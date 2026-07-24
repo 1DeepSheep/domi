@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld("workbench", {
   loadDomiCache: () => ipcRenderer.invoke("domi:cache"),
   checkDomi: () => ipcRenderer.invoke("domi:status"),
   syncDomi: () => ipcRenderer.invoke("domi:sync"),
+  previewStorageMigration: () => ipcRenderer.invoke("domi:migration-preview"),
   listWeeklyNews: (request) => ipcRenderer.invoke("domi:weekly-news", request),
   saveWeeklyNewsCheckpoint: (request) => ipcRenderer.invoke("domi:weekly-news-checkpoint", request),
   listPlaud: (request) => ipcRenderer.invoke("domi:plaud-list", request),

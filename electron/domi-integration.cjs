@@ -4,6 +4,7 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { LocalDomiRepository, resolveHomePath } = require("./local-domi-repository.cjs");
+const { LocalToFeishuMigration } = require("./local-to-feishu-migration.cjs");
 const { TaskQueue } = require("./service-coordinator.cjs");
 
 const execFileAsync = promisify(execFile);
@@ -464,9 +465,15 @@ class DomiIntegration {
       libraryDir: source.localLibraryDir
     });
     try {
-      return callback(repository);
-    } finally {
+      const result = callback(repository);
+      if (result && typeof result.then === "function") {
+        return result.finally(() => repository.close());
+      }
       repository.close();
+      return result;
+    } catch (error) {
+      repository.close();
+      throw error;
     }
   }
 
@@ -755,10 +762,11 @@ class DomiIntegration {
     return { ok: true, fileId: result.fileId || fileId, trashed: true };
   }
 
-  async lark(args) {
+  async lark(args, options = {}) {
     return this.runJson(this.larkCli, [...args, "--as", "user"], {
-      label: "飞书数据读取",
-      queue: "lark"
+      label: options.label || "飞书数据读取",
+      queue: "lark",
+      ...options
     });
   }
 
@@ -1165,6 +1173,64 @@ class DomiIntegration {
   loadCache() {
     const cached = this.stateStore.loadCache(CACHE_KEY);
     return cached ? { ok: true, snapshot: cached.value, updatedAt: cached.updatedAt } : { ok: true };
+  }
+
+  localMigrationSource(settingsInput) {
+    const settings = settingsInput || this.configProvider();
+    const localLibraryDir = resolveHomePath(settings.localRepositoryDir);
+    const localDatabasePath = resolveHomePath(settings.localDatabasePath);
+    if (!localLibraryDir || !localDatabasePath) {
+      throw new Error("本地资料库尚未配置，无法生成迁移计划。");
+    }
+    return {
+      backend: "local",
+      localLibraryDir,
+      localDatabasePath
+    };
+  }
+
+  previewLocalToFeishu(settingsInput) {
+    const source = this.localMigrationSource(settingsInput);
+    const plugin = this.findPlugin();
+    return this.withLocalRepository(source, (repository) => {
+      const migration = new LocalToFeishuMigration({
+        repository,
+        pluginRoot: plugin.root,
+        libraryRoot: source.localLibraryDir,
+        runLark: (args, options) => this.lark(args, options)
+      });
+      return migration.preview();
+    });
+  }
+
+  async migrateLocalToFeishu({ sourceSettings, targetSettings }) {
+    const source = this.localMigrationSource(sourceSettings);
+    const plugin = this.findPlugin();
+    const health = await this.larkStatus();
+    if (!health.ok) {
+      return {
+        ok: false,
+        projectCount: 0,
+        migratedProjectCount: 0,
+        documentCount: 0,
+        assetCount: 0,
+        migrated: [],
+        failed: [],
+        error: health.error || "飞书用户身份未就绪，请先重新授权。"
+      };
+    }
+    return this.withLocalRepository(source, (repository) => {
+      const migration = new LocalToFeishuMigration({
+        repository,
+        pluginRoot: plugin.root,
+        libraryRoot: source.localLibraryDir,
+        runLark: (args, options) => this.lark(args, {
+          label: "本地资料迁移到飞书",
+          ...options
+        })
+      });
+      return migration.run(targetSettings);
+    });
   }
 
   async sync() {

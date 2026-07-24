@@ -44,6 +44,7 @@ declare global {
       loadDomiCache: () => Promise<DomiSyncResult>;
       checkDomi: () => Promise<DomiStatusResult>;
       syncDomi: () => Promise<DomiSyncResult>;
+      previewStorageMigration: () => Promise<StorageMigrationPreview>;
       listWeeklyNews: (request?: DomiWeeklyNewsRequest) => Promise<DomiWeeklyNewsSnapshot>;
       saveWeeklyNewsCheckpoint: (
         request: DomiWeeklyNewsCheckpointRequest
@@ -308,6 +309,38 @@ export type DomiSyncResult = {
   error?: string;
 };
 
+export type StorageMigrationProject = {
+  projectId: string;
+  name: string;
+  domain: string;
+  subdomains: string[];
+  documentCount: number;
+};
+
+export type StorageMigrationPreview = {
+  ok: boolean;
+  projectCount?: number;
+  documentCount?: number;
+  projects?: StorageMigrationProject[];
+  error?: string;
+};
+
+export type StorageMigrationFailure = {
+  projectId: string;
+  name: string;
+  error: string;
+};
+
+export type StorageMigrationResult = {
+  ok: boolean;
+  projectCount: number;
+  migratedProjectCount: number;
+  documentCount: number;
+  assetCount: number;
+  failed: StorageMigrationFailure[];
+  error?: string;
+};
+
 export type DomiStatusResult = {
   ok: boolean;
   health?: DomiHealth;
@@ -530,10 +563,12 @@ export type AppSettingsResult = {
 export type AppSettingsSaveRequest = Partial<AppSettings> & {
   apiKey?: string;
   clearApiKey?: boolean;
+  storageMigration?: "none" | "local-to-feishu";
 };
 
 export type AppSettingsSaveResult = AppSettingsResult & {
   codex?: CodexCheckResult;
+  migration?: StorageMigrationResult;
 };
 
 export type UpdateState =

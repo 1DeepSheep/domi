@@ -13,7 +13,11 @@ const {
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
 const { DomiPluginManager } = require("./domi-plugin-manager.cjs");
-const { AppSettingsService } = require("./app-settings.cjs");
+const {
+  AppSettingsService,
+  normalizeSettings,
+  validateDomiConfig
+} = require("./app-settings.cjs");
 const { UpdateService } = require("./update-service.cjs");
 const { ServiceCoordinator } = require("./service-coordinator.cjs");
 const { classifyCodexTurnStatus } = require("./codex-turn-status.cjs");
@@ -1275,6 +1279,10 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
 
 async function saveRuntimeSettings(request) {
   const current = getAppSettings().load().settings;
+  const {
+    storageMigration = "none",
+    ...settingsRequest
+  } = request || {};
   const connectionChanged = [
     "codexPath",
     "externalAccessMode",
@@ -1288,18 +1296,38 @@ async function saveRuntimeSettings(request) {
     "wikiSpaceId",
     "localLibraryDir",
     "localRepositoryDir"
-  ].some((key) => Object.prototype.hasOwnProperty.call(request || {}, key)
-    && request[key] !== current[key]);
+  ].some((key) => Object.prototype.hasOwnProperty.call(settingsRequest, key)
+    && settingsRequest[key] !== current[key]);
   if (connectionChanged && activeRuns.size > 0) {
     return { ok: false, error: "请先停止正在执行的任务，再修改 Codex 或资料库连接。" };
   }
   try {
-    const result = getAppSettings().save(request);
+    let migration;
+    const migratesLocalToFeishu = current.storageBackend === "local"
+      && settingsRequest.storageBackend === "feishu"
+      && storageMigration === "local-to-feishu";
+    if (migratesLocalToFeishu) {
+      const targetSettings = normalizeSettings({ ...current, ...settingsRequest });
+      validateDomiConfig(targetSettings);
+      migration = await getDomiIntegration().migrateLocalToFeishu({
+        sourceSettings: current,
+        targetSettings
+      });
+      if (!migration.ok) {
+        return {
+          ok: false,
+          settings: current,
+          migration,
+          error: migration.error || "本地文档迁移到飞书失败，资料库仍保持本地模式。"
+        };
+      }
+    }
+    const result = getAppSettings().save(settingsRequest);
     getUpdateService().configureChannel(result.settings.updateChannel);
-    if (!connectionChanged) return { ok: true, ...result };
+    if (!connectionChanged) return { ok: true, ...result, migration };
     resetCodexClient();
     const codex = await runCodexCheck();
-    return { ok: true, ...result, codex };
+    return { ok: true, ...result, codex, migration };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -1963,5 +1991,12 @@ ipcMain.handle("domi:sync", async () => {
       snapshot: cached.snapshot,
       updatedAt: cached.updatedAt
     };
+  }
+});
+ipcMain.handle("domi:migration-preview", async () => {
+  try {
+    return getDomiIntegration().previewLocalToFeishu();
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
