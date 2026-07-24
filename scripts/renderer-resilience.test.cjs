@@ -95,8 +95,13 @@ assert.match(
 );
 assert.match(
   app,
-  /workspaceView === "news" \? renderNewsWorkspace\(\)/,
+  /workspaceView === "news"\s*\?\s*renderNewsWorkspace\(\)/,
   "The news navigation item must render the dedicated news workspace."
+);
+assert.match(
+  app,
+  /workspaceView === "documents"\s*\?\s*renderDocumentLibrary\(\)/,
+  "The document-library navigation item must render the local library workspace."
 );
 assert.match(
   app,

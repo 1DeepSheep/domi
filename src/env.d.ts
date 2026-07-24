@@ -27,6 +27,10 @@ declare global {
       ) => Promise<FileSelectionResult>;
       openResource: (resource: string) => Promise<{ ok: boolean; error?: string; target?: string }>;
       showNotification: (request: DesktopNotificationRequest) => Promise<DesktopNotificationResult>;
+      listDocumentLibrary: () => Promise<DocumentLibrarySnapshot>;
+      createDocumentLibraryEntry: (
+        request: DocumentLibraryCreateRequest
+      ) => Promise<DocumentLibraryCreateResult>;
       readMarkdown: (request: MarkdownReadRequest) => Promise<MarkdownReadResult>;
       saveMarkdown: (request: MarkdownSaveRequest) => Promise<MarkdownSaveResult>;
       renameMarkdown: (request: MarkdownRenameRequest) => Promise<MarkdownRenameResult>;
@@ -103,6 +107,44 @@ export type MarkdownDocument = {
   content: string;
   size: number;
   mtimeMs: number;
+};
+
+export type DocumentLibraryNode = {
+  kind: "folder" | "markdown" | "pdf";
+  name: string;
+  path: string;
+  relativePath: string;
+  size: number;
+  mtimeMs: number;
+  children?: DocumentLibraryNode[];
+};
+
+export type DocumentLibrarySnapshot = {
+  ok: boolean;
+  rootPath: string;
+  rootName: string;
+  nodes: DocumentLibraryNode[];
+  documentCount: number;
+  folderCount: number;
+  truncated: boolean;
+  structured?: boolean;
+  scannedAt: number;
+  error?: string;
+};
+
+export type DocumentLibraryCreateRequest = {
+  parentPath?: string;
+  kind: "folder" | "markdown";
+  name: string;
+};
+
+export type DocumentLibraryCreateResult = {
+  ok: boolean;
+  kind?: "folder" | "markdown";
+  path?: string;
+  name?: string;
+  snapshot?: DocumentLibrarySnapshot;
+  error?: string;
 };
 
 export type MarkdownReadRequest = {

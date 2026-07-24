@@ -188,6 +188,21 @@ const browserFallback: Window["workbench"] = {
     new Notification(title, { body, silent });
     return { ok: true };
   },
+  listDocumentLibrary: async () => ({
+    ok: false,
+    rootPath: "",
+    rootName: "本地文档库",
+    nodes: [],
+    documentCount: 0,
+    folderCount: 0,
+    truncated: false,
+    scannedAt: Date.now(),
+    error: "请在 Electron 窗口中读取本地文档库。"
+  }),
+  createDocumentLibraryEntry: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中新建本地文档。"
+  }),
   readMarkdown: async () => ({
     ok: false,
     error: "请在 Electron 窗口中预览本地 Markdown 文件。"

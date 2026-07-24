@@ -14,10 +14,15 @@ import {
   Database,
   ExternalLink,
   FileText,
+  FilePlus2,
   FileType2,
+  Folder,
+  FolderOpen,
+  FolderPlus,
   Gauge,
   Atom,
   LayoutDashboard,
+  LibraryBig,
   ListChecks,
   Mic,
   MoreHorizontal,
@@ -49,6 +54,7 @@ import {
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
+  ReactNode,
   Suspense,
   lazy,
   useDeferredValue,
@@ -80,6 +86,8 @@ import {
   DomiEntityMaterials,
   DomiSnapshot,
   DomiWeeklyNewsSnapshot,
+  DocumentLibraryNode,
+  DocumentLibrarySnapshot,
   LocalAttachment,
   MarkdownDocument,
   PdfDocument
@@ -103,7 +111,22 @@ const SetupCenter = lazy(() => import("./SetupCenter"));
 const MessageContent = lazy(() => import("./MessageContent"));
 
 type Role = "user" | "assistant" | "system";
-type WorkspaceView = "conversation" | "tasks" | "news";
+type WorkspaceView = "conversation" | "tasks" | "news" | "documents";
+
+function filterDocumentLibraryNodes(nodes: DocumentLibraryNode[], rawQuery: string) {
+  const query = rawQuery.trim().toLocaleLowerCase("zh-CN");
+  if (!query) return nodes;
+  const filter = (node: DocumentLibraryNode): DocumentLibraryNode | null => {
+    const children = (node.children || [])
+      .map(filter)
+      .filter((child): child is DocumentLibraryNode => Boolean(child));
+    if (node.name.toLocaleLowerCase("zh-CN").includes(query) || children.length > 0) {
+      return node.kind === "folder" ? { ...node, children } : node;
+    }
+    return null;
+  };
+  return nodes.map(filter).filter((node): node is DocumentLibraryNode => Boolean(node));
+}
 
 type Message = {
   id: string;
@@ -939,6 +962,20 @@ function App() {
   const [weeklyNewsAutomation, setWeeklyNewsAutomation] = useState<WeeklyNewsAutomationState>(
     readWeeklyNewsAutomationState
   );
+  const [documentLibrary, setDocumentLibrary] = useState<DocumentLibrarySnapshot | null>(null);
+  const [documentLibraryLoading, setDocumentLibraryLoading] = useState(false);
+  const [documentLibraryError, setDocumentLibraryError] = useState("");
+  const [documentLibraryQuery, setDocumentLibraryQuery] = useState("");
+  const [documentLibraryExpandedPaths, setDocumentLibraryExpandedPaths] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [documentLibrarySelectedFolder, setDocumentLibrarySelectedFolder] = useState("");
+  const [documentLibraryCreateKind, setDocumentLibraryCreateKind] = useState<
+    "folder" | "markdown" | null
+  >(null);
+  const [documentLibraryCreateName, setDocumentLibraryCreateName] = useState("");
+  const [documentLibraryCreating, setDocumentLibraryCreating] = useState(false);
+  const [documentLibraryCreateError, setDocumentLibraryCreateError] = useState("");
   const [plaudSnapshot, setPlaudSnapshot] = useState<DomiPlaudSnapshot | null>(null);
   const [plaudLoading, setPlaudLoading] = useState(false);
   const [plaudSyncing, setPlaudSyncing] = useState(false);
@@ -1229,8 +1266,14 @@ function App() {
   const markdownDirty = Boolean(markdownDocument && markdownDraft !== markdownDocument.content);
   const markdownPanelActive = Boolean(markdownDocument || markdownLoading || markdownRequestLabel);
   const pdfPanelActive = Boolean(pdfDocument || pdfLoading || pdfRequestLabel);
-  const documentPanelActive = markdownPanelActive || pdfPanelActive;
+  const openDocumentActive = markdownPanelActive || pdfPanelActive;
+  const documentPanelActive = workspaceView !== "documents" && openDocumentActive;
   const activeRightPanelWidth = documentPanelActive ? documentPanelWidth : contextPanelWidth;
+  const filteredDocumentLibraryNodes = useMemo(
+    () => filterDocumentLibraryNodes(documentLibrary?.nodes || [], documentLibraryQuery),
+    [documentLibrary, documentLibraryQuery]
+  );
+  const selectedDocumentLibraryPath = markdownDocument?.path || pdfDocument?.path || "";
 
   const selectedWorkflow = useMemo(
     () => workflows.find((workflow) => workflow.id === selectedWorkflowId),
@@ -3793,6 +3836,110 @@ function App() {
     setOpenSections((current) => ({ ...current, [section]: !current[section] }));
   }
 
+  async function refreshDocumentLibrary(options: { silent?: boolean } = {}) {
+    if (!options.silent) setDocumentLibraryLoading(true);
+    setDocumentLibraryError("");
+    try {
+      const snapshot = await workbench.listDocumentLibrary();
+      if (!snapshot.ok) {
+        setDocumentLibraryError(snapshot.error || "无法读取本地文档库。");
+        setDocumentLibrary(snapshot);
+        return null;
+      }
+      setDocumentLibrary(snapshot);
+      setDocumentLibrarySelectedFolder((current) => current || snapshot.rootPath);
+      return snapshot;
+    } catch (error) {
+      const message = describeOperationError(error, "无法读取本地文档库。");
+      setDocumentLibraryError(message);
+      return null;
+    } finally {
+      if (!options.silent) setDocumentLibraryLoading(false);
+    }
+  }
+
+  function openDocumentLibrary() {
+    setWorkspaceView("documents");
+    setThreadMenuId(null);
+    setRightPanelOpen(false);
+    if (!documentLibrary && !documentLibraryLoading) {
+      void refreshDocumentLibrary();
+    }
+  }
+
+  function toggleDocumentLibraryFolder(path: string) {
+    setDocumentLibrarySelectedFolder(path);
+    setDocumentLibraryExpandedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
+  function beginDocumentLibraryCreate(kind: "folder" | "markdown") {
+    setDocumentLibraryCreateKind(kind);
+    setDocumentLibraryCreateName("");
+    setDocumentLibraryCreateError("");
+  }
+
+  function cancelDocumentLibraryCreate() {
+    setDocumentLibraryCreateKind(null);
+    setDocumentLibraryCreateName("");
+    setDocumentLibraryCreateError("");
+  }
+
+  async function submitDocumentLibraryCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!documentLibraryCreateKind || documentLibraryCreating || !documentLibrary) return;
+    const name = documentLibraryCreateName.trim();
+    if (!name) {
+      setDocumentLibraryCreateError(
+        documentLibraryCreateKind === "folder" ? "请输入文件夹名称。" : "请输入文档名称。"
+      );
+      return;
+    }
+    const parentPath = documentLibrarySelectedFolder || documentLibrary.rootPath;
+    setDocumentLibraryCreating(true);
+    setDocumentLibraryCreateError("");
+    try {
+      const result = await workbench.createDocumentLibraryEntry({
+        parentPath,
+        kind: documentLibraryCreateKind,
+        name
+      });
+      if (!result.ok || !result.path) {
+        setDocumentLibraryCreateError(result.error || "新建失败。");
+        return;
+      }
+      if (result.snapshot) setDocumentLibrary(result.snapshot);
+      setDocumentLibraryExpandedPaths((current) => new Set(current).add(parentPath));
+      const createdKind = result.kind;
+      cancelDocumentLibraryCreate();
+      if (createdKind === "folder") {
+        setDocumentLibrarySelectedFolder(result.path);
+        setDocumentLibraryExpandedPaths((current) => new Set(current).add(result.path as string));
+      } else {
+        setDocumentLibrarySelectedFolder(parentPath);
+        await openMarkdown(result.path);
+      }
+    } catch (error) {
+      setDocumentLibraryCreateError(describeOperationError(error, "新建失败。"));
+    } finally {
+      setDocumentLibraryCreating(false);
+    }
+  }
+
+  function openDocumentLibraryNode(node: DocumentLibraryNode, parentPath: string) {
+    if (node.kind === "folder") {
+      toggleDocumentLibraryFolder(node.path);
+      return;
+    }
+    setDocumentLibrarySelectedFolder(parentPath);
+    if (node.kind === "pdf") void openPdf(node.path);
+    else void openMarkdown(node.path);
+  }
+
   async function openMarkdown(resource: string, basePath?: string) {
     if (markdownDirty) {
       const confirmed = window.confirm("当前 Markdown 文件尚未保存，仍要打开其他文件吗？");
@@ -3807,7 +3954,7 @@ function App() {
     setMarkdownRenaming(false);
     setMarkdownTitleEditing(false);
     setMarkdownTitleDraft("");
-    setRightPanelOpen(true);
+    if (workspaceView !== "documents") setRightPanelOpen(true);
     setPdfDocument(null);
     setPdfError("");
     setPdfRequestLabel("");
@@ -3855,7 +4002,7 @@ function App() {
     setMarkdownRenaming(false);
     setMarkdownTitleEditing(false);
     setMarkdownTitleDraft("");
-    setRightPanelOpen(true);
+    if (workspaceView !== "documents") setRightPanelOpen(true);
     setMarkdownDocument(null);
     setMarkdownDraft("");
     markdownDocumentRef.current = null;
@@ -4026,6 +4173,9 @@ function App() {
       setMarkdownRequestLabel(result.document.path);
       setMarkdownTitleEditing(false);
       setMarkdownTitleDraft("");
+      if (workspaceView === "documents") {
+        void refreshDocumentLibrary({ silent: true });
+      }
     } catch (error) {
       if (requestId !== markdownRenameRequestRef.current) return;
       reportDocumentOperation("重命名 Markdown", error);
@@ -4287,6 +4437,243 @@ function App() {
 
   function renderDocumentPanel() {
     return pdfPanelActive ? renderPdfPanel() : renderMarkdownPanel();
+  }
+
+  function renderDocumentLibraryNode(
+    node: DocumentLibraryNode,
+    parentPath: string,
+    depth = 0
+  ): ReactNode {
+    const isFolder = node.kind === "folder";
+    const expanded = isFolder && (
+      documentLibraryQuery.trim()
+        ? true
+        : documentLibraryExpandedPaths.has(node.path)
+    );
+    const selected = isFolder
+      ? documentLibrarySelectedFolder === node.path
+      : selectedDocumentLibraryPath === node.path;
+    return (
+      <div className="document-library-node" key={node.path}>
+        <button
+          className={`document-library-node-row ${selected ? "selected" : ""}`}
+          type="button"
+          style={{ "--tree-indent": `${depth * 14}px` } as CSSProperties}
+          onClick={() => openDocumentLibraryNode(node, parentPath)}
+          title={node.path}
+          role="treeitem"
+          aria-expanded={isFolder ? expanded : undefined}
+          aria-selected={selected}
+        >
+          <span className="document-library-disclosure" aria-hidden="true">
+            {isFolder ? <ChevronRight className={expanded ? "open" : ""} size={13} /> : null}
+          </span>
+          <span className={`document-library-node-icon ${node.kind}`} aria-hidden="true">
+            {node.kind === "folder"
+              ? expanded ? <FolderOpen size={16} /> : <Folder size={16} />
+              : node.kind === "pdf" ? <FileType2 size={16} /> : <FileText size={16} />}
+          </span>
+          <span className="document-library-node-name">{node.name}</span>
+          {node.kind !== "folder" && (
+            <small>{formatFileSize(node.size)}</small>
+          )}
+        </button>
+        {expanded && node.children && (
+          <div className="document-library-children" role="group">
+            {node.children.length > 0
+              ? node.children.map((child) =>
+                  renderDocumentLibraryNode(child, node.path, depth + 1)
+                )
+              : (
+                <span
+                  className="document-library-empty-folder"
+                  style={{ "--tree-indent": `${(depth + 1) * 14}px` } as CSSProperties}
+                >
+                  空文件夹
+                </span>
+              )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderDocumentLibrary() {
+    const rootPath = documentLibrary?.rootPath || "";
+    const selectedFolderName = documentLibrarySelectedFolder === rootPath
+      ? "文档库根目录"
+      : documentLibrarySelectedFolder.split(/[\\/]/).filter(Boolean).pop() || "文档库根目录";
+    return (
+      <section className="document-library-workspace" aria-labelledby="document-library-title">
+        <aside className="document-library-tree-pane">
+          <header className="document-library-tree-header">
+            <div>
+              <span className="document-library-root-icon"><LibraryBig size={18} /></span>
+              <span>
+                <strong id="document-library-title">
+                  {documentLibrary?.rootName || "本地文档库"}
+                </strong>
+                <small>
+                  {documentLibrary?.ok
+                    ? `${documentLibrary.documentCount} 篇文档 · ${documentLibrary.folderCount} 个文件夹`
+                    : "按本地目录组织"}
+                </small>
+              </span>
+            </div>
+            <div className="document-library-tree-actions">
+              <button
+                type="button"
+                onClick={() => beginDocumentLibraryCreate("markdown")}
+                disabled={!documentLibrary?.ok}
+                title={`在“${selectedFolderName}”中新建文档`}
+                aria-label="新建 Markdown 文档"
+              >
+                <FilePlus2 size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={() => beginDocumentLibraryCreate("folder")}
+                disabled={!documentLibrary?.ok}
+                title={`在“${selectedFolderName}”中新建文件夹`}
+                aria-label="新建文件夹"
+              >
+                <FolderPlus size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={() => rootPath && void workbench.openResource(rootPath)}
+                disabled={!rootPath}
+                title="在访达中打开文档库"
+                aria-label="在访达中打开文档库"
+              >
+                <ExternalLink size={14} />
+              </button>
+            </div>
+          </header>
+
+          <label className="document-library-search">
+            <Search size={14} />
+            <input
+              value={documentLibraryQuery}
+              onChange={(event) => setDocumentLibraryQuery(event.target.value)}
+              placeholder="搜索文档和文件夹"
+              aria-label="搜索本地文档库"
+            />
+            {documentLibraryQuery && (
+              <button
+                type="button"
+                onClick={() => setDocumentLibraryQuery("")}
+                title="清除搜索"
+                aria-label="清除文档搜索"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </label>
+
+          {documentLibraryCreateKind && (
+            <form className="document-library-create" onSubmit={submitDocumentLibraryCreate}>
+              <span>
+                {documentLibraryCreateKind === "folder"
+                  ? <FolderPlus size={15} />
+                  : <FilePlus2 size={15} />}
+              </span>
+              <input
+                autoFocus
+                value={documentLibraryCreateName}
+                onChange={(event) => setDocumentLibraryCreateName(event.target.value)}
+                placeholder={documentLibraryCreateKind === "folder" ? "文件夹名称" : "文档名称"}
+                aria-label={documentLibraryCreateKind === "folder" ? "文件夹名称" : "文档名称"}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") cancelDocumentLibraryCreate();
+                }}
+              />
+              <button type="submit" disabled={documentLibraryCreating} title="创建">
+                {documentLibraryCreating ? <RefreshCw className="spinning" size={13} /> : <Check size={13} />}
+              </button>
+              <button type="button" onClick={cancelDocumentLibraryCreate} title="取消">
+                <X size={13} />
+              </button>
+              {documentLibraryCreateError && <small>{documentLibraryCreateError}</small>}
+            </form>
+          )}
+
+          <button
+            className={`document-library-root-row ${
+              documentLibrarySelectedFolder === rootPath ? "selected" : ""
+            }`}
+            type="button"
+            onClick={() => {
+              if (rootPath) setDocumentLibrarySelectedFolder(rootPath);
+            }}
+            disabled={!rootPath}
+            title={rootPath}
+          >
+            <FolderOpen size={16} />
+            <span>全部文档</span>
+          </button>
+
+          <div className="document-library-tree" role="tree">
+            {documentLibraryLoading && !documentLibrary && (
+              <div className="document-library-state">
+                <RefreshCw className="spinning" size={17} />
+                正在读取本地目录
+              </div>
+            )}
+            {!documentLibraryLoading && documentLibraryError && (
+              <div className="document-library-state error">
+                <AlertCircle size={17} />
+                <span>{documentLibraryError}</span>
+                <button type="button" onClick={() => void refreshDocumentLibrary()}>重试</button>
+              </div>
+            )}
+            {documentLibrary?.ok && filteredDocumentLibraryNodes.map((node) =>
+              renderDocumentLibraryNode(node, documentLibrary.rootPath)
+            )}
+            {documentLibrary?.ok && filteredDocumentLibraryNodes.length === 0 && (
+              <div className="document-library-state">
+                <FileText size={17} />
+                {documentLibraryQuery ? "没有匹配的文档" : "文档库还是空的"}
+              </div>
+            )}
+          </div>
+
+          {documentLibrary?.truncated && (
+            <div className="document-library-truncated">
+              目录内容较多，部分内容暂未显示
+            </div>
+          )}
+        </aside>
+
+        <div className="document-library-content">
+          {openDocumentActive ? renderDocumentPanel() : (
+            <div className="document-library-welcome">
+              <span><LibraryBig size={28} /></span>
+              <h2>选择一篇文档开始阅读</h2>
+              <p>展开左侧目录即可查看本地 Markdown；内容会直接保存在原文件中。</p>
+              <div>
+                <button
+                  type="button"
+                  onClick={() => beginDocumentLibraryCreate("markdown")}
+                  disabled={!documentLibrary?.ok}
+                >
+                  <FilePlus2 size={15} />
+                  新建文档
+                </button>
+                <button
+                  type="button"
+                  onClick={() => rootPath && void workbench.openResource(rootPath)}
+                  disabled={!rootPath}
+                >
+                  <FolderOpen size={15} />
+                  打开本地目录
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+    );
   }
 
   function renderTaskBoard() {
@@ -5108,6 +5495,15 @@ function App() {
             <strong>行业动态</strong>
             <span className="sidebar-nav-meta" />
           </button>
+          <button
+            className={`sidebar-nav-item ${workspaceView === "documents" ? "active" : ""}`}
+            type="button"
+            onClick={openDocumentLibrary}
+          >
+            <LibraryBig className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
+            <strong>文档库</strong>
+            <span className="sidebar-nav-meta" />
+          </button>
         </nav>
 
         <div className={`sidebar-workflow-section ${skillsExpanded ? "open" : ""}`}>
@@ -5341,11 +5737,17 @@ function App() {
               ? "任务"
               : workspaceView === "news"
                 ? "行业动态"
+                : workspaceView === "documents"
+                  ? "文档库"
                 : activeThread.title}</strong>
             <span>{workspaceView === "tasks"
               ? `${taskNavigationCount} 个待处理或进行中`
               : workspaceView === "news"
                 ? "Domi 行业雷达"
+                : workspaceView === "documents"
+                  ? documentLibrary?.rootName
+                    ? `本地资料库 · ${documentLibrary.rootName}`
+                    : "本地 Markdown 与资料目录"
                 : activeThread.project}</span>
           </div>
           <div className="topbar-actions">
@@ -5359,24 +5761,34 @@ function App() {
                   ])
                 : workspaceView === "news"
                   ? scanWeeklyNews()
+                  : workspaceView === "documents"
+                    ? refreshDocumentLibrary()
                   : refreshDomi())}
               disabled={workspaceView === "news"
                 ? weeklyNewsLoading || weeklyNewsScanning
+                : workspaceView === "documents"
+                  ? documentLibraryLoading
                 : domiSyncing || (workspaceView === "tasks" && plaudEnabled && (plaudLoading || plaudSyncing))}
               title={workspaceView === "tasks"
                 ? "刷新任务来源"
                 : workspaceView === "news"
                   ? "运行 Domi 行业雷达"
+                  : workspaceView === "documents"
+                    ? "刷新本地文档库"
                   : domiError ? `重新同步 Domi：${domiError}` : "同步 Domi 项目与人脉"}
               aria-label={workspaceView === "tasks"
                 ? "刷新任务来源"
                 : workspaceView === "news"
                   ? "运行 Domi 行业雷达"
+                  : workspaceView === "documents"
+                    ? "刷新本地文档库"
                   : "同步 Domi 项目与人脉"}
             >
               <RefreshCw
                 className={workspaceView === "news"
                   ? weeklyNewsLoading || weeklyNewsScanning ? "spinning" : ""
+                  : workspaceView === "documents"
+                    ? documentLibraryLoading ? "spinning" : ""
                   : domiSyncing || (workspaceView === "tasks" && plaudEnabled && (plaudLoading || plaudSyncing)) ? "spinning" : ""}
                 size={18}
               />
@@ -5396,17 +5808,23 @@ function App() {
         </header>
 
         <div
-          className={`main-grid ${rightPanelOpen ? "right-open" : "right-closed"} ${documentPanelActive ? "document-open" : ""} ${workspaceView === "tasks" ? "task-view" : workspaceView === "news" ? "news-view" : ""}`}
+          className={`main-grid ${rightPanelOpen ? "right-open" : "right-closed"} ${documentPanelActive ? "document-open" : ""} ${workspaceView === "tasks" ? "task-view" : workspaceView === "news" ? "news-view" : workspaceView === "documents" ? "document-library-view" : ""}`}
           style={{ "--right-panel-width": `${activeRightPanelWidth}px` } as CSSProperties}
         >
-          <section className={`chat-pane ${workspaceView === "tasks" ? "task-mode" : workspaceView === "news" ? "news-mode" : hasConversation ? "has-conversation" : "is-home"}`}>
+          <section className={`chat-pane ${workspaceView === "tasks" ? "task-mode" : workspaceView === "news" ? "news-mode" : workspaceView === "documents" ? "document-library-mode" : hasConversation ? "has-conversation" : "is-home"}`}>
             <SectionErrorBoundary
               resetKey={`${workspaceView}:${activeThread.id}:${visibleMessages.length}:${visibleMessages[visibleMessages.length - 1]?.content.length || 0}:${weeklyNews?.syncedAt || 0}`}
               title="工作区暂时无法显示"
               description="当前任务和本地数据仍然保留，可以重试加载这部分界面。"
             >
               <RenderRegion render={() => (
-              workspaceView === "tasks" ? renderTaskBoard() : workspaceView === "news" ? renderNewsWorkspace() : hasConversation ? (
+              workspaceView === "tasks"
+                ? renderTaskBoard()
+                : workspaceView === "news"
+                  ? renderNewsWorkspace()
+                  : workspaceView === "documents"
+                    ? renderDocumentLibrary()
+                    : hasConversation ? (
               <>
                 <div
                   className="chat-scroll"
