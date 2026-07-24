@@ -31,6 +31,12 @@ const {
   resolveMarkdownImagePath,
   savePastedMarkdownImage
 } = require("./markdown-assets.cjs");
+const {
+  createDocumentLibraryEntry,
+  documentLibraryLocation,
+  ensureDocumentLibraryStructure,
+  listDocumentLibrary
+} = require("./document-library.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
 
 const execFileAsync = promisify(execFile);
@@ -352,6 +358,58 @@ async function selectLocalDirectory(sender, requestedPath) {
     return { ok: true, canceled: true, path: "" };
   }
   return { ok: true, canceled: false, path: result.filePaths[0] };
+}
+
+function currentDocumentLibraryLocation() {
+  const settings = getAppSettings().load().settings;
+  const location = documentLibraryLocation(settings);
+  if (location.initializeStructure) {
+    ensureDocumentLibraryStructure(location.rootPath);
+  } else if (!fs.existsSync(location.rootPath)) {
+    fs.mkdirSync(location.rootPath, { recursive: true });
+  }
+  return location;
+}
+
+function readDocumentLibrary() {
+  try {
+    const location = currentDocumentLibraryLocation();
+    return {
+      ...listDocumentLibrary(location.rootPath),
+      structured: location.initializeStructure
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      rootPath: "",
+      rootName: "本地文档库",
+      nodes: [],
+      documentCount: 0,
+      folderCount: 0,
+      truncated: false,
+      scannedAt: Date.now(),
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function createDocumentLibraryItem(request) {
+  try {
+    const location = currentDocumentLibraryLocation();
+    const created = createDocumentLibraryEntry(location.rootPath, request);
+    return {
+      ...created,
+      snapshot: {
+        ...listDocumentLibrary(location.rootPath),
+        structured: location.initializeStructure
+      }
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 async function openResource(resource) {
@@ -1848,6 +1906,10 @@ ipcMain.handle("files:import-data", (_event, files, workspacePath) =>
   importLocalFileData(workspacePath, files)
 );
 ipcMain.handle("resource:open", (_event, resource) => openResource(resource));
+ipcMain.handle("document-library:list", () => readDocumentLibrary());
+ipcMain.handle("document-library:create", (_event, request) =>
+  createDocumentLibraryItem(request)
+);
 ipcMain.handle("markdown:read", (_event, request) => readMarkdownDocument(request));
 ipcMain.handle("markdown:save", (_event, request) => saveMarkdownDocument(request));
 ipcMain.handle("markdown:rename", (_event, request) => renameMarkdownDocument(request));
