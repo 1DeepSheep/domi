@@ -2,6 +2,21 @@ import { CodexRunRequest } from "./env";
 
 const nativeWorkbench = (window as unknown as { workbench?: Window["workbench"] }).workbench;
 
+function browserWebResource(resource: string) {
+  let candidate = String(resource || "").trim().replace(/\u200b/g, "");
+  const markdown = candidate.match(/^\[[^\]]*]\(\s*(.+)\s*\)$/s);
+  if (markdown) candidate = markdown[1].trim();
+  if (candidate.startsWith("<") && candidate.endsWith(">")) candidate = candidate.slice(1, -1).trim();
+  const titled = candidate.match(/^(https?:\/\/\S+?)(?:\s+["'][^"']*["'])?$/i);
+  if (titled) candidate = titled[1];
+  try {
+    const parsed = new URL(candidate);
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
 const browserFallback: Window["workbench"] = {
   loadSettings: async () => ({
     ok: true,
@@ -159,9 +174,10 @@ const browserFallback: Window["workbench"] = {
     error: "请使用 Electron 窗口粘贴图片或录音文件。"
   }),
   openResource: async (resource) => {
-    if (/^https?:\/\//i.test(resource)) {
-      window.open(resource, "_blank", "noopener,noreferrer");
-      return { ok: true, target: resource };
+    const target = browserWebResource(resource);
+    if (target) {
+      window.open(target, "_blank", "noopener,noreferrer");
+      return { ok: true, target };
     }
     return { ok: false, error: "请在 Electron 窗口中打开本地文件。", target: resource };
   },
