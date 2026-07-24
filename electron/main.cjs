@@ -31,6 +31,7 @@ const {
   resolveMarkdownImagePath,
   savePastedMarkdownImage
 } = require("./markdown-assets.cjs");
+const { normalizeWebResource } = require("./resource-target.cjs");
 
 const execFileAsync = promisify(execFile);
 const pdfProtocol = "domi-pdf";
@@ -354,16 +355,17 @@ async function selectLocalDirectory(sender, requestedPath) {
 }
 
 async function openResource(resource) {
+  const webResource = normalizeWebResource(resource);
+  if (webResource) {
+    await shell.openExternal(webResource);
+    return { ok: true, target: webResource };
+  }
+
   if (typeof resource !== "string" || !resource.trim()) {
     return { ok: false, error: "资源地址为空。" };
   }
 
   const target = resource.trim();
-  if (/^https?:\/\//i.test(target)) {
-    await shell.openExternal(target);
-    return { ok: true, target };
-  }
-
   let localPath = target;
   if (/^file:\/\//i.test(target)) {
     try {

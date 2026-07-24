@@ -5,6 +5,7 @@ const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { LocalDomiRepository, resolveHomePath } = require("./local-domi-repository.cjs");
 const { LocalToFeishuMigration } = require("./local-to-feishu-migration.cjs");
+const { normalizeWebResource } = require("./resource-target.cjs");
 const { TaskQueue } = require("./service-coordinator.cjs");
 
 const execFileAsync = promisify(execFile);
@@ -1012,7 +1013,7 @@ class DomiIntegration {
           publishedAt: timestampValue(values["信息发布时间"]),
           summary: textValue(values["新闻核心内容"]).trim(),
           investmentMeaning: textValue(values["投资含义"]).trim(),
-          url: textValue(values["原文链接"]).trim(),
+          url: normalizeWebResource(values["原文链接"]),
           source: textValue(values["来源名称"]).trim(),
           companies: textValue(values["涉及公司"]).trim(),
           institutions: textValue(values["涉及机构"]).trim(),
