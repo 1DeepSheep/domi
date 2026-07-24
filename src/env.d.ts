@@ -726,6 +726,7 @@ export type CodexEventPayload = {
   type:
     | "thread"
     | "started"
+    | "compatibility"
     | "assistant-delta"
     | "usage"
     | "json"

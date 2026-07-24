@@ -3,6 +3,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
+const {
+  codexClientCapabilities,
+  isExperimentalApiInitializationError
+} = require("./codex-protocol.cjs");
 
 function codexEnvironment(extra = {}) {
   const home = os.homedir();
@@ -74,6 +78,7 @@ class CodexAppServer {
     this.nextRequestId = 1;
     this.intentionalClose = false;
     this.stderrTail = "";
+    this.declaredCapabilities = codexClientCapabilities();
   }
 
   async start() {
@@ -97,6 +102,7 @@ class CodexAppServer {
     const binary = resolveCodexBinary(runtime.codexPath);
     this.intentionalClose = false;
     this.stderrTail = "";
+    this.declaredCapabilities = codexClientCapabilities();
     this.child = spawn(binary, ["app-server", "--listen", "stdio://", ...(runtime.args || [])], {
       cwd: this.cwd,
       env: codexEnvironment(runtime.env),
@@ -134,17 +140,31 @@ class CodexAppServer {
     });
 
     await processStarted;
-    await this.#sendRequest("initialize", {
+    const initializeParams = {
       clientInfo: {
         name: "domi",
         title: "豆米",
         version: this.version
-      },
-      capabilities: {
-        experimentalApi: false
       }
-    });
+    };
+    try {
+      await this.#sendRequest("initialize", {
+        ...initializeParams,
+        capabilities: this.declaredCapabilities
+      });
+    } catch (error) {
+      if (!isExperimentalApiInitializationError(error)) {
+        throw error;
+      }
+      this.declaredCapabilities = codexClientCapabilities({ experimentalApi: false });
+      this.onLog?.("当前 Codex 版本不接受 experimentalApi 声明，豆米已切换稳定兼容模式。\n");
+      await this.#sendRequest("initialize", initializeParams);
+    }
     this.#send({ method: "initialized" });
+  }
+
+  capabilities() {
+    return { ...this.declaredCapabilities };
   }
 
   async request(method, params = {}, options = {}) {

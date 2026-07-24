@@ -22,7 +22,7 @@ const { UpdateService } = require("./update-service.cjs");
 const { ServiceCoordinator } = require("./service-coordinator.cjs");
 const { classifyCodexTurnStatus } = require("./codex-turn-status.cjs");
 const {
-  codexTurnContext,
+  requestCodexTurn,
   threadPersistenceOptions
 } = require("./codex-run-context.cjs");
 const {
@@ -1476,18 +1476,17 @@ function repositoryRuntimeContext(payload) {
   const settings = getAppSettings().load().settings;
   if (settings.storageBackend === "local") {
     return [
-      "Domi 资料库运行上下文（本轮刚从豆米设置读取）：",
-      "- 当前资料库后端：local。",
+      "Domi 本轮资料库事实：",
+      "- 后端：local。",
       `- SQLite：${settings.localDatabasePath}`,
-      `- Markdown 与资料目录：${settings.localRepositoryDir}`,
-      "- 必须按 domi:investment-mgmt 的 storage-backends 契约使用 domi-repo.cjs；不要要求飞书授权，不要调用 Wiki/Base。",
-      "- 飞书鉴权状态不得触发后端回退或改变本轮后端。"
+      `- Markdown 与资料目录：${settings.localRepositoryDir}。`,
+      "- 使用 domi:investment-mgmt 本地后端；本轮不调用飞书 Wiki/Base。"
     ].join("\n");
   }
   return [
-    "Domi 资料库运行上下文（本轮刚从豆米设置读取）：",
-    "- 当前资料库后端：feishu。",
-    "- 必须继续使用当前配置的 Base、Wiki 与本地材料目录；禁止因授权或网络错误静默切换到本地后端。"
+    "Domi 本轮资料库事实：",
+    "- 后端：feishu。",
+    "- 使用当前配置的 Base、Wiki 与本地材料目录；错误时不要静默切换后端。"
   ].join("\n");
 }
 
@@ -1497,18 +1496,16 @@ async function larkRuntimeContext(required) {
   const identity = status.userName ? `，当前用户：${status.userName}` : "";
   if (status.ok) {
     return [
-      "豆米客户端运行前检查（这是本轮刚刚实测的事实）：",
-      `- lark-cli 已验证可用${identity}。可执行文件：${status.cliPath}`,
-      "- 涉及飞书、Wiki、Watching List 或线上项目文档时，必须实际执行 lark-cli 查询，不能只检索本地资料库后结束。",
-      "- 未实际执行 lark-cli 并收到真实错误前，禁止声称钥匙串未初始化、未登录、权限不足或飞书不可用。",
-      "- 如果命令确实失败，请报告实际命令及原始错误摘要，不要推测失败原因。"
+      "Domi 本轮飞书连接事实：",
+      `- lark-cli 已验证可用${identity}；路径：${status.cliPath}。`,
+      "- 飞书任务应实际调用 lark-cli；失败时报告真实错误，不推测授权状态。"
     ].join("\n");
   }
   return [
-    "豆米客户端运行前检查（这是本轮刚刚实测的事实）：",
-    `- lark-cli 预检失败。可执行文件：${status.cliPath}`,
-    `- 实际错误：${status.error || "未返回错误详情"}`,
-    "- 请基于该真实错误说明飞书状态，不要另行猜测钥匙串或登录状态。"
+    "Domi 本轮飞书连接事实：",
+    `- lark-cli 预检失败；路径：${status.cliPath}。`,
+    `- 实际错误：${status.error || "未返回错误详情"}。`,
+    "- 请基于该错误处理，不推测其他授权原因。"
   ].join("\n");
 }
 
@@ -1621,14 +1618,26 @@ async function runCodex(sender, payload) {
         ? payload.serviceTier
         : undefined;
     try {
-      const response = await client.request("turn/start", {
+      const response = await requestCodexTurn(client, {
         threadId,
-        ...codexTurnContext(prompt, runtimeContext),
         model,
         effort,
         serviceTier,
         cwd: workspacePath,
         approvalPolicy: "never"
+      }, prompt, runtimeContext, {
+        onCompatibility: ({ message, error }) => {
+          if (process.env.NODE_ENV !== "production" && error) {
+            process.stderr.write(
+              `[codex compatibility] ${error instanceof Error ? error.message : String(error)}\n`
+            );
+          }
+          publishCodexEvent(sender, runId, {
+            type: "compatibility",
+            threadId,
+            summary: message
+          });
+        }
       });
       const run = activeRuns.get(runId);
       if (run) {
