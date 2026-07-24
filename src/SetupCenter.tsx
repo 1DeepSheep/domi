@@ -27,6 +27,7 @@ import {
   CodexCheckResult,
   DiagnosticCheck,
   DiagnosticReport,
+  StorageMigrationPreview,
   UpdateStatus
 } from "./env";
 
@@ -61,8 +62,13 @@ export default function SetupCenter({
   const [plaudChecking, setPlaudChecking] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [migrateLocalDocuments, setMigrateLocalDocuments] = useState(true);
+  const [migrationPreview, setMigrationPreview] = useState<StorageMigrationPreview | null>(null);
+  const [migrationPreviewBusy, setMigrationPreviewBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const switchingLocalToFeishu = settings.storageBackend === "local"
+    && draft.storageBackend === "feishu";
 
   useEffect(() => setDraft({
     ...settings,
@@ -71,6 +77,24 @@ export default function SetupCenter({
     apiModel: ""
   }), [settings]);
   useEffect(() => setTab(initialTab), [initialTab]);
+
+  useEffect(() => {
+    if (!switchingLocalToFeishu) {
+      setMigrationPreview(null);
+      setMigrationPreviewBusy(false);
+      return;
+    }
+    let cancelled = false;
+    setMigrationPreviewBusy(true);
+    workbench.previewStorageMigration().then((preview) => {
+      if (!cancelled) setMigrationPreview(preview);
+    }).finally(() => {
+      if (!cancelled) setMigrationPreviewBusy(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [switchingLocalToFeishu]);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,6 +117,9 @@ export default function SetupCenter({
       authMode: "chatgpt",
       apiBaseUrl: "",
       apiModel: "",
+      storageMigration: switchingLocalToFeishu && migrateLocalDocuments
+        ? "local-to-feishu"
+        : "none",
       onboardingComplete: complete || settings.onboardingComplete
     });
     setSaving(false);
@@ -100,7 +127,11 @@ export default function SetupCenter({
       setError(result.error || "保存设置失败。");
       return false;
     }
-    setNotice(result.codex?.ok ? "连接已保存并验证。" : "设置已保存，请根据状态提示完成连接。");
+    setNotice(result.migration?.ok
+      ? `已迁移 ${result.migration.migratedProjectCount} 个项目、${result.migration.migratedPeopleCount} 位人脉、${result.migration.migratedNewsCount} 条行业动态、${result.migration.documentCount} 篇文档和 ${result.migration.assetCount} 张图片，并切换到飞书资料库。`
+      : result.codex?.ok
+        ? "连接已保存并验证。"
+        : "设置已保存，请根据状态提示完成连接。");
     if (complete) onClose();
     return true;
   }
@@ -417,55 +448,83 @@ export default function SetupCenter({
                 </span>
               </div>
               {draft.storageBackend === "feishu" ? (
-                <div className="data-connection-grid">
-                  <section>
-                    <h3>项目库</h3>
-                    <label>
-                      <span>Base Token</span>
-                      <input value={draft.projectBaseToken} onChange={(event) => setDraft((current) => ({ ...current, projectBaseToken: event.target.value }))} placeholder="项目 Watching List 的 Base Token" spellCheck={false} />
-                    </label>
-                    <label>
-                      <span>Table ID</span>
-                      <input value={draft.projectTableId} onChange={(event) => setDraft((current) => ({ ...current, projectTableId: event.target.value }))} placeholder="项目表 Table ID" spellCheck={false} />
-                    </label>
-                  </section>
-                  <section>
-                    <h3>人脉库</h3>
-                    <label>
-                      <span>Base Token</span>
-                      <input value={draft.peopleBaseToken} onChange={(event) => setDraft((current) => ({ ...current, peopleBaseToken: event.target.value }))} placeholder="People Base Token" spellCheck={false} />
-                    </label>
-                    <label>
-                      <span>Table ID</span>
-                      <input value={draft.peopleTableId} onChange={(event) => setDraft((current) => ({ ...current, peopleTableId: event.target.value }))} placeholder="人脉表 Table ID" spellCheck={false} />
-                    </label>
-                  </section>
-                  <section>
-                    <h3>行业动态</h3>
-                    <label>
-                      <span>Base Token</span>
-                      <input value={draft.radarBaseToken} onChange={(event) => setDraft((current) => ({ ...current, radarBaseToken: event.target.value }))} placeholder="行业信息追踪 Base Token" spellCheck={false} />
-                    </label>
-                    <label>
-                      <span>Table ID</span>
-                      <input value={draft.radarTableId} onChange={(event) => setDraft((current) => ({ ...current, radarTableId: event.target.value }))} placeholder="新闻表 Table ID" spellCheck={false} />
-                    </label>
-                  </section>
-                  <section>
-                    <h3>文档与材料</h3>
-                    <label>
-                      <span>Wiki Space ID</span>
-                      <input value={draft.wikiSpaceId} onChange={(event) => setDraft((current) => ({ ...current, wikiSpaceId: event.target.value }))} placeholder="团队 Wiki Space ID" spellCheck={false} />
-                    </label>
-                    <label className="local-library-setting">
-                      <span>本地材料目录</span>
-                      <div className="directory-picker">
-                        <input value={draft.localLibraryDir} onChange={(event) => setDraft((current) => ({ ...current, localLibraryDir: event.target.value }))} placeholder="请选择本地材料目录" spellCheck={false} />
-                        <button type="button" onClick={chooseLocalLibraryDirectory} title="选择本地材料目录" aria-label="选择本地材料目录"><FolderOpen size={16} /></button>
-                      </div>
-                    </label>
-                  </section>
-                </div>
+                <>
+                  {switchingLocalToFeishu && (
+                    <div className="storage-migration-card">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={migrateLocalDocuments}
+                        className={migrateLocalDocuments ? "enabled" : ""}
+                        onClick={() => setMigrateLocalDocuments((current) => !current)}
+                      >
+                        <span className="storage-migration-icon"><Cloud size={19} /></span>
+                        <span>
+                          <strong>先迁移本地资料，再切换到飞书</strong>
+                          <small>{migrationPreviewBusy
+                            ? "正在统计本地资料库…"
+                            : migrationPreview?.ok
+                              ? `将处理 ${migrationPreview.projectCount || 0} 个项目、${migrationPreview.peopleCount || 0} 位人脉、${migrationPreview.newsCount || 0} 条行业动态和 ${migrationPreview.documentCount || 0} 篇 Markdown 文档。`
+                              : migrationPreview?.error || "保存时会先检查本地资料库。"}</small>
+                        </span>
+                        <i aria-hidden="true"><b /></i>
+                      </button>
+                      <p>
+                        项目文档按领域和子领域写入 Wiki；项目、人脉和行业动态写入各自多维表格，并按业务键去重、回读校验。
+                        原始 PDF、录音和其他附件继续保留在本地；迁移失败不会切换后端，也不会删除本地文件。
+                      </p>
+                    </div>
+                  )}
+                  <div className="data-connection-grid">
+                    <section>
+                      <h3>项目库</h3>
+                      <label>
+                        <span>Base Token</span>
+                        <input value={draft.projectBaseToken} onChange={(event) => setDraft((current) => ({ ...current, projectBaseToken: event.target.value }))} placeholder="项目 Watching List 的 Base Token" spellCheck={false} />
+                      </label>
+                      <label>
+                        <span>Table ID</span>
+                        <input value={draft.projectTableId} onChange={(event) => setDraft((current) => ({ ...current, projectTableId: event.target.value }))} placeholder="项目表 Table ID" spellCheck={false} />
+                      </label>
+                    </section>
+                    <section>
+                      <h3>人脉库</h3>
+                      <label>
+                        <span>Base Token</span>
+                        <input value={draft.peopleBaseToken} onChange={(event) => setDraft((current) => ({ ...current, peopleBaseToken: event.target.value }))} placeholder="People Base Token" spellCheck={false} />
+                      </label>
+                      <label>
+                        <span>Table ID</span>
+                        <input value={draft.peopleTableId} onChange={(event) => setDraft((current) => ({ ...current, peopleTableId: event.target.value }))} placeholder="人脉表 Table ID" spellCheck={false} />
+                      </label>
+                    </section>
+                    <section>
+                      <h3>行业动态</h3>
+                      <label>
+                        <span>Base Token</span>
+                        <input value={draft.radarBaseToken} onChange={(event) => setDraft((current) => ({ ...current, radarBaseToken: event.target.value }))} placeholder="行业信息追踪 Base Token" spellCheck={false} />
+                      </label>
+                      <label>
+                        <span>Table ID</span>
+                        <input value={draft.radarTableId} onChange={(event) => setDraft((current) => ({ ...current, radarTableId: event.target.value }))} placeholder="新闻表 Table ID" spellCheck={false} />
+                      </label>
+                    </section>
+                    <section>
+                      <h3>文档与材料</h3>
+                      <label>
+                        <span>Wiki Space ID</span>
+                        <input value={draft.wikiSpaceId} onChange={(event) => setDraft((current) => ({ ...current, wikiSpaceId: event.target.value }))} placeholder="团队 Wiki Space ID" spellCheck={false} />
+                      </label>
+                      <label className="local-library-setting">
+                        <span>本地材料目录</span>
+                        <div className="directory-picker">
+                          <input value={draft.localLibraryDir} onChange={(event) => setDraft((current) => ({ ...current, localLibraryDir: event.target.value }))} placeholder="请选择本地材料目录" spellCheck={false} />
+                          <button type="button" onClick={chooseLocalLibraryDirectory} title="选择本地材料目录" aria-label="选择本地材料目录"><FolderOpen size={16} /></button>
+                        </div>
+                      </label>
+                    </section>
+                  </div>
+                </>
               ) : (
                 <div className="local-storage-panel">
                   <div className="local-storage-summary">
@@ -699,7 +758,13 @@ export default function SetupCenter({
             {tab === "data" && (
               <button className="setup-primary" type="button" onClick={required ? saveDataAndContinue : () => save(false)} disabled={saving}>
                 {saving && <LoaderCircle className="spinning" size={16} />}
-                {required ? "下一步：录音转写" : "保存资料连接"}
+                {saving && switchingLocalToFeishu && migrateLocalDocuments
+                  ? "正在迁移并切换…"
+                  : required
+                    ? "下一步：录音转写"
+                    : switchingLocalToFeishu && migrateLocalDocuments
+                      ? "迁移并切换到飞书"
+                      : "保存资料连接"}
               </button>
             )}
             {tab === "plaud" && (

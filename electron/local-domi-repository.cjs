@@ -114,6 +114,18 @@ class LocalDomiRepository {
       );
       CREATE INDEX IF NOT EXISTS idx_documents_owner
         ON documents(owner_type, owner_id, kind);
+      CREATE TABLE IF NOT EXISTS document_migrations (
+        source_path TEXT NOT NULL,
+        target_space_id TEXT NOT NULL,
+        source_sha256 TEXT NOT NULL DEFAULT '',
+        target_document_id TEXT NOT NULL DEFAULT '',
+        target_node_token TEXT NOT NULL DEFAULT '',
+        target_url TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        error TEXT NOT NULL DEFAULT '',
+        migrated_at INTEGER NOT NULL,
+        PRIMARY KEY (source_path, target_space_id)
+      );
       INSERT INTO repository_meta (key, value, updated_at)
         VALUES ('schema_version', '${LOCAL_REPOSITORY_SCHEMA}', unixepoch('now') * 1000)
         ON CONFLICT(key) DO UPDATE SET
@@ -206,6 +218,137 @@ class LocalDomiRepository {
       evidenceStatus: row.evidence_status,
       action: row.action
     }));
+  }
+
+  listMigrationProjects() {
+    const documentRows = this.database.prepare(`
+      SELECT owner_id, kind, title, path
+      FROM documents
+      WHERE owner_type = 'project'
+      ORDER BY updated_at ASC, path ASC
+    `).all();
+    const documentsByProject = new Map();
+    for (const row of documentRows) {
+      const documents = documentsByProject.get(row.owner_id) || [];
+      documents.push({
+        kind: row.kind,
+        title: row.title,
+        path: row.path
+      });
+      documentsByProject.set(row.owner_id, documents);
+    }
+    return this.database.prepare(`
+      SELECT id, name, domain, subdomains_json, status, rating, notes,
+        cities_json, investors_json, last_updated_at, document_path
+      FROM projects
+      ORDER BY updated_at ASC, name ASC
+    `).all().map((row) => ({
+      id: row.id,
+      name: row.name,
+      domain: row.domain,
+      subdomains: parseList(row.subdomains_json),
+      status: row.status,
+      rating: row.rating,
+      notes: row.notes,
+      cities: parseList(row.cities_json),
+      investors: parseList(row.investors_json),
+      lastUpdatedAt: row.last_updated_at || null,
+      documentPath: row.document_path,
+      documents: documentsByProject.get(row.id) || []
+    }));
+  }
+
+  listMigrationPeople() {
+    return this.database.prepare(`
+      SELECT id, name, types_json, organization, status, rating,
+        last_contact_at, cities_json, document_path, created_at, updated_at
+      FROM people
+      ORDER BY updated_at ASC, name ASC
+    `).all().map((row) => ({
+      id: row.id,
+      name: row.name,
+      types: parseList(row.types_json),
+      organization: row.organization,
+      status: row.status,
+      rating: row.rating,
+      lastContactAt: row.last_contact_at || null,
+      cities: parseList(row.cities_json),
+      documentPath: row.document_path,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  listMigrationNews() {
+    return this.database.prepare(`
+      SELECT event_id, title, domains_json, subdomains_json, types_json,
+        published_at, summary, investment_meaning, url, source, companies,
+        institutions, importance, confidence, evidence_status, action,
+        worth_following, document_path, created_at, updated_at
+      FROM news_events
+      ORDER BY published_at ASC, event_id ASC
+    `).all().map((row) => ({
+      eventId: row.event_id,
+      title: row.title,
+      domains: parseList(row.domains_json),
+      subdomains: parseList(row.subdomains_json),
+      types: parseList(row.types_json),
+      publishedAt: row.published_at,
+      summary: row.summary,
+      investmentMeaning: row.investment_meaning,
+      url: row.url,
+      source: row.source,
+      companies: row.companies,
+      institutions: row.institutions,
+      importance: Number(row.importance) || 0,
+      confidence: Number(row.confidence) || 0,
+      evidenceStatus: row.evidence_status,
+      action: row.action,
+      worthFollowing: Boolean(row.worth_following),
+      documentPath: row.document_path,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  getDocumentMigration(sourcePath, targetSpaceId) {
+    return this.database.prepare(`
+      SELECT source_path, target_space_id, source_sha256, target_document_id,
+        target_node_token, target_url, status, error, migrated_at
+      FROM document_migrations
+      WHERE source_path = ? AND target_space_id = ?
+    `).get(path.resolve(sourcePath), String(targetSpaceId || ""));
+  }
+
+  saveDocumentMigration(record) {
+    const sourcePath = path.resolve(record.sourcePath);
+    const targetSpaceId = String(record.targetSpaceId || "");
+    const migratedAt = Number(record.migratedAt) || Date.now();
+    this.database.prepare(`
+      INSERT INTO document_migrations (
+        source_path, target_space_id, source_sha256, target_document_id,
+        target_node_token, target_url, status, error, migrated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_path, target_space_id) DO UPDATE SET
+        source_sha256 = excluded.source_sha256,
+        target_document_id = excluded.target_document_id,
+        target_node_token = excluded.target_node_token,
+        target_url = excluded.target_url,
+        status = excluded.status,
+        error = excluded.error,
+        migrated_at = excluded.migrated_at
+    `).run(
+      sourcePath,
+      targetSpaceId,
+      String(record.sourceSha256 || ""),
+      String(record.targetDocumentId || ""),
+      String(record.targetNodeToken || ""),
+      String(record.targetUrl || ""),
+      String(record.status || "pending"),
+      String(record.error || ""),
+      migratedAt
+    );
+    return this.getDocumentMigration(sourcePath, targetSpaceId);
   }
 }
 
