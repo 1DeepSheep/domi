@@ -5785,6 +5785,96 @@ body.panel-resizing .main-grid {
   line-height: 1.5;
 }
 
+.storage-migration-card {
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid #ead8d0;
+  border-radius: 9px;
+  background: #fdfaf8;
+}
+
+.storage-migration-card > button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 32px minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  padding: 13px 14px 10px;
+  text-align: left;
+}
+
+.storage-migration-card > button:hover {
+  background: #fff7f3;
+}
+
+.storage-migration-icon {
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border-radius: 9px;
+  color: #a86850;
+  background: #f6e9e3;
+}
+
+.storage-migration-card strong,
+.storage-migration-card small {
+  display: block;
+}
+
+.storage-migration-card strong {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.storage-migration-card small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.storage-migration-card i {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: #d8d8d4;
+  transition: background 140ms ease;
+}
+
+.storage-migration-card i b {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(50, 46, 42, 0.18);
+  transition: transform 140ms ease;
+}
+
+.storage-migration-card > button.enabled i {
+  background: #d97454;
+}
+
+.storage-migration-card > button.enabled i b {
+  transform: translateX(14px);
+}
+
+.storage-migration-card p {
+  margin: 0;
+  border-top: 1px solid #eee2dc;
+  color: #77726d;
+  padding: 9px 14px 11px 56px;
+  font-size: 8.5px;
+  line-height: 1.55;
+}
+
 .data-connection-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

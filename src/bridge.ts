@@ -265,6 +265,12 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "浏览器预览模式不能同步 Domi 数据。"
   }),
+  previewStorageMigration: async () => ({
+    ok: true,
+    projectCount: 0,
+    documentCount: 0,
+    projects: []
+  }),
   onCodexEvent: () => () => undefined,
   onUpdateStatus: () => () => undefined
 };
