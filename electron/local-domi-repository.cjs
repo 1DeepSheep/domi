@@ -258,6 +258,59 @@ class LocalDomiRepository {
     }));
   }
 
+  listMigrationPeople() {
+    return this.database.prepare(`
+      SELECT id, name, types_json, organization, status, rating,
+        last_contact_at, cities_json, document_path, created_at, updated_at
+      FROM people
+      ORDER BY updated_at ASC, name ASC
+    `).all().map((row) => ({
+      id: row.id,
+      name: row.name,
+      types: parseList(row.types_json),
+      organization: row.organization,
+      status: row.status,
+      rating: row.rating,
+      lastContactAt: row.last_contact_at || null,
+      cities: parseList(row.cities_json),
+      documentPath: row.document_path,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  listMigrationNews() {
+    return this.database.prepare(`
+      SELECT event_id, title, domains_json, subdomains_json, types_json,
+        published_at, summary, investment_meaning, url, source, companies,
+        institutions, importance, confidence, evidence_status, action,
+        worth_following, document_path, created_at, updated_at
+      FROM news_events
+      ORDER BY published_at ASC, event_id ASC
+    `).all().map((row) => ({
+      eventId: row.event_id,
+      title: row.title,
+      domains: parseList(row.domains_json),
+      subdomains: parseList(row.subdomains_json),
+      types: parseList(row.types_json),
+      publishedAt: row.published_at,
+      summary: row.summary,
+      investmentMeaning: row.investment_meaning,
+      url: row.url,
+      source: row.source,
+      companies: row.companies,
+      institutions: row.institutions,
+      importance: Number(row.importance) || 0,
+      confidence: Number(row.confidence) || 0,
+      evidenceStatus: row.evidence_status,
+      action: row.action,
+      worthFollowing: Boolean(row.worth_following),
+      documentPath: row.document_path,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
   getDocumentMigration(sourcePath, targetSpaceId) {
     return this.database.prepare(`
       SELECT source_path, target_space_id, source_sha256, target_document_id,

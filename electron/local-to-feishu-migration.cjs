@@ -68,6 +68,154 @@ function normalizeStatus(value) {
     : String(value || "待交流").trim();
 }
 
+function formatFeishuDateTime(value) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(new Date(timestamp))
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value])
+  );
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+function normalizeEvidenceStatus(value) {
+  const raw = String(value || "").trim();
+  if (["独立核实", "公司／机构口径", "可观察动作", "二手报道", "传闻／待核验"].includes(raw)) {
+    return raw;
+  }
+  if (/独立|交叉|已核验/.test(raw)) return "独立核实";
+  if (/官方|公司|机构/.test(raw)) return "公司／机构口径";
+  if (/观察|动作/.test(raw)) return "可观察动作";
+  if (/传闻|待核验|未核验/.test(raw)) return "传闻／待核验";
+  return "二手报道";
+}
+
+function normalizeSuggestedAction(value, worthFollowing) {
+  const raw = String(value || "").trim();
+  if (["立即关注", "继续跟踪", "进入深研", "加入候选池", "仅归档"].includes(raw)) return raw;
+  if (/立即/.test(raw)) return "立即关注";
+  if (/深研|研究/.test(raw)) return "进入深研";
+  if (/候选/.test(raw)) return "加入候选池";
+  if (/归档|忽略/.test(raw)) return "仅归档";
+  return worthFollowing ? "继续跟踪" : "仅归档";
+}
+
+function importanceLevel(value) {
+  const score = Number(value) || 0;
+  if (score >= 9) return "P0-立即关注";
+  if (score >= 7) return "P1-重点关注";
+  if (score >= 5) return "P2-日常跟踪";
+  return "P3-仅归档";
+}
+
+function fieldName(field) {
+  return String(field?.field_name || field?.fieldName || field?.name || "").trim();
+}
+
+function fieldOptions(field) {
+  const options = field?.property?.options
+    || field?.property?.multiple?.options
+    || field?.options
+    || [];
+  return Array.isArray(options)
+    ? options.map((option) => String(option?.name || option?.text || option?.value || option || "").trim()).filter(Boolean)
+    : [];
+}
+
+function basePayload(response) {
+  const direct = response?.data ?? response ?? {};
+  if (
+    direct
+    && typeof direct === "object"
+    && !Array.isArray(direct)
+    && !direct.items
+    && !direct.records
+    && !direct.fields
+    && direct.data
+    && typeof direct.data === "object"
+    && !Array.isArray(direct.data)
+  ) {
+    return direct.data;
+  }
+  return direct;
+}
+
+function baseRecordRows(response) {
+  const data = basePayload(response);
+  const items = data?.items || data?.records;
+  if (Array.isArray(items)) return items;
+  if (!Array.isArray(data?.fields) || !Array.isArray(data?.data)) return [];
+  const names = data.fields.map((field) => fieldName(field) || String(field));
+  const ids = data.record_id_list || data.recordIds || [];
+  return data.data.map((row, index) => ({
+    record_id: String(ids[index] || ""),
+    fields: Object.fromEntries(names.map((name, fieldIndex) => [name, row[fieldIndex]]))
+  }));
+}
+
+function fieldList(response) {
+  const data = basePayload(response);
+  if (Array.isArray(data)) return data;
+  return data?.items || data?.fields || [];
+}
+
+function cellScalar(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "object") return value;
+  return value.link
+    ?? value.url
+    ?? value.text
+    ?? value.name
+    ?? value.value
+    ?? value.id
+    ?? "";
+}
+
+function cellText(value) {
+  if (Array.isArray(value)) return value.map((item) => cellText(item)).join("");
+  return String(cellScalar(value) ?? "").trim();
+}
+
+function equalCellValue(expected, actual) {
+  if (Array.isArray(expected)) {
+    const actualItems = Array.isArray(actual) ? actual : actual === null || actual === undefined ? [] : [actual];
+    const normalize = (items) => items
+      .map((item) => comparableText(cellScalar(item)))
+      .filter(Boolean)
+      .sort();
+    return JSON.stringify(normalize(expected)) === JSON.stringify(normalize(actualItems));
+  }
+  if (typeof expected === "boolean") {
+    const scalar = cellScalar(actual);
+    return (scalar === true || scalar === 1 || scalar === "true") === expected;
+  }
+  if (typeof expected === "number") return Math.abs((Number(cellScalar(actual)) || 0) - expected) < 0.0001;
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(expected))) {
+    if (String(actual).trim() === String(expected)) return true;
+    const expectedTimestamp = Date.parse(`${String(expected).replace(" ", "T")}+08:00`);
+    const actualTimestamp = Number(cellScalar(actual)) || Date.parse(String(cellScalar(actual)));
+    return Number.isFinite(actualTimestamp) && Math.abs(actualTimestamp - expectedTimestamp) < 1000;
+  }
+  return cellText(actual) === String(expected ?? "").trim();
+}
+
+function verifyFieldMap(record, expectedFields) {
+  const actualFields = record?.fields || {};
+  return Object.entries(expectedFields).every(([name, expected]) =>
+    equalCellValue(expected, actualFields[name])
+  );
+}
+
 function stripFrontmatter(markdown) {
   const normalized = String(markdown || "").replace(/^\uFEFF/, "");
   if (!normalized.startsWith("---\n") && !normalized.startsWith("---\r\n")) return normalized;
@@ -268,6 +416,8 @@ class LocalToFeishuMigration {
 
   preview() {
     const projects = this.repository.listMigrationProjects();
+    const people = this.repository.listMigrationPeople();
+    const news = this.repository.listMigrationNews();
     const planned = projects.map((project) => ({
       projectId: project.id,
       name: project.name,
@@ -278,6 +428,8 @@ class LocalToFeishuMigration {
     return {
       ok: true,
       projectCount: planned.length,
+      peopleCount: people.length,
+      newsCount: news.length,
       documentCount: planned.reduce((total, project) => total + project.documentCount, 0),
       projects: planned
     };
@@ -566,29 +718,149 @@ class LocalToFeishuMigration {
     return { ...document, skipped: false, assetCount: prepared.assets.length };
   }
 
-  async searchProjectRecords(target, projectName) {
+  async inspectBase({ baseToken, tableId, label, requiredFields }) {
     const response = await this.runLark([
-      "api",
-      "POST",
-      `/open-apis/bitable/v1/apps/${target.projectBaseToken}/tables/${target.projectTableId}/records/search`,
-      "--data",
-      JSON.stringify({
-        filter: {
-          conjunction: "and",
-          conditions: [{
-            field_name: "公司名称",
-            operator: "contains",
-            value: [projectName]
-          }]
-        },
-        field_names: ["公司名称", "链接"],
-        page_size: 20
-      }),
+      "base",
+      "+field-list",
+      "--base-token",
+      baseToken,
+      "--table-id",
+      tableId,
+      "--limit",
+      "200",
       "--format",
       "json"
     ]);
-    return responseItems(response).filter((record) =>
-      comparableText(textValue(record.fields?.["公司名称"])) === comparableText(projectName)
+    const fields = fieldList(response);
+    const byName = new Map(fields.map((field) => [fieldName(field), field]).filter(([name]) => name));
+    const missing = requiredFields.filter((name) => !byName.has(name));
+    if (missing.length) {
+      throw new Error(`${label}缺少迁移字段：${missing.join("、")}。`);
+    }
+    return byName;
+  }
+
+  assertOptionValues(fieldMap, field, values, label) {
+    const allowed = fieldOptions(fieldMap.get(field));
+    if (!allowed.length) return;
+    const allowedComparable = new Set(allowed.map(comparableText));
+    const invalid = [...new Set((values || []).map(String).map((value) => value.trim()).filter(Boolean))]
+      .filter((value) => !allowedComparable.has(comparableText(value)));
+    if (invalid.length) {
+      throw new Error(`${label}的“${field}”包含目标表未配置的选项：${invalid.join("、")}。`);
+    }
+  }
+
+  async inspectTargets(target, { projects, people, news }) {
+    const projectFields = await this.inspectBase({
+      baseToken: target.projectBaseToken,
+      tableId: target.projectTableId,
+      label: "项目 Watching List",
+      requiredFields: ["公司名称", "领域", "子领域", "进展状态", "链接"]
+    });
+    const peopleFields = await this.inspectBase({
+      baseToken: target.peopleBaseToken,
+      tableId: target.peopleTableId,
+      label: "People 人脉库",
+      requiredFields: ["人名"]
+    });
+    const newsFields = await this.inspectBase({
+      baseToken: target.radarBaseToken,
+      tableId: target.radarTableId,
+      label: "行业动态库",
+      requiredFields: [
+        "新闻标题", "领域", "信息类型", "信息发布时间", "新闻核心内容", "投资含义",
+        "原文链接", "来源名称", "重要性评分", "重要性等级", "可信度", "证据状态",
+        "是否值得关注", "建议动作", "事件ID", "扫描批次"
+      ]
+    });
+    this.assertOptionValues(projectFields, "领域", projects.map((project) => project.domain), "本地项目");
+    this.assertOptionValues(
+      projectFields,
+      "子领域",
+      projects.flatMap((project) => project.subdomains || []),
+      "本地项目"
+    );
+    this.assertOptionValues(
+      projectFields,
+      "进展状态",
+      projects.map((project) => normalizeStatus(project.status)),
+      "本地项目"
+    );
+    this.assertOptionValues(
+      peopleFields,
+      "类型",
+      people.flatMap((person) => person.types?.slice(0, 1) || []),
+      "本地人脉"
+    );
+    this.assertOptionValues(peopleFields, "进展状态", people.map((person) => person.status), "本地人脉");
+    this.assertOptionValues(peopleFields, "评级", people.map((person) => person.rating), "本地人脉");
+    this.assertOptionValues(peopleFields, "城市", people.flatMap((person) => person.cities || []), "本地人脉");
+    this.assertOptionValues(newsFields, "领域", news.flatMap((event) => event.domains || []), "本地行业动态");
+    this.assertOptionValues(newsFields, "子领域", news.flatMap((event) => event.subdomains || []), "本地行业动态");
+    this.assertOptionValues(newsFields, "信息类型", news.flatMap((event) => event.types || []), "本地行业动态");
+    this.assertOptionValues(
+      newsFields,
+      "重要性等级",
+      news.map((event) => importanceLevel(event.importance)),
+      "本地行业动态"
+    );
+    this.assertOptionValues(
+      newsFields,
+      "证据状态",
+      news.map((event) => normalizeEvidenceStatus(event.evidenceStatus)),
+      "本地行业动态"
+    );
+    this.assertOptionValues(
+      newsFields,
+      "建议动作",
+      news.map((event) => normalizeSuggestedAction(event.action, event.worthFollowing)),
+      "本地行业动态"
+    );
+    this.baseFields = { project: projectFields, people: peopleFields, news: newsFields };
+  }
+
+  async searchExactRecords({ baseToken, tableId, keyField, keyValue, fieldNames }) {
+    const response = await this.runLark([
+      "base",
+      "+record-list",
+      "--base-token",
+      baseToken,
+      "--table-id",
+      tableId,
+      "--filter-json",
+      JSON.stringify({
+        logic: "and",
+        conditions: [[keyField, "==", keyValue]]
+      }),
+      ...fieldNames.flatMap((field) => ["--field-id", field]),
+      "--limit",
+      "20",
+      "--format",
+      "json"
+    ]);
+    return baseRecordRows(response).filter((record) =>
+      comparableText(cellText(record.fields?.[keyField])) === comparableText(keyValue)
+    );
+  }
+
+  async searchProjectRecords(target, projectName) {
+    return this.searchExactRecords({
+      baseToken: target.projectBaseToken,
+      tableId: target.projectTableId,
+      keyField: "公司名称",
+      keyValue: projectName,
+      fieldNames: [...this.baseFields.project.keys()]
+        .filter((field) => field !== "最后更新时间")
+    });
+  }
+
+  existingFieldMap(kind, fields) {
+    const schema = this.baseFields?.[kind] || new Map();
+    return Object.fromEntries(
+      Object.entries(fields).filter(([name, value]) =>
+        schema.has(name) && value !== "" && value !== null && value !== undefined
+      )
     );
   }
 
@@ -597,18 +869,17 @@ class LocalToFeishuMigration {
     if (existing.length > 1) {
       throw new Error(`Watching List 中存在 ${existing.length} 条同名项目“${project.name}”，请先合并重复记录。`);
     }
-    const fields = {
+    const fields = this.existingFieldMap("project", {
       "公司名称": project.name,
       "领域": project.domain,
       "子领域": project.subdomains,
       "进展状态": normalizeStatus(project.status),
-      "链接": documentUrl
-    };
-    if (project.notes) fields.Notes = project.notes;
-    if (project.rating) fields["项目评级"] = project.rating;
-    if (project.cities?.length) fields["城市"] = project.cities;
-    if (project.investors?.length) fields["投资机构"] = project.investors;
-    if (!existing.length && project.lastUpdatedAt) fields["最后更新时间"] = project.lastUpdatedAt;
+      "链接": documentUrl,
+      "Notes": project.notes,
+      "项目评级": project.rating,
+      "城市": project.cities?.length ? project.cities : "",
+      "投资机构": project.investors?.length ? project.investors : ""
+    });
     const args = [
       "base",
       "+record-upsert",
@@ -625,10 +896,163 @@ class LocalToFeishuMigration {
     if (recordId) args.push("--record-id", recordId);
     await this.runLark(args, { timeout: 120000 });
     const verified = await this.searchProjectRecords(target, project.name);
-    if (verified.length !== 1 || textValue(verified[0].fields?.["链接"]).trim() !== documentUrl) {
+    if (verified.length !== 1 || !verifyFieldMap(verified[0], fields)) {
       throw new Error(`Watching List 项目“${project.name}”写入后回读验证失败。`);
     }
     return {
+      recordId: String(verified[0].record_id || verified[0].recordId || ""),
+      created: !recordId
+    };
+  }
+
+  async searchPeopleRecords(target, person) {
+    const records = await this.searchExactRecords({
+      baseToken: target.peopleBaseToken,
+      tableId: target.peopleTableId,
+      keyField: "人名",
+      keyValue: person.name,
+      fieldNames: ["人名", "所属组织&身份", "类型", "进展状态", "评级", "最后联系日期", "城市"]
+        .filter((field) => this.baseFields.people.has(field))
+    });
+    if (!records.length) return [];
+    const sameOrganization = records.filter((record) =>
+      comparableText(cellText(record.fields?.["所属组织&身份"])) === comparableText(person.organization)
+    );
+    if (sameOrganization.length === 1) return sameOrganization;
+    if (
+      records.length === 1
+      && (!person.organization || !cellText(records[0].fields?.["所属组织&身份"]))
+    ) {
+      return records;
+    }
+    throw new Error(`People 人脉库中存在无法唯一匹配的同名记录“${person.name}”，请先补充或整理所属组织。`);
+  }
+
+  personFields(person) {
+    return this.existingFieldMap("people", {
+      "人名": person.name,
+      "类型": person.types?.length ? person.types.slice(0, 1) : "",
+      "所属组织&身份": person.organization,
+      "进展状态": person.status,
+      "评级": person.rating,
+      "最后联系日期": formatFeishuDateTime(person.lastContactAt),
+      "城市": person.cities?.length ? person.cities : ""
+    });
+  }
+
+  async migratePerson(person, target) {
+    if (!String(person.name || "").trim()) throw new Error("本地人脉缺少姓名。");
+    const existing = await this.searchPeopleRecords(target, person);
+    const fields = this.personFields(person);
+    const args = [
+      "base",
+      "+record-upsert",
+      "--base-token",
+      target.peopleBaseToken,
+      "--table-id",
+      target.peopleTableId,
+      "--json",
+      JSON.stringify(fields),
+      "--format",
+      "json"
+    ];
+    const recordId = String(existing[0]?.record_id || existing[0]?.recordId || "");
+    if (recordId) args.push("--record-id", recordId);
+    await this.runLark(args, { timeout: 120000 });
+    const verified = await this.searchPeopleRecords(target, person);
+    if (verified.length !== 1 || !verifyFieldMap(verified[0], fields)) {
+      throw new Error(`People 人脉“${person.name}”写入后回读验证失败。`);
+    }
+    return {
+      id: person.id,
+      name: person.name,
+      recordId: String(verified[0].record_id || verified[0].recordId || ""),
+      created: !recordId
+    };
+  }
+
+  validateNews(event) {
+    const missing = [
+      ["事件ID", event.eventId],
+      ["新闻标题", event.title],
+      ["领域", event.domains?.length],
+      ["信息类型", event.types?.length],
+      ["信息发布时间", event.publishedAt],
+      ["新闻核心内容", event.summary],
+      ["原文链接", event.url],
+      ["来源名称", event.source]
+    ].filter(([, value]) => !value).map(([field]) => field);
+    if (event.worthFollowing && !String(event.investmentMeaning || "").trim()) missing.push("投资含义");
+    if (missing.length) throw new Error(`缺少必填字段：${missing.join("、")}。`);
+    if (event.importance < 1 || event.importance > 10) throw new Error("重要性评分必须在 1–10 之间。");
+    if (event.confidence < 1 || event.confidence > 10) throw new Error("可信度必须在 1–10 之间。");
+  }
+
+  newsFields(event, { creating }) {
+    const fields = this.existingFieldMap("news", {
+      "新闻标题": event.title,
+      "领域": event.domains,
+      "子领域": event.subdomains?.length ? event.subdomains : "",
+      "信息类型": event.types,
+      "信息发布时间": formatFeishuDateTime(event.publishedAt),
+      "新闻核心内容": event.summary,
+      "投资含义": event.investmentMeaning,
+      "原文链接": event.url,
+      "来源名称": event.source,
+      "涉及公司": event.companies,
+      "涉及机构": event.institutions,
+      "重要性评分": event.importance,
+      "重要性等级": importanceLevel(event.importance),
+      "可信度": event.confidence,
+      "证据状态": normalizeEvidenceStatus(event.evidenceStatus),
+      "是否值得关注": event.worthFollowing,
+      "建议动作": normalizeSuggestedAction(event.action, event.worthFollowing),
+      "事件ID": event.eventId,
+      "扫描批次": creating ? "本地资料库迁移" : ""
+    });
+    return fields;
+  }
+
+  async searchNewsRecords(target, eventId) {
+    return this.searchExactRecords({
+      baseToken: target.radarBaseToken,
+      tableId: target.radarTableId,
+      keyField: "事件ID",
+      keyValue: eventId,
+      fieldNames: [...this.baseFields.news.keys()]
+        .filter((field) => !["收录时间", "最后更新时间"].includes(field))
+    });
+  }
+
+  async migrateNewsEvent(event, target) {
+    this.validateNews(event);
+    const existing = await this.searchNewsRecords(target, event.eventId);
+    if (existing.length > 1) {
+      throw new Error(`行业动态库中存在 ${existing.length} 条事件ID为“${event.eventId}”的记录，请先合并重复项。`);
+    }
+    const fields = this.newsFields(event, { creating: existing.length === 0 });
+    const args = [
+      "base",
+      "+record-upsert",
+      "--base-token",
+      target.radarBaseToken,
+      "--table-id",
+      target.radarTableId,
+      "--json",
+      JSON.stringify(fields),
+      "--format",
+      "json"
+    ];
+    const recordId = String(existing[0]?.record_id || existing[0]?.recordId || "");
+    if (recordId) args.push("--record-id", recordId);
+    await this.runLark(args, { timeout: 120000 });
+    const verified = await this.searchNewsRecords(target, event.eventId);
+    if (verified.length !== 1 || !verifyFieldMap(verified[0], fields)) {
+      throw new Error(`行业动态“${event.title}”写入后回读验证失败。`);
+    }
+    return {
+      eventId: event.eventId,
+      title: event.title,
       recordId: String(verified[0].record_id || verified[0].recordId || ""),
       created: !recordId
     };
@@ -681,21 +1105,56 @@ class LocalToFeishuMigration {
   }
 
   async run(target) {
-    for (const key of ["projectBaseToken", "projectTableId", "wikiSpaceId"]) {
+    for (const key of [
+      "projectBaseToken", "projectTableId", "peopleBaseToken", "peopleTableId",
+      "radarBaseToken", "radarTableId", "wikiSpaceId"
+    ]) {
       if (!String(target[key] || "").trim()) throw new Error(`飞书迁移缺少 ${key}。`);
     }
-    this.loadFolderMap();
-    await this.loadWikiTree(target.wikiSpaceId);
     const projects = this.repository.listMigrationProjects();
-    const migrated = [];
+    const people = this.repository.listMigrationPeople();
+    const news = this.repository.listMigrationNews();
+    await this.inspectTargets(target, { projects, people, news });
+    if (projects.length) {
+      this.loadFolderMap();
+      await this.loadWikiTree(target.wikiSpaceId);
+    }
+    const migratedProjects = [];
+    const migratedPeople = [];
+    const migratedNews = [];
     const failed = [];
     for (const project of projects) {
       try {
-        migrated.push(await this.migrateProject(project, target));
+        migratedProjects.push(await this.migrateProject(project, target));
       } catch (error) {
         failed.push({
-          projectId: project.id,
+          kind: "project",
+          id: project.id,
           name: project.name,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    for (const person of people) {
+      try {
+        migratedPeople.push(await this.migratePerson(person, target));
+      } catch (error) {
+        failed.push({
+          kind: "person",
+          id: person.id,
+          name: person.name,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    for (const event of news) {
+      try {
+        migratedNews.push(await this.migrateNewsEvent(event, target));
+      } catch (error) {
+        failed.push({
+          kind: "news",
+          id: event.eventId,
+          name: event.title,
           error: error instanceof Error ? error.message : String(error)
         });
       }
@@ -703,16 +1162,23 @@ class LocalToFeishuMigration {
     return {
       ok: failed.length === 0,
       projectCount: projects.length,
-      migratedProjectCount: migrated.length,
-      documentCount: migrated.reduce((total, item) => total + item.documents.length, 0),
-      assetCount: migrated.reduce(
+      migratedProjectCount: migratedProjects.length,
+      peopleCount: people.length,
+      migratedPeopleCount: migratedPeople.length,
+      newsCount: news.length,
+      migratedNewsCount: migratedNews.length,
+      documentCount: migratedProjects.reduce((total, item) => total + item.documents.length, 0),
+      assetCount: migratedProjects.reduce(
         (total, item) => total + item.documents.reduce((sum, document) => sum + document.assetCount, 0),
         0
       ),
-      migrated,
+      migrated: migratedProjects,
+      migratedProjects,
+      migratedPeople,
+      migratedNews,
       failed,
       error: failed.length
-        ? `${failed.length} 个项目迁移失败；资料库仍保持本地模式。${failed.slice(0, 3).map((item) => `${item.name}：${item.error}`).join("；")}`
+        ? `${failed.length} 条本地资料迁移失败；资料库仍保持本地模式。${failed.slice(0, 3).map((item) => `${item.name}：${item.error}`).join("；")}`
         : ""
     };
   }
@@ -720,7 +1186,12 @@ class LocalToFeishuMigration {
 
 module.exports = {
   LocalToFeishuMigration,
+  baseRecordRows,
   comparableText,
+  formatFeishuDateTime,
+  importanceLevel,
+  normalizeEvidenceStatus,
+  normalizeSuggestedAction,
   parseWikiFolderMap,
   prepareMarkdownDocument,
   projectDocuments,

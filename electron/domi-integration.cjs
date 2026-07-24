@@ -1212,9 +1212,16 @@ class DomiIntegration {
         ok: false,
         projectCount: 0,
         migratedProjectCount: 0,
+        peopleCount: 0,
+        migratedPeopleCount: 0,
+        newsCount: 0,
+        migratedNewsCount: 0,
         documentCount: 0,
         assetCount: 0,
         migrated: [],
+        migratedProjects: [],
+        migratedPeople: [],
+        migratedNews: [],
         failed: [],
         error: health.error || "飞书用户身份未就绪，请先重新授权。"
       };

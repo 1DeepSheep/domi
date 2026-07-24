@@ -128,7 +128,7 @@ export default function SetupCenter({
       return false;
     }
     setNotice(result.migration?.ok
-      ? `已迁移 ${result.migration.migratedProjectCount} 个项目、${result.migration.documentCount} 篇文档和 ${result.migration.assetCount} 张图片，并切换到飞书资料库。`
+      ? `已迁移 ${result.migration.migratedProjectCount} 个项目、${result.migration.migratedPeopleCount} 位人脉、${result.migration.migratedNewsCount} 条行业动态、${result.migration.documentCount} 篇文档和 ${result.migration.assetCount} 张图片，并切换到飞书资料库。`
       : result.codex?.ok
         ? "连接已保存并验证。"
         : "设置已保存，请根据状态提示完成连接。");
@@ -460,17 +460,17 @@ export default function SetupCenter({
                       >
                         <span className="storage-migration-icon"><Cloud size={19} /></span>
                         <span>
-                          <strong>先迁移本地项目文档，再切换到飞书</strong>
+                          <strong>先迁移本地资料，再切换到飞书</strong>
                           <small>{migrationPreviewBusy
                             ? "正在统计本地资料库…"
                             : migrationPreview?.ok
-                              ? `将处理 ${migrationPreview.projectCount || 0} 个项目、${migrationPreview.documentCount || 0} 篇 Markdown 文档。`
+                              ? `将处理 ${migrationPreview.projectCount || 0} 个项目、${migrationPreview.peopleCount || 0} 位人脉、${migrationPreview.newsCount || 0} 条行业动态和 ${migrationPreview.documentCount || 0} 篇 Markdown 文档。`
                               : migrationPreview?.error || "保存时会先检查本地资料库。"}</small>
                         </span>
                         <i aria-hidden="true"><b /></i>
                       </button>
                       <p>
-                        按领域和子领域写入对应 Wiki 目录，图片随文档上传，并回填 Watching List 链接。
+                        项目文档按领域和子领域写入 Wiki；项目、人脉和行业动态写入各自多维表格，并按业务键去重、回读校验。
                         原始 PDF、录音和其他附件继续保留在本地；迁移失败不会切换后端，也不会删除本地文件。
                       </p>
                     </div>

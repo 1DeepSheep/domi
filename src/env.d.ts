@@ -320,13 +320,16 @@ export type StorageMigrationProject = {
 export type StorageMigrationPreview = {
   ok: boolean;
   projectCount?: number;
+  peopleCount?: number;
+  newsCount?: number;
   documentCount?: number;
   projects?: StorageMigrationProject[];
   error?: string;
 };
 
 export type StorageMigrationFailure = {
-  projectId: string;
+  kind: "project" | "person" | "news";
+  id: string;
   name: string;
   error: string;
 };
@@ -335,6 +338,10 @@ export type StorageMigrationResult = {
   ok: boolean;
   projectCount: number;
   migratedProjectCount: number;
+  peopleCount: number;
+  migratedPeopleCount: number;
+  newsCount: number;
+  migratedNewsCount: number;
   documentCount: number;
   assetCount: number;
   failed: StorageMigrationFailure[];
