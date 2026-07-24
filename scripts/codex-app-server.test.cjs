@@ -11,10 +11,12 @@ test("concurrent requests wait for Codex App Server initialization", async () =>
   fs.writeFileSync(fakeCodexPath, `#!/usr/bin/env node
 const readline = require("node:readline");
 let initialized = false;
+let initializeCapabilities = null;
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
+    initializeCapabilities = message.params.capabilities || null;
     setTimeout(() => {
       initialized = true;
       process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n");
@@ -30,6 +32,13 @@ input.on("line", (line) => {
       return;
     }
     process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n");
+    return;
+  }
+  if (message.method === "capabilities") {
+    process.stdout.write(JSON.stringify({
+      id: message.id,
+      result: initializeCapabilities
+    }) + "\\n");
   }
 });
 `, { mode: 0o755 });
@@ -49,6 +58,58 @@ input.on("line", (line) => {
       server.request("ping")
     ]);
     assert.deepEqual(results, [{ ok: true }, { ok: true }, { ok: true }]);
+    assert.deepEqual(await server.request("capabilities"), { experimentalApi: true });
+    assert.deepEqual(server.capabilities(), { experimentalApi: true });
+  } finally {
+    server.close();
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("unsupported experimental capability falls back during initialization", async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-capability-test-"));
+  const fakeCodexPath = path.join(temporaryDirectory, "fake-codex");
+  fs.writeFileSync(fakeCodexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+let initializeAttempts = 0;
+const input = readline.createInterface({ input: process.stdin });
+input.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    initializeAttempts += 1;
+    if (message.params.capabilities?.experimentalApi === true) {
+      process.stdout.write(JSON.stringify({
+        id: message.id,
+        error: { code: -32602, message: "unknown capability experimentalApi" }
+      }) + "\\n");
+      return;
+    }
+    process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n");
+    return;
+  }
+  if (message.method === "attempts") {
+    process.stdout.write(JSON.stringify({
+      id: message.id,
+      result: { initializeAttempts }
+    }) + "\\n");
+  }
+});
+`, { mode: 0o755 });
+
+  const logs = [];
+  const server = new CodexAppServer({
+    cwd: temporaryDirectory,
+    version: "test",
+    requestTimeoutMs: 3_000,
+    onLog: (text) => logs.push(text),
+    runtimeProvider: () => ({ codexPath: fakeCodexPath })
+  });
+
+  try {
+    await server.start();
+    assert.deepEqual(server.capabilities(), { experimentalApi: false });
+    assert.deepEqual(await server.request("attempts"), { initializeAttempts: 2 });
+    assert.match(logs.join(""), /稳定兼容模式/);
   } finally {
     server.close();
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });

@@ -3193,6 +3193,17 @@ function App() {
       return;
     }
 
+    if (payload.type === "compatibility") {
+      addTimeline(context.threadId, {
+        runId: payload.runId,
+        title: "已切换 Codex 兼容模式",
+        detail: payload.summary,
+        kind: "event",
+        status: "done"
+      });
+      return;
+    }
+
     if (payload.type === "assistant-delta") {
       queueAssistantDelta(payload.runId, context, payload);
       return;
