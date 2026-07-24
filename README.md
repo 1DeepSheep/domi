@@ -1,49 +1,74 @@
-# 豆米
+<p align="center">
+  <img src="public/domi-icon.png" width="96" alt="豆米图标">
+</p>
 
-豆米是一个面向投资团队的 Mac 桌面端 agent 工作台。界面由 Electron + React 实现，底层通过本机 `codex app-server` 调用 Codex。
+<h1 align="center">豆米 Domi</h1>
 
-## 运行
+<p align="center">
+  面向投资研究与项目管理的 Mac 桌面智能工作台。<br>
+  在熟悉的对话界面里调用本机 Codex，把行业动态、项目研究、会议纪要和资料归档串成一条工作流。
+</p>
 
-```bash
-npm install
-npm run dev
-```
+<p align="center">
+  <a href="https://github.com/1DeepSheep/domi-releases/releases/latest">下载最新版</a>
+  ·
+  <a href="https://github.com/1DeepSheep/domi-plugin">Domi 插件</a>
+  ·
+  <a href="https://github.com/1DeepSheep/domi-workbench/issues">反馈问题</a>
+</p>
 
-`npm run dev` 会先从 `~/plugins/domi` 复制最新的本地 Domi 插件源码，并在开发版启动检查时刷新 Codex 中由豆米管理的插件。修改插件后重启开发命令即可生效；也可以通过 `DOMI_PLUGIN_SOURCE=/absolute/path npm run dev` 指定其他本地插件仓库。
+> 当前公开版仅提供 Apple Silicon Mac 安装包，需要这台 Mac 已安装并登录 Codex。
 
-开发模式下请确保本机已安装 Codex：
+## 一眼看懂豆米能做什么
+
+- **行业雷达**：自动刷新行业新闻，按领域和子领域筛选，突出值得关注的新动态。
+- **项目研究**：从公司名、链接、BP、截图或已有材料出发，完成桌面研究、投资分析和项目归档。
+- **人物与机构研究**：整理创始人、团队、投资机构和关系线索，形成可继续维护的人物资料。
+- **投资工作流**：支持投资快评、IC 材料、交易谈判、结构化研究及 HTML/PDF slides 报告。
+- **会议与录音**：处理文字稿与音频，生成纪要、核心结论和跟进事项；PLAUD 为可选连接。
+- **两种资料库**：既可完全使用本地 SQLite + Markdown，也可连接用户自己的飞书多维表格和 Wiki。
+- **连续任务执行**：对话绑定 Codex 任务，支持流式回答、停止执行、恢复上下文、文件附件和操作时间线。
+
+## 安装
+
+### 1. 准备 Codex
+
+豆米复用本机 Codex 已登录的 ChatGPT/Codex 身份，不要求在客户端中填写 OpenAI API Key。
+
+如果还没有 Codex，请先参考 [OpenAI Codex 官方文档](https://developers.openai.com/codex/) 完成安装与登录。也可以在终端检查：
 
 ```bash
 codex --version
 codex login status
 ```
 
-## Codex 连接
+### 2. 下载豆米
 
-首次启动会进入配置向导，支持两种模式：
+1. 打开 [Domi Releases](https://github.com/1DeepSheep/domi-releases/releases/latest)。
+2. 下载名称以 `arm64.dmg` 结尾的安装包。
+3. 打开 DMG，把「豆米」拖入“应用程序”文件夹。
+4. 启动豆米。公开安装包已经 Developer ID 签名、Apple 公证并附加公证票据。
 
-- **本机 Codex**：复用这台 Mac 上已经登录的 ChatGPT / Codex 身份，也可以从豆米打开登录页面。
+### 3. 完成首次设置
 
-设置页内置脱敏系统诊断，检查 Keychain、工作区、SQLite、Codex App Server 和 Domi 插件。
+首次打开时按向导完成三项选择：
 
-## 当前能力
+1. 检查本机 Codex 登录状态；
+2. 选择“本地资料库”或“飞书资料库”；
+3. 根据需要连接 PLAUD，也可以直接跳过，以后再连接。
 
-- 左侧任务列表与投资技能入口，可新建、切换和恢复任务。
-- 中间 Codex 风格对话框，支持普通提问、文件附件、Domi 插件与工作流。
-- 首页提供行业雷达、推进执行、PLAUD 队列以及一键投资工作流。
-- Electron 主进程保持 `codex app-server` 长连接，并把 JSON-RPC 事件实时推给前端。
-- 豆米对话绑定 Codex thread，支持同一对话连续执行、流式回答和上下文续聊。
-- 支持停止当前 turn、展示工具与文件操作时间线，以及本轮 token 用量。
-- 复用本机 Codex 的 ChatGPT 登录身份，不在客户端内保存 OpenAI API Key。
-- 右侧工作看板展示推进建议、PLAUD 录音与 Domi 连接状态。
-- 右侧栏支持 Markdown 直接编辑及 PDF 预览。
-- 正式版支持稳定版/测试版更新通道、后台检查、下载和重启安装。
-- 正式安装包内置发布时锁定的最新 Domi 插件；客户端启动会自动安装或升级该插件，并保留用户手动安装的更高版本。
-- 客户端名称为「豆米」，应用图标来自 `public/domi-icon.png`。
+豆米会自动安装与当前客户端匹配的 Domi 插件。普通用户不需要另外安装插件。
 
-## 本地数据
+## 资料保存在哪里
 
-正式版用户数据与应用程序分离：
+| 模式 | 适合谁 | 数据如何保存 |
+| --- | --- | --- |
+| 本地资料库 | 希望开箱即用、资料不依赖第三方云服务的用户 | SQLite 保存结构化索引和状态；Markdown、图片及其他附件保存在用户选择的本地目录 |
+| 飞书资料库 | 已使用飞书 Wiki 和多维表格协作的团队 | 用户在自己的 Mac 上配置 Base、表格和 Wiki 映射；项目材料仍可保存在本地目录 |
+
+本地 Markdown 编辑器支持粘贴图片；复制整篇文档时也会复制可用的图片内容。两种模式可以使用同一套项目分类、研究和写作规则，区别只在资料写入位置。
+
+正式版默认数据目录与应用程序分离：
 
 ```text
 ~/Library/Application Support/豆米/domi.sqlite3
@@ -51,17 +76,34 @@ codex login status
 ~/Documents/豆米/
 ```
 
-开发版使用独立工作区，不会把任务数据写进源码目录：
+首次安装得到的是空白工作台。覆盖安装和自动更新只替换应用程序，不会删除用户的任务、目录映射或连接设置；数据库升级前会自动保留最近三份备份。
 
-```text
-~/Documents/豆米开发工作区/
+## 隐私与连接
+
+- 仓库和安装包不包含维护者的历史任务、录音、项目材料、组织名称、飞书地址或连接凭据。
+- ChatGPT/Codex 登录状态由本机 Codex 管理。
+- 飞书、PLAUD 和目录映射由每位用户在自己的 Mac 上配置并保存在本地。
+- PLAUD 完全可选；未连接时不会启动 PLAUD 队列或读取录音。
+- Keychain、SQLite、工作区和 Codex App Server 可在“系统诊断”中进行脱敏检查。
+
+## 更新
+
+正式版内置更新检查。新版本下载并重启安装后会继续使用原有资料库、任务历史和连接设置。
+
+也可以随时前往 [发行仓库](https://github.com/1DeepSheep/domi-releases/releases/latest) 手动下载最新版。
+
+## 从源码运行
+
+面向贡献者的本地开发：
+
+```bash
+git clone https://github.com/1DeepSheep/domi-workbench.git
+cd domi-workbench
+npm install
+npm run dev
 ```
 
-ChatGPT/Codex 登录由本机 Codex 管理。飞书、PLAUD 等连接信息、签名私钥、公证凭据、数据库和任务材料均不得进入 Git 或安装包。
-
-首次安装是干净工作台；覆盖安装或自动更新只替换 `/Applications/豆米.app`，不会删除上述本地数据。数据库升级前会自动保留最近三份备份。
-
-## 隐私检查
+`npm run dev` 默认从 `~/plugins/domi` 读取 Domi 插件源码。也可以通过 `DOMI_PLUGIN_SOURCE=/absolute/path npm run dev` 指定其他插件目录。
 
 提交或打包前运行：
 
@@ -71,24 +113,14 @@ npm run privacy:history
 npm run check
 ```
 
-`privacy:check` 检查准备发布的源码，`privacy:history` 额外检查全部 Git 历史。运行时目录、数据库、录音、密钥与发布产物均已加入 `.gitignore`。发布细节见 `docs/RELEASE.md`。
+构建和签名、公证、发布流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
-## macOS 构建
+## 相关仓库
 
-仅构建 Apple Silicon 的 `.app`：
+- [domi-workbench](https://github.com/1DeepSheep/domi-workbench)：桌面客户端源码
+- [domi-plugin](https://github.com/1DeepSheep/domi-plugin)：投资工作流、路由和 Skills
+- [domi-releases](https://github.com/1DeepSheep/domi-releases)：签名、公证后的 macOS 安装包
 
-```bash
-npm run pack:mac
-```
+## License
 
-构建 Apple Silicon 的 DMG/ZIP：
-
-```bash
-npm run dist:mac
-```
-
-`dist:mac` 会先从公开的官方 Domi 插件仓库拉取并锁定最新 `main`，再将插件快照写入安装包。Domi 插件改动必须先提交、推送并提升插件版本，未提交的本地修改不会进入正式安装包。Fork 可通过 `DOMI_PLUGIN_REPOSITORY` 指定自己的插件仓库。产物按版本写入 `release/<version>/`。
-
-公开分发前必须在构建机器安装有效的 Apple `Developer ID Application` 证书，并配置 Apple 公证凭据；`electron-builder` 会自动发现签名身份。没有证书时可以生成本地测试包，但其他用户的 macOS 会显示来源与安全警告。
-
-源码与插件仓库可以公开，但必须从通过当前源码、完整 Git 历史和最终 DMG 三层隐私检查的干净根提交开始。自动更新文件发布到独立的公开发行仓库。不要在客户端内嵌 GitHub Token。完整发布和升级规则见 `docs/RELEASE.md`。
+[Apache License 2.0](LICENSE)
