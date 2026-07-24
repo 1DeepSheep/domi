@@ -1,0 +1,133 @@
+{
+  "name": "domi-workbench",
+  "productName": "豆米",
+  "version": "0.3.0",
+  "author": "Domi Team",
+  "license": "Apache-2.0",
+  "private": true,
+  "description": "豆米：面向投资团队的 Mac 桌面端 AI Agent 工作台。",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "predev": "npm run plugin:prepare",
+    "dev": "DOMI_INSTALL_BUNDLED_PLUGIN=1 concurrently -k -n VITE,ELECTRON -c cyan,magenta \"vite --host 127.0.0.1 --port 5173\" \"wait-on tcp:127.0.0.1:5173 && electron .\"",
+    "build": "tsc --noEmit && vite build",
+    "privacy:check": "node scripts/privacy-check.cjs",
+    "privacy:history": "node scripts/privacy-check.cjs --history",
+    "privacy:artifact": "node scripts/privacy-check.cjs --artifact",
+    "check": "npm run privacy:check && npm run build && node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/codex-app-server.cjs && node --check electron/codex-run-context.cjs && node --check electron/codex-turn-status.cjs && node --check electron/app-settings.cjs && node --check electron/domi-integration.cjs && node --check electron/local-domi-repository.cjs && node --check electron/markdown-assets.cjs && node --check electron/domi-plugin-manager.cjs && node --check electron/plaud-worker.cjs && node --check electron/service-coordinator.cjs && node --check electron/state-store.cjs && node --check electron/update-service.cjs && node --check scripts/prepare-domi-plugin.cjs && node scripts/renderer-resilience.test.cjs && node scripts/app-settings.test.cjs && node scripts/codex-app-server.test.cjs && node scripts/codex-run-context.test.cjs && node scripts/codex-turn-status.test.cjs && node scripts/domi-integration.test.cjs && node scripts/domi-plugin-manager.test.cjs && node scripts/markdown-assets.test.cjs && node scripts/radar-workflow.test.cjs && node scripts/service-coordinator.test.cjs && node scripts/state-store.test.cjs",
+    "plugin:prepare": "node scripts/prepare-domi-plugin.cjs",
+    "plugin:prepare:release": "node scripts/prepare-domi-plugin.cjs --release",
+    "icon:mac": "bash scripts/build-mac-icon.sh",
+    "preview": "npm run build && NODE_ENV=production electron .",
+    "pack:mac": "npm run plugin:prepare && npm run build && npm run icon:mac && bash scripts/package-mac.sh dir",
+    "dist:mac": "npm run plugin:prepare:release && npm run privacy:check && npm run build && npm run icon:mac && bash scripts/package-mac.sh dist",
+    "dist:mac:resume": "npm run privacy:check && bash scripts/package-mac.sh resume"
+  },
+  "dependencies": {
+    "@fontsource-variable/geist": "^5.2.9",
+    "@fontsource-variable/instrument-sans": "^5.2.8",
+    "@fontsource-variable/newsreader": "^5.2.10",
+    "@tiptap/extension-image": "^3.27.4",
+    "@tiptap/extension-table": "^3.27.4",
+    "@tiptap/extension-task-item": "^3.27.4",
+    "@tiptap/extension-task-list": "^3.27.4",
+    "@tiptap/markdown": "^3.27.4",
+    "@tiptap/pm": "^3.27.4",
+    "@tiptap/react": "^3.27.4",
+    "@tiptap/starter-kit": "^3.27.4",
+    "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.2.1",
+    "electron-updater": "^6.8.9",
+    "lucide-react": "^0.468.0",
+    "marked": "^17.0.6",
+    "playwright": "^1.59.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.0.6",
+    "wait-on": "^8.0.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "electron": "^43.1.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.domi.workbench",
+    "productName": "豆米",
+    "copyright": "Copyright © 2026 Domi",
+    "asar": true,
+    "afterPack": "scripts/after-pack.cjs",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "public/domi-dock-icon.png",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/domi-plugin",
+        "to": "domi-plugin",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/domi-plugin-lock.json",
+        "to": "domi-plugin-lock.json"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.finance",
+      "icon": "build/icon.icns",
+      "electronLanguages": [
+        "en",
+        "zh_CN"
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "extendInfo": {
+        "NSDocumentsFolderUsageDescription": "豆米需要在文稿目录创建本地项目工作区并保存任务成果。",
+        "NSMicrophoneUsageDescription": "豆米在用户主动使用录音功能时需要访问麦克风。"
+      }
+    },
+    "dmg": {
+      "title": "豆米 ${version}",
+      "icon": "build/icon.icns",
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 150,
+          "y": 190,
+          "type": "file"
+        },
+        {
+          "x": 390,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "artifactName": "Domi-${version}-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "1DeepSheep",
+        "repo": "domi-releases",
+        "releaseType": "release"
+      }
+    ]
+  }
+}

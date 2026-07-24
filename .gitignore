@@ -1,0 +1,33 @@
+node_modules/
+dist/
+release/
+build/*.icns
+build/domi-plugin/
+build/domi-plugin-lock.json
+.release-input/
+.DS_Store
+
+# Local runtime data must never enter source control.
+demo-workspace/
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.log
+
+# Local credentials, signing material, and developer-specific configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.p8
+*.key
+*.cer
+*.crt
+*.mobileprovision
+*.provisionprofile
+*.notarytool-profile
+.npmrc
+.privacy-terms.local

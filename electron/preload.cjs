@@ -1,0 +1,57 @@
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
+
+contextBridge.exposeInMainWorld("workbench", {
+  checkCodex: () => ipcRenderer.invoke("codex:check"),
+  loadSettings: () => ipcRenderer.invoke("settings:load"),
+  saveSettings: (request) => ipcRenderer.invoke("settings:save", request),
+  selectDirectory: (currentPath) => ipcRenderer.invoke("settings:select-directory", currentPath),
+  startChatGPTLogin: () => ipcRenderer.invoke("settings:chatgpt-login"),
+  runDiagnostics: () => ipcRenderer.invoke("settings:diagnose"),
+  exportDiagnostics: (report) => ipcRenderer.invoke("settings:export-diagnostics", report),
+  reportRendererIssue: (report) => ipcRenderer.send("app:renderer-report", report),
+  getUpdateStatus: () => ipcRenderer.invoke("update:status"),
+  checkForUpdates: () => ipcRenderer.invoke("update:check"),
+  downloadUpdate: () => ipcRenderer.invoke("update:download"),
+  installUpdate: () => ipcRenderer.invoke("update:install"),
+  runCodex: (payload) => ipcRenderer.invoke("codex:run", payload),
+  stopCodex: (runId) => ipcRenderer.invoke("codex:stop", runId),
+  recoverCodexThread: (threadId) => ipcRenderer.invoke("codex:recover-thread", threadId),
+  selectFiles: (workspacePath) => ipcRenderer.invoke("files:select", workspacePath),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+  importFiles: (sourcePaths, workspacePath) => ipcRenderer.invoke("files:import", sourcePaths, workspacePath),
+  importFileData: (files, workspacePath) => ipcRenderer.invoke("files:import-data", files, workspacePath),
+  openResource: (resource) => ipcRenderer.invoke("resource:open", resource),
+  showNotification: (request) => ipcRenderer.invoke("app:notify", request),
+  readMarkdown: (request) => ipcRenderer.invoke("markdown:read", request),
+  saveMarkdown: (request) => ipcRenderer.invoke("markdown:save", request),
+  renameMarkdown: (request) => ipcRenderer.invoke("markdown:rename", request),
+  resolveMarkdownImage: (request) => ipcRenderer.invoke("markdown:image-preview", request),
+  saveMarkdownImage: (request) => ipcRenderer.invoke("markdown:image-save", request),
+  copyMarkdown: (request) => ipcRenderer.invoke("markdown:copy", request),
+  readPdf: (request) => ipcRenderer.invoke("pdf:read", request),
+  loadState: (defaultState) => ipcRenderer.invoke("storage:load", defaultState),
+  saveState: (state) => ipcRenderer.invoke("storage:save", state),
+  saveStatePatch: (patch) => ipcRenderer.invoke("storage:save-patch", patch),
+  createProjectWorkspace: (request) => ipcRenderer.invoke("workspace:create", request),
+  openWorkspace: (workspacePath) => ipcRenderer.invoke("workspace:open", workspacePath),
+  loadDomiCache: () => ipcRenderer.invoke("domi:cache"),
+  checkDomi: () => ipcRenderer.invoke("domi:status"),
+  syncDomi: () => ipcRenderer.invoke("domi:sync"),
+  listWeeklyNews: (request) => ipcRenderer.invoke("domi:weekly-news", request),
+  saveWeeklyNewsCheckpoint: (request) => ipcRenderer.invoke("domi:weekly-news-checkpoint", request),
+  listPlaud: (request) => ipcRenderer.invoke("domi:plaud-list", request),
+  syncPlaud: (request) => ipcRenderer.invoke("domi:plaud-sync", request),
+  renamePlaud: (request) => ipcRenderer.invoke("domi:plaud-rename", request),
+  deletePlaud: (request) => ipcRenderer.invoke("domi:plaud-delete", request),
+  loadDomiEntityMaterials: (request) => ipcRenderer.invoke("domi:entity-materials", request),
+  onCodexEvent: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("codex:event", handler);
+    return () => ipcRenderer.removeListener("codex:event", handler);
+  },
+  onUpdateStatus: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("update:status", handler);
+    return () => ipcRenderer.removeListener("update:status", handler);
+  }
+});
