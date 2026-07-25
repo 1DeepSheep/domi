@@ -927,6 +927,7 @@ function App() {
   const [activeThreadId, setActiveThreadId] = useState(initialThreads[0].id);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("conversation");
   const [skillsExpanded, setSkillsExpanded] = useState(true);
+  const [documentLibrarySidebarExpanded, setDocumentLibrarySidebarExpanded] = useState(false);
   const [composerDraftsByThread, setComposerDraftsByThread] = useState<
     Record<string, ComposerDraft>
   >({});
@@ -3791,6 +3792,7 @@ function App() {
     rememberActiveChatScrollPosition();
     setActiveThreadId(threadId);
     setWorkspaceView("conversation");
+    setDocumentLibrarySidebarExpanded(false);
     setThreadMenuId(null);
     setComposerDragActive(false);
   }
@@ -3859,6 +3861,9 @@ function App() {
   }
 
   function openDocumentLibrary() {
+    setDocumentLibrarySidebarExpanded((current) =>
+      workspaceView === "documents" ? !current : true
+    );
     setWorkspaceView("documents");
     setThreadMenuId(null);
     setRightPanelOpen(false);
@@ -4498,163 +4503,161 @@ function App() {
     );
   }
 
-  function renderDocumentLibrary() {
+  function renderDocumentLibrarySidebar() {
     const rootPath = documentLibrary?.rootPath || "";
     const selectedFolderName = documentLibrarySelectedFolder === rootPath
       ? "文档库根目录"
       : documentLibrarySelectedFolder.split(/[\\/]/).filter(Boolean).pop() || "文档库根目录";
     return (
-      <section className="document-library-workspace" aria-labelledby="document-library-title">
-        <aside className="document-library-tree-pane">
-          <header className="document-library-tree-header">
-            <div>
-              <span className="document-library-root-icon"><LibraryBig size={18} /></span>
-              <span>
-                <strong id="document-library-title">
-                  {documentLibrary?.rootName || "本地文档库"}
-                </strong>
-                <small>
-                  {documentLibrary?.ok
-                    ? `${documentLibrary.documentCount} 篇文档 · ${documentLibrary.folderCount} 个文件夹`
-                    : "按本地目录组织"}
-                </small>
-              </span>
-            </div>
-            <div className="document-library-tree-actions">
-              <button
-                type="button"
-                onClick={() => beginDocumentLibraryCreate("markdown")}
-                disabled={!documentLibrary?.ok}
-                title={`在“${selectedFolderName}”中新建文档`}
-                aria-label="新建 Markdown 文档"
-              >
-                <FilePlus2 size={15} />
-              </button>
-              <button
-                type="button"
-                onClick={() => beginDocumentLibraryCreate("folder")}
-                disabled={!documentLibrary?.ok}
-                title={`在“${selectedFolderName}”中新建文件夹`}
-                aria-label="新建文件夹"
-              >
-                <FolderPlus size={15} />
-              </button>
-              <button
-                type="button"
-                onClick={() => rootPath && void workbench.openResource(rootPath)}
-                disabled={!rootPath}
-                title="在访达中打开文档库"
-                aria-label="在访达中打开文档库"
-              >
-                <ExternalLink size={14} />
-              </button>
-            </div>
-          </header>
-
-          <label className="document-library-search">
-            <Search size={14} />
-            <input
-              value={documentLibraryQuery}
-              onChange={(event) => setDocumentLibraryQuery(event.target.value)}
-              placeholder="搜索文档和文件夹"
-              aria-label="搜索本地文档库"
-            />
-            {documentLibraryQuery && (
-              <button
-                type="button"
-                onClick={() => setDocumentLibraryQuery("")}
-                title="清除搜索"
-                aria-label="清除文档搜索"
-              >
-                <X size={13} />
-              </button>
-            )}
-          </label>
-
-          {documentLibraryCreateKind && (
-            <form className="document-library-create" onSubmit={submitDocumentLibraryCreate}>
-              <span>
-                {documentLibraryCreateKind === "folder"
-                  ? <FolderPlus size={15} />
-                  : <FilePlus2 size={15} />}
-              </span>
-              <input
-                autoFocus
-                value={documentLibraryCreateName}
-                onChange={(event) => setDocumentLibraryCreateName(event.target.value)}
-                placeholder={documentLibraryCreateKind === "folder" ? "文件夹名称" : "文档名称"}
-                aria-label={documentLibraryCreateKind === "folder" ? "文件夹名称" : "文档名称"}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") cancelDocumentLibraryCreate();
-                }}
-              />
-              <button type="submit" disabled={documentLibraryCreating} title="创建">
-                {documentLibraryCreating ? <RefreshCw className="spinning" size={13} /> : <Check size={13} />}
-              </button>
-              <button type="button" onClick={cancelDocumentLibraryCreate} title="取消">
-                <X size={13} />
-              </button>
-              {documentLibraryCreateError && <small>{documentLibraryCreateError}</small>}
-            </form>
-          )}
-
-          <button
-            className={`document-library-root-row ${
-              documentLibrarySelectedFolder === rootPath ? "selected" : ""
-            }`}
-            type="button"
-            onClick={() => {
-              if (rootPath) setDocumentLibrarySelectedFolder(rootPath);
-            }}
-            disabled={!rootPath}
-            title={rootPath}
-          >
-            <FolderOpen size={16} />
-            <span>全部文档</span>
-          </button>
-
-          <div className="document-library-tree" role="tree">
-            {documentLibraryLoading && !documentLibrary && (
-              <div className="document-library-state">
-                <RefreshCw className="spinning" size={17} />
-                正在读取本地目录
-              </div>
-            )}
-            {!documentLibraryLoading && documentLibraryError && (
-              <div className="document-library-state error">
-                <AlertCircle size={17} />
-                <span>{documentLibraryError}</span>
-                <button type="button" onClick={() => void refreshDocumentLibrary()}>重试</button>
-              </div>
-            )}
-            {documentLibrary?.ok && filteredDocumentLibraryNodes.map((node) =>
-              renderDocumentLibraryNode(node, documentLibrary.rootPath)
-            )}
-            {documentLibrary?.ok && filteredDocumentLibraryNodes.length === 0 && (
-              <div className="document-library-state">
-                <FileText size={17} />
-                {documentLibraryQuery ? "没有匹配的文档" : "文档库还是空的"}
-              </div>
-            )}
+      <div className="sidebar-document-library" aria-label="本地文档库目录">
+        <div className="sidebar-document-toolbar">
+          <span title={documentLibrary?.rootName || "本地资料库"}>
+            {documentLibrary?.rootName || "本地资料库"}
+          </span>
+          <div className="document-library-tree-actions">
+            <button
+              type="button"
+              onClick={() => beginDocumentLibraryCreate("markdown")}
+              disabled={!documentLibrary?.ok}
+              title={`在“${selectedFolderName}”中新建文档`}
+              aria-label="新建 Markdown 文档"
+            >
+              <FilePlus2 size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => beginDocumentLibraryCreate("folder")}
+              disabled={!documentLibrary?.ok}
+              title={`在“${selectedFolderName}”中新建文件夹`}
+              aria-label="新建文件夹"
+            >
+              <FolderPlus size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => rootPath && void workbench.openResource(rootPath)}
+              disabled={!rootPath}
+              title="在访达中打开文档库"
+              aria-label="在访达中打开文档库"
+            >
+              <ExternalLink size={13} />
+            </button>
           </div>
+        </div>
 
-          {documentLibrary?.truncated && (
-            <div className="document-library-truncated">
-              目录内容较多，部分内容暂未显示
+        <label className="document-library-search">
+          <Search size={13} />
+          <input
+            value={documentLibraryQuery}
+            onChange={(event) => setDocumentLibraryQuery(event.target.value)}
+            placeholder="搜索文档和文件夹"
+            aria-label="搜索本地文档库"
+          />
+          {documentLibraryQuery && (
+            <button
+              type="button"
+              onClick={() => setDocumentLibraryQuery("")}
+              title="清除搜索"
+              aria-label="清除文档搜索"
+            >
+              <X size={12} />
+            </button>
+          )}
+        </label>
+
+        {documentLibraryCreateKind && (
+          <form className="document-library-create" onSubmit={submitDocumentLibraryCreate}>
+            <span>
+              {documentLibraryCreateKind === "folder"
+                ? <FolderPlus size={14} />
+                : <FilePlus2 size={14} />}
+            </span>
+            <input
+              autoFocus
+              value={documentLibraryCreateName}
+              onChange={(event) => setDocumentLibraryCreateName(event.target.value)}
+              placeholder={documentLibraryCreateKind === "folder" ? "文件夹名称" : "文档名称"}
+              aria-label={documentLibraryCreateKind === "folder" ? "文件夹名称" : "文档名称"}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") cancelDocumentLibraryCreate();
+              }}
+            />
+            <button type="submit" disabled={documentLibraryCreating} title="创建">
+              {documentLibraryCreating ? <RefreshCw className="spinning" size={12} /> : <Check size={12} />}
+            </button>
+            <button type="button" onClick={cancelDocumentLibraryCreate} title="取消">
+              <X size={12} />
+            </button>
+            {documentLibraryCreateError && <small>{documentLibraryCreateError}</small>}
+          </form>
+        )}
+
+        <button
+          className={`document-library-root-row ${
+            documentLibrarySelectedFolder === rootPath ? "selected" : ""
+          }`}
+          type="button"
+          onClick={() => {
+            if (rootPath) setDocumentLibrarySelectedFolder(rootPath);
+          }}
+          disabled={!rootPath}
+          title={rootPath}
+        >
+          <FolderOpen size={15} />
+          <span>全部文档</span>
+        </button>
+
+        <div className="document-library-tree" role="tree">
+          {documentLibraryLoading && !documentLibrary && (
+            <div className="document-library-state">
+              <RefreshCw className="spinning" size={15} />
+              正在读取本地目录
             </div>
           )}
-        </aside>
+          {!documentLibraryLoading && documentLibraryError && (
+            <div className="document-library-state error">
+              <AlertCircle size={15} />
+              <span>{documentLibraryError}</span>
+              <button type="button" onClick={() => void refreshDocumentLibrary()}>重试</button>
+            </div>
+          )}
+          {documentLibrary?.ok && filteredDocumentLibraryNodes.map((node) =>
+            renderDocumentLibraryNode(node, documentLibrary.rootPath)
+          )}
+          {documentLibrary?.ok && filteredDocumentLibraryNodes.length === 0 && (
+            <div className="document-library-state">
+              <FileText size={15} />
+              {documentLibraryQuery ? "没有匹配的文档" : "文档库还是空的"}
+            </div>
+          )}
+        </div>
 
+        {documentLibrary?.truncated && (
+          <div className="document-library-truncated">
+            部分内容暂未显示
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderDocumentLibrary() {
+    const rootPath = documentLibrary?.rootPath || "";
+    return (
+      <section className="document-library-workspace" aria-label="文档阅读与编辑">
         <div className="document-library-content">
           {openDocumentActive ? renderDocumentPanel() : (
             <div className="document-library-welcome">
               <span><LibraryBig size={28} /></span>
               <h2>选择一篇文档开始阅读</h2>
-              <p>展开左侧目录即可查看本地 Markdown；内容会直接保存在原文件中。</p>
+              <p>在左侧“文档库”中展开目录，即可查看并编辑本地 Markdown。</p>
               <div>
                 <button
                   type="button"
-                  onClick={() => beginDocumentLibraryCreate("markdown")}
+                  onClick={() => {
+                    setDocumentLibrarySidebarExpanded(true);
+                    beginDocumentLibraryCreate("markdown");
+                  }}
                   disabled={!documentLibrary?.ok}
                 >
                   <FilePlus2 size={15} />
@@ -5472,6 +5475,7 @@ function App() {
             type="button"
             onClick={() => {
               setWorkspaceView("tasks");
+              setDocumentLibrarySidebarExpanded(false);
               setThreadMenuId(null);
             }}
           >
@@ -5488,6 +5492,7 @@ function App() {
             type="button"
             onClick={() => {
               setWorkspaceView("news");
+              setDocumentLibrarySidebarExpanded(false);
               setThreadMenuId(null);
             }}
           >
@@ -5495,15 +5500,23 @@ function App() {
             <strong>行业动态</strong>
             <span className="sidebar-nav-meta" />
           </button>
-          <button
-            className={`sidebar-nav-item ${workspaceView === "documents" ? "active" : ""}`}
-            type="button"
-            onClick={openDocumentLibrary}
-          >
-            <LibraryBig className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
-            <strong>文档库</strong>
-            <span className="sidebar-nav-meta" />
-          </button>
+          <div className={`sidebar-document-section ${documentLibrarySidebarExpanded ? "open" : ""}`}>
+            <button
+              className={`sidebar-nav-item ${workspaceView === "documents" ? "active" : ""}`}
+              type="button"
+              onClick={openDocumentLibrary}
+              aria-expanded={documentLibrarySidebarExpanded}
+            >
+              <LibraryBig className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
+              <strong>文档库</strong>
+              <span className="sidebar-nav-meta">
+                <span className="sidebar-nav-disclosure" aria-hidden="true">
+                  <ChevronRight size={14} strokeWidth={2} />
+                </span>
+              </span>
+            </button>
+            {documentLibrarySidebarExpanded && renderDocumentLibrarySidebar()}
+          </div>
         </nav>
 
         <div className={`sidebar-workflow-section ${skillsExpanded ? "open" : ""}`}>
