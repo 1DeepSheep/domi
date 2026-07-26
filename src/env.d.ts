@@ -349,6 +349,7 @@ export type DomiSyncResult = {
   snapshot?: DomiSnapshot;
   updatedAt?: number;
   error?: string;
+  stale?: boolean;
 };
 
 export type StorageMigrationProject = {

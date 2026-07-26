@@ -5,6 +5,8 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   DomiIntegration,
+  describeFeishuSyncError,
+  isRetryableFeishuReadError,
   resolveWeeklyNewsTimestamps
 } = require("../electron/domi-integration.cjs");
 const { LocalDomiRepository } = require("../electron/local-domi-repository.cjs");
@@ -90,6 +92,140 @@ test("weekly news radar checkpoint is independent and monotonic", () => {
     radarCheckedThrough: firstCheckpoint
   });
   assert.equal(integration.loadWeeklyNewsRadarCheckpoint(), firstCheckpoint);
+});
+
+test("Feishu record reads retry transient EOF errors and reduce page payload size", async () => {
+  const delays = [];
+  const calls = [];
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => null,
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test",
+    sleep: async (milliseconds) => {
+      delays.push(milliseconds);
+    }
+  });
+  integration.lark = async (args) => {
+    calls.push(args);
+    if (calls.length < 3) {
+      throw new Error('飞书数据读取执行失败：API call failed: Post "[远程接口]": EOF');
+    }
+    return {
+      data: {
+        items: [{ record_id: "record-1", fields: { 公司名称: "示例科技" } }],
+        total: 1,
+        has_more: false
+      }
+    };
+  };
+
+  const result = await integration.fetchRecords({
+    appToken: "example",
+    tableId: "table_id",
+    fieldNames: ["公司名称"]
+  });
+
+  assert.equal(calls.length, 3);
+  assert.deepEqual(delays, [350, 900]);
+  const paramsIndex = calls[0].indexOf("--params");
+  assert.equal(JSON.parse(calls[0][paramsIndex + 1]).page_size, 200);
+  assert.deepEqual(result.items.map((item) => item.record_id), ["record-1"]);
+});
+
+test("Feishu record reads do not retry authorization failures", async () => {
+  let attempts = 0;
+  const delays = [];
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => null,
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test",
+    sleep: async (milliseconds) => {
+      delays.push(milliseconds);
+    }
+  });
+  integration.lark = async () => {
+    attempts += 1;
+    throw new Error("need_user_authorization");
+  };
+
+  await assert.rejects(
+    integration.fetchRecords({
+      appToken: "example",
+      tableId: "table_id",
+      fieldNames: ["公司名称"]
+    }),
+    /need_user_authorization/
+  );
+  assert.equal(attempts, 1);
+  assert.deepEqual(delays, []);
+});
+
+test("Feishu sync preserves cached data and hides API URLs after repeated network failure", async () => {
+  const cachedSnapshot = {
+    version: 1,
+    backend: "feishu",
+    syncedAt: 1_700_000_000_000,
+    health: {},
+    sources: {
+      projects: { name: "项目库", total: 1, localLibraryDir: "/tmp/library" },
+      people: { name: "人脉库", total: 1 }
+    },
+    projects: [{ recordId: "project-1", name: "缓存项目" }],
+    people: [{ recordId: "person-1", name: "缓存人脉" }]
+  };
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => ({ value: cachedSnapshot, updatedAt: 1_700_000_100_000 }),
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test"
+  });
+  integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
+  integration.readProjectConfig = () => ({
+    backend: "feishu",
+    appToken: "example",
+    tableId: "table_id",
+    wikiSpaceId: "placeholder",
+    localLibraryDir: "/tmp/library"
+  });
+  integration.resolvePeopleBase = () => ({
+    appToken: "example",
+    tableId: "table_id"
+  });
+  integration.status = async () => ({
+    plugin: { ok: true },
+    lark: { ok: true },
+    plaud: { ok: true }
+  });
+  integration.fetchRecords = async () => {
+    throw new Error(
+      '飞书数据读取执行失败：API call failed: Post "https://example.com/api/request": EOF'
+    );
+  };
+
+  const result = await integration.sync();
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stale, true);
+  assert.equal(result.snapshot, cachedSnapshot);
+  assert.match(result.error, /自动重试后仍未恢复/);
+  assert.match(result.error, /已继续使用上次同步的数据/);
+  assert.doesNotMatch(result.error, /https?:\/\//);
+  assert.doesNotMatch(result.error, /example\.com|api\/request/);
+});
+
+test("Feishu error classification distinguishes transient failures from expired authorization", () => {
+  assert.equal(isRetryableFeishuReadError(new Error("socket hang up")), true);
+  assert.equal(isRetryableFeishuReadError(new Error("Unexpected end of JSON input")), true);
+  assert.equal(isRetryableFeishuReadError(new Error("need_user_authorization")), false);
+  assert.equal(
+    describeFeishuSyncError(new Error("need_user_authorization"), { hasCache: true }),
+    "飞书授权已失效，请在“资料连接”中重新授权。当前仍显示上次同步的数据。"
+  );
 });
 
 test("weekly news falls back to retained local history when Feishu is offline", async () => {
