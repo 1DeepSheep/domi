@@ -80,7 +80,7 @@ test("legacy OneDrive settings migrate to the generic local library directory", 
       version: 1,
       oneDriveProjectDir: "~/Library/CloudStorage/Legacy/Projects"
     }).load();
-    assert.equal(migrated.settings.version, 4);
+    assert.equal(migrated.settings.version, 5);
     assert.equal(migrated.settings.localLibraryDir, "~/Library/CloudStorage/Legacy/Projects");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -106,6 +106,33 @@ test("legacy API provider settings migrate to ChatGPT and never affect the Codex
     assert.equal(runtime.providerLabel, "个人 ChatGPT");
     assert.deepEqual(runtime.args, []);
     assert.equal(runtime.env.DOMI_PROVIDER_API_KEY, undefined);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Responses relay settings persist without placing a credential in app settings", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-"));
+  try {
+    const service = createService(root);
+    const saved = service.save({
+      authMode: "relay",
+      apiBaseUrl: "https://relay.example.com/v1",
+      apiModel: "relay-model",
+      relayCredentialConfigured: true
+    });
+    assert.equal(saved.settings.authMode, "relay");
+    assert.equal(saved.settings.apiBaseUrl, "https://relay.example.com/v1");
+    assert.equal(saved.settings.apiModel, "relay-model");
+    assert.equal(saved.settings.relayCredentialConfigured, true);
+    assert.equal(saved.hasApiKey, true);
+
+    const runtime = service.runtime();
+    assert.equal(runtime.authMode, "relay");
+    assert.equal(runtime.defaultModel, "relay-model");
+    assert.equal(runtime.providerLabel, "Responses 中转站");
+    assert.equal(runtime.hasApiKey, true);
+    assert.deepEqual(runtime.env.DOMI_PROVIDER_API_KEY, undefined);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -159,7 +186,7 @@ test("existing onboarded users keep PLAUD enabled after settings migration", () 
       ...completeDomiConfig,
       plaudConnectionMode: undefined
     }).load();
-    assert.equal(migrated.settings.version, 4);
+    assert.equal(migrated.settings.version, 5);
     assert.equal(migrated.settings.plaudConnectionMode, "enabled");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

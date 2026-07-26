@@ -10,6 +10,7 @@ const {
   codexEnvironment,
   resolveCodexBinary
 } = require("./codex-app-server.cjs");
+const { CodexBootstrapService } = require("./codex-bootstrap.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
 const { DomiPluginManager } = require("./domi-plugin-manager.cjs");
@@ -101,6 +102,7 @@ let stateStore = null;
 let domiIntegration = null;
 let domiPluginManager = null;
 let appSettings = null;
+let codexBootstrap = null;
 let updateService = null;
 const serviceCoordinator = new ServiceCoordinator();
 
@@ -198,6 +200,13 @@ function getAppSettings() {
     });
   }
   return appSettings;
+}
+
+function getCodexBootstrap() {
+  if (!codexBootstrap) {
+    codexBootstrap = new CodexBootstrapService();
+  }
+  return codexBootstrap;
 }
 
 function getUpdateService() {
@@ -1194,6 +1203,8 @@ function resetCodexClient() {
 async function runCodexCheck() {
   ensureDemoWorkspace();
   const loaded = getAppSettings().load();
+  let detectedPath = "";
+  let detectedVersion = "";
   let runtime = {
     authMode: "chatgpt",
     providerLabel: "个人 ChatGPT",
@@ -1205,6 +1216,11 @@ async function runCodexCheck() {
   try {
     runtime = getAppSettings().runtime();
     const binary = resolveCodexBinary(runtime.codexPath);
+    detectedPath = binary;
+    const versionResult = await execFileAsync(binary, ["--version"], {
+      env: codexEnvironment(runtime.env)
+    });
+    detectedVersion = String(versionResult.stdout || "").trim();
     let pluginSetup = null;
     try {
       pluginSetup = await getDomiPluginManager().ensure({
@@ -1220,10 +1236,7 @@ async function runCodexCheck() {
       };
     }
     const client = getCodexClient();
-    const [{ stdout }, accountResult, modelResult, configResult] = await Promise.all([
-      execFileAsync(binary, ["--version"], {
-        env: codexEnvironment(runtime.env)
-      }),
+    const [accountResult, modelResult, configResult] = await Promise.all([
       client.request("account/read", { refreshToken: false }),
       client.request("model/list", {
         cursor: null,
@@ -1240,14 +1253,14 @@ async function runCodexCheck() {
     return {
       ok: authenticated,
       path: binary,
-      version: stdout.trim(),
+      version: detectedVersion,
       transport: "app-server",
       workspacePath: demoWorkspace,
       account,
       authMode: runtime.authMode,
       providerLabel: runtime.providerLabel,
       apiBaseUrl: runtime.apiBaseUrl,
-      credentialStored: Boolean(account),
+      credentialStored: Boolean(account || runtime.hasApiKey),
       requiresOpenaiAuth,
       configuredModel: config.model || "",
       configuredReasoningEffort: config.model_reasoning_effort || "medium",
@@ -1269,13 +1282,17 @@ async function runCodexCheck() {
           description: tier.description || ""
         }))
       })),
-      error: authenticated ? "" : "请先登录 ChatGPT Codex。"
+      error: authenticated
+        ? ""
+        : runtime.authMode === "relay"
+          ? "中转站身份未就绪，请重新保存配置并测试。"
+          : "请先登录 ChatGPT Codex。"
     };
   } catch (error) {
     return {
       ok: false,
-      path: "",
-      version: "",
+      path: detectedPath,
+      version: detectedVersion,
       transport: "app-server",
       workspacePath: demoWorkspace,
       account: null,
@@ -1345,6 +1362,10 @@ async function saveRuntimeSettings(request) {
   } = request || {};
   const connectionChanged = [
     "codexPath",
+    "authMode",
+    "apiBaseUrl",
+    "apiModel",
+    "relayCredentialConfigured",
     "externalAccessMode",
     "storageBackend",
     "projectBaseToken",
@@ -1363,6 +1384,12 @@ async function saveRuntimeSettings(request) {
   }
   try {
     let migration;
+    if (settingsRequest.authMode === "chatgpt" && current.authMode === "relay") {
+      const restored = getCodexBootstrap().restoreChatGPTConfig();
+      if (!restored.ok) {
+        return { ok: false, error: restored.error || "无法恢复 ChatGPT Codex 配置。" };
+      }
+    }
     const migratesLocalToFeishu = current.storageBackend === "local"
       && settingsRequest.storageBackend === "feishu"
       && storageMigration === "local-to-feishu";
@@ -1393,8 +1420,79 @@ async function saveRuntimeSettings(request) {
   }
 }
 
+async function installCodexCli() {
+  if (activeRuns.size > 0) {
+    return { ok: false, error: "请先停止正在执行的任务，再安装 Codex CLI。" };
+  }
+  const result = await getCodexBootstrap().install();
+  if (!result.ok) return result;
+  getAppSettings().save({ codexPath: result.path });
+  resetCodexClient();
+  return result;
+}
+
+async function configureCodexRelay(request = {}) {
+  if (activeRuns.size > 0) {
+    return { ok: false, error: "请先停止正在执行的任务，再修改 Codex 中转站。" };
+  }
+  const result = await getCodexBootstrap().configureRelay(request);
+  if (!result.ok) return result;
+  getAppSettings().save({
+    authMode: "relay",
+    apiBaseUrl: result.baseUrl,
+    apiModel: result.model,
+    relayCredentialConfigured: true,
+    codexPath: result.codexPath
+  });
+  resetCodexClient();
+  const codex = await runCodexCheck();
+  if (!codex.ok) {
+    return {
+      ok: false,
+      configured: true,
+      codex,
+      error: codex.error || "中转站已配置，但 Codex App Server 尚未就绪。"
+    };
+  }
+  const verification = await getCodexBootstrap().testConnection(result.codexPath);
+  return {
+    ok: verification.ok,
+    configured: true,
+    codex,
+    verification,
+    error: verification.ok ? "" : verification.error || "中转站测试失败。"
+  };
+}
+
+async function testCodexConnection() {
+  if (activeRuns.size > 0) {
+    return { ok: false, error: "请先停止正在执行的任务，再运行 Codex 连接测试。" };
+  }
+  resetCodexClient();
+  const codex = await runCodexCheck();
+  if (!codex.ok) return { ok: false, codex, error: codex.error || "Codex App Server 不可用。" };
+  const verification = await getCodexBootstrap().testConnection(codex.path);
+  return {
+    ok: verification.ok,
+    codex,
+    verification,
+    error: verification.ok ? "" : verification.error || "Codex 连接测试失败。"
+  };
+}
+
 async function startChatGptLogin() {
   try {
+    const restored = getCodexBootstrap().restoreChatGPTConfig();
+    if (!restored.ok) {
+      return { ok: false, error: restored.error || "无法恢复 ChatGPT Codex 配置。" };
+    }
+    getAppSettings().save({
+      authMode: "chatgpt",
+      apiBaseUrl: "",
+      apiModel: "",
+      relayCredentialConfigured: false
+    });
+    if (restored.changed) resetCodexClient();
     const response = await getCodexClient().request("account/login/start", {
       type: "chatgpt",
       appBrand: "codex",
@@ -1887,6 +1985,9 @@ ipcMain.handle("settings:save", (_event, request) => saveRuntimeSettings(request
 ipcMain.handle("settings:select-directory", (event, currentPath) =>
   selectLocalDirectory(event.sender, currentPath)
 );
+ipcMain.handle("settings:install-codex", () => installCodexCli());
+ipcMain.handle("settings:configure-relay", (_event, request) => configureCodexRelay(request));
+ipcMain.handle("settings:test-codex", () => testCodexConnection());
 ipcMain.handle("settings:chatgpt-login", () => startChatGptLogin());
 ipcMain.handle("settings:diagnose", () => runSystemDiagnostics());
 ipcMain.handle("settings:export-diagnostics", (event, report) =>
