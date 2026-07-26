@@ -6058,7 +6058,19 @@ function App() {
                 {openSections.domi ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
               </button>
               <div className="panel-content">
-                {domiError && <div className="domi-inline-error">{domiError}</div>}
+                {domiError && (
+                  <div className="domi-inline-error actionable" role="status">
+                    <AlertCircle size={14} />
+                    <span>{domiError}</span>
+                    <button
+                      type="button"
+                      onClick={() => void refreshDomi()}
+                      disabled={domiSyncing}
+                    >
+                      {domiSyncing ? "重试中" : "重试"}
+                    </button>
+                  </div>
+                )}
                 {plaudEnabled ? (
                   <>
                     {plaudError && <div className="domi-inline-error">{plaudError}</div>}
