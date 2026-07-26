@@ -5956,9 +5956,215 @@ body.panel-resizing .main-grid {
 
 .connection-form {
   width: 100%;
-  max-width: 620px;
+  max-width: 680px;
   margin: 0 auto;
-  padding-top: 30px;
+  padding-top: 24px;
+}
+
+.codex-install-step {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  min-height: 68px;
+  align-items: center;
+  gap: 11px;
+  border: 1px solid #dde5df;
+  border-radius: 10px;
+  color: #5c7564;
+  background: #fafcfb;
+  padding: 12px 14px;
+}
+
+.codex-install-step.warning {
+  border-color: #eadfd5;
+  color: #a56850;
+  background: #fdfaf7;
+}
+
+.codex-install-step > i {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 9px;
+  background: #edf4ef;
+  font-style: normal;
+}
+
+.codex-install-step.warning > i {
+  background: #f8ece6;
+}
+
+.codex-install-step span,
+.codex-install-step strong,
+.codex-install-step small {
+  display: block;
+  min-width: 0;
+  font-family: var(--font-cn);
+}
+
+.codex-install-step strong {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.codex-install-step small {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-install-step > button,
+.relay-configure-button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: #52524e;
+  background: #fff;
+  padding: 0 11px;
+  font-family: var(--font-cn);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.codex-install-step > button:hover,
+.relay-configure-button:hover {
+  background: var(--hover);
+}
+
+.codex-install-step > button:disabled,
+.relay-configure-button:disabled,
+.setup-inline-actions button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.codex-mode-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin: 12px 0;
+}
+
+.codex-mode-options > button {
+  display: grid;
+  min-height: 76px;
+  grid-template-columns: 30px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  color: #676762;
+  background: #fff;
+  padding: 13px;
+  text-align: left;
+}
+
+.codex-mode-options > button:hover {
+  background: #fbfbfa;
+}
+
+.codex-mode-options > button.selected {
+  border-color: #dda18a;
+  color: var(--accent-strong);
+  background: #fdf8f5;
+  box-shadow: inset 3px 0 0 #d77d5b;
+}
+
+.codex-mode-options span,
+.codex-mode-options strong,
+.codex-mode-options small {
+  display: block;
+  min-width: 0;
+  font-family: var(--font-cn);
+}
+
+.codex-mode-options strong {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.codex-mode-options small {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.codex-mode-options i {
+  display: grid;
+  place-items: center;
+  font-style: normal;
+}
+
+.relay-settings {
+  display: grid;
+  gap: 11px;
+  margin-bottom: 12px;
+  border: 1px solid #eadfd8;
+  border-radius: 10px;
+  background: #fdfaf8;
+  padding: 14px;
+}
+
+.relay-settings > div {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 10px;
+}
+
+.relay-settings label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.relay-settings label > span {
+  color: #4b4b47;
+  font-family: var(--font-cn);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.relay-settings label > small {
+  color: var(--faint);
+  font-family: var(--font-cn);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.relay-settings input {
+  width: 100%;
+  height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  outline: 0;
+  color: var(--text);
+  background: #fff;
+  padding: 0 10px;
+  font-family: var(--font-ui);
+  font-size: 10px;
+}
+
+.relay-settings input:focus {
+  border-color: #c88972;
+  box-shadow: 0 0 0 3px rgba(201, 102, 71, 0.08);
+}
+
+.relay-configure-button {
+  justify-self: start;
+  border-color: #dca38d;
+  color: #b85d3d;
+  background: #fffaf7;
 }
 
 .connection-panel {

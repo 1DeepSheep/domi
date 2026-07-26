@@ -8,6 +8,7 @@ import {
   ExternalLink,
   FolderOpen,
   HardDrive,
+  KeyRound,
   LoaderCircle,
   LogIn,
   Mic,
@@ -15,6 +16,7 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  Terminal,
   X
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -56,6 +58,11 @@ export default function SetupCenter({
   const [draft, setDraft] = useState(settings);
   const [saving, setSaving] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
+  const [installBusy, setInstallBusy] = useState(false);
+  const [relayBusy, setRelayBusy] = useState(false);
+  const [connectionTestBusy, setConnectionTestBusy] = useState(false);
+  const [connectionVerified, setConnectionVerified] = useState(false);
+  const [relayApiKey, setRelayApiKey] = useState("");
   const [diagnosing, setDiagnosing] = useState(false);
   const [report, setReport] = useState<DiagnosticReport | null>(null);
   const [plaudCheck, setPlaudCheck] = useState<DiagnosticCheck | null>(null);
@@ -70,12 +77,7 @@ export default function SetupCenter({
   const switchingLocalToFeishu = settings.storageBackend === "local"
     && draft.storageBackend === "feishu";
 
-  useEffect(() => setDraft({
-    ...settings,
-    authMode: "chatgpt",
-    apiBaseUrl: "",
-    apiModel: ""
-  }), [settings]);
+  useEffect(() => setDraft(settings), [settings]);
   useEffect(() => setTab(initialTab), [initialTab]);
 
   useEffect(() => {
@@ -114,9 +116,6 @@ export default function SetupCenter({
     setNotice("");
     const result = await onSave({
       ...draft,
-      authMode: "chatgpt",
-      apiBaseUrl: "",
-      apiModel: "",
       storageMigration: switchingLocalToFeishu && migrateLocalDocuments
         ? "local-to-feishu"
         : "none",
@@ -136,8 +135,22 @@ export default function SetupCenter({
     return true;
   }
 
-  async function saveConnectionAndContinue() {
-    if (await save(false)) setTab("data");
+  async function saveConnection(continueToData: boolean) {
+    if (!codexStatus?.path) {
+      setError("请先安装 Codex CLI。");
+      return;
+    }
+    if (!selectedConnectionReady) {
+      setError(draft.authMode === "relay"
+        ? "请先安全保存中转站配置并完成测试。"
+        : "请先完成 ChatGPT 登录并测试连接。");
+      return;
+    }
+    if (required && !connectionVerified) {
+      setError("请先完成登录或中转站配置，并运行一次完整连接测试。");
+      return;
+    }
+    if (await save(false) && continueToData) setTab("data");
   }
 
   async function saveDataAndContinue() {
@@ -180,6 +193,15 @@ export default function SetupCenter({
   async function startLogin() {
     setLoginBusy(true);
     setError("");
+    setNotice("");
+    setConnectionVerified(false);
+    setDraft((current) => ({
+      ...current,
+      authMode: "chatgpt",
+      apiBaseUrl: "",
+      apiModel: "",
+      relayCredentialConfigured: false
+    }));
     const saved = await onSave({ ...draft, authMode: "chatgpt" });
     if (!saved.ok) {
       setError(saved.error || "无法切换到 ChatGPT 登录模式。");
@@ -193,6 +215,92 @@ export default function SetupCenter({
       return;
     }
     setNotice("登录页面已在浏览器打开。完成登录后回到豆米重新检测。");
+  }
+
+  async function installCodex() {
+    setInstallBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await workbench.installCodex();
+      if (!result.ok) {
+        setError(result.error || "Codex CLI 安装失败。");
+        return;
+      }
+      setDraft((current) => ({ ...current, codexPath: result.path }));
+      await onSave({ codexPath: result.path });
+      await onRefresh();
+      setNotice(result.installedNow
+        ? `Codex CLI 已安装并验证：${result.version}`
+        : `已检测到可用的 Codex CLI：${result.version}`);
+    } catch (installError) {
+      setError(installError instanceof Error ? installError.message : String(installError));
+    } finally {
+      setInstallBusy(false);
+    }
+  }
+
+  async function configureRelay() {
+    setRelayBusy(true);
+    setError("");
+    setNotice("");
+    setConnectionVerified(false);
+    try {
+      const result = await workbench.configureCodexRelay({
+        baseUrl: draft.apiBaseUrl,
+        model: draft.apiModel,
+        apiKey: relayApiKey || undefined,
+        keepExistingKey: !relayApiKey && draft.relayCredentialConfigured
+      });
+      if (!result.ok) {
+        setError(result.error || "中转站配置或测试失败。");
+        return;
+      }
+      const nextDraft = {
+        ...draft,
+        authMode: "relay" as const,
+        apiBaseUrl: result.codex?.apiBaseUrl || draft.apiBaseUrl,
+        apiModel: result.codex?.configuredModel || draft.apiModel,
+        relayCredentialConfigured: true
+      };
+      setDraft(nextDraft);
+      setRelayApiKey("");
+      await onSave({
+        authMode: "relay",
+        apiBaseUrl: nextDraft.apiBaseUrl,
+        apiModel: nextDraft.apiModel,
+        relayCredentialConfigured: true,
+        codexPath: result.codex?.path || nextDraft.codexPath
+      });
+      await onRefresh();
+      setConnectionVerified(true);
+      setNotice(result.verification?.detail || "中转站模型响应与工具调用均已通过。");
+    } catch (relayError) {
+      setError(relayError instanceof Error ? relayError.message : String(relayError));
+    } finally {
+      setRelayBusy(false);
+    }
+  }
+
+  async function testConnection() {
+    setConnectionTestBusy(true);
+    setError("");
+    setNotice("");
+    setConnectionVerified(false);
+    try {
+      const result = await workbench.testCodexConnection();
+      if (!result.ok) {
+        setError(result.error || "Codex 完整连接测试失败。");
+        return;
+      }
+      await onRefresh();
+      setConnectionVerified(true);
+      setNotice(result.verification?.detail || "模型响应与 Shell 工具调用均已通过。");
+    } catch (testError) {
+      setError(testError instanceof Error ? testError.message : String(testError));
+    } finally {
+      setConnectionTestBusy(false);
+    }
   }
 
   async function chooseLocalLibraryDirectory() {
@@ -286,6 +394,24 @@ export default function SetupCenter({
         error: "更新检查失败"
       }[updateStatus.state]
     : "正在读取版本信息";
+  const codexInstalled = Boolean(codexStatus?.path);
+  const relayDraftMatchesRuntime = draft.authMode !== "relay" || Boolean(
+    draft.relayCredentialConfigured
+    && draft.apiBaseUrl.trim() === codexStatus?.apiBaseUrl
+    && draft.apiModel.trim() === codexStatus?.configuredModel
+  );
+  const selectedConnectionReady = Boolean(
+    codexStatus?.ok
+    && codexStatus.authMode === draft.authMode
+    && relayDraftMatchesRuntime
+  );
+  const connectionDetail = selectedConnectionReady
+    ? draft.authMode === "relay"
+      ? [codexStatus?.configuredModel, codexStatus?.apiBaseUrl, codexStatus?.version].filter(Boolean).join(" · ")
+      : [codexStatus?.account?.email, codexStatus?.account?.planType, codexStatus?.version].filter(Boolean).join(" · ")
+    : codexStatus?.error || (draft.authMode === "relay"
+      ? "请填写中转站信息并保存测试"
+      : "请登录 ChatGPT 后重新测试");
 
   return (
     <div className="setup-overlay" role="dialog" aria-modal="true" aria-label="豆米设置">
@@ -314,7 +440,7 @@ export default function SetupCenter({
           </nav>
           <div className="setup-security-note">
             <ShieldCheck size={15} />
-            <span>登录状态由本机 Codex 安全管理，豆米不单独保存账号凭据。</span>
+            <span>ChatGPT 登录由 Codex 管理；中转站密钥只保存在 macOS 钥匙串。</span>
           </div>
         </aside>
 
@@ -323,7 +449,7 @@ export default function SetupCenter({
             <div>
               <span>{required ? "开始使用豆米" : "偏好设置"}</span>
               <h2>{tab === "connection"
-                ? "Codex 账号"
+                ? "安装并连接 Codex"
                 : tab === "data"
                   ? "配置 Domi 资料库"
                   : tab === "plaud"
@@ -332,7 +458,7 @@ export default function SetupCenter({
                     ? "软件更新"
                     : "系统诊断"}</h2>
               <p>{tab === "connection"
-                ? "使用本机已登录的 ChatGPT / Codex 账号，通过 Codex app-server 执行完整任务。"
+                ? "豆米会在本机安装 Codex CLI；你可以使用 ChatGPT 账号，或连接兼容 Responses API 的中转站。"
                 : tab === "data"
                   ? "选择飞书协作资料库或完全本地的 SQLite + Markdown 资料库；配置仅保存在这台 Mac。"
                 : tab === "plaud"
@@ -348,29 +474,145 @@ export default function SetupCenter({
 
           {tab === "connection" ? (
             <div className="setup-form connection-form">
-              <div className={`connection-panel ${codexStatus?.ok ? "ok" : "warning"}`}>
+              <div className={`codex-install-step ${codexInstalled ? "ok" : "warning"}`}>
+                <i>{codexInstalled ? <CheckCircle2 size={18} /> : <Terminal size={18} />}</i>
+                <span>
+                  <strong>{codexInstalled ? "Codex CLI 已安装" : "先安装 Codex CLI"}</strong>
+                  <small>{codexInstalled
+                    ? `${codexStatus?.version || "版本已检测"} · ${codexStatus?.path}`
+                    : "从 OpenAI 官方地址下载到 ~/.local/bin；不会修改系统目录。"}</small>
+                </span>
+                <button type="button" onClick={installCodex} disabled={installBusy}>
+                  {installBusy ? <LoaderCircle className="spinning" size={15} /> : <Download size={15} />}
+                  {installBusy ? "正在安装…" : codexInstalled ? "重新检测" : "安装 Codex"}
+                </button>
+              </div>
+
+              <div className="codex-mode-options" role="radiogroup" aria-label="Codex 身份方式">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={draft.authMode === "chatgpt"}
+                  className={draft.authMode === "chatgpt" ? "selected" : ""}
+                  onClick={() => {
+                    setDraft((current) => ({
+                      ...current,
+                      authMode: "chatgpt",
+                      apiBaseUrl: "",
+                      apiModel: "",
+                      relayCredentialConfigured: false
+                    }));
+                    setConnectionVerified(false);
+                    setError("");
+                    setNotice("");
+                  }}
+                >
+                  <LogIn size={18} />
+                  <span>
+                    <strong>ChatGPT 账号</strong>
+                    <small>使用 Codex 官方登录，适合个人 ChatGPT / Codex 账号。</small>
+                  </span>
+                  <i>{draft.authMode === "chatgpt" ? <CheckCircle2 size={17} /> : null}</i>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={draft.authMode === "relay"}
+                  className={draft.authMode === "relay" ? "selected" : ""}
+                  onClick={() => {
+                    setDraft((current) => ({ ...current, authMode: "relay" }));
+                    setConnectionVerified(false);
+                    setError("");
+                    setNotice("");
+                  }}
+                >
+                  <KeyRound size={18} />
+                  <span>
+                    <strong>Responses 中转站</strong>
+                    <small>把本机 Codex 连接到兼容 OpenAI Responses API 的服务。</small>
+                  </span>
+                  <i>{draft.authMode === "relay" ? <CheckCircle2 size={17} /> : null}</i>
+                </button>
+              </div>
+
+              {draft.authMode === "relay" && (
+                <div className="relay-settings">
+                  <label>
+                    <span>中转站地址</span>
+                    <input
+                      value={draft.apiBaseUrl}
+                      onChange={(event) => {
+                        setDraft((current) => ({ ...current, apiBaseUrl: event.target.value }));
+                        setConnectionVerified(false);
+                      }}
+                      placeholder="https://relay.example.com/v1"
+                      spellCheck={false}
+                    />
+                    <small>必须支持 OpenAI Responses API；普通 Chat Completions 接口不能提供完整 Codex 能力。</small>
+                  </label>
+                  <div>
+                    <label>
+                      <span>模型名称</span>
+                      <input
+                        value={draft.apiModel}
+                        onChange={(event) => {
+                          setDraft((current) => ({ ...current, apiModel: event.target.value }));
+                          setConnectionVerified(false);
+                        }}
+                        placeholder="中转站支持的模型 ID"
+                        spellCheck={false}
+                      />
+                    </label>
+                    <label>
+                      <span>API Key</span>
+                      <input
+                        type="password"
+                        value={relayApiKey}
+                        onChange={(event) => {
+                          setRelayApiKey(event.target.value);
+                          setConnectionVerified(false);
+                        }}
+                        placeholder={draft.relayCredentialConfigured ? "已保存在 macOS 钥匙串，留空则沿用" : "仅保存到 macOS 钥匙串"}
+                        autoComplete="new-password"
+                        spellCheck={false}
+                      />
+                    </label>
+                  </div>
+                  <button className="relay-configure-button" type="button" onClick={configureRelay} disabled={relayBusy || !codexInstalled}>
+                    {relayBusy ? <LoaderCircle className="spinning" size={15} /> : <ShieldCheck size={15} />}
+                    {relayBusy ? "正在配置并测试…" : "安全保存并测试"}
+                  </button>
+                </div>
+              )}
+
+              <div className={`connection-panel ${selectedConnectionReady ? "ok" : "warning"}`}>
                 <div className="connection-status">
                   <i className="connection-status-icon">
-                    {codexStatus?.ok ? <BadgeCheck size={20} /> : <CircleAlert size={20} />}
+                    {selectedConnectionReady ? <BadgeCheck size={20} /> : <CircleAlert size={20} />}
                   </i>
                   <div>
-                    <small>ChatGPT / Codex</small>
-                    <strong>{codexStatus?.ok ? "ChatGPT 身份已就绪" : "尚未检测到可用身份"}</strong>
-                    <span>{codexStatus?.ok
-                      ? [codexStatus.account?.email, codexStatus.account?.planType, codexStatus.version].filter(Boolean).join(" · ")
-                      : codexStatus?.error || "请登录 Codex 后重新检测"}</span>
+                    <small>{draft.authMode === "relay" ? "Responses 中转站" : "ChatGPT / Codex"}</small>
+                    <strong>{selectedConnectionReady
+                      ? draft.authMode === "relay" ? "中转站配置已就绪" : "ChatGPT 身份已就绪"
+                      : "尚未检测到可用连接"}</strong>
+                    <span>{connectionDetail}</span>
                   </div>
                   <b className="connection-status-badge">
-                    {codexStatus?.ok ? "已连接" : "待登录"}
+                    {connectionVerified ? "已实测" : selectedConnectionReady ? "待实测" : "待连接"}
                   </b>
                 </div>
                 <div className="setup-inline-actions">
-                  <button type="button" onClick={startLogin} disabled={loginBusy}>
-                    {loginBusy ? <LoaderCircle className="spinning" size={16} /> : <LogIn size={16} />}
-                    {codexStatus?.ok ? "切换 ChatGPT 账号" : "登录 ChatGPT"}
-                    <ExternalLink size={13} />
+                  {draft.authMode === "chatgpt" && (
+                    <button type="button" onClick={startLogin} disabled={loginBusy || !codexInstalled}>
+                      {loginBusy ? <LoaderCircle className="spinning" size={16} /> : <LogIn size={16} />}
+                      {selectedConnectionReady ? "切换 ChatGPT 账号" : "登录 ChatGPT"}
+                      <ExternalLink size={13} />
+                    </button>
+                  )}
+                  <button type="button" onClick={testConnection} disabled={connectionTestBusy || !codexInstalled || (draft.authMode === "relay" && !draft.relayCredentialConfigured)}>
+                    {connectionTestBusy ? <LoaderCircle className="spinning" size={15} /> : <RefreshCw size={15} />}
+                    {connectionTestBusy ? "正在调用模型与工具…" : "测试完整连接"}
                   </button>
-                  <button type="button" onClick={onRefresh}><RefreshCw size={15} />检测连接</button>
                 </div>
               </div>
 
@@ -750,7 +992,7 @@ export default function SetupCenter({
                 ? "更新包必须通过 Developer ID 签名与 Apple 公证。"
                 : "诊断报告不包含登录令牌或 Base 标识。"}</span>
             {tab === "connection" && (
-              <button className="setup-primary" type="button" onClick={required ? saveConnectionAndContinue : () => save(false)} disabled={saving}>
+              <button className="setup-primary" type="button" onClick={() => saveConnection(required)} disabled={saving}>
                 {saving && <LoaderCircle className="spinning" size={16} />}
                 {required ? "下一步：资料连接" : "保存设置"}
               </button>

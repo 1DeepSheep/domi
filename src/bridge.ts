@@ -21,11 +21,12 @@ const browserFallback: Window["workbench"] = {
   loadSettings: async () => ({
     ok: true,
     settings: {
-      version: 4,
+      version: 5,
       onboardingComplete: true,
       authMode: "chatgpt",
       apiBaseUrl: "",
       apiModel: "",
+      relayCredentialConfigured: false,
       codexPath: "",
       plaudConnectionMode: "disabled",
       storageBackend: "feishu",
@@ -49,11 +50,12 @@ const browserFallback: Window["workbench"] = {
   saveSettings: async (request) => ({
     ok: true,
     settings: {
-      version: 4,
+      version: 5,
       onboardingComplete: Boolean(request.onboardingComplete),
-      authMode: "chatgpt",
-      apiBaseUrl: "",
-      apiModel: "",
+      authMode: request.authMode === "relay" ? "relay" : "chatgpt",
+      apiBaseUrl: request.authMode === "relay" ? request.apiBaseUrl || "" : "",
+      apiModel: request.authMode === "relay" ? request.apiModel || "" : "",
+      relayCredentialConfigured: request.authMode === "relay" && Boolean(request.relayCredentialConfigured),
       codexPath: request.codexPath || "",
       plaudConnectionMode: request.plaudConnectionMode === "enabled" ? "enabled" : "disabled",
       storageBackend: request.storageBackend === "local" ? "local" : "feishu",
@@ -79,6 +81,22 @@ const browserFallback: Window["workbench"] = {
     canceled: false,
     path: "",
     error: "请在 Electron 窗口中选择本地资料库目录。"
+  }),
+  installCodex: async () => ({
+    ok: false,
+    installed: false,
+    path: "",
+    version: "",
+    credentialStored: false,
+    error: "请在 Electron 窗口中安装 Codex CLI。"
+  }),
+  configureCodexRelay: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中配置 Codex 中转站。"
+  }),
+  testCodexConnection: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中测试 Codex 连接。"
   }),
   startChatGPTLogin: async () => ({ ok: false, error: "请在 Electron 窗口中登录。" }),
   runDiagnostics: async () => ({
