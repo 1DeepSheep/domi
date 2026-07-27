@@ -10,11 +10,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/1DeepSheep/domi-releases/releases/latest">下载最新版</a>
+  <a href="https://github.com/1DeepSheep/domi/releases/latest">下载最新版</a>
   ·
   <a href="https://github.com/1DeepSheep/domi-plugin">domi 插件</a>
   ·
-  <a href="https://github.com/1DeepSheep/domi-workbench/issues">反馈问题</a>
+  <a href="https://github.com/1DeepSheep/domi/issues">反馈问题</a>
 </p>
 
 > 当前公开版仅提供 Apple Silicon Mac 安装包。安装包内置经过 SHA-256 校验的 OpenAI Codex CLI 基线，首次启动可离线完成运行时准备，再进行连接测试。
@@ -33,7 +33,7 @@
 
 ### 1. 下载 domi
 
-1. 打开 [domi Releases](https://github.com/1DeepSheep/domi-releases/releases/latest)。
+1. 打开 [domi Releases](https://github.com/1DeepSheep/domi/releases/latest)。
 2. 下载名称以 `arm64.dmg` 结尾的安装包。
 3. 打开 DMG，把「domi」拖入“应用程序”文件夹。
 4. 启动 domi。公开安装包已经 Developer ID 签名、Apple 公证并附加公证票据。
@@ -94,15 +94,15 @@ domi 会自动安装与当前客户端匹配的 domi 插件。普通用户不需
 - **domi 客户端**：发现 GitHub Release 新版本后可以下载并重启安装，原有资料库、任务历史和连接设置继续保留；
 - **Codex Runtime**：在“设置 → 软件更新”中点击“检查并更新”。domi 使用系统网络设置运行 OpenAI 官方更新器，更新后保留上一版本入口；下载、校验或启动验证失败时继续使用当前版本，也可以手动恢复上一版本。
 
-也可以随时前往 [发行仓库](https://github.com/1DeepSheep/domi-releases/releases/latest) 手动下载最新版。
+也可以随时前往 [domi Releases](https://github.com/1DeepSheep/domi/releases/latest) 手动下载最新版。
 
 ## 从源码运行
 
 面向贡献者的本地开发：
 
 ```bash
-git clone https://github.com/1DeepSheep/domi-workbench.git
-cd domi-workbench
+git clone https://github.com/1DeepSheep/domi.git
+cd domi
 npm install
 npm run dev
 ```
@@ -121,9 +121,8 @@ npm run check
 
 ## 相关仓库
 
-- [domi-workbench](https://github.com/1DeepSheep/domi-workbench)：桌面客户端源码
+- [domi](https://github.com/1DeepSheep/domi)：桌面客户端源码、问题反馈与签名公证后的 macOS Releases
 - [domi-plugin](https://github.com/1DeepSheep/domi-plugin)：投资工作流、路由和 Skills
-- [domi-releases](https://github.com/1DeepSheep/domi-releases)：签名、公证后的 macOS 安装包
 
 ## License
 
