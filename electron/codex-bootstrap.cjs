@@ -11,6 +11,11 @@ const {
 
 const execFileAsync = promisify(execFile);
 const CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh";
+const OFFICIAL_CODEX_INSTALLER_HOSTS = new Set([
+  "chatgpt.com",
+  "www.chatgpt.com",
+  "releases.openai.com"
+]);
 const DOMI_PROVIDER_ID = "domi_relay";
 const DOMI_KEYCHAIN_SERVICE = "com.domi.codex.relay";
 const DOMI_KEYCHAIN_ACCOUNT = "provider-api-key";
@@ -63,6 +68,18 @@ function keychainAuthConfig() {
   };
 }
 
+function isOfficialCodexInstallerUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:"
+      && !parsed.username
+      && !parsed.password
+      && OFFICIAL_CODEX_INSTALLER_HOSTS.has(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function mergeRelayConfig(source, { baseUrl, model }) {
   const config = source && typeof source === "object" ? structuredClone(source) : {};
   config.model = normalizeRelayModel(model);
@@ -82,8 +99,8 @@ function mergeRelayConfig(source, { baseUrl, model }) {
   return config;
 }
 
-async function fetchOfficialInstaller() {
-  const response = await fetch(CODEX_INSTALLER_URL, {
+async function fetchOfficialInstaller(fetcher = fetch) {
+  const response = await fetcher(CODEX_INSTALLER_URL, {
     redirect: "follow",
     headers: { "user-agent": "Domi Codex Bootstrap" },
     signal: AbortSignal.timeout(30_000)
@@ -91,8 +108,7 @@ async function fetchOfficialInstaller() {
   if (!response.ok) {
     throw new Error(`Codex 官方安装程序下载失败（HTTP ${response.status}）。`);
   }
-  const finalUrl = new URL(response.url);
-  if (!["chatgpt.com", "www.chatgpt.com"].includes(finalUrl.hostname)) {
+  if (!isOfficialCodexInstallerUrl(response.url)) {
     throw new Error("Codex 安装程序被重定向到了非官方地址，已停止安装。");
   }
   const script = await response.text();
@@ -507,10 +523,13 @@ class CodexBootstrapService {
 
 module.exports = {
   CODEX_INSTALLER_URL,
+  OFFICIAL_CODEX_INSTALLER_HOSTS,
   DOMI_KEYCHAIN_ACCOUNT,
   DOMI_KEYCHAIN_SERVICE,
   DOMI_PROVIDER_ID,
   CodexBootstrapService,
+  fetchOfficialInstaller,
+  isOfficialCodexInstallerUrl,
   keychainAuthConfig,
   mergeRelayConfig,
   normalizeRelayBaseUrl,

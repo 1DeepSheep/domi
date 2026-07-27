@@ -9,6 +9,8 @@ const {
   DOMI_KEYCHAIN_SERVICE,
   DOMI_PROVIDER_ID,
   CodexBootstrapService,
+  fetchOfficialInstaller,
+  isOfficialCodexInstallerUrl,
   mergeRelayConfig,
   normalizeRelayBaseUrl
 } = require("../electron/codex-bootstrap.cjs");
@@ -23,6 +25,41 @@ test("relay URL policy requires HTTPS except for loopback development", () => {
   assert.throws(() => normalizeRelayBaseUrl("http://relay.example.com/v1"), /HTTPS/);
   assert.throws(() => normalizeRelayBaseUrl("https://user:pass@example.com/v1"), /不能包含账号/);
   assert.throws(() => normalizeRelayBaseUrl("https://relay.example.com/v1?token=value"), /查询参数/);
+});
+
+test("official Codex installer accepts OpenAI release redirects and rejects lookalikes", () => {
+  assert.equal(isOfficialCodexInstallerUrl("https://chatgpt.com/codex/install.sh"), true);
+  assert.equal(isOfficialCodexInstallerUrl("https://releases.openai.com/codex/install.sh"), true);
+  assert.equal(isOfficialCodexInstallerUrl("http://releases.openai.com/codex/install.sh"), false);
+  assert.equal(isOfficialCodexInstallerUrl("https://releases.openai.com.evil.example/codex/install.sh"), false);
+  assert.equal(
+    isOfficialCodexInstallerUrl("https://user:pass" + "@releases.openai.com/codex/install.sh"),
+    false
+  );
+});
+
+test("official installer download accepts the OpenAI releases redirect", async () => {
+  const validScript = `#!/bin/sh\n# CODEX_INSTALL_DIR\n${"x".repeat(5000)}`;
+  const script = await fetchOfficialInstaller(async (url, options) => {
+    assert.equal(url, "https://chatgpt.com/codex/install.sh");
+    assert.equal(options.redirect, "follow");
+    return {
+      ok: true,
+      status: 200,
+      url: "https://releases.openai.com/codex/install.sh",
+      text: async () => validScript
+    };
+  });
+  assert.equal(script, validScript);
+});
+
+test("official installer download still rejects non-OpenAI redirects", async () => {
+  await assert.rejects(() => fetchOfficialInstaller(async () => ({
+    ok: true,
+    status: 200,
+    url: "https://releases.openai.com.evil.example/codex/install.sh",
+    text: async () => `#!/bin/sh\n# CODEX_INSTALL_DIR\n${"x".repeat(5000)}`
+  })), /非官方地址/);
 });
 
 test("relay config preserves unrelated settings and uses a Keychain token command", () => {
