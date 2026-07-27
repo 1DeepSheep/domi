@@ -24,6 +24,8 @@ const { ServiceCoordinator } = require("./service-coordinator.cjs");
 const { classifyCodexTurnStatus } = require("./codex-turn-status.cjs");
 const { isSelectedCodexConnectionReady } = require("./codex-protocol.cjs");
 const {
+  codexRunExecutionMode,
+  partitionCodexRuns,
   requestCodexTurn,
   threadPersistenceOptions
 } = require("./codex-run-context.cjs");
@@ -1077,6 +1079,23 @@ function finishRun(run, type, details = {}) {
   run.resolve(result);
 }
 
+function prepareCodexConnectionMaintenance(blockedError) {
+  const { background, foreground } = partitionCodexRuns(activeRuns.values());
+  if (foreground.length > 0) {
+    return {
+      ok: false,
+      error: blockedError
+    };
+  }
+  for (const run of background) {
+    finishRun(run, "stopped");
+  }
+  return {
+    ok: true,
+    pausedBackgroundRuns: background.length
+  };
+}
+
 function handleCodexNotification(method, params) {
   const run = findActiveRun(params);
   if (!run) {
@@ -1390,8 +1409,11 @@ async function saveRuntimeSettings(request) {
     "localRepositoryDir"
   ].some((key) => Object.prototype.hasOwnProperty.call(settingsRequest, key)
     && settingsRequest[key] !== current[key]);
-  if (connectionChanged && activeRuns.size > 0) {
-    return { ok: false, error: "请先停止正在执行的任务，再修改 Codex 或资料库连接。" };
+  if (connectionChanged) {
+    const maintenance = prepareCodexConnectionMaintenance(
+      "请先停止正在执行的用户任务，再修改 Codex 或资料库连接。"
+    );
+    if (!maintenance.ok) return maintenance;
   }
   try {
     let migration;
@@ -1432,20 +1454,22 @@ async function saveRuntimeSettings(request) {
 }
 
 async function installCodexCli() {
-  if (activeRuns.size > 0) {
-    return { ok: false, error: "请先停止正在执行的任务，再安装 Codex CLI。" };
-  }
+  const maintenance = prepareCodexConnectionMaintenance(
+    "请先停止正在执行的用户任务，再安装 Codex CLI。"
+  );
+  if (!maintenance.ok) return maintenance;
   const result = await getCodexBootstrap().install();
   if (!result.ok) return result;
   getAppSettings().save({ codexPath: result.path });
   resetCodexClient();
-  return result;
+  return { ...result, pausedBackgroundRuns: maintenance.pausedBackgroundRuns };
 }
 
 async function configureCodexRelay(request = {}) {
-  if (activeRuns.size > 0) {
-    return { ok: false, error: "请先停止正在执行的任务，再修改 Codex 中转站。" };
-  }
+  const maintenance = prepareCodexConnectionMaintenance(
+    "请先停止正在执行的用户任务，再修改 Codex 中转站。"
+  );
+  if (!maintenance.ok) return maintenance;
   const result = await getCodexBootstrap().configureRelay(request);
   if (!result.ok) return result;
   getAppSettings().save({
@@ -1471,14 +1495,16 @@ async function configureCodexRelay(request = {}) {
     configured: true,
     codex,
     verification,
+    pausedBackgroundRuns: maintenance.pausedBackgroundRuns,
     error: verification.ok ? "" : verification.error || "中转站测试失败。"
   };
 }
 
 async function testCodexConnection() {
-  if (activeRuns.size > 0) {
-    return { ok: false, error: "请先停止正在执行的任务，再运行 Codex 连接测试。" };
-  }
+  const maintenance = prepareCodexConnectionMaintenance(
+    "请先停止正在执行的用户任务，再运行 Codex 连接测试。"
+  );
+  if (!maintenance.ok) return maintenance;
   resetCodexClient();
   const codex = await runCodexCheck();
   if (!codex.ok) return { ok: false, codex, error: codex.error || "Codex App Server 不可用。" };
@@ -1487,6 +1513,7 @@ async function testCodexConnection() {
     ok: verification.ok,
     codex,
     verification,
+    pausedBackgroundRuns: maintenance.pausedBackgroundRuns,
     error: verification.ok ? "" : verification.error || "Codex 连接测试失败。"
   };
 }
@@ -1759,6 +1786,7 @@ async function runCodex(sender, payload) {
         sender,
         threadId,
         turnId: null,
+        executionMode: codexRunExecutionMode(payload),
         output: "",
         eventCount: 0,
         workspacePath,

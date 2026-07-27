@@ -206,6 +206,21 @@ assert.match(
   "Weekly news automation must refresh when the app returns to the foreground."
 );
 assert.match(
+  app,
+  /!weeklyNewsAutomationReady \|\| !appSettings\?\.onboardingComplete/,
+  "Weekly news automation must stay idle until first-run onboarding is complete."
+);
+assert.match(
+  app,
+  /background:\s*automatic[\s\S]*?result\.stopped/,
+  "Automatic radar runs must be pausable during Codex connection maintenance."
+);
+assert.match(
+  main,
+  /prepareCodexConnectionMaintenance[\s\S]*?partitionCodexRuns\(activeRuns\.values\(\)\)/,
+  "Codex connection maintenance must distinguish background automation from user tasks."
+);
+assert.match(
   main,
   /backgroundThrottling:\s*false/,
   "The renderer scheduler must continue while the app is minimized."

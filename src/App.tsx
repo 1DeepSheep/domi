@@ -2344,6 +2344,7 @@ function App() {
         prompt: workflowPrompt(radarWorkflow, requestText, priorityPeopleContext, true),
         requestText,
         ephemeral: true,
+        background: automatic,
         workflowId: radarWorkflow.id,
         webSearch: true,
         model,
@@ -2353,6 +2354,14 @@ function App() {
       });
       window.clearInterval(pollingTimer);
       if (pollingPromise) await pollingPromise;
+      if (result.stopped) {
+        setWeeklyNewsNotice(
+          automatic
+            ? "后台行业扫描已暂停，Codex 连接维护完成后会自动重试"
+            : "行业扫描已停止"
+        );
+        return { status: "skipped" };
+      }
       if (!result.ok) {
         const partial = await readLatestWithRetry(1);
         const partialAdded = (partial?.items || []).filter((item) =>
@@ -2475,7 +2484,7 @@ function App() {
   weeklyNewsAutoScanActionRef.current = () => scanWeeklyNews(true);
 
   useEffect(() => {
-    if (!hasNativeWorkbench || !weeklyNewsAutomationReady) return;
+    if (!hasNativeWorkbench || !weeklyNewsAutomationReady || !appSettings?.onboardingComplete) return;
     let disposed = false;
 
     const runTick = async (focusTriggered = false) => {
@@ -2578,7 +2587,7 @@ function App() {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [weeklyNewsAutomationReady]);
+  }, [weeklyNewsAutomationReady, appSettings?.onboardingComplete]);
 
   async function openWeeklyNews(item: DomiNewsItem) {
     if (!item.url) return;
