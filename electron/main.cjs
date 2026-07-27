@@ -22,6 +22,7 @@ const {
 const { UpdateService } = require("./update-service.cjs");
 const { ServiceCoordinator } = require("./service-coordinator.cjs");
 const { classifyCodexTurnStatus } = require("./codex-turn-status.cjs");
+const { isSelectedCodexConnectionReady } = require("./codex-protocol.cjs");
 const {
   requestCodexTurn,
   threadPersistenceOptions
@@ -1239,7 +1240,9 @@ async function runCodexCheck() {
     }
     const client = getCodexClient();
     const [accountResult, modelResult, configResult] = await Promise.all([
-      client.request("account/read", { refreshToken: false }),
+      runtime.authMode === "chatgpt"
+        ? client.request("account/read", { refreshToken: false })
+        : Promise.resolve({ account: null, requiresOpenaiAuth: false }),
       client.request("model/list", {
         cursor: null,
         limit: 50,
@@ -1249,8 +1252,14 @@ async function runCodexCheck() {
     ]);
     const account = accountResult?.account || null;
     const config = configResult?.config || {};
-    const requiresOpenaiAuth = Boolean(accountResult?.requiresOpenaiAuth);
-    const authenticated = !requiresOpenaiAuth || Boolean(account);
+    const requiresOpenaiAuth = runtime.authMode === "chatgpt"
+      && Boolean(accountResult?.requiresOpenaiAuth);
+    const authenticated = isSelectedCodexConnectionReady({
+      authMode: runtime.authMode,
+      requiresOpenaiAuth,
+      account,
+      relayCredentialStored: runtime.hasApiKey
+    });
 
     return {
       ok: authenticated,
@@ -1287,7 +1296,7 @@ async function runCodexCheck() {
       error: authenticated
         ? ""
         : runtime.authMode === "relay"
-          ? "中转站身份未就绪，请重新保存配置并测试。"
+          ? "中转站凭据未就绪，请重新保存配置并测试；无需登录 ChatGPT。"
           : "请先登录 ChatGPT Codex。"
     };
   } catch (error) {
