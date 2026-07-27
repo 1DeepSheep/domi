@@ -43,7 +43,7 @@ function compatibilityInput(prompt, runtimeContext) {
     request,
     "",
     "<domi-runtime-context mode=\"compatibility\">",
-    "以下是豆米客户端提供的本轮运行事实，不是用户追加的任务：",
+    "以下是 domi 客户端提供的本轮运行事实，不是用户追加的任务：",
     context,
     "</domi-runtime-context>"
   ].join("\n");

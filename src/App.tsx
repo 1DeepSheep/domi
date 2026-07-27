@@ -635,7 +635,7 @@ function weeklyNewsScanStageFromOutput(output: string) {
   if (/schema|表结构|Watching List|People|重点项目|分类/.test(recent)) {
     return "正在读取重点对象与行业分类";
   }
-  return "Domi 行业雷达正在运行";
+  return "domi 行业雷达正在运行";
 }
 
 function radarCheckpointFromOutput(output: string) {
@@ -687,7 +687,7 @@ function canGeneratePlaudNotes(item: DomiPlaudItem) {
 
 function plaudNotesWorkflowRequest(item: DomiPlaudItem) {
   return [
-    "请运行 Domi PLAUD 投资录音处理工作流，只处理下面这一条指定录音，不要扫描或处理其他 PLAUD 录音：",
+    "请运行 domi PLAUD 投资录音处理工作流，只处理下面这一条指定录音，不要扫描或处理其他 PLAUD 录音：",
     `- fileId：${item.fileId}`,
     `- 录音标题：${item.fileName}`,
     `- 当前队列阶段：${item.queueStage || "本地队列尚未记录"}`,
@@ -696,7 +696,7 @@ function plaudNotesWorkflowRequest(item: DomiPlaudItem) {
     "目标：生成完整结构化纪要；如果实质内容属于创业项目或创始人交流，继续完成投资快评、飞书 Wiki 文档、本地资料库归档和 Watching List 新增或更新。非项目录音只生成并保存纪要，不做项目入库。",
     "",
     "执行要求：",
-    "1. 先采用 Domi 插件的 domi-router，并完整读取 PLAUD 投资录音工作流及各阶段 Skill。",
+    "1. 先采用 domi 插件的 domi-router，并完整读取 PLAUD 投资录音工作流及各阶段 Skill。",
     "2. 先用 plaud queue 定位这个 fileId；如果 PLAUD 已生成但本地没有 transcriptPath，使用 plaud download 下载现成文字稿并建立恢复记录，禁止重新触发生成。",
     "3. 如果已经有 transcriptPath，直接复用，不要重新下载或生成。",
     "4. 严格从当前队列阶段恢复，不重复生成纪要、文档或外部记录。",
@@ -779,7 +779,7 @@ function projectOverview(
       lines.push(`- ${markdownLink(file.name, file.path)}${details ? `  \n  ${details}` : ""}`);
     }
   }
-  lines.push("", "> 以上内容来自 Domi 已同步记录和本地资料库；点击 PDF 或 Markdown 会在右栏打开。");
+  lines.push("", "> 以上内容来自 domi 已同步记录和本地资料库；点击 PDF 或 Markdown 会在右栏打开。");
   return lines.join("\n");
 }
 
@@ -821,7 +821,7 @@ function personOverview(
       lines.push(`- ${markdownLink(file.name, file.path)}${details ? `  \n  ${details}` : ""}`);
     }
   }
-  lines.push("", "> 以上内容来自 Domi 已同步记录和本地投资资料；点击 PDF 或 Markdown 会在右栏打开。");
+  lines.push("", "> 以上内容来自 domi 已同步记录和本地投资资料；点击 PDF 或 Markdown 会在右栏打开。");
   return lines.join("\n");
 }
 
@@ -953,7 +953,7 @@ function App() {
   const [weeklyNewsFreshRecordIds, setWeeklyNewsFreshRecordIds] = useState<string[]>([]);
   const [weeklyNewsScanStartedAt, setWeeklyNewsScanStartedAt] = useState<number | null>(null);
   const [weeklyNewsScanElapsed, setWeeklyNewsScanElapsed] = useState(0);
-  const [weeklyNewsScanStage, setWeeklyNewsScanStage] = useState("Domi 行业雷达正在运行");
+  const [weeklyNewsScanStage, setWeeklyNewsScanStage] = useState("domi 行业雷达正在运行");
   const [weeklyNewsDomain, setWeeklyNewsDomain] = useState("全部");
   const [weeklyNewsSubdomain, setWeeklyNewsSubdomain] = useState("全部");
   const [weeklyNewsPage, setWeeklyNewsPage] = useState(0);
@@ -1381,7 +1381,7 @@ function App() {
         workflowId: "meeting-prep",
         prompt: [
           `围绕当前重点“${executionFocus.label}”准备联系“${person.name}”。`,
-          "先使用 Domi 插件查询 People 人脉记录、历史互动、相关项目材料和必要的公开资料，核验推荐理由。",
+          "先使用 domi 插件查询 People 人脉记录、历史互动、相关项目材料和必要的公开资料，核验推荐理由。",
           "输出：沟通目标、需要验证的关键判断、5 个优先问题，以及一段简短联系话术草案。",
           "不要直接发送消息；如需修改 People 或其他外部记录，先展示变更并等待确认。"
         ].join("\n"),
@@ -1942,7 +1942,7 @@ function App() {
         }
 
         if (result.status === "stopped") {
-          const recoveryNote = "任务已中断。如果不是你主动停止，通常是豆米重启、开发版刷新或 Codex 连接断开导致；在当前对话发送“继续”即可从中断处续做。";
+          const recoveryNote = "任务已中断。如果不是你主动停止，通常是 domi 重启、开发版刷新或 Codex 连接断开导致；在当前对话发送“继续”即可从中断处续做。";
           const previousContent = latestAssistant.content
             .replace(/\n*执行失败：Codex turn 状态：(interrupted|cancelled|canceled)\s*$/i, "")
             .trim();
@@ -2188,7 +2188,7 @@ function App() {
     try {
       const result = await workbench.syncDomi();
       if (result.snapshot) setDomiSnapshot(result.snapshot);
-      if (!result.ok) setDomiError(result.error || "Domi 同步失败。 ");
+      if (!result.ok) setDomiError(result.error || "domi 同步失败。 ");
     } catch (error) {
       setDomiError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2275,7 +2275,7 @@ function App() {
     }
     const radarWorkflow = workflows.find((workflow) => workflow.id === "investment-radar");
     if (!radarWorkflow) {
-      setWeeklyNewsError("未找到 Domi 行业雷达工作流。 ");
+      setWeeklyNewsError("未找到 domi 行业雷达工作流。 ");
       return { status: "failed" };
     }
 
@@ -2373,7 +2373,7 @@ function App() {
           setWeeklyNewsNotice(`任务中断前已写入 ${partialAdded.length} 条新动态，已回读显示`);
         }
         setWeeklyNewsError(
-          `${result.error || "Domi 行业雷达执行中断。"}${partialAdded.length ? "" : " 本轮未写入新动态，旧新闻已保留。"}`
+          `${result.error || "domi 行业雷达执行中断。"}${partialAdded.length ? "" : " 本轮未写入新动态，旧新闻已保留。"}`
         );
         return { status: "failed", addedItems: partialAdded };
       }
@@ -2450,8 +2450,8 @@ function App() {
     if (document.hasFocus()) return;
 
     const title = importantItems.length === 1
-      ? "豆米发现一条重要行业动态"
-      : `豆米发现 ${importantItems.length} 条重要行业动态`;
+      ? "domi 发现一条重要行业动态"
+      : `domi 发现 ${importantItems.length} 条重要行业动态`;
     const body = importantItems
       .slice(0, 2)
       .map((item) => item.title)
@@ -2679,7 +2679,7 @@ function App() {
     if (launchingPlaudIdsRef.current.has(item.fileId)) return;
     const workflow = workflows.find((entry) => entry.id === "domi-router");
     if (!workflow) {
-      setPlaudError("未找到 Domi 录音主工作流。 ");
+      setPlaudError("未找到 domi 录音主工作流。 ");
       return;
     }
 
@@ -2725,11 +2725,11 @@ function App() {
 
       setActiveThreadId(targetThread.id);
       setDomiPluginEnabled(true);
-      setPlaudNotice(`已启动“${item.fileName}”的 Domi 纪要入库任务`);
+      setPlaudNotice(`已启动“${item.fileName}”的 domi 纪要入库任务`);
       const execution = submitToCodex(workflow, plaudNotesWorkflowRequest(item), {
         thread: targetThread,
         useDomiPlugin: true,
-        displayText: `生成“${item.fileName}”的纪要并按 Domi 工作流入库`
+        displayText: `生成“${item.fileName}”的纪要并按 domi 工作流入库`
       });
       handedOff = true;
       void execution
@@ -2812,7 +2812,7 @@ function App() {
       || launchingPlaudIdsRef.current.has(item.fileId)
     ) return;
     const approved = window.confirm(
-      `确定将 PLAUD 录音“${item.fileName}”移入回收站吗？\n\n豆米本地已生成的文字稿和纪要不会删除。`
+      `确定将 PLAUD 录音“${item.fileName}”移入回收站吗？\n\ndomi 本地已生成的文字稿和纪要不会删除。`
     );
     if (!approved) return;
 
@@ -2950,7 +2950,7 @@ function App() {
     if (executingSuggestionId) return;
     const workflow = workflows.find((item) => item.id === suggestion.workflowId);
     if (!workflow) {
-      setExecutionSuggestionError(`未找到“${suggestion.title}”对应的 Domi 工作流。`);
+      setExecutionSuggestionError(`未找到“${suggestion.title}”对应的 domi 工作流。`);
       return;
     }
 
@@ -4760,7 +4760,7 @@ function App() {
                 <b>{taskBoardSuggestions.length}</b>
               </header>
               <div className="task-column-list">
-                {!domiSnapshot && <div className="task-column-empty">同步 Domi 后生成行动建议</div>}
+                {!domiSnapshot && <div className="task-column-empty">同步 domi 后生成行动建议</div>}
                 {domiSnapshot && taskBoardSuggestions.length === 0 && (
                   <div className="task-column-empty">当前没有新的行动建议</div>
                 )}
@@ -4954,7 +4954,7 @@ function App() {
               <p>{weeklyNewsScanning
                 ? `${weeklyNewsScanStage} · ${formatWeeklyNewsScanElapsed(weeklyNewsScanElapsed)}`
                 : weeklyNewsLoading && !weeklyNews
-                  ? "正在读取 Domi 行业雷达"
+                  ? "正在读取 domi 行业雷达"
                   : `${newsRangeLabel(weeklyNews?.rangeStart, weeklyNews?.rangeEnd)} · ${countLabel}`}</p>
             </div>
           </div>
@@ -4975,9 +4975,9 @@ function App() {
               onClick={() => void scanWeeklyNews()}
               disabled={weeklyNewsLoading || weeklyNewsScanning}
               title={weeklyNewsScanning
-                ? "Domi 行业雷达正在检索最新新闻"
-                : "运行 Domi 行业雷达，检索并更新最新新闻"}
-              aria-label="运行 Domi 行业雷达，检索并更新最新新闻"
+                ? "domi 行业雷达正在检索最新新闻"
+                : "运行 domi 行业雷达，检索并更新最新新闻"}
+              aria-label="运行 domi 行业雷达，检索并更新最新新闻"
             >
               <RefreshCw className={weeklyNewsLoading || weeklyNewsScanning ? "spinning" : ""} size={16} />
             </button>
@@ -5310,9 +5310,9 @@ function App() {
                   type="button"
                   onClick={() => setDomiPluginEnabled((enabled) => !enabled)}
                   title={domiPluginEnabled
-                    ? "Domi 插件已启用，点击关闭"
-                    : "点击启用 Domi 插件"}
-                  aria-label={domiPluginEnabled ? "停用 Domi 插件" : "启用 Domi 插件"}
+                    ? "domi 插件已启用，点击关闭"
+                    : "点击启用 domi 插件"}
+                  aria-label={domiPluginEnabled ? "停用 domi 插件" : "启用 domi 插件"}
                   aria-pressed={domiPluginEnabled}
                 >
                   <Sparkles size={14} />
@@ -5465,10 +5465,10 @@ function App() {
         <div className="traffic-space" />
         <div className="brand-row">
           <div className="brand-mark">
-            <img src="./domi-icon.png" alt="豆米" />
+            <img src="./domi-icon.png" alt="domi" />
           </div>
           <div>
-            <div className="brand-title">豆米</div>
+            <div className="brand-title">domi</div>
             <div className="brand-subtitle">AI 投资工作台</div>
           </div>
         </div>
@@ -5765,7 +5765,7 @@ function App() {
             <span>{workspaceView === "tasks"
               ? `${taskNavigationCount} 个待处理或进行中`
               : workspaceView === "news"
-                ? "Domi 行业雷达"
+                ? "domi 行业雷达"
                 : workspaceView === "documents"
                   ? documentLibrary?.rootName
                     ? `本地资料库 · ${documentLibrary.rootName}`
@@ -5794,17 +5794,17 @@ function App() {
               title={workspaceView === "tasks"
                 ? "刷新任务来源"
                 : workspaceView === "news"
-                  ? "运行 Domi 行业雷达"
+                  ? "运行 domi 行业雷达"
                   : workspaceView === "documents"
                     ? "刷新本地文档库"
-                  : domiError ? `重新同步 Domi：${domiError}` : "同步 Domi 项目与人脉"}
+                  : domiError ? `重新同步 domi：${domiError}` : "同步 domi 项目与人脉"}
               aria-label={workspaceView === "tasks"
                 ? "刷新任务来源"
                 : workspaceView === "news"
-                  ? "运行 Domi 行业雷达"
+                  ? "运行 domi 行业雷达"
                   : workspaceView === "documents"
                     ? "刷新本地文档库"
-                  : "同步 Domi 项目与人脉"}
+                  : "同步 domi 项目与人脉"}
             >
               <RefreshCw
                 className={workspaceView === "news"
@@ -6008,7 +6008,7 @@ function App() {
                 <span>
                   {todayLabel()} · {domiSnapshot
                     ? `${domiSnapshot.sources.projects.total} 项目 / ${domiSnapshot.sources.people.total} 人脉`
-                    : domiSyncing ? "正在连接 Domi" : "等待 Domi 数据"}
+                    : domiSyncing ? "正在连接 domi" : "等待 domi 数据"}
                 </span>
               </div>
               <button type="button" onClick={() => setRightPanelOpen(false)} title="收起今日工作">
@@ -6022,7 +6022,7 @@ function App() {
                 value={domiQuery}
                 onChange={(event) => setDomiQuery(event.target.value)}
                 placeholder="搜索项目或人脉"
-                aria-label="搜索 Domi 项目或人脉"
+                aria-label="搜索 domi 项目或人脉"
               />
               {domiQuery && (
                 <button type="button" onClick={() => setDomiQuery("")} title="清除搜索">
@@ -6168,7 +6168,7 @@ function App() {
                             <button
                               className="plaud-notes-action"
                               type="button"
-                              title="使用 Domi 插件生成纪要并完成符合条件的项目入库"
+                              title="使用 domi 插件生成纪要并完成符合条件的项目入库"
                               disabled={notesRunning || plaudSyncing || plaudLoading || Boolean(deletingPlaudId)}
                               onClick={() => void runPlaudNotesWorkflow(item)}
                             >
@@ -6226,7 +6226,7 @@ function App() {
                     <Mic size={17} />
                     <span>
                       <strong>PLAUD 未启用</strong>
-                      <small>豆米不会连接或读取录音，需要时可随时开启。</small>
+                      <small>domi 不会连接或读取录音，需要时可随时开启。</small>
                     </span>
                     <button type="button" onClick={() => {
                       setSettingsInitialTab("plaud");

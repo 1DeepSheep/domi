@@ -22,7 +22,7 @@ function run(binary, args, options = {}) {
 }
 
 function fail(message) {
-  console.error(`Domi plugin preparation failed: ${message}`);
+  console.error(`domi plugin preparation failed: ${message}`);
   process.exit(1);
 }
 
@@ -52,7 +52,7 @@ function resolveSource() {
       });
     }
   } catch {
-    fail("无法从 GitHub 拉取 Domi 插件 main。请检查仓库权限和网络连接。");
+    fail("无法从 GitHub 拉取 domi 插件 main。请检查仓库权限和网络连接。");
   }
   return { root: checkoutRoot, temporaryRoot };
 }
@@ -78,17 +78,17 @@ function validateSource(sourceRoot) {
     commit = run("git", ["rev-parse", "HEAD"], { cwd: sourceRoot });
     if (releaseMode) {
       const dirty = run("git", ["status", "--porcelain"], { cwd: sourceRoot });
-      if (dirty) fail("正式发布使用的 Domi 插件工作区不是干净状态");
+      if (dirty) fail("正式发布使用的 domi 插件工作区不是干净状态");
       if (process.env.DOMI_PLUGIN_SOURCE) {
         run("git", ["fetch", "origin", "main", "--quiet"], { cwd: sourceRoot });
         const remoteCommit = run("git", ["rev-parse", "origin/main"], { cwd: sourceRoot });
         if (commit !== remoteCommit) {
-          fail(`Domi 插件不是 GitHub main 最新提交（本地 ${commit.slice(0, 8)}，远端 ${remoteCommit.slice(0, 8)}）`);
+          fail(`domi 插件不是 GitHub main 最新提交（本地 ${commit.slice(0, 8)}，远端 ${remoteCommit.slice(0, 8)}）`);
         }
       }
     }
   } catch (error) {
-    if (releaseMode) fail(error.message || "无法验证 Domi 插件 Git 状态");
+    if (releaseMode) fail(error.message || "无法验证 domi 插件 Git 状态");
   }
 
   return { manifest, commit };
@@ -97,13 +97,13 @@ function validateSource(sourceRoot) {
 function validatePublicReleaseContent(sourceRoot) {
   const checkerPath = path.join(sourceRoot, "scripts", "public-release-check.cjs");
   if (!fs.existsSync(checkerPath)) {
-    if (releaseMode) fail("Domi 插件缺少 scripts/public-release-check.cjs");
+    if (releaseMode) fail("domi 插件缺少 scripts/public-release-check.cjs");
     return;
   }
   try {
     run(process.execPath, [checkerPath], { cwd: sourceRoot, stdio: "inherit" });
   } catch {
-    fail("Domi 插件公共发布身份检查未通过");
+    fail("domi 插件公共发布身份检查未通过");
   }
 }
 
@@ -116,7 +116,7 @@ function pluginFiles(sourceRoot) {
       .split("\0")
       .filter(Boolean);
   } catch {
-    fail("Domi 插件源码必须是 Git 仓库");
+    fail("domi 插件源码必须是 Git 仓库");
   }
 }
 
@@ -152,7 +152,7 @@ function copyPlugin(sourceRoot, files) {
 
 const source = resolveSource();
 try {
-  if (!fs.existsSync(source.root)) fail(`没有找到 Domi 插件源码：${source.root}`);
+  if (!fs.existsSync(source.root)) fail(`没有找到 domi 插件源码：${source.root}`);
   const { manifest, commit } = validateSource(source.root);
   validatePublicReleaseContent(source.root);
   const files = pluginFiles(source.root);
@@ -168,7 +168,7 @@ try {
     preparedAt: new Date().toISOString()
   };
   fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, "utf8");
-  console.log(`Prepared Domi plugin ${lock.pluginVersion} (${lock.gitCommit.slice(0, 8)})`);
+  console.log(`Prepared domi plugin ${lock.pluginVersion} (${lock.gitCommit.slice(0, 8)})`);
 } finally {
   if (source.temporaryRoot) fs.rmSync(source.temporaryRoot, { recursive: true, force: true });
 }

@@ -83,12 +83,12 @@ export const workflows: Workflow[] = [
   {
     id: "domi-router",
     title: "处理录音",
-    shortTitle: "Domi",
+    shortTitle: "domi",
     skill: "$domi:domi-router",
     description: "恢复并运行 PLAUD → 纪要 → 投资快评 → 当前项目库主工作流。",
     output: "文字稿、结构化纪要、投资评分和项目库结果",
     defaultPrompt:
-      "运行 Domi PLAUD 投资录音主工作流：先检查并恢复未完成队列，再发现尚未生成文字稿的录音；严格按 Domi Router 的阶段和确认规则执行。",
+      "运行 domi PLAUD 投资录音主工作流：先检查并恢复未完成队列，再发现尚未生成文字稿的录音；严格按 domi Router 的阶段和确认规则执行。",
     hidden: true
   },
   {
@@ -99,7 +99,7 @@ export const workflows: Workflow[] = [
     description: "联网检索关注领域的最新行业事件，完成原文核验、事件去重与评分，并更新行业信息追踪。",
     output: "已核验的行业事件、评分、原文链接和行业信息追踪写入回执",
     defaultPrompt:
-      "请以 quick_scan 增量模式更新豆米首页行业动态：使用 48 小时重叠回看发现迟发、迟索引内容，整体最长最近 72 小时；上次成功水位只用于标记增量，不得直接截断发现窗口。只覆盖 AI、半导体、智能出行、前沿科技、具身智能&机器人；不要扫描或返回消费、消费科技、互联网科技。直接使用本机重点项目快照、调用方提供的 A/S 重点人物别名索引和缓存分类，不重新读取完整项目库、人脉库或完整 schema；先一次性读取时间窗内既有事件建立去重索引，再并发检索五个一级领域。每轮必须完成一次中文专业科技媒体定向扫源，覆盖 DeepTech 深科技，并为对话、访谈、专访、公开观点等投资论点信号预留候选位。仅对宽搜已出现明确信号的重点对象做定向补查，不逐一扫描全部重点名单。完成原文核验、实体归一、事件级去重与评分后写入当前资料库的行业事件库，最后一次性回读验证并输出带候选/拒绝统计的 RADAR_RESULT。目标在 6 分钟内完成；没有合格增量也必须正常完成并返回 added=0。",
+      "请以 quick_scan 增量模式更新 domi 首页行业动态：使用 48 小时重叠回看发现迟发、迟索引内容，整体最长最近 72 小时；上次成功水位只用于标记增量，不得直接截断发现窗口。只覆盖 AI、半导体、智能出行、前沿科技、具身智能&机器人；不要扫描或返回消费、消费科技、互联网科技。直接使用本机重点项目快照、调用方提供的 A/S 重点人物别名索引和缓存分类，不重新读取完整项目库、人脉库或完整 schema；先一次性读取时间窗内既有事件建立去重索引，再并发检索五个一级领域。每轮必须完成一次中文专业科技媒体定向扫源，覆盖 DeepTech 深科技，并为对话、访谈、专访、公开观点等投资论点信号预留候选位。仅对宽搜已出现明确信号的重点对象做定向补查，不逐一扫描全部重点名单。完成原文核验、实体归一、事件级去重与评分后写入当前资料库的行业事件库，最后一次性回读验证并输出带候选/拒绝统计的 RADAR_RESULT。目标在 6 分钟内完成；没有合格增量也必须正常完成并返回 added=0。",
     hidden: true,
     webSearch: true
   },
@@ -111,7 +111,7 @@ export const workflows: Workflow[] = [
     description: "围绕即将沟通的项目、人物或机构，汇总内部资料与最新动态，生成一页式会前简报和核心问题清单。",
     output: "会前背景摘要、历史互动、最新动态、信息缺口、核心问题和会后动作建议",
     defaultPrompt:
-      "运行 Domi 会前准备工作流。优先使用当前绑定项目、人物或用户输入的会议对象；对象不明确时，先询问公司／项目名、人物名、会议目的和时间。识别对象后完整读取 Domi Router，并按场景采用插件内对应 Skill：项目场景查询 Watching List、Wiki、本地资料库和历史交流材料，按需采用 desk-research 补充最新公开信息；人物场景查询 People 人脉库，采用 sourcing 的 profile／relationship 模式核验履历、关系路径和历史互动；混合场景合并两条路径。输出适合会前快速阅读的一页式简报，包含背景与当前状态、历史互动、最新动态、关键判断、信息缺口、8–10 个优先问题、敏感点、会议目标和会后建议动作。默认保持只读，不做投资评级，不新建或更新项目、人脉及外部记录。",
+      "运行 domi 会前准备工作流。优先使用当前绑定项目、人物或用户输入的会议对象；对象不明确时，先询问公司／项目名、人物名、会议目的和时间。识别对象后完整读取 domi Router，并按场景采用插件内对应 Skill：项目场景查询 Watching List、Wiki、本地资料库和历史交流材料，按需采用 desk-research 补充最新公开信息；人物场景查询 People 人脉库，采用 sourcing 的 profile／relationship 模式核验履历、关系路径和历史互动；混合场景合并两条路径。输出适合会前快速阅读的一页式简报，包含背景与当前状态、历史互动、最新动态、关键判断、信息缺口、8–10 个优先问题、敏感点、会议目标和会后建议动作。默认保持只读，不做投资评级，不新建或更新项目、人脉及外部记录。",
     quickStart: true,
     hidden: true,
     webSearch: true
@@ -124,7 +124,7 @@ export const workflows: Workflow[] = [
     description: "发现或核验目标人物，读取 People 人脉表实时结构并查重，将确认后的合格人选写入人脉库。",
     output: "候选人地图、人物画像、查重与字段变更计划、People 人脉表写入回执",
     defaultPrompt:
-      "运行 Domi 人物研究入库（people intake）工作流。优先使用用户输入的人物姓名、赛道、人才画像或关系线索；目标不明确时，先询问范围、用途、人数和排除条件。目标明确后完整读取 people-intake-workflow，依次执行 sourcing 发现与画像，并按当前资料库后端完成 schema 检查和多键查重；用户点名且身份唯一的单人可按规则直接 upsert，开放式发现或批量候选必须先展示精确变更计划并等待确认，再写入当前人脉库，最后按记录 ID 回读验证。",
+      "运行 domi 人物研究入库（people intake）工作流。优先使用用户输入的人物姓名、赛道、人才画像或关系线索；目标不明确时，先询问范围、用途、人数和排除条件。目标明确后完整读取 people-intake-workflow，依次执行 sourcing 发现与画像，并按当前资料库后端完成 schema 检查和多键查重；用户点名且身份唯一的单人可按规则直接 upsert，开放式发现或批量候选必须先展示精确变更计划并等待确认，再写入当前人脉库，最后按记录 ID 回读验证。",
     quickStart: true,
     hidden: true,
     webSearch: true
@@ -137,7 +137,7 @@ export const workflows: Workflow[] = [
     description: "先读内部材料，再完成项目只读研究；不评级、不归档、不写入外部系统。",
     output: "项目研究、关键判断、信息缺口和是否继续评级入库的确认",
     defaultPrompt:
-      "运行 Domi 投资项目只读研究工作流。优先使用当前绑定项目或用户输入的项目目标；如果目标仍不明确，先询问项目名称、官网或材料。目标明确后调用 desk-research，先查询内部已有材料再开展公开研究；本轮不要评级、归档或写入外部系统，完成后询问是否继续评级并入库。",
+      "运行 domi 投资项目只读研究工作流。优先使用当前绑定项目或用户输入的项目目标；如果目标仍不明确，先询问项目名称、官网或材料。目标明确后调用 desk-research，先查询内部已有材料再开展公开研究；本轮不要评级、归档或写入外部系统，完成后询问是否继续评级并入库。",
     hidden: true,
     webSearch: true
   },
@@ -149,7 +149,7 @@ export const workflows: Workflow[] = [
     description: "串联项目研究、投资快评，并按当前资料库后端完成文档、材料与项目记录入库。",
     output: "研究报告、投资快评、项目档案和三系统写入回执",
     defaultPrompt:
-      "运行 Domi 投资项目研究并入库工作流。优先使用当前绑定项目或用户输入的项目目标；如果目标仍不明确，先询问项目名称、官网或材料。目标明确后严格按 desk-research → investment-review → investment-mgmt 执行，并由 storage-backends 契约选择飞书或本地资料库链路；写入前完成去重和字段校验，写入后验证结构化记录、文档与资料目录。",
+      "运行 domi 投资项目研究并入库工作流。优先使用当前绑定项目或用户输入的项目目标；如果目标仍不明确，先询问项目名称、官网或材料。目标明确后严格按 desk-research → investment-review → investment-mgmt 执行，并由 storage-backends 契约选择飞书或本地资料库链路；写入前完成去重和字段校验，写入后验证结构化记录、文档与资料目录。",
     quickStart: true,
     hidden: true,
     webSearch: true
@@ -162,7 +162,7 @@ export const workflows: Workflow[] = [
     description: "立即开始本机录音，停止后自动串联 PLAUD、纪要、核心要点和跟进事项。",
     output: "PLAUD 文字稿、结构化纪要、核心要点和跟进事项",
     defaultPrompt:
-      "开始 Domi 快速讨论工作流：立即使用 mac-recording 以 workflow-kind quick-discussion 开始本机录音，不要先运行 doctor 或 status。用户停止录音后，继续执行 PLAUD 文字稿、ASR Notes 结构化纪要、核心要点和跟进事项。",
+      "开始 domi 快速讨论工作流：立即使用 mac-recording 以 workflow-kind quick-discussion 开始本机录音，不要先运行 doctor 或 status。用户停止录音后，继续执行 PLAUD 文字稿、ASR Notes 结构化纪要、核心要点和跟进事项。",
     quickStart: true,
     hidden: true,
     requiresPlaud: true
@@ -251,7 +251,7 @@ export const workflows: Workflow[] = [
     description: "辅助估值、Term Sheet、保护性条款和创始人沟通策略。",
     output: "谈判策略、条款风险、话术和替代方案",
     defaultPrompt:
-      "请先确认投资阶段、谈判环节和当前态势，再基于 Domi 的交易谈判资料给出建议。"
+      "请先确认投资阶段、谈判环节和当前态势，再基于 domi 的交易谈判资料给出建议。"
   }
 ];
 
@@ -269,8 +269,8 @@ export function workflowPrompt(
   if (!workflow) {
     if (!useDomiPlugin) {
       return [
-        "你正在豆米投资工作台中运行，底层是本地 Codex。",
-        "本轮未启用 Domi 插件。不要采用或调用任何 $domi:* Skill；请使用 Codex 的通用能力，用中文直接完成用户任务。",
+        "你正在 domi 投资工作台中运行，底层是本地 Codex。",
+        "本轮未启用 domi 插件。不要采用或调用任何 $domi:* Skill；请使用 Codex 的通用能力，用中文直接完成用户任务。",
         "不得编造项目、人脉、融资、财务或会议事实。涉及外部写入时，先向用户确认。",
         domiContext ? `\n工作台当前绑定上下文：\n${domiContext}` : "",
         "",
@@ -279,12 +279,12 @@ export function workflowPrompt(
       ].filter(Boolean).join("\n");
     }
     return [
-      "你正在豆米投资工作台中运行，底层是本地 Codex。",
-      "当前启用的分析师是 domi-AI分析师。必须使用已安装的 Domi 插件完成本轮任务。",
-      "开始前先采用并完整读取 Domi 插件中的 $domi:domi-router；根据用户意图路由到插件内最匹配的投资 Skill，并在进入对应阶段前完整读取该 Skill 及其 references。不要使用同名的非 Domi Skill 替代。",
-      "如果请求不属于 Router 已定义的多阶段工作流，仍应从 Domi 插件中选择最匹配的单项投资 Skill；确实没有匹配 Skill 时，再以投资分析师身份直接回答。",
-      "请用中文直接完成任务。优先使用已有 Watching List、People、Wiki、本地资料库和下面的 Domi 绑定上下文，避免重复研究；不得编造项目、人脉、融资、财务或会议事实；外部写入必须遵循对应 Skill 的确认、去重和字段校验规则。",
-      domiContext ? `\nDomi 绑定上下文：\n${domiContext}` : "",
+      "你正在 domi 投资工作台中运行，底层是本地 Codex。",
+      "当前启用的分析师是 domi-AI分析师。必须使用已安装的 domi 插件完成本轮任务。",
+      "开始前先采用并完整读取 domi 插件中的 $domi:domi-router；根据用户意图路由到插件内最匹配的投资 Skill，并在进入对应阶段前完整读取该 Skill 及其 references。不要使用同名的非 domi Skill 替代。",
+      "如果请求不属于 Router 已定义的多阶段工作流，仍应从 domi 插件中选择最匹配的单项投资 Skill；确实没有匹配 Skill 时，再以投资分析师身份直接回答。",
+      "请用中文直接完成任务。优先使用已有 Watching List、People、Wiki、本地资料库和下面的 domi 绑定上下文，避免重复研究；不得编造项目、人脉、融资、财务或会议事实；外部写入必须遵循对应 Skill 的确认、去重和字段校验规则。",
+      domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
       "",
       "用户请求：",
       trimmed
@@ -294,32 +294,32 @@ export function workflowPrompt(
   const outputFile = `./outputs/${new Date().toISOString().slice(0, 10)}-${workflow.id}.md`;
   if (workflow.id === "investment-radar") {
     return [
-      "你正在豆米投资工作台中运行，底层是本地 Codex。",
-      "采用 Domi 插件中的 $domi:investment-radar，并严格执行该 Skill 的 quick_scan 快速增量路径。只需读取 quick_scan 明确要求的最小引用集；不要先加载 Domi Router、sourcing 全文、完整 Watching List 或 People 表。",
+      "你正在 domi 投资工作台中运行，底层是本地 Codex。",
+      "采用 domi 插件中的 $domi:investment-radar，并严格执行该 Skill 的 quick_scan 快速增量路径。只需读取 quick_scan 明确要求的最小引用集；不要先加载 domi Router、sourcing 全文、完整 Watching List 或 People 表。",
       "本轮是首页手动刷新：先建立一份覆盖重叠回看窗口的既有事件去重索引，再并发搜索；A/S 重点人物别名索引只用于匹配与消歧，有直接事件信号时才补查对象。每轮必须完成 DeepTech 深科技等中文专业媒体扫源，并为深度访谈/公开观点类投资论点信号预留候选位。把耗时控制在 6 分钟内，达到 12 条高质量候选或 8 条合格新增后停止扩展搜索。",
       "写入后进行一次批量回读；执行结束必须输出一行机器可读结果：RADAR_RESULT {\"added\":0,\"updated\":0,\"unchanged\":0,\"failed\":0,\"checked_through\":\"ISO-8601\",\"discovery_from\":\"ISO-8601\",\"candidates\":0,\"rejected\":{\"duplicate\":0,\"not_event\":0,\"unverified\":0,\"unavailable\":0,\"out_of_scope\":0}}。没有新增不是失败。",
-      "不得编造新闻、融资或公司事实；不得修改豆米应用源码。",
-      domiContext ? `\nDomi 绑定上下文：\n${domiContext}` : "",
+      "不得编造新闻、融资或公司事实；不得修改 domi 应用源码。",
+      domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
       "",
       "用户输入：",
       trimmed || workflow.defaultPrompt
     ].filter(Boolean).join("\n");
   }
   return [
-    "你正在豆米投资工作台中运行，底层是本地 Codex。",
-    `必须采用 Domi 插件中的 Skill：${workflow.skill}。进入执行阶段前完整读取该 Skill 及其要求的 references，不要用通用模板或同名非 Domi Skill 替代。`,
+    "你正在 domi 投资工作台中运行，底层是本地 Codex。",
+    `必须采用 domi 插件中的 Skill：${workflow.skill}。进入执行阶段前完整读取该 Skill 及其要求的 references，不要用通用模板或同名非 domi Skill 替代。`,
     "",
     `工作流：${workflow.title}`,
     `目标：${workflow.description}`,
     `期望产物：${workflow.output}`,
-    domiContext ? `\nDomi 绑定上下文：\n${domiContext}` : "",
+    domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
     "",
     "执行要求：",
-    "1. 遵循该 Domi Skill 的去重、核验、信息不足和外部写入确认规则。",
+    "1. 遵循该 domi Skill 的去重、核验、信息不足和外部写入确认规则。",
     "2. 先使用已有 Watching List、People、Wiki 或本地资料库上下文，避免重复研究和重复建档。",
     "3. 不得编造项目、人脉、融资、财务或会议事实。",
     `4. 遵循 Skill 自己的产物路径；如 Skill 未指定路径，长产物写入 ${outputFile}。`,
-    "5. 不要修改豆米工作台应用源码。",
+    "5. 不要修改 domi 工作台应用源码。",
     "",
     "用户输入：",
     trimmed || workflow.defaultPrompt

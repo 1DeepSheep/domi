@@ -44,7 +44,7 @@ const completeDomiConfig = {
   localLibraryDir: "/tmp/domi-investment-library"
 };
 
-test("Domi connection settings persist outside the app bundle and survive app updates", () => {
+test("domi connection settings persist outside the app bundle and survive app updates", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-"));
   try {
     const service = createService(root);
@@ -144,7 +144,7 @@ test("onboarding cannot complete before employee data connections are configured
     const service = createService(root);
     assert.throws(
       () => service.save({ onboardingComplete: true, plaudConnectionMode: "disabled" }),
-      /请补充 Domi 资料连接/
+      /请补充 domi 资料连接/
     );
     const saved = service.save({ ...completeDomiConfig, onboardingComplete: true });
     assert.equal(saved.settings.onboardingComplete, true);

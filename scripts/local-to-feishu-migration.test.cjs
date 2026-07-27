@@ -71,7 +71,7 @@ project_id: prj_demo
     title: "示例项目"
   }, root);
   assert.doesNotMatch(prepared.content, /project_id/);
-  assert.match(prepared.content, /Domi迁移图片1/);
+  assert.match(prepared.content, /domi迁移图片1/);
   assert.equal(prepared.assets[0].path, imagePath);
   assert.equal(prepared.sourceSha256.length, 64);
 });
