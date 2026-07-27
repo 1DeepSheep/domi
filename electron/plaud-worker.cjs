@@ -7,7 +7,7 @@ function print(value) {
 function safeError(error) {
   const message = error instanceof Error ? error.message : String(error);
   if (/Cannot find module ['"]playwright['"]/i.test(message)) {
-    return "PLAUD 缺少浏览器运行组件。请重启豆米；如果仍然失败，请重新安装最新版豆米。";
+    return "PLAUD 缺少浏览器运行组件。请重启 domi；如果仍然失败，请重新安装最新版 domi。";
   }
   return message
     .replace(/\b(?:authorization|cookie|x-pld-user|x-device-id)\s*[:=]\s*[^\r\n]+/gi, "[REDACTED]")

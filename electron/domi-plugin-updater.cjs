@@ -31,7 +31,7 @@ function compareVersions(left, right) {
 }
 
 function safeError(error) {
-  return String(error?.message || error || "Domi plugin update failed.")
+  return String(error?.message || error || "domi plugin update failed.")
     .replace(/([?&](?:token|key|authorization)=)[^&\s]+/gi, "$1[REDACTED]")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]");
 }
@@ -204,7 +204,7 @@ class DomiPluginUpdater {
       const response = await this.fetchImpl(url, {
         headers: {
           Accept: "application/vnd.github+json",
-          "User-Agent": "Domi-Workbench-Plugin-Updater"
+          "User-Agent": "domi-Workbench-Plugin-Updater"
         },
         signal: controller.signal
       });

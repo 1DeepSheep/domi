@@ -119,7 +119,7 @@ class DomiPluginManager {
     const manifest = readJson(manifestPath);
     const lock = readJson(this.bundledLockPath);
     if (manifest.name !== "domi" || manifest.version !== lock.pluginVersion) {
-      throw new Error("内置 Domi 插件清单与版本锁不一致。");
+      throw new Error("内置 domi 插件清单与版本锁不一致。");
     }
     return {
       source: "bundled",
@@ -158,7 +158,7 @@ class DomiPluginManager {
     fs.mkdirSync(path.dirname(marketplacePath), { recursive: true });
     fs.writeFileSync(marketplacePath, `${JSON.stringify({
       name: MARKETPLACE_NAME,
-      interface: { displayName: "Domi Managed" },
+      interface: { displayName: "domi Managed" },
       plugins: [{
         name: "domi",
         source: { source: "local", path: "./plugins/domi" },
@@ -202,7 +202,7 @@ class DomiPluginManager {
     const copiedManifest = readJsonSafe(path.join(nextPluginRoot, ".codex-plugin", "plugin.json"));
     if (copiedManifest?.name !== "domi" || copiedManifest.version !== info.lock.pluginVersion) {
       fs.rmSync(nextPluginRoot, { recursive: true, force: true });
-      throw new Error("待安装的 Domi 插件与版本锁不一致。");
+      throw new Error("待安装的 domi 插件与版本锁不一致。");
     }
 
     writeJsonAtomic(this.transactionStatePath, {
@@ -259,7 +259,7 @@ class DomiPluginManager {
 
   async #ensure({ binary, env }) {
     const bundledInfo = this.bundledInfo();
-    if (!bundledInfo) return { ok: false, skipped: true, error: "安装包未包含 Domi 插件。" };
+    if (!bundledInfo) return { ok: false, skipped: true, error: "安装包未包含 domi 插件。" };
     const installedInfo = this.installedInfo();
     const remoteResult = this.remoteUpdateEnabled
       ? await this.remoteUpdater.check()
@@ -273,7 +273,7 @@ class DomiPluginManager {
     const marketplaceList = await this.runCodex(binary, ["plugin", "marketplace", "list", "--json"], env);
     const configured = (marketplaceList.marketplaces || []).find((item) => item.name === MARKETPLACE_NAME);
     if (configured && canonicalPath(configured.root) !== canonicalPath(this.marketplaceRoot)) {
-      throw new Error(`Codex 中已存在同名 Marketplace，但路径不是豆米管理目录：${configured.root}`);
+      throw new Error(`Codex 中已存在同名 Marketplace，但路径不是 domi 管理目录：${configured.root}`);
     }
     if (!configured) {
       await this.runCodex(binary, ["plugin", "marketplace", "add", this.marketplaceRoot, "--json"], env);

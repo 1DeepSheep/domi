@@ -42,7 +42,9 @@ const {
   listDocumentLibrary
 } = require("./document-library.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
+const { prepareApplicationBrandPaths } = require("./brand-migration.cjs");
 
+const brandPaths = prepareApplicationBrandPaths(app);
 const execFileAsync = promisify(execFile);
 const pdfProtocol = "domi-pdf";
 const markdownAssetProtocol = "domi-asset";
@@ -71,13 +73,13 @@ const activeRuns = new Map();
 const allowedMarkdownAssetPaths = new Set();
 const CODEX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const externalDomiWorkflows = new Map([
-  ["domi-analyst", "使用 domi-AI分析师，并可能读取当前 Domi 资料库"],
-  ["domi-router", "访问 PLAUD、Domi 恢复队列和当前资料库，并可能按工作流更新记录"],
+  ["domi-analyst", "使用 domi-AI分析师，并可能读取当前 domi 资料库"],
+  ["domi-router", "访问 PLAUD、domi 恢复队列和当前资料库，并可能按工作流更新记录"],
   ["meeting-prep", "读取当前项目、人脉、文档和材料及公开信息，生成只读会前简报"],
-  ["people-intake", "使用 Domi 人物研究入库工作流检索公开信息、查重并更新当前人脉库"],
-  ["project-research", "使用 Domi Router 读取内部项目材料、当前文档库与公开信息源，完成项目只读研究"],
-  ["project-intake", "使用 Domi Router 完成项目研究、投资快评，并更新当前项目库"],
-  ["quick-discussion", "使用 Domi Router 调用本机麦克风、PLAUD 与本地文件，生成讨论纪要和跟进事项"],
+  ["people-intake", "使用 domi 人物研究入库工作流检索公开信息、查重并更新当前人脉库"],
+  ["project-research", "使用 domi Router 读取内部项目材料、当前文档库与公开信息源，完成项目只读研究"],
+  ["project-intake", "使用 domi Router 完成项目研究、投资快评，并更新当前项目库"],
+  ["quick-discussion", "使用 domi Router 调用本机麦克风、PLAUD 与本地文件，生成讨论纪要和跟进事项"],
   ["investment-radar", "联网检索和核验最新行业新闻，并更新当前行业事件库"],
   ["desk-research", "访问当前项目库、文档、材料和联网数据源，并可能按要求回填研究成果"],
   ["sourcing", "访问当前人脉库和公开信息源，并可能按要求更新人脉记录"],
@@ -86,16 +88,13 @@ const externalDomiWorkflows = new Map([
 const larkRequestPattern = /(?:飞书|lark|wiki|watching\s*list|项目库|人脉库|people|onedrive|项目文档|交流文档|线上文档)/i;
 const explicitFeishuRequestPattern = /(?:飞书|lark|wiki|watching\s*list|线上文档)/i;
 
-const appName = "豆米";
+const appName = brandPaths.appName;
 const rootDir = path.resolve(__dirname, "..");
-const runtimeLogPath = path.join(app.getPath("userData"), "logs", "runtime.jsonl");
+const runtimeLogPath = path.join(brandPaths.userDataPath, "logs", "runtime.jsonl");
 const runtimeLogArchivePath = `${runtimeLogPath}.1`;
 const RUNTIME_LOG_MAX_BYTES = 2 * 1024 * 1024;
 const legacyDevelopmentWorkspace = path.join(rootDir, "demo-workspace");
-const demoWorkspace = path.join(
-  app.getPath("documents"),
-  app.isPackaged ? appName : `${appName}开发工作区`
-);
+const demoWorkspace = brandPaths.workspacePath;
 const outputDir = path.join(demoWorkspace, "outputs");
 const projectsDir = path.join(demoWorkspace, "projects");
 const appIconPath = path.join(rootDir, "public", "domi-dock-icon.png");
@@ -622,7 +621,7 @@ async function readMarkdownDocument(request) {
       return { ok: false, error: "所选路径不是文件。" };
     }
     if (stat.size > 8 * 1024 * 1024) {
-      return { ok: false, error: "Markdown 文件超过 8 MB，暂不在豆米中打开。" };
+      return { ok: false, error: "Markdown 文件超过 8 MB，暂不在 domi 中打开。" };
     }
     const content = await fs.promises.readFile(resolved, "utf8");
     return {
@@ -896,7 +895,7 @@ function createWindow() {
     appendRuntimeLog("renderer-unresponsive");
     void dialog.showMessageBox(win, {
       type: "warning",
-      title: "豆米暂时无响应",
+      title: "domi 暂时无响应",
       message: "界面暂时无响应，后台任务仍会继续运行。",
       detail: "可以等待界面恢复，或重新载入界面并自动恢复正在执行的 Codex 对话。",
       buttons: ["继续等待", "重新载入界面"],
@@ -1586,7 +1585,7 @@ async function runSystemDiagnostics() {
   );
   push(
     "domi-plugin-package",
-    "内置 Domi 插件",
+    "内置 domi 插件",
     Boolean(codex.pluginSetup?.ok),
     codex.pluginSetup?.ok
       ? `v${codex.pluginSetup.version || codex.pluginSetup.bundledVersion || "未知"}${codex.pluginSetup.gitCommit ? ` · ${codex.pluginSetup.gitCommit.slice(0, 8)}` : ""}`
@@ -1598,7 +1597,7 @@ async function runSystemDiagnostics() {
     const pluginOk = Boolean(health.plugin?.ok);
     push(
       "domi",
-      "Domi 插件",
+      "domi 插件",
       pluginOk,
       pluginOk ? `v${health.plugin.version}` : health.plugin?.error || "未检测到插件"
     );
@@ -1613,8 +1612,8 @@ async function runSystemDiagnostics() {
           : health.plaud?.error || "未检测到 Tabbit 中的 PLAUD 登录"
     );
   } catch (error) {
-    push("domi", "Domi 插件", false, error instanceof Error ? error.message : String(error));
-    push("plaud", "PLAUD 录音转写", false, "Domi 插件未就绪，暂时无法检测 PLAUD");
+    push("domi", "domi 插件", false, error instanceof Error ? error.message : String(error));
+    push("plaud", "PLAUD 录音转写", false, "domi 插件未就绪，暂时无法检测 PLAUD");
   }
 
   return {
@@ -1637,8 +1636,8 @@ async function exportSystemDiagnostics(sender, report) {
   try {
     const owner = BrowserWindow.fromWebContents(sender);
     const result = await dialog.showSaveDialog(owner, {
-      title: "导出豆米诊断报告",
-      defaultPath: `豆米诊断-${new Date().toISOString().slice(0, 10)}.json`,
+      title: "导出 domi 诊断报告",
+      defaultPath: `domi-诊断-${new Date().toISOString().slice(0, 10)}.json`,
       filters: [{ name: "JSON", extensions: ["json"] }]
     });
     if (result.canceled || !result.filePath) return { ok: true, canceled: true };
@@ -1670,7 +1669,7 @@ function repositoryRuntimeContext(payload) {
   const settings = getAppSettings().load().settings;
   if (settings.storageBackend === "local") {
     return [
-      "Domi 本轮资料库事实：",
+      "domi 本轮资料库事实：",
       "- 后端：local。",
       `- SQLite：${settings.localDatabasePath}`,
       `- Markdown 与资料目录：${settings.localRepositoryDir}。`,
@@ -1678,7 +1677,7 @@ function repositoryRuntimeContext(payload) {
     ].join("\n");
   }
   return [
-    "Domi 本轮资料库事实：",
+    "domi 本轮资料库事实：",
     "- 后端：feishu。",
     "- 使用当前配置的 Base、Wiki 与本地材料目录；错误时不要静默切换后端。"
   ].join("\n");
@@ -1690,13 +1689,13 @@ async function larkRuntimeContext(required) {
   const identity = status.userName ? `，当前用户：${status.userName}` : "";
   if (status.ok) {
     return [
-      "Domi 本轮飞书连接事实：",
+      "domi 本轮飞书连接事实：",
       `- lark-cli 已验证可用${identity}；路径：${status.cliPath}。`,
       "- 飞书任务应实际调用 lark-cli；失败时报告真实错误，不推测授权状态。"
     ].join("\n");
   }
   return [
-    "Domi 本轮飞书连接事实：",
+    "domi 本轮飞书连接事实：",
     `- lark-cli 预检失败；路径：${status.cliPath}。`,
     `- 实际错误：${status.error || "未返回错误详情"}。`,
     "- 请基于该错误处理，不推测其他授权原因。"
@@ -1717,7 +1716,7 @@ async function confirmExternalDomiRun(sender, payload) {
   const owner = BrowserWindow.fromWebContents(sender);
   const options = {
     type: "warning",
-    title: "允许 Domi 本次访问外部数据？",
+    title: "允许 domi 本次访问外部数据？",
     message: "本次任务需要临时扩展 Codex 权限",
     detail: `${detail}。\n\n权限只应用于本次任务；其他普通对话仍在项目工作区沙箱中运行。`,
     buttons: ["取消", "允许本次运行"],
@@ -1768,7 +1767,7 @@ async function runCodex(sender, payload) {
         ok: false,
         runId,
         output: "",
-        error: "已取消 Domi 外部数据访问，本次工作流未运行。",
+        error: "已取消 domi 外部数据访问，本次工作流未运行。",
         workspacePath
       };
     }
@@ -1937,13 +1936,14 @@ app.whenReady().then(() => {
     version: app.getVersion(),
     packaged: app.isPackaged,
     platform: process.platform,
-    arch: process.arch
+    arch: process.arch,
+    brandUserDataMigrated: brandPaths.userDataMigration.migrated,
+    brandWorkspaceMigrated: brandPaths.workspaceMigration.migrated
   });
   migrateLegacyDevelopmentWorkspace();
   ensureDemoWorkspace();
   installPdfProtocol();
   installMarkdownAssetProtocol();
-  app.setName(appName);
   if (process.platform === "darwin") {
     app.dock.setIcon(nativeImage.createFromPath(appIconPath));
   }
@@ -1996,7 +1996,7 @@ ipcMain.handle("app:notify", (_event, request = {}) => {
   if (!Notification.isSupported()) {
     return { ok: false, error: "当前系统不支持桌面通知。" };
   }
-  const title = boundedRuntimeText(request.title || "豆米行业动态", 120);
+  const title = boundedRuntimeText(request.title || "domi 行业动态", 120);
   const body = boundedRuntimeText(request.body || "发现新的重要行业动态", 500);
   const notification = new Notification({
     title,

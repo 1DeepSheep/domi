@@ -143,7 +143,7 @@ class CodexAppServer {
     const initializeParams = {
       clientInfo: {
         name: "domi",
-        title: "豆米",
+        title: "domi",
         version: this.version
       }
     };
@@ -157,7 +157,7 @@ class CodexAppServer {
         throw error;
       }
       this.declaredCapabilities = codexClientCapabilities({ experimentalApi: false });
-      this.onLog?.("当前 Codex 版本不接受 experimentalApi 声明，豆米已切换稳定兼容模式。\n");
+      this.onLog?.("当前 Codex 版本不接受 experimentalApi 声明，domi 已切换稳定兼容模式。\n");
       await this.#sendRequest("initialize", initializeParams);
     }
     this.#send({ method: "initialized" });
@@ -285,7 +285,7 @@ class CodexAppServer {
       id: message.id,
       error: {
         code: -32601,
-        message: `豆米暂不支持 App Server 请求：${message.method}`
+        message: `domi 暂不支持 App Server 请求：${message.method}`
       }
     });
   }

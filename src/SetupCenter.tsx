@@ -173,7 +173,7 @@ export default function SetupCenter({
       if (!check?.ok) {
         setError(check?.detail || "尚未检测到 PLAUD 登录，请先在 Tabbit 中登录 PLAUD。");
       } else {
-        setNotice("已检测到本机 PLAUD 登录，豆米可以读取录音队列。");
+        setNotice("已检测到本机 PLAUD 登录，domi 可以读取录音队列。");
       }
     } catch (diagnosticError) {
       setError(diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError));
@@ -214,7 +214,7 @@ export default function SetupCenter({
       setError(result.error || "无法打开 ChatGPT 登录页面。");
       return;
     }
-    setNotice("登录页面已在浏览器打开。完成登录后回到豆米重新检测。");
+    setNotice("登录页面已在浏览器打开。完成登录后回到 domi 重新检测。");
   }
 
   async function installCodex() {
@@ -416,12 +416,12 @@ export default function SetupCenter({
       : "请登录 ChatGPT 后重新测试");
 
   return (
-    <div className="setup-overlay" role="dialog" aria-modal="true" aria-label="豆米设置">
+    <div className="setup-overlay" role="dialog" aria-modal="true" aria-label="domi 设置">
       <div className="setup-window">
         <aside className="setup-nav">
           <div className="setup-brand">
             <img src="./domi-icon.png" alt="" />
-            <div><strong>豆米</strong><span>{required ? "首次启动配置" : "设置"}</span></div>
+            <div><strong>domi</strong><span>{required ? "首次启动配置" : "设置"}</span></div>
           </div>
           <nav>
             <button className={tab === "connection" ? "active" : ""} onClick={() => setTab("connection")}>
@@ -449,25 +449,25 @@ export default function SetupCenter({
         <section className={`setup-content ${tab === "connection" ? "connection-tab" : ""}`}>
           <header className="setup-header">
             <div>
-              <span>{required ? "开始使用豆米" : "偏好设置"}</span>
+              <span>{required ? "开始使用 domi" : "偏好设置"}</span>
               <h2>{tab === "connection"
                 ? "安装并连接 Codex"
                 : tab === "data"
-                  ? "配置 Domi 资料库"
+                  ? "配置 domi 资料库"
                   : tab === "plaud"
                     ? "连接 PLAUD"
                   : tab === "updates"
                     ? "软件更新"
                     : "系统诊断"}</h2>
               <p>{tab === "connection"
-                ? "豆米会在本机安装 Codex CLI；ChatGPT 账号和 Responses 中转站二选一，无需同时配置。"
+                ? "domi 会在本机安装 Codex CLI；ChatGPT 账号和 Responses 中转站二选一，无需同时配置。"
                 : tab === "data"
                   ? "选择飞书协作资料库或完全本地的 SQLite + Markdown 资料库；配置仅保存在这台 Mac。"
                 : tab === "plaud"
-                  ? "PLAUD 仅用于把录音转成文字稿。现在不用可以直接跳过，豆米不会连接或读取录音。"
+                  ? "PLAUD 仅用于把录音转成文字稿。现在不用可以直接跳过，domi 不会连接或读取录音。"
                 : tab === "updates"
                   ? "检查签名版本并更新程序本体；历史、工作区和本机配置会继续保留。"
-                  : "检查 Codex、Keychain、本地数据库、工作区和 Domi 插件。"}</p>
+                  : "检查 Codex、Keychain、本地数据库、工作区和 domi 插件。"}</p>
             </div>
             {!required && (
               <button className="setup-close" type="button" onClick={onClose} title="关闭设置"><X size={18} /></button>
@@ -691,8 +691,8 @@ export default function SetupCenter({
                 <span>
                   <strong>{draft.storageBackend === "local" ? "数据完全保存在本机" : "插件与个人数据分离"}</strong>
                   <small>{draft.storageBackend === "local"
-                    ? "不需要飞书授权。豆米只在所选目录和本机 Application Support 数据库中读写。"
-                    : "飞书标识写入本机 Application Support，权限限制为当前用户；不会进入 Domi 插件、Git、DMG 或诊断报告。"}</small>
+                    ? "不需要飞书授权。domi 只在所选目录和本机 Application Support 数据库中读写。"
+                    : "飞书标识写入本机 Application Support，权限限制为当前用户；不会进入 domi 插件、Git、DMG 或诊断报告。"}</small>
                 </span>
               </div>
               {draft.storageBackend === "feishu" ? (
@@ -795,7 +795,7 @@ export default function SetupCenter({
                         <FolderOpen size={16} />
                       </button>
                     </div>
-                    <small>豆米会建立行业研究、行业动态、项目库和人脉库目录；已有文件不会被删除。</small>
+                    <small>domi 会建立行业研究、行业动态、项目库和人脉库目录；已有文件不会被删除。</small>
                   </label>
                   <div className="local-database-location">
                     <span>SQLite 数据库</span>
@@ -858,12 +858,12 @@ export default function SetupCenter({
                     <div>
                       <strong>{plaudCheck?.ok ? "PLAUD 已连接" : "在 Tabbit 中登录 PLAUD"}</strong>
                       <small>{plaudCheck?.detail
-                        || "豆米复用本机 Tabbit 的已登录会话，不保存 Cookie、授权头或账号密码。"}</small>
+                        || "domi 复用本机 Tabbit 的已登录会话，不保存 Cookie、授权头或账号密码。"}</small>
                     </div>
                   </div>
                   <ol>
                     <li>打开 Tabbit，并完成 PLAUD 登录。</li>
-                    <li>回到豆米，点击“检测 PLAUD”。</li>
+                    <li>回到 domi，点击“检测 PLAUD”。</li>
                     <li>检测成功后即可读取录音；安装向导也允许稍后再登录。</li>
                   </ol>
                   <div className="setup-inline-actions">
@@ -879,7 +879,7 @@ export default function SetupCenter({
                   <ShieldCheck size={19} />
                   <span>
                     <strong>PLAUD 保持关闭</strong>
-                    <small>本地资料库、飞书资料库、行业动态和其他 Domi 能力仍可正常使用。</small>
+                    <small>本地资料库、飞书资料库、行业动态和其他 domi 能力仍可正常使用。</small>
                   </span>
                 </div>
               ) : (
@@ -948,7 +948,7 @@ export default function SetupCenter({
                 <ShieldCheck size={18} />
                 <span>
                   <strong>升级不会清除本地数据</strong>
-                  <small>对话历史和设置保存在 Application Support，任务材料保存在豆米工作区；更新只替换应用程序。</small>
+                  <small>对话历史和设置保存在 Application Support，任务材料保存在 domi 工作区；更新只替换应用程序。</small>
                 </span>
               </div>
               {(error || notice || updateStatus?.error) && (
@@ -989,11 +989,11 @@ export default function SetupCenter({
 
           <footer className="setup-footer">
             <span>{tab === "connection"
-              ? "更改连接会重启本地 Codex 服务，不影响豆米中的对话记录。"
+              ? "更改连接会重启本地 Codex 服务，不影响 domi 中的对话记录。"
               : tab === "data"
                 ? "配置保存在 Application Support；覆盖安装和自动更新会继续沿用，无需重复配置。"
               : tab === "plaud"
-                ? "PLAUD 登录保留在 Tabbit；豆米只保存是否启用这项能力。"
+                ? "PLAUD 登录保留在 Tabbit；domi 只保存是否启用这项能力。"
               : tab === "updates"
                 ? "更新包必须通过 Developer ID 签名与 Apple 公证。"
                 : "诊断报告不包含登录令牌或 Base 标识。"}</span>
@@ -1032,7 +1032,7 @@ export default function SetupCenter({
                 disabled={saving || draft.plaudConnectionMode === "unconfigured"}
               >
                 {saving && <LoaderCircle className="spinning" size={16} />}
-                {required ? "保存并进入豆米" : "保存 PLAUD 设置"}
+                {required ? "保存并进入 domi" : "保存 PLAUD 设置"}
               </button>
             )}
             {tab === "updates" && (

@@ -21,7 +21,7 @@ function reportRendererIssue(report: Parameters<typeof workbench.reportRendererI
   try {
     workbench.reportRendererIssue(report);
   } catch (error) {
-    console.error("豆米无法上报渲染异常", error);
+    console.error("domi 无法上报渲染异常", error);
   }
 }
 

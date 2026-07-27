@@ -44,7 +44,7 @@ function createReleaseFixture(root) {
   }));
   fs.writeFileSync(
     path.join(pluginRoot, "skills", "domi-router", "SKILL.md"),
-    "# Domi router\n"
+    "# domi router\n"
   );
   fs.writeFileSync(path.join(pluginRoot, "fixture.txt"), "signed remote plugin\n");
 
@@ -180,7 +180,7 @@ async function run() {
 }
 
 run()
-  .then(() => console.log("Domi plugin updater tests passed."))
+  .then(() => console.log("domi plugin updater tests passed."))
   .catch((error) => {
     console.error(error);
     process.exitCode = 1;

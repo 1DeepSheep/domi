@@ -209,7 +209,7 @@ class WorkbenchStateStore {
       ? thread.messages.map((message) => recoverInterrupted && message?.status === "running" ? {
           ...message,
           status: "error",
-          content: message.content || "上次运行在豆米关闭时中断。"
+          content: message.content || "上次运行在 domi 关闭时中断。"
         } : message)
       : [];
 

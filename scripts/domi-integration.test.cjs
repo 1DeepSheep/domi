@@ -324,10 +324,10 @@ test("local repository mode syncs projects, people and news without Feishu", asy
   integration.findPlugin = () => ({
     root: "/tmp/domi-plugin",
     version: "test",
-    manifest: { interface: { displayName: "Domi" } }
+    manifest: { interface: { displayName: "domi" } }
   });
   integration.status = async () => ({
-    plugin: { ok: true, version: "test", displayName: "Domi", root: "/tmp/domi-plugin" },
+    plugin: { ok: true, version: "test", displayName: "domi", root: "/tmp/domi-plugin" },
     lark: { ok: true, disabled: true, userName: "", appName: "本地资料库" },
     plaud: { ok: true, queueCount: 0, queueStages: {} }
   });

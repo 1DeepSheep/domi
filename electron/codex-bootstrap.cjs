@@ -88,7 +88,7 @@ function mergeRelayConfig(source, { baseUrl, model }) {
     ? config.model_providers
     : {};
   config.model_providers[DOMI_PROVIDER_ID] = {
-    name: "Domi Responses 中转站",
+    name: "domi Responses 中转站",
     base_url: normalizeRelayBaseUrl(baseUrl),
     wire_api: "responses",
     request_max_retries: 4,
@@ -102,7 +102,7 @@ function mergeRelayConfig(source, { baseUrl, model }) {
 async function fetchOfficialInstaller(fetcher = fetch) {
   const response = await fetcher(CODEX_INSTALLER_URL, {
     redirect: "follow",
-    headers: { "user-agent": "Domi Codex Bootstrap" },
+    headers: { "user-agent": "domi Codex Bootstrap" },
     signal: AbortSignal.timeout(30_000)
   });
   if (!response.ok) {
@@ -448,7 +448,7 @@ class CodexBootstrapService {
     try {
       const binary = this.resolveBinary(preferredPath);
       const prompt = [
-        "这是豆米安装后的连接测试。",
+        "这是 domi 安装后的连接测试。",
         "请使用 shell 工具恰好执行一次 `printf DOMI_TOOL_OK`，",
         "确认看到命令输出后，最终只回复 DOMI_CODEX_OK。"
       ].join("");

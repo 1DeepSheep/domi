@@ -1,12 +1,12 @@
 # Privacy and public distribution
 
-The Domi application bundle contains application code, public assets, and a reviewed snapshot of the Domi plugin. User state lives outside the application and is preserved when the app is replaced or updated.
+The domi application bundle contains application code, public assets, and a reviewed snapshot of the domi plugin. User state lives outside the application and is preserved when the app is replaced or updated.
 
 ## Data kept on the user’s Mac
 
 ```text
-~/Library/Application Support/豆米/
-~/Documents/豆米/
+~/Library/Application Support/domi/
+~/Documents/domi/
 ~/.domi/
 ```
 
@@ -22,10 +22,10 @@ Before any source or binary publication:
 npm run privacy:check
 npm run privacy:history
 npm run check
-node scripts/privacy-check.cjs --artifact /absolute/path/to/Domi-version-arm64.dmg
+node scripts/privacy-check.cjs --artifact /absolute/path/to/domi-version-arm64.dmg
 ```
 
-The corresponding Domi plugin commit must separately pass:
+The corresponding domi plugin commit must separately pass:
 
 ```bash
 node scripts/public-release-check.cjs

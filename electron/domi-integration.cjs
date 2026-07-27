@@ -180,7 +180,7 @@ function compareVersions(left, right) {
 }
 
 function commandErrorMessage(error, binary, options = {}) {
-  const label = options.label || path.basename(binary) || "Domi 命令";
+  const label = options.label || path.basename(binary) || "domi 命令";
   if (error?.killed || error?.code === "ETIMEDOUT") {
     return `${label}执行超时（${Math.round((options.timeout || 60000) / 1000)} 秒）。`;
   }
@@ -192,7 +192,7 @@ function commandErrorMessage(error, binary, options = {}) {
     .trim();
   const rawDetail = clean(error?.stderr) || clean(error?.stdout);
   if (/Cannot find module ['"]playwright['"]/i.test(rawDetail)) {
-    return `${label}缺少浏览器运行组件。请重启豆米；如果仍然失败，请重新安装最新版豆米。`;
+    return `${label}缺少浏览器运行组件。请重启 domi；如果仍然失败，请重新安装最新版 domi。`;
   }
   let detail = rawDetail;
   if (rawDetail) {
@@ -263,7 +263,7 @@ class DomiIntegration {
     this.materialIndexCache = new Map();
     this.larkCommandQueue = new TaskQueue(2);
     this.plaudCommandQueue = new TaskQueue(1);
-    this.plaudOutputDir = path.resolve(plaudOutputDir || path.join(os.homedir(), "Documents", "豆米", "work", "domi", "plaud"));
+    this.plaudOutputDir = path.resolve(plaudOutputDir || path.join(os.homedir(), "Documents", "domi", "work", "domi", "plaud"));
     this.plaudStateFile = path.join(
       path.resolve(plaudStateDir || process.env.DOMI_PLAUD_STATE_DIR || path.join(os.homedir(), ".domi")),
       "plaud-workflow.json"
@@ -366,10 +366,10 @@ class DomiIntegration {
     const entityType = request?.entityType === "person" ? "person" : "project";
     const recordId = String(request?.recordId || "");
     const cached = this.stateStore.loadCache(CACHE_KEY)?.value;
-    if (!cached) throw new Error("Domi 项目与人脉缓存尚未同步。");
+    if (!cached) throw new Error("domi 项目与人脉缓存尚未同步。");
     const collection = entityType === "project" ? cached.projects : cached.people;
     const entity = collection?.find((item) => item.recordId === recordId);
-    if (!entity) throw new Error("没有在 Domi 缓存中找到该项目或人脉。");
+    if (!entity) throw new Error("没有在 domi 缓存中找到该项目或人脉。");
 
     const projectConfig = this.readProjectConfig();
     const searchRoot = entityType === "project"
@@ -400,7 +400,7 @@ class DomiIntegration {
       "cache"
     );
     if (!fs.existsSync(cacheRoot)) {
-      throw new Error("未找到已安装的 Domi 插件。请先在 Codex 中安装 Domi。 ");
+      throw new Error("未找到已安装的 domi 插件。请先在 Codex 中安装 domi。 ");
     }
     const candidates = fs.readdirSync(cacheRoot, { withFileTypes: true })
       .filter((marketplace) => marketplace.isDirectory())
@@ -430,7 +430,7 @@ class DomiIntegration {
       .sort((left, right) => compareVersions(right.version, left.version)
         || Number(right.marketplace === "domi-managed") - Number(left.marketplace === "domi-managed"));
     if (!candidates.length) {
-      throw new Error("Domi 插件目录存在，但没有可读取的 plugin.json。 ");
+      throw new Error("domi 插件目录存在，但没有可读取的 plugin.json。 ");
     }
     return candidates[0];
   }
@@ -446,7 +446,7 @@ class DomiIntegration {
     const localDatabaseRaw = String(settings.localDatabasePath || "").trim();
     if (backend === "local") {
       if (!localRepositoryRaw || !localDatabaseRaw) {
-        throw new Error("Domi 本地资料库尚未配置。请在豆米设置的“资料连接”中选择本地资料库目录。 ");
+        throw new Error("domi 本地资料库尚未配置。请在 domi 设置的“资料连接”中选择本地资料库目录。 ");
       }
       return {
         backend,
@@ -458,7 +458,7 @@ class DomiIntegration {
       };
     }
     if (!appToken || !tableId || !wikiSpaceId || !localLibraryRaw) {
-      throw new Error("Domi 项目库连接尚未配置。请在豆米设置的“资料连接”中填写项目 Base、Wiki 和本地资料库目录。 ");
+      throw new Error("domi 项目库连接尚未配置。请在 domi 设置的“资料连接”中填写项目 Base、Wiki 和本地资料库目录。 ");
     }
     return {
       backend,
@@ -476,7 +476,7 @@ class DomiIntegration {
       const localLibraryDir = resolveHomePath(settings.localRepositoryDir);
       const localDatabasePath = resolveHomePath(settings.localDatabasePath);
       if (!localLibraryDir || !localDatabasePath) {
-        throw new Error("Domi 本地行业动态库尚未配置。请在豆米设置的“资料连接”中选择本地资料库目录。 ");
+        throw new Error("domi 本地行业动态库尚未配置。请在 domi 设置的“资料连接”中选择本地资料库目录。 ");
       }
       return {
         backend: "local",
@@ -490,7 +490,7 @@ class DomiIntegration {
     const appToken = String(settings.radarBaseToken || "").trim();
     const tableId = String(settings.radarTableId || "").trim();
     if (!appToken || !tableId) {
-      throw new Error("Domi 行业动态连接尚未配置。请在豆米设置的“资料连接”中填写行业动态 Base。 ");
+      throw new Error("domi 行业动态连接尚未配置。请在 domi 设置的“资料连接”中填写行业动态 Base。 ");
     }
     return { backend: "feishu", appToken, tableId, baseUrl: "" };
   }
@@ -534,7 +534,7 @@ class DomiIntegration {
       const value = JSON.parse(stdout.trim());
       if (value?.ok === false) {
         const message = typeof value.error === "string" ? value.error : value.error?.message;
-        throw new Error(message || "Domi 命令执行失败。 ");
+        throw new Error(message || "domi 命令执行失败。 ");
       }
       return value;
     };
@@ -568,7 +568,7 @@ class DomiIntegration {
 
   async runPlaudWorker(command, args = [], pluginInput) {
     if (!this.plaudEnabled()) {
-      throw new Error("PLAUD 未启用。请先在豆米设置的“录音转写”中开启。");
+      throw new Error("PLAUD 未启用。请先在 domi 设置的“录音转写”中开启。");
     }
     const { plugin } = this.plaudPaths(pluginInput);
     return this.runJson(process.execPath, [this.plaudWorker, command, plugin.root, ...args], {
@@ -779,7 +779,7 @@ class DomiIntegration {
 
   async renamePlaud(request = {}) {
     if (!this.plaudEnabled()) {
-      return { ok: false, error: "PLAUD 未启用。请先在豆米设置的“录音转写”中开启。" };
+      return { ok: false, error: "PLAUD 未启用。请先在 domi 设置的“录音转写”中开启。" };
     }
     const fileId = String(request.fileId || "").trim();
     const fileName = String(request.fileName || "").trim();
@@ -790,7 +790,7 @@ class DomiIntegration {
 
   async deletePlaud(request = {}) {
     if (!this.plaudEnabled()) {
-      return { ok: false, error: "PLAUD 未启用。请先在豆米设置的“录音转写”中开启。" };
+      return { ok: false, error: "PLAUD 未启用。请先在 domi 设置的“录音转写”中开启。" };
     }
     const fileId = String(request.fileId || "").trim();
     const result = await this.runPlaudWorker("trash", [fileId]);
@@ -859,7 +859,7 @@ class DomiIntegration {
     const appToken = String(settings.peopleBaseToken || "").trim();
     const tableId = String(settings.peopleTableId || "").trim();
     if (!appToken || !tableId) {
-      throw new Error("Domi 人脉库连接尚未配置。请在豆米设置的“资料连接”中填写人脉 Base。 ");
+      throw new Error("domi 人脉库连接尚未配置。请在 domi 设置的“资料连接”中填写人脉 Base。 ");
     }
     return { appToken, tableId };
   }
@@ -887,7 +887,7 @@ class DomiIntegration {
       pageToken = data.page_token || "";
       if (!pageToken) break;
     }
-    throw new Error("Domi Base 记录超过同步上限或分页信息缺失。 ");
+    throw new Error("domi Base 记录超过同步上限或分页信息缺失。 ");
   }
 
   weeklyNewsCacheKey(days, page) {
@@ -1202,7 +1202,7 @@ class DomiIntegration {
       plugin: {
         ok: true,
         version: plugin.version,
-        displayName: plugin.manifest?.interface?.displayName || "Domi",
+        displayName: plugin.manifest?.interface?.displayName || "domi",
         root: plugin.root
       },
       lark: {

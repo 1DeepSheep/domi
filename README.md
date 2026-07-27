@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="public/domi-icon.png" width="96" alt="豆米图标">
+  <img src="public/domi-icon.png" width="96" alt="domi 图标">
 </p>
 
-<h1 align="center">豆米 Domi</h1>
+<h1 align="center">domi</h1>
 
 <p align="center">
   面向投资研究与项目管理的 Mac 桌面智能工作台。<br>
@@ -12,14 +12,14 @@
 <p align="center">
   <a href="https://github.com/1DeepSheep/domi-releases/releases/latest">下载最新版</a>
   ·
-  <a href="https://github.com/1DeepSheep/domi-plugin">Domi 插件</a>
+  <a href="https://github.com/1DeepSheep/domi-plugin">domi 插件</a>
   ·
   <a href="https://github.com/1DeepSheep/domi-workbench/issues">反馈问题</a>
 </p>
 
 > 当前公开版仅提供 Apple Silicon Mac 安装包。首次启动向导会自动检测或安装 Codex CLI，并完成连接测试。
 
-## 一眼看懂豆米能做什么
+## 一眼看懂 domi 能做什么
 
 - **行业雷达**：自动刷新行业新闻，按领域和子领域筛选，突出值得关注的新动态。
 - **项目研究**：从公司名、链接、BP、截图或已有材料出发，完成桌面研究、投资分析和项目归档。
@@ -31,23 +31,23 @@
 
 ## 安装
 
-### 1. 下载豆米
+### 1. 下载 domi
 
-1. 打开 [Domi Releases](https://github.com/1DeepSheep/domi-releases/releases/latest)。
+1. 打开 [domi Releases](https://github.com/1DeepSheep/domi-releases/releases/latest)。
 2. 下载名称以 `arm64.dmg` 结尾的安装包。
-3. 打开 DMG，把「豆米」拖入“应用程序”文件夹。
-4. 启动豆米。公开安装包已经 Developer ID 签名、Apple 公证并附加公证票据。
+3. 打开 DMG，把「domi」拖入“应用程序”文件夹。
+4. 启动 domi。公开安装包已经 Developer ID 签名、Apple 公证并附加公证票据。
 
 ### 2. 安装并连接 Codex
 
-首次启动时，豆米会检测终端中的 Codex CLI；如果尚未安装，可以直接点击“安装 Codex”。豆米从 OpenAI 官方安装地址下载脚本，并把 Codex 安装到当前用户的 `~/.local/bin`，不会修改系统目录。
+首次启动时，domi 会检测终端中的 Codex CLI；如果尚未安装，可以直接点击“安装 Codex”。domi 从 OpenAI 官方安装地址下载脚本，并把 Codex 安装到当前用户的 `~/.local/bin`，不会修改系统目录。
 
 随后选择一种身份方式：
 
 - **ChatGPT 账号**：打开 Codex 官方登录，复用本机 ChatGPT / Codex 账号；
 - **Responses 中转站**：填写兼容 OpenAI Responses API 的地址、模型名称和 API Key。密钥只写入 macOS 钥匙串，`~/.codex/config.toml` 只保存地址、模型和读取钥匙串的命令。
 
-最后点击“测试完整连接”。豆米会启动一次不保存历史、只读沙箱的临时 Codex 任务，同时验证模型响应和 Shell 工具调用；两项都通过后才允许完成首次设置。普通 Chat Completions 接口不支持完整 Codex 能力，不能作为中转站使用。安装方式与配置格式分别遵循 [Codex CLI 官方文档](https://learn.chatgpt.com/docs/codex/cli) 和 [Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+最后点击“测试完整连接”。domi 会启动一次不保存历史、只读沙箱的临时 Codex 任务，同时验证模型响应和 Shell 工具调用；两项都通过后才允许完成首次设置。普通 Chat Completions 接口不支持完整 Codex 能力，不能作为中转站使用。安装方式与配置格式分别遵循 [Codex CLI 官方文档](https://learn.chatgpt.com/docs/codex/cli) 和 [Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
 ### 3. 选择资料库和可选连接
 
@@ -56,7 +56,7 @@
 1. 选择“本地资料库”或“飞书资料库”；
 2. 根据需要连接 PLAUD，也可以直接跳过，以后再连接。
 
-豆米会自动安装与当前客户端匹配的 Domi 插件。普通用户不需要另外安装插件。
+domi 会自动安装与当前客户端匹配的 domi 插件。普通用户不需要另外安装插件。
 
 ## 资料保存在哪里
 
@@ -67,22 +67,22 @@
 
 本地 Markdown 编辑器支持粘贴图片；复制整篇文档时也会复制可用的图片内容。两种模式可以使用同一套项目分类、研究和写作规则，区别只在资料写入位置。
 
-从本地模式切换到飞书时，可选择先迁移本地资料：豆米会按领域和子领域把项目主页、纪要与研究 Markdown 写入对应 Wiki，上传文档内图片，并把项目、人脉、行业动态分别写入 Watching List、People Base 和行业动态 Base。项目按公司名称、人脉按姓名与所属组织、新闻按事件 ID 匹配现有记录；每条写入都会回读校验。只有全部资料通过校验后才切换模式，本地文件、SQLite 数据和原始附件始终保留。
+从本地模式切换到飞书时，可选择先迁移本地资料：domi 会按领域和子领域把项目主页、纪要与研究 Markdown 写入对应 Wiki，上传文档内图片，并把项目、人脉、行业动态分别写入 Watching List、People Base 和行业动态 Base。项目按公司名称、人脉按姓名与所属组织、新闻按事件 ID 匹配现有记录；每条写入都会回读校验。只有全部资料通过校验后才切换模式，本地文件、SQLite 数据和原始附件始终保留。
 
 正式版默认数据目录与应用程序分离：
 
 ```text
-~/Library/Application Support/豆米/domi.sqlite3
-~/Library/Application Support/豆米/backups/
-~/Documents/豆米/
+~/Library/Application Support/domi/domi.sqlite3
+~/Library/Application Support/domi/backups/
+~/Documents/domi/
 ```
 
-首次安装得到的是空白工作台。覆盖安装和自动更新只替换应用程序，不会删除用户的任务、目录映射或连接设置；数据库升级前会自动保留最近三份备份。
+首次安装得到的是空白工作台。覆盖安装和自动更新只替换应用程序，不会删除用户的任务、目录映射或连接设置；数据库升级前会自动保留最近三份备份。由 `0.4.x` 升级到 `0.5.0` 时，domi 会在首次启动时把旧版 Application Support 和默认文稿工作区迁移到上述新目录；如果迁移无法完成，会继续使用原目录，避免把用户显示成空白工作台。
 
 ## 隐私与连接
 
 - 仓库和安装包不包含维护者的历史任务、录音、项目材料、组织名称、飞书地址或连接凭据。
-- ChatGPT/Codex 登录状态由本机 Codex 管理；中转站 API Key 只保存在 macOS 钥匙串，不写入豆米设置、Codex 配置、日志或诊断报告。
+- ChatGPT/Codex 登录状态由本机 Codex 管理；中转站 API Key 只保存在 macOS 钥匙串，不写入 domi 设置、Codex 配置、日志或诊断报告。
 - 飞书、PLAUD 和目录映射由每位用户在自己的 Mac 上配置并保存在本地。
 - PLAUD 完全可选；未连接时不会启动 PLAUD 队列或读取录音。
 - Keychain、SQLite、工作区和 Codex App Server 可在“系统诊断”中进行脱敏检查。
@@ -104,7 +104,7 @@ npm install
 npm run dev
 ```
 
-`npm run dev` 默认从 `~/plugins/domi` 读取 Domi 插件源码。也可以通过 `DOMI_PLUGIN_SOURCE=/absolute/path npm run dev` 指定其他插件目录。
+`npm run dev` 默认从 `~/plugins/domi` 读取 domi 插件源码。也可以通过 `DOMI_PLUGIN_SOURCE=/absolute/path npm run dev` 指定其他插件目录。
 
 提交或打包前运行：
 
