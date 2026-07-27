@@ -5763,6 +5763,78 @@ body.panel-resizing .main-grid {
   background: #fcf1ed;
 }
 
+.codex-runtime-update {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 20px;
+  border-bottom: 1px solid var(--line);
+  padding: 20px 0;
+}
+
+.codex-runtime-update-copy {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--accent-strong);
+}
+
+.codex-runtime-update-copy span,
+.codex-runtime-update-copy strong,
+.codex-runtime-update-copy small {
+  display: block;
+}
+
+.codex-runtime-update-copy strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.codex-runtime-update-copy small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: var(--font-en);
+  font-size: 9px;
+}
+
+.codex-runtime-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.codex-runtime-actions button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: #fff;
+  padding: 0 11px;
+  font-family: var(--font-cn);
+  font-size: 9px;
+}
+
+.codex-runtime-actions button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.codex-runtime-actions button:disabled {
+  opacity: 0.5;
+}
+
+.codex-runtime-update > p {
+  grid-column: 1 / -1;
+  margin: 0 0 0 36px;
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
 .update-channel-setting {
   display: flex;
   align-items: center;
@@ -5980,6 +6052,18 @@ body.panel-resizing .main-grid {
   background: #fdfaf7;
 }
 
+.codex-install-step.working {
+  border-color: #e4ddd7;
+  color: var(--accent-strong);
+  background: #fcfaf8;
+}
+
+.codex-install-step.error {
+  border-color: #ebcfc5;
+  color: var(--danger);
+  background: #fdf7f5;
+}
+
 .codex-install-step > i {
   display: grid;
   width: 32px;
@@ -5991,6 +6075,11 @@ body.panel-resizing .main-grid {
 }
 
 .codex-install-step.warning > i {
+  background: #f8ece6;
+}
+
+.codex-install-step.working > i,
+.codex-install-step.error > i {
   background: #f8ece6;
 }
 
@@ -6045,6 +6134,20 @@ body.panel-resizing .main-grid {
 .setup-inline-actions button:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.codex-install-badge {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  border-radius: 999px;
+  color: currentColor;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  padding: 0 10px;
+  font-family: var(--font-cn);
+  font-size: 8px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .codex-mode-options {

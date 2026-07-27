@@ -90,6 +90,36 @@ const browserFallback: Window["workbench"] = {
     credentialStored: false,
     error: "请在 Electron 窗口中安装 Codex CLI。"
   }),
+  getCodexRuntimeStatus: async () => ({
+    ok: false,
+    managed: false,
+    path: "",
+    version: "",
+    bundledVersion: "",
+    rollbackAvailable: false,
+    rollbackVersion: "",
+    error: "浏览器预览模式不管理 Codex Runtime。"
+  }),
+  updateCodexRuntime: async () => ({
+    ok: false,
+    managed: false,
+    path: "",
+    version: "",
+    bundledVersion: "",
+    rollbackAvailable: false,
+    rollbackVersion: "",
+    error: "浏览器预览模式不能更新 Codex Runtime。"
+  }),
+  rollbackCodexRuntime: async () => ({
+    ok: false,
+    managed: false,
+    path: "",
+    version: "",
+    bundledVersion: "",
+    rollbackAvailable: false,
+    rollbackVersion: "",
+    error: "浏览器预览模式不能恢复 Codex Runtime。"
+  }),
   configureCodexRelay: async () => ({
     ok: false,
     error: "请在 Electron 窗口中配置 Codex 中转站。"

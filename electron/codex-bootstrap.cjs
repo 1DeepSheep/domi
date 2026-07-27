@@ -347,6 +347,9 @@ class CodexBootstrapService {
     exec = execFileAsync,
     fetchInstaller = fetchOfficialInstaller,
     resolveBinary = resolveCodexBinary,
+    installBundled = null,
+    runtimeManager = null,
+    installerEnvironment = async () => ({}),
     writeCredential = writeCredentialToKeychain,
     runCodex = runCodexWithPrompt,
     sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -355,6 +358,9 @@ class CodexBootstrapService {
     this.exec = exec;
     this.fetchInstaller = fetchInstaller;
     this.resolveBinary = resolveBinary;
+    this.installBundled = installBundled;
+    this.runtimeManager = runtimeManager;
+    this.installerEnvironment = installerEnvironment;
     this.writeCredential = writeCredential;
     this.runCodex = runCodex;
     this.sleep = sleep;
@@ -398,16 +404,45 @@ class CodexBootstrapService {
     const existing = await this.status();
     if (existing.ok) return { ...existing, installedNow: false };
 
+    if (this.installBundled) {
+      try {
+        const installed = await this.installBundled();
+        await this.sleep(100);
+        const status = await this.status(installed.path);
+        if (!status.ok) {
+          throw new Error(status.error || "内置 Codex Runtime 已安装，但没有找到可执行文件。");
+        }
+        return { ...status, installedNow: true, source: "bundled" };
+      } catch (error) {
+        return {
+          ok: false,
+          installed: false,
+          installedNow: false,
+          path: "",
+          version: "",
+          credentialStored: false,
+          error: userFacingError(error)
+        };
+      }
+    }
+
+    return this.installOnline();
+  }
+
+  async installOnline({ update = false } = {}) {
+    const previous = update ? this.runtimeManager?.captureCurrent?.() : null;
     const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-install-"));
     const installerPath = path.join(temporaryDirectory, "install.sh");
     try {
       const script = await this.fetchInstaller();
       fs.writeFileSync(installerPath, script, { mode: 0o700 });
+      const proxyEnvironment = await this.installerEnvironment();
       await this.exec("/bin/sh", [installerPath], {
         env: codexEnvironment({
           HOME: this.homeDir,
           CODEX_NON_INTERACTIVE: "1",
-          CODEX_INSTALL_DIR: path.join(this.homeDir, ".local", "bin")
+          CODEX_INSTALL_DIR: path.join(this.homeDir, ".local", "bin"),
+          ...proxyEnvironment
         }),
         timeout: 5 * 60_000,
         maxBuffer: 4 * 1024 * 1024
@@ -418,8 +453,19 @@ class CodexBootstrapService {
       if (!status.ok) {
         throw new Error(status.error || "Codex 已执行安装，但没有找到可执行文件。");
       }
-      return { ...status, installedNow: true };
+      if (update && this.runtimeManager) {
+        const runtime = await this.runtimeManager.recordExternalUpdate(previous);
+        return {
+          ...status,
+          ...runtime,
+          runtime,
+          installedNow: true,
+          source: "official-update"
+        };
+      }
+      return { ...status, installedNow: true, source: "official" };
     } catch (error) {
+      if (update && previous) this.runtimeManager?.restoreCaptured?.(previous);
       return {
         ok: false,
         installed: false,
@@ -431,6 +477,44 @@ class CodexBootstrapService {
       };
     } finally {
       fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  }
+
+  async updateRuntime() {
+    return this.installOnline({ update: true });
+  }
+
+  async runtimeStatus() {
+    if (!this.runtimeManager) {
+      const status = await this.status();
+      return {
+        ...status,
+        managed: false,
+        bundledVersion: "",
+        rollbackAvailable: false,
+        rollbackVersion: ""
+      };
+    }
+    const managed = await this.runtimeManager.snapshot();
+    if (managed.ok) return managed;
+    const external = await this.status();
+    if (!external.ok) return managed;
+    return {
+      ...managed,
+      ok: true,
+      managed: false,
+      path: external.path,
+      version: external.version,
+      error: ""
+    };
+  }
+
+  async rollbackRuntime() {
+    try {
+      if (!this.runtimeManager) throw new Error("当前版本不支持 Codex Runtime 回退。");
+      return await this.runtimeManager.rollback();
+    } catch (error) {
+      return { ok: false, error: userFacingError(error) };
     }
   }
 
