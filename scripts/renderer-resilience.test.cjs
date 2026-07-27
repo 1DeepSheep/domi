@@ -121,6 +121,21 @@ assert.match(
 );
 assert.match(
   setupCenter,
+  /autoInstallAttemptedRef[\s\S]*?!required[\s\S]*?codexStatus === null[\s\S]*?codexInstalled[\s\S]*?void installCodex\(true\)/,
+  "First-run onboarding must install Codex automatically after the initial binary check."
+);
+assert.match(
+  setupCenter,
+  /Codex CLI 自动安装未完成[\s\S]*?onClick=\{\(\) => void installCodex\(false\)\}[\s\S]*?重新安装/,
+  "A failed automatic Codex install must expose an explicit retry without restoring the old manual first step."
+);
+assert.match(
+  setupCenter,
+  /disabled=\{saving \|\| connectionTestBusy \|\| installBusy \|\| !codexInstalled\}/,
+  "Onboarding must not advance while the required Codex installation is incomplete."
+);
+assert.match(
+  setupCenter,
   /connectionTestBusy[\s\S]*?"正在测试并进入…"/,
   "The first-run primary action must explain that it is testing before advancing."
 );

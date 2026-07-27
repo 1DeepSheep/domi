@@ -4,6 +4,7 @@ release/
 build/*.icns
 build/domi-plugin/
 build/domi-plugin-lock.json
+build/codex-runtime/
 .release-input/
 .DS_Store
 

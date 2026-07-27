@@ -17,7 +17,7 @@
   <a href="https://github.com/1DeepSheep/domi-workbench/issues">反馈问题</a>
 </p>
 
-> 当前公开版仅提供 Apple Silicon Mac 安装包。首次启动向导会自动检测或安装 Codex CLI，并完成连接测试。
+> 当前公开版仅提供 Apple Silicon Mac 安装包。安装包内置经过 SHA-256 校验的 OpenAI Codex CLI 基线，首次启动可离线完成运行时准备，再进行连接测试。
 
 ## 一眼看懂 domi 能做什么
 
@@ -40,7 +40,7 @@
 
 ### 2. 安装并连接 Codex
 
-首次启动时，domi 会检测终端中的 Codex CLI；如果尚未安装，可以直接点击“安装 Codex”。domi 从 OpenAI 官方安装地址下载脚本，并把 Codex 安装到当前用户的 `~/.local/bin`，不会修改系统目录。
+首次启动时，domi 会检测可用的 Codex CLI；如果尚未安装，会自动校验并解压安装包内置的 OpenAI 官方独立发行版，无需打开终端，也不依赖当时能否连接 GitHub。运行时保存在 Codex 官方的 `~/.codex/packages/standalone` 目录，并在 `~/.local/bin` 建立用户级链接，不修改系统目录。版本、来源与校验值记录在 [`resources/codex-runtime.json`](resources/codex-runtime.json)，第三方说明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 随后选择一种身份方式：
 
@@ -89,7 +89,10 @@ domi 会自动安装与当前客户端匹配的 domi 插件。普通用户不需
 
 ## 更新
 
-正式版内置更新检查。新版本下载并重启安装后会继续使用原有资料库、任务历史和连接设置。
+正式版内置两类更新：
+
+- **domi 客户端**：发现 GitHub Release 新版本后可以下载并重启安装，原有资料库、任务历史和连接设置继续保留；
+- **Codex Runtime**：在“设置 → 软件更新”中点击“检查并更新”。domi 使用系统网络设置运行 OpenAI 官方更新器，更新后保留上一版本入口；下载、校验或启动验证失败时继续使用当前版本，也可以手动恢复上一版本。
 
 也可以随时前往 [发行仓库](https://github.com/1DeepSheep/domi-releases/releases/latest) 手动下载最新版。
 

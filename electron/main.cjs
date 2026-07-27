@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, Notification, protocol, safeStorage, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, Notification, protocol, safeStorage, session, shell } = require("electron");
 const { execFile } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -15,6 +15,7 @@ const {
   createElectronNetFetcher,
   fetchOfficialInstaller
 } = require("./codex-bootstrap.cjs");
+const { CodexRuntimeManager } = require("./codex-runtime.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
 const { DomiPluginManager } = require("./domi-plugin-manager.cjs");
@@ -109,6 +110,7 @@ let domiIntegration = null;
 let domiPluginManager = null;
 let appSettings = null;
 let codexBootstrap = null;
+let codexRuntimeManager = null;
 let updateService = null;
 const serviceCoordinator = new ServiceCoordinator();
 
@@ -214,10 +216,57 @@ function getCodexBootstrap() {
   if (!codexBootstrap) {
     const electronFetcher = createElectronNetFetcher(net);
     codexBootstrap = new CodexBootstrapService({
-      fetchInstaller: () => fetchOfficialInstaller(electronFetcher)
+      fetchInstaller: () => fetchOfficialInstaller(electronFetcher),
+      installBundled: () => getCodexRuntimeManager().installBundled(),
+      runtimeManager: getCodexRuntimeManager(),
+      installerEnvironment: resolveCodexInstallerProxyEnvironment
     });
   }
   return codexBootstrap;
+}
+
+function getCodexRuntimeManager() {
+  if (!codexRuntimeManager) {
+    const runtimeRoot = app.isPackaged
+      ? path.join(process.resourcesPath, "codex-runtime")
+      : path.join(rootDir, "build", "codex-runtime");
+    codexRuntimeManager = new CodexRuntimeManager({
+      archivePath: path.join(runtimeRoot, "codex-package.tar.gz"),
+      manifestPath: app.isPackaged
+        ? path.join(runtimeRoot, "manifest.json")
+        : path.join(rootDir, "resources", "codex-runtime.json")
+    });
+  }
+  return codexRuntimeManager;
+}
+
+async function resolveCodexInstallerProxyEnvironment() {
+  try {
+    const rules = await session.defaultSession.resolveProxy(
+      "https://github.com/openai/codex/releases/latest"
+    );
+    const rule = String(rules || "")
+      .split(";")
+      .map((value) => value.trim())
+      .find((value) => value && value.toUpperCase() !== "DIRECT");
+    if (!rule) return {};
+    const match = rule.match(/^(PROXY|HTTPS?|SOCKS5?)\s+(.+)$/i);
+    if (!match || !/^[A-Za-z0-9_.:[\]-]+$/.test(match[2])) return {};
+    if (/^SOCKS/i.test(match[1])) {
+      return {
+        ALL_PROXY: `socks5h://${match[2]}`,
+        all_proxy: `socks5h://${match[2]}`
+      };
+    }
+    return {
+      HTTPS_PROXY: `http://${match[2]}`,
+      HTTP_PROXY: `http://${match[2]}`,
+      https_proxy: `http://${match[2]}`,
+      http_proxy: `http://${match[2]}`
+    };
+  } catch {
+    return {};
+  }
 }
 
 function getUpdateService() {
@@ -1471,6 +1520,34 @@ async function installCodexCli() {
   return { ...result, pausedBackgroundRuns: maintenance.pausedBackgroundRuns };
 }
 
+async function codexRuntimeStatus() {
+  return getCodexBootstrap().runtimeStatus();
+}
+
+async function updateCodexRuntime() {
+  const maintenance = prepareCodexConnectionMaintenance(
+    "请先停止正在执行的用户任务，再更新 Codex Runtime。"
+  );
+  if (!maintenance.ok) return maintenance;
+  const result = await getCodexBootstrap().updateRuntime();
+  if (!result.ok) return result;
+  getAppSettings().save({ codexPath: result.path });
+  resetCodexClient();
+  return { ...result, pausedBackgroundRuns: maintenance.pausedBackgroundRuns };
+}
+
+async function rollbackCodexRuntime() {
+  const maintenance = prepareCodexConnectionMaintenance(
+    "请先停止正在执行的用户任务，再恢复 Codex Runtime。"
+  );
+  if (!maintenance.ok) return maintenance;
+  const result = await getCodexBootstrap().rollbackRuntime();
+  if (!result.ok) return result;
+  getAppSettings().save({ codexPath: result.path });
+  resetCodexClient();
+  return { ...result, pausedBackgroundRuns: maintenance.pausedBackgroundRuns };
+}
+
 async function configureCodexRelay(request = {}) {
   const maintenance = prepareCodexConnectionMaintenance(
     "请先停止正在执行的用户任务，再修改 Codex 中转站。"
@@ -2032,6 +2109,9 @@ ipcMain.handle("settings:select-directory", (event, currentPath) =>
   selectLocalDirectory(event.sender, currentPath)
 );
 ipcMain.handle("settings:install-codex", () => installCodexCli());
+ipcMain.handle("settings:codex-runtime-status", () => codexRuntimeStatus());
+ipcMain.handle("settings:update-codex-runtime", () => updateCodexRuntime());
+ipcMain.handle("settings:rollback-codex-runtime", () => rollbackCodexRuntime());
 ipcMain.handle("settings:configure-relay", (_event, request) => configureCodexRelay(request));
 ipcMain.handle("settings:test-codex", () => testCodexConnection());
 ipcMain.handle("settings:chatgpt-login", () => startChatGptLogin());
