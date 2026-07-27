@@ -655,6 +655,7 @@ export type CodexSetupResult = {
   configured?: boolean;
   codex?: CodexCheckResult;
   verification?: CodexConnectionVerification;
+  pausedBackgroundRuns?: number;
   error?: string;
 };
 
@@ -768,6 +769,7 @@ export type CodexRunRequest = {
   requestText?: string;
   threadId?: string;
   ephemeral?: boolean;
+  background?: boolean;
   workflowId?: string;
   webSearch?: boolean;
   model?: string;
