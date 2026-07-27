@@ -1,7 +1,7 @@
 {
   "name": "domi-workbench",
   "productName": "豆米",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "author": "Domi Team",
   "license": "Apache-2.0",
   "private": true,
