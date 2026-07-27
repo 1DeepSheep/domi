@@ -1,7 +1,9 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  codexRunExecutionMode,
   codexTurnContext,
+  partitionCodexRuns,
   requestCodexTurn,
   runtimeAdditionalContext,
   threadPersistenceOptions
@@ -11,6 +13,23 @@ test("background runs create ephemeral Codex threads", () => {
   assert.deepEqual(threadPersistenceOptions({ ephemeral: true }), { ephemeral: true });
   assert.deepEqual(threadPersistenceOptions({ ephemeral: false }), {});
   assert.deepEqual(threadPersistenceOptions({}), {});
+});
+
+test("connection maintenance distinguishes background automation from user tasks", () => {
+  assert.equal(codexRunExecutionMode({ background: true }), "background");
+  assert.equal(codexRunExecutionMode({ background: false }), "foreground");
+  assert.equal(codexRunExecutionMode({}), "foreground");
+
+  const automaticRun = { runId: "radar", executionMode: "background" };
+  const userRun = { runId: "user-task", executionMode: "foreground" };
+  const legacyRun = { runId: "legacy-task" };
+  assert.deepEqual(
+    partitionCodexRuns([automaticRun, userRun, legacyRun]),
+    {
+      background: [automaticRun],
+      foreground: [userRun, legacyRun]
+    }
+  );
 });
 
 test("runtime preflight is application context instead of user prompt text", () => {

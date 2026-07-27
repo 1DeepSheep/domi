@@ -8,6 +8,22 @@ function threadPersistenceOptions(payload = {}) {
   return payload.ephemeral === true ? { ephemeral: true } : {};
 }
 
+function codexRunExecutionMode(payload = {}) {
+  return payload.background === true ? "background" : "foreground";
+}
+
+function partitionCodexRuns(runs = []) {
+  const partition = {
+    background: [],
+    foreground: []
+  };
+  for (const run of runs) {
+    const mode = run?.executionMode === "background" ? "background" : "foreground";
+    partition[mode].push(run);
+  }
+  return partition;
+}
+
 function runtimeAdditionalContext(runtimeContext) {
   const value = String(runtimeContext || "").trim();
   if (!value) return undefined;
@@ -101,8 +117,10 @@ async function requestCodexTurn(client, params, prompt, runtimeContext, options 
 }
 
 module.exports = {
+  codexRunExecutionMode,
   compatibilityInput,
   codexTurnContext,
+  partitionCodexRuns,
   requestCodexTurn,
   runtimeAdditionalContext,
   threadPersistenceOptions
