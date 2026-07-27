@@ -9,6 +9,7 @@ function read(relativePath) {
 }
 
 const app = read("src/App.tsx");
+const setupCenter = read("src/SetupCenter.tsx");
 const editor = read("src/RichMarkdownEditor.tsx");
 const editorBoundary = read("src/MarkdownEditorErrorBoundary.tsx");
 const sectionBoundary = read("src/SectionErrorBoundary.tsx");
@@ -112,6 +113,16 @@ assert.match(
   app,
   /const plaudEnabled = appSettings\?\.plaudConnectionMode === "enabled"[\s\S]*?workflow\.requiresPlaud \|\| plaudEnabled/,
   "PLAUD-dependent quick starts must remain hidden until the user enables PLAUD."
+);
+assert.match(
+  setupCenter,
+  /if \(required && !connectionVerified\) \{[\s\S]*?const verified = await testConnection\(\);[\s\S]*?if \(!verified\) return;/,
+  "First-run Next must run the full Codex connection test instead of blocking on a hidden prerequisite."
+);
+assert.match(
+  setupCenter,
+  /connectionTestBusy[\s\S]*?"正在测试并进入…"/,
+  "The first-run primary action must explain that it is testing before advancing."
 );
 assert.doesNotMatch(
   app,

@@ -147,8 +147,8 @@ export default function SetupCenter({
       return;
     }
     if (required && !connectionVerified) {
-      setError("请完成当前选择的连接方式，并运行一次完整连接测试。");
-      return;
+      const verified = await testConnection();
+      if (!verified) return;
     }
     if (await save(false) && continueToData) setTab("data");
   }
@@ -282,7 +282,7 @@ export default function SetupCenter({
     }
   }
 
-  async function testConnection() {
+  async function testConnection(): Promise<boolean> {
     setConnectionTestBusy(true);
     setError("");
     setNotice("");
@@ -291,13 +291,15 @@ export default function SetupCenter({
       const result = await workbench.testCodexConnection();
       if (!result.ok) {
         setError(result.error || "Codex 完整连接测试失败。");
-        return;
+        return false;
       }
       await onRefresh();
       setConnectionVerified(true);
       setNotice(result.verification?.detail || "模型响应与 Shell 工具调用均已通过。");
+      return true;
     } catch (testError) {
       setError(testError instanceof Error ? testError.message : String(testError));
+      return false;
     } finally {
       setConnectionTestBusy(false);
     }
@@ -598,7 +600,11 @@ export default function SetupCenter({
                     <span>{connectionDetail}</span>
                   </div>
                   <b className="connection-status-badge">
-                    {connectionVerified ? "已实测" : selectedConnectionReady ? "待实测" : "待连接"}
+                    {connectionVerified
+                      ? "已实测"
+                      : selectedConnectionReady
+                        ? required ? "下一步自动测试" : "待实测"
+                        : "待连接"}
                   </b>
                 </div>
                 <div className="setup-inline-actions">
@@ -992,9 +998,18 @@ export default function SetupCenter({
                 ? "更新包必须通过 Developer ID 签名与 Apple 公证。"
                 : "诊断报告不包含登录令牌或 Base 标识。"}</span>
             {tab === "connection" && (
-              <button className="setup-primary" type="button" onClick={() => saveConnection(required)} disabled={saving}>
-                {saving && <LoaderCircle className="spinning" size={16} />}
-                {required ? "下一步：资料连接" : "保存设置"}
+              <button
+                className="setup-primary"
+                type="button"
+                onClick={() => saveConnection(required)}
+                disabled={saving || connectionTestBusy}
+              >
+                {(saving || connectionTestBusy) && <LoaderCircle className="spinning" size={16} />}
+                {connectionTestBusy
+                  ? "正在测试并进入…"
+                  : required
+                    ? "下一步：资料连接"
+                    : "保存设置"}
               </button>
             )}
             {tab === "data" && (
