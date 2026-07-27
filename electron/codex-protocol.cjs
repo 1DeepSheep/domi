@@ -29,10 +29,23 @@ function isAdditionalContextCompatibilityError(error) {
     && /(experimentalApi|capabilit|invalid|unknown|unrecognized|unsupported|unexpected)/i.test(message);
 }
 
+function isSelectedCodexConnectionReady({
+  authMode = "chatgpt",
+  requiresOpenaiAuth = true,
+  account = null,
+  relayCredentialStored = false
+} = {}) {
+  if (authMode === "relay") {
+    return relayCredentialStored === true;
+  }
+  return requiresOpenaiAuth !== true || Boolean(account);
+}
+
 module.exports = {
   DEFAULT_CODEX_CLIENT_CAPABILITIES,
   codexClientCapabilities,
   isAdditionalContextCompatibilityError,
   isExperimentalApiInitializationError,
+  isSelectedCodexConnectionReady,
   usesExperimentalApi
 };
