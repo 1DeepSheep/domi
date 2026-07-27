@@ -371,7 +371,7 @@ function prepareMarkdownDocument(document, libraryRoot) {
     const caption = String(altText || path.basename(String(target).replace(/^<|>$/g, ""))).trim() || "图片";
     if (!resolved || resolved.missing) return `> 本地图片未迁移：${caption}（${resolved?.reason || "无法解析"}）`;
     assetIndex += 1;
-    const marker = `Domi迁移图片${assetIndex}-${crypto.createHash("sha1").update(resolved.path).digest("hex").slice(0, 8)}`;
+    const marker = `domi迁移图片${assetIndex}-${crypto.createHash("sha1").update(resolved.path).digest("hex").slice(0, 8)}`;
     assets.push({ path: resolved.path, caption, marker, type: "image" });
     return `> ${marker} · ${caption}`;
   });

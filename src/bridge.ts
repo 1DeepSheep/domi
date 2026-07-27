@@ -103,7 +103,7 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     generatedAt: Date.now(),
     durationMs: 0,
-    app: { name: "豆米", version: "browser", packaged: false },
+    app: { name: "domi", version: "browser", packaged: false },
     system: { platform: "browser", arch: "unknown", release: "" },
     connection: {
       authMode: "chatgpt",
@@ -118,7 +118,7 @@ const browserFallback: Window["workbench"] = {
     error: "浏览器预览模式不能导出诊断报告。"
   }),
   reportRendererIssue: (report) => {
-    console.error("豆米渲染异常", report);
+    console.error("domi 渲染异常", report);
   },
   getUpdateStatus: async () => ({
     state: "disabled",
@@ -272,20 +272,20 @@ const browserFallback: Window["workbench"] = {
   }),
   loadDomiCache: async () => ({
     ok: false,
-    error: "浏览器预览模式不能读取 Domi 缓存。"
+    error: "浏览器预览模式不能读取 domi 缓存。"
   }),
   checkDomi: async () => ({
     ok: false,
-    error: "浏览器预览模式不能检查本地 Domi 插件。"
+    error: "浏览器预览模式不能检查本地 domi 插件。"
   }),
   listWeeklyNews: async () => ({
     ok: false,
     items: [],
-    error: "浏览器预览模式不能读取 Domi 行业新闻。"
+    error: "浏览器预览模式不能读取 domi 行业新闻。"
   }),
   saveWeeklyNewsCheckpoint: async () => ({
     ok: false,
-    error: "浏览器预览模式不能保存 Domi 行业雷达水位。"
+    error: "浏览器预览模式不能保存 domi 行业雷达水位。"
   }),
   listPlaud: async () => ({
     ok: false,
@@ -308,11 +308,11 @@ const browserFallback: Window["workbench"] = {
   }),
   loadDomiEntityMaterials: async () => ({
     ok: false,
-    error: "请在 Electron 窗口中读取 Domi 项目和人脉材料。"
+    error: "请在 Electron 窗口中读取 domi 项目和人脉材料。"
   }),
   syncDomi: async () => ({
     ok: false,
-    error: "浏览器预览模式不能同步 Domi 数据。"
+    error: "浏览器预览模式不能同步 domi 数据。"
   }),
   previewStorageMigration: async () => ({
     ok: true,

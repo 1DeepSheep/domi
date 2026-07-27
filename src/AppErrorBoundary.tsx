@@ -20,10 +20,10 @@ export default class AppErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("豆米界面渲染失败", error, info.componentStack);
+    console.error("domi 界面渲染失败", error, info.componentStack);
     workbench.reportRendererIssue({
       kind: "react-boundary",
-      message: error.message || "豆米界面渲染失败",
+      message: error.message || "domi 界面渲染失败",
       stack: [error.stack, info.componentStack].filter(Boolean).join("\n")
     });
   }
@@ -34,9 +34,9 @@ export default class AppErrorBoundary extends Component<
     return (
       <main className="app-recovery" role="alert">
         <div className="app-recovery__panel">
-          <div className="app-recovery__mark">豆米</div>
+          <div className="app-recovery__mark">domi</div>
           <h1>界面加载失败</h1>
-          <p>本地对话和配置没有被删除。重新载入后，豆米会尝试恢复正在执行的任务。</p>
+          <p>本地对话和配置没有被删除。重新载入后，domi 会尝试恢复正在执行的任务。</p>
           <button type="button" onClick={() => window.location.reload()}>
             重新载入
           </button>

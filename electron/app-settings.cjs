@@ -114,7 +114,7 @@ function validateDomiConfig(settings) {
       ];
   const missing = requiredKeys.filter((key) => !settings[key]);
   if (missing.length) {
-    throw new Error(`请补充 Domi 资料连接：${missing.map((key) => labels[key]).join("、")}。`);
+    throw new Error(`请补充 domi 资料连接：${missing.map((key) => labels[key]).join("、")}。`);
   }
   if (settings.storageBackend === "feishu") {
     for (const key of ["projectBaseToken", "projectTableId", "peopleBaseToken", "peopleTableId", "radarBaseToken", "radarTableId"]) {
@@ -151,7 +151,7 @@ class AppSettingsService {
     if (!this.domiConfigPath) return;
     const config = { version: 4 };
     for (const key of domiConfigKeys) config[key] = settings[key];
-    // Older Domi plugin builds read this key. Keep the alias until every
+    // Older domi plugin builds read this key. Keep the alias until every
     // supported plugin version understands localLibraryDir.
     config.oneDriveProjectDir = settings.localLibraryDir;
     const directory = path.dirname(this.domiConfigPath);

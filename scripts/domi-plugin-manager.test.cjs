@@ -98,4 +98,4 @@ try {
   fs.rmSync(temporaryRoot, { recursive: true, force: true });
 }
 
-console.log("Domi plugin manager tests passed.");
+console.log("domi plugin manager tests passed.");

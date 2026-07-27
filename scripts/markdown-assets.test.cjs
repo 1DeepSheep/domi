@@ -51,7 +51,7 @@ async function main() {
 
     const markdown = [
       "---",
-      "project: Domi",
+      "project: domi",
       "---",
       "# 研究纪要",
       "",
@@ -67,7 +67,7 @@ async function main() {
     assert.equal(clipboard.imageCount, 1);
     assert.equal(clipboard.missingImageCount, 0);
     assert.match(clipboard.html, /data:image\/png;base64,/);
-    assert.doesNotMatch(clipboard.html, /project: Domi/, "frontmatter should not enter rich clipboard HTML");
+    assert.doesNotMatch(clipboard.html, /project: domi/, "frontmatter should not enter rich clipboard HTML");
 
     const missing = buildMarkdownClipboardPayload({
       documentPath,
