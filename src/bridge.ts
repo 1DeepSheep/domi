@@ -2,15 +2,31 @@ import { CodexRunRequest } from "./env";
 
 const nativeWorkbench = (window as unknown as { workbench?: Window["workbench"] }).workbench;
 
+function browserWebResource(resource: string) {
+  let candidate = String(resource || "").trim().replace(/\u200b/g, "");
+  const markdown = candidate.match(/^\[[^\]]*]\(\s*(.+)\s*\)$/s);
+  if (markdown) candidate = markdown[1].trim();
+  if (candidate.startsWith("<") && candidate.endsWith(">")) candidate = candidate.slice(1, -1).trim();
+  const titled = candidate.match(/^(https?:\/\/\S+?)(?:\s+["'][^"']*["'])?$/i);
+  if (titled) candidate = titled[1];
+  try {
+    const parsed = new URL(candidate);
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
 const browserFallback: Window["workbench"] = {
   loadSettings: async () => ({
     ok: true,
     settings: {
-      version: 4,
+      version: 5,
       onboardingComplete: true,
       authMode: "chatgpt",
       apiBaseUrl: "",
       apiModel: "",
+      relayCredentialConfigured: false,
       codexPath: "",
       plaudConnectionMode: "disabled",
       storageBackend: "feishu",
@@ -34,11 +50,12 @@ const browserFallback: Window["workbench"] = {
   saveSettings: async (request) => ({
     ok: true,
     settings: {
-      version: 4,
+      version: 5,
       onboardingComplete: Boolean(request.onboardingComplete),
-      authMode: "chatgpt",
-      apiBaseUrl: "",
-      apiModel: "",
+      authMode: request.authMode === "relay" ? "relay" : "chatgpt",
+      apiBaseUrl: request.authMode === "relay" ? request.apiBaseUrl || "" : "",
+      apiModel: request.authMode === "relay" ? request.apiModel || "" : "",
+      relayCredentialConfigured: request.authMode === "relay" && Boolean(request.relayCredentialConfigured),
       codexPath: request.codexPath || "",
       plaudConnectionMode: request.plaudConnectionMode === "enabled" ? "enabled" : "disabled",
       storageBackend: request.storageBackend === "local" ? "local" : "feishu",
@@ -64,6 +81,22 @@ const browserFallback: Window["workbench"] = {
     canceled: false,
     path: "",
     error: "请在 Electron 窗口中选择本地资料库目录。"
+  }),
+  installCodex: async () => ({
+    ok: false,
+    installed: false,
+    path: "",
+    version: "",
+    credentialStored: false,
+    error: "请在 Electron 窗口中安装 Codex CLI。"
+  }),
+  configureCodexRelay: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中配置 Codex 中转站。"
+  }),
+  testCodexConnection: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中测试 Codex 连接。"
   }),
   startChatGPTLogin: async () => ({ ok: false, error: "请在 Electron 窗口中登录。" }),
   runDiagnostics: async () => ({
@@ -159,9 +192,10 @@ const browserFallback: Window["workbench"] = {
     error: "请使用 Electron 窗口粘贴图片或录音文件。"
   }),
   openResource: async (resource) => {
-    if (/^https?:\/\//i.test(resource)) {
-      window.open(resource, "_blank", "noopener,noreferrer");
-      return { ok: true, target: resource };
+    const target = browserWebResource(resource);
+    if (target) {
+      window.open(target, "_blank", "noopener,noreferrer");
+      return { ok: true, target };
     }
     return { ok: false, error: "请在 Electron 窗口中打开本地文件。", target: resource };
   },
@@ -172,6 +206,21 @@ const browserFallback: Window["workbench"] = {
     new Notification(title, { body, silent });
     return { ok: true };
   },
+  listDocumentLibrary: async () => ({
+    ok: false,
+    rootPath: "",
+    rootName: "本地文档库",
+    nodes: [],
+    documentCount: 0,
+    folderCount: 0,
+    truncated: false,
+    scannedAt: Date.now(),
+    error: "请在 Electron 窗口中读取本地文档库。"
+  }),
+  createDocumentLibraryEntry: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中新建本地文档。"
+  }),
   readMarkdown: async () => ({
     ok: false,
     error: "请在 Electron 窗口中预览本地 Markdown 文件。"

@@ -3,11 +3,12 @@ const path = require("node:path");
 
 const SETTINGS_KEY = "runtime";
 const defaultSettings = Object.freeze({
-  version: 4,
+  version: 5,
   onboardingComplete: false,
   authMode: "chatgpt",
   apiBaseUrl: "",
   apiModel: "",
+  relayCredentialConfigured: false,
   codexPath: "",
   plaudConnectionMode: "unconfigured",
   storageBackend: "feishu",
@@ -41,6 +42,7 @@ const domiConfigKeys = Object.freeze([
 ]);
 
 function normalizeSettings(value = {}) {
+  const version = Number(value.version) || 0;
   const codexPath = String(value.codexPath || "").trim();
   const localLibraryDir = String(value.localLibraryDir || value.oneDriveProjectDir || "").trim();
   const localRepositoryDir = String(value.localRepositoryDir || "").trim();
@@ -56,12 +58,14 @@ function normalizeSettings(value = {}) {
     : value.onboardingComplete
       ? "enabled"
       : "unconfigured";
+  const authMode = version >= 5 && value.authMode === "relay" ? "relay" : "chatgpt";
   return {
-    version: 4,
+    version: 5,
     onboardingComplete: Boolean(value.onboardingComplete),
-    authMode: "chatgpt",
-    apiBaseUrl: "",
-    apiModel: "",
+    authMode,
+    apiBaseUrl: authMode === "relay" ? String(value.apiBaseUrl || "").trim() : "",
+    apiModel: authMode === "relay" ? String(value.apiModel || "").trim() : "",
+    relayCredentialConfigured: authMode === "relay" && Boolean(value.relayCredentialConfigured),
     codexPath,
     plaudConnectionMode,
     storageBackend: value.storageBackend === "local" ? "local" : "feishu",
@@ -195,7 +199,7 @@ class AppSettingsService {
     }
     return {
       settings,
-      hasApiKey: false,
+      hasApiKey: settings.relayCredentialConfigured,
       secureStorageAvailable: this.safeStorage.isEncryptionAvailable(),
       updatedAt: stored.updatedAt
     };
@@ -226,7 +230,7 @@ class AppSettingsService {
     this.writeDomiConfig(settings);
     return {
       settings,
-      hasApiKey: false,
+      hasApiKey: settings.relayCredentialConfigured,
       secureStorageAvailable: this.safeStorage.isEncryptionAvailable(),
       updatedAt: saved.updatedAt
     };
@@ -235,14 +239,14 @@ class AppSettingsService {
   runtime() {
     const { settings } = this.load();
     const runtime = {
-      authMode: "chatgpt",
+      authMode: settings.authMode,
       codexPath: settings.codexPath,
       args: [],
       env: {},
-      defaultModel: "",
-      providerLabel: "个人 ChatGPT",
-      apiBaseUrl: "",
-      hasApiKey: false
+      defaultModel: settings.authMode === "relay" ? settings.apiModel : "",
+      providerLabel: settings.authMode === "relay" ? "Responses 中转站" : "个人 ChatGPT",
+      apiBaseUrl: settings.authMode === "relay" ? settings.apiBaseUrl : "",
+      hasApiKey: settings.authMode === "relay" && settings.relayCredentialConfigured
     };
     if (this.domiConfigPath) runtime.env.DOMI_CONFIG_PATH = this.domiConfigPath;
     return runtime;

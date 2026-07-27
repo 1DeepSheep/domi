@@ -7,6 +7,9 @@ declare global {
       loadSettings: () => Promise<AppSettingsResult>;
       saveSettings: (request: AppSettingsSaveRequest) => Promise<AppSettingsSaveResult>;
       selectDirectory: (currentPath?: string) => Promise<DirectorySelectionResult>;
+      installCodex: () => Promise<CodexInstallResult>;
+      configureCodexRelay: (request: CodexRelayConfigureRequest) => Promise<CodexSetupResult>;
+      testCodexConnection: () => Promise<CodexSetupResult>;
       startChatGPTLogin: () => Promise<ChatGPTLoginResult>;
       runDiagnostics: () => Promise<DiagnosticReport>;
       exportDiagnostics: (report: DiagnosticReport) => Promise<DiagnosticExportResult>;
@@ -27,6 +30,10 @@ declare global {
       ) => Promise<FileSelectionResult>;
       openResource: (resource: string) => Promise<{ ok: boolean; error?: string; target?: string }>;
       showNotification: (request: DesktopNotificationRequest) => Promise<DesktopNotificationResult>;
+      listDocumentLibrary: () => Promise<DocumentLibrarySnapshot>;
+      createDocumentLibraryEntry: (
+        request: DocumentLibraryCreateRequest
+      ) => Promise<DocumentLibraryCreateResult>;
       readMarkdown: (request: MarkdownReadRequest) => Promise<MarkdownReadResult>;
       saveMarkdown: (request: MarkdownSaveRequest) => Promise<MarkdownSaveResult>;
       renameMarkdown: (request: MarkdownRenameRequest) => Promise<MarkdownRenameResult>;
@@ -103,6 +110,44 @@ export type MarkdownDocument = {
   content: string;
   size: number;
   mtimeMs: number;
+};
+
+export type DocumentLibraryNode = {
+  kind: "folder" | "markdown" | "pdf";
+  name: string;
+  path: string;
+  relativePath: string;
+  size: number;
+  mtimeMs: number;
+  children?: DocumentLibraryNode[];
+};
+
+export type DocumentLibrarySnapshot = {
+  ok: boolean;
+  rootPath: string;
+  rootName: string;
+  nodes: DocumentLibraryNode[];
+  documentCount: number;
+  folderCount: number;
+  truncated: boolean;
+  structured?: boolean;
+  scannedAt: number;
+  error?: string;
+};
+
+export type DocumentLibraryCreateRequest = {
+  parentPath?: string;
+  kind: "folder" | "markdown";
+  name: string;
+};
+
+export type DocumentLibraryCreateResult = {
+  ok: boolean;
+  kind?: "folder" | "markdown";
+  path?: string;
+  name?: string;
+  snapshot?: DocumentLibrarySnapshot;
+  error?: string;
 };
 
 export type MarkdownReadRequest = {
@@ -307,6 +352,7 @@ export type DomiSyncResult = {
   snapshot?: DomiSnapshot;
   updatedAt?: number;
   error?: string;
+  stale?: boolean;
 };
 
 export type StorageMigrationProject = {
@@ -513,7 +559,7 @@ export type CodexCheckResult = {
   transport: "app-server" | "browser";
   workspacePath: string;
   account: CodexAccount | null;
-  authMode: "chatgpt" | "api";
+  authMode: "chatgpt" | "relay";
   providerLabel: string;
   apiBaseUrl: string;
   credentialStored: boolean;
@@ -536,11 +582,12 @@ export type CodexCheckResult = {
 };
 
 export type AppSettings = {
-  version: 4;
+  version: 5;
   onboardingComplete: boolean;
-  authMode: "chatgpt" | "api";
+  authMode: "chatgpt" | "relay";
   apiBaseUrl: string;
   apiModel: string;
+  relayCredentialConfigured: boolean;
   codexPath: string;
   plaudConnectionMode: "unconfigured" | "enabled" | "disabled";
   storageBackend: "feishu" | "local";
@@ -576,6 +623,39 @@ export type AppSettingsSaveRequest = Partial<AppSettings> & {
 export type AppSettingsSaveResult = AppSettingsResult & {
   codex?: CodexCheckResult;
   migration?: StorageMigrationResult;
+};
+
+export type CodexInstallResult = {
+  ok: boolean;
+  installed: boolean;
+  installedNow?: boolean;
+  path: string;
+  version: string;
+  credentialStored: boolean;
+  error?: string;
+};
+
+export type CodexRelayConfigureRequest = {
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+  keepExistingKey?: boolean;
+};
+
+export type CodexConnectionVerification = {
+  ok: boolean;
+  modelOk: boolean;
+  toolOk: boolean;
+  detail?: string;
+  error?: string;
+};
+
+export type CodexSetupResult = {
+  ok: boolean;
+  configured?: boolean;
+  codex?: CodexCheckResult;
+  verification?: CodexConnectionVerification;
+  error?: string;
 };
 
 export type UpdateState =
@@ -726,6 +806,7 @@ export type CodexEventPayload = {
   type:
     | "thread"
     | "started"
+    | "compatibility"
     | "assistant-delta"
     | "usage"
     | "json"
