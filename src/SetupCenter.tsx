@@ -142,12 +142,12 @@ export default function SetupCenter({
     }
     if (!selectedConnectionReady) {
       setError(draft.authMode === "relay"
-        ? "请先安全保存中转站配置并完成测试。"
+        ? "请先安全保存中转站配置并完成测试；无需登录 ChatGPT。"
         : "请先完成 ChatGPT 登录并测试连接。");
       return;
     }
     if (required && !connectionVerified) {
-      setError("请先完成登录或中转站配置，并运行一次完整连接测试。");
+      setError("请完成当前选择的连接方式，并运行一次完整连接测试。");
       return;
     }
     if (await save(false) && continueToData) setTab("data");
@@ -458,7 +458,7 @@ export default function SetupCenter({
                     ? "软件更新"
                     : "系统诊断"}</h2>
               <p>{tab === "connection"
-                ? "豆米会在本机安装 Codex CLI；你可以使用 ChatGPT 账号，或连接兼容 Responses API 的中转站。"
+                ? "豆米会在本机安装 Codex CLI；ChatGPT 账号和 Responses 中转站二选一，无需同时配置。"
                 : tab === "data"
                   ? "选择飞书协作资料库或完全本地的 SQLite + Markdown 资料库；配置仅保存在这台 Mac。"
                 : tab === "plaud"
@@ -488,7 +488,7 @@ export default function SetupCenter({
                 </button>
               </div>
 
-              <div className="codex-mode-options" role="radiogroup" aria-label="Codex 身份方式">
+              <div className="codex-mode-options" role="radiogroup" aria-label="Codex 连接方式（二选一）">
                 <button
                   type="button"
                   role="radio"
@@ -510,7 +510,7 @@ export default function SetupCenter({
                   <LogIn size={18} />
                   <span>
                     <strong>ChatGPT 账号</strong>
-                    <small>使用 Codex 官方登录，适合个人 ChatGPT / Codex 账号。</small>
+                    <small>选择后只需完成 Codex 官方登录与连接测试。</small>
                   </span>
                   <i>{draft.authMode === "chatgpt" ? <CheckCircle2 size={17} /> : null}</i>
                 </button>
@@ -529,7 +529,7 @@ export default function SetupCenter({
                   <KeyRound size={18} />
                   <span>
                     <strong>Responses 中转站</strong>
-                    <small>把本机 Codex 连接到兼容 OpenAI Responses API 的服务。</small>
+                    <small>选择后只需保存中转站并通过测试，不要求登录 ChatGPT。</small>
                   </span>
                   <i>{draft.authMode === "relay" ? <CheckCircle2 size={17} /> : null}</i>
                 </button>

@@ -4,6 +4,34 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { CodexAppServer } = require("../electron/codex-app-server.cjs");
+const { isSelectedCodexConnectionReady } = require("../electron/codex-protocol.cjs");
+
+test("ChatGPT and Responses relay are independent connection choices", () => {
+  assert.equal(isSelectedCodexConnectionReady({
+    authMode: "chatgpt",
+    requiresOpenaiAuth: true,
+    account: { email: "user@example.com" },
+    relayCredentialStored: false
+  }), true);
+  assert.equal(isSelectedCodexConnectionReady({
+    authMode: "chatgpt",
+    requiresOpenaiAuth: true,
+    account: null,
+    relayCredentialStored: true
+  }), false);
+  assert.equal(isSelectedCodexConnectionReady({
+    authMode: "relay",
+    requiresOpenaiAuth: true,
+    account: null,
+    relayCredentialStored: true
+  }), true);
+  assert.equal(isSelectedCodexConnectionReady({
+    authMode: "relay",
+    requiresOpenaiAuth: false,
+    account: { email: "user@example.com" },
+    relayCredentialStored: false
+  }), false);
+});
 
 test("concurrent requests wait for Codex App Server initialization", async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-init-test-"));
