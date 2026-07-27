@@ -32,6 +32,7 @@ function resolveCodexBinary(preferredPath = "") {
   const candidates = [
     preferredPath,
     process.env.DOMI_CODEX_PATH,
+    path.join(home, ".codex", "packages", "standalone", "current", "bin", "codex"),
     path.join(home, ".npm-global", "bin", "codex"),
     path.join(home, ".local", "bin", "codex"),
     "/opt/homebrew/bin/codex",

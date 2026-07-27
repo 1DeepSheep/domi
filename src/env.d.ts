@@ -8,6 +8,9 @@ declare global {
       saveSettings: (request: AppSettingsSaveRequest) => Promise<AppSettingsSaveResult>;
       selectDirectory: (currentPath?: string) => Promise<DirectorySelectionResult>;
       installCodex: () => Promise<CodexInstallResult>;
+      getCodexRuntimeStatus: () => Promise<CodexRuntimeStatus>;
+      updateCodexRuntime: () => Promise<CodexRuntimeActionResult>;
+      rollbackCodexRuntime: () => Promise<CodexRuntimeActionResult>;
       configureCodexRelay: (request: CodexRelayConfigureRequest) => Promise<CodexSetupResult>;
       testCodexConnection: () => Promise<CodexSetupResult>;
       startChatGPTLogin: () => Promise<ChatGPTLoginResult>;
@@ -633,6 +636,23 @@ export type CodexInstallResult = {
   version: string;
   credentialStored: boolean;
   error?: string;
+};
+
+export type CodexRuntimeStatus = {
+  ok: boolean;
+  managed: boolean;
+  path: string;
+  version: string;
+  bundledVersion: string;
+  currentTarget?: string;
+  rollbackAvailable: boolean;
+  rollbackVersion: string;
+  error?: string;
+};
+
+export type CodexRuntimeActionResult = Partial<CodexInstallResult> & CodexRuntimeStatus & {
+  runtime?: CodexRuntimeStatus;
+  pausedBackgroundRuns?: number;
 };
 
 export type CodexRelayConfigureRequest = {

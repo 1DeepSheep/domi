@@ -19,7 +19,7 @@ import {
   Terminal,
   X
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { workbench } from "./bridge";
 import {
   AppSettings,
@@ -27,6 +27,7 @@ import {
   AppSettingsSaveResult,
   ChatGPTLoginResult,
   CodexCheckResult,
+  CodexRuntimeStatus,
   DiagnosticCheck,
   DiagnosticReport,
   StorageMigrationPreview,
@@ -59,6 +60,8 @@ export default function SetupCenter({
   const [saving, setSaving] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
   const [installBusy, setInstallBusy] = useState(false);
+  const [installError, setInstallError] = useState("");
+  const autoInstallAttemptedRef = useRef(false);
   const [relayBusy, setRelayBusy] = useState(false);
   const [connectionTestBusy, setConnectionTestBusy] = useState(false);
   const [connectionVerified, setConnectionVerified] = useState(false);
@@ -69,6 +72,8 @@ export default function SetupCenter({
   const [plaudChecking, setPlaudChecking] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [codexRuntime, setCodexRuntime] = useState<CodexRuntimeStatus | null>(null);
+  const [codexRuntimeBusy, setCodexRuntimeBusy] = useState(false);
   const [migrateLocalDocuments, setMigrateLocalDocuments] = useState(true);
   const [migrationPreview, setMigrationPreview] = useState<StorageMigrationPreview | null>(null);
   const [migrationPreviewBusy, setMigrationPreviewBusy] = useState(false);
@@ -102,6 +107,9 @@ export default function SetupCenter({
     let cancelled = false;
     workbench.getUpdateStatus().then((status) => {
       if (!cancelled) setUpdateStatus(status);
+    });
+    workbench.getCodexRuntimeStatus().then((status) => {
+      if (!cancelled) setCodexRuntime(status);
     });
     const unsubscribe = workbench.onUpdateStatus((status) => setUpdateStatus(status));
     return () => {
@@ -217,24 +225,27 @@ export default function SetupCenter({
     setNotice("登录页面已在浏览器打开。完成登录后回到 domi 重新检测。");
   }
 
-  async function installCodex() {
+  async function installCodex(automatic = false) {
     setInstallBusy(true);
+    setInstallError("");
     setError("");
     setNotice("");
     try {
       const result = await workbench.installCodex();
       if (!result.ok) {
-        setError(result.error || "Codex CLI 安装失败。");
+        setInstallError(result.error || "Codex CLI 安装失败。");
         return;
       }
       setDraft((current) => ({ ...current, codexPath: result.path }));
       await onSave({ codexPath: result.path });
       await onRefresh();
-      setNotice(result.installedNow
-        ? `Codex CLI 已安装并验证：${result.version}`
-        : `已检测到可用的 Codex CLI：${result.version}`);
-    } catch (installError) {
-      setError(installError instanceof Error ? installError.message : String(installError));
+      if (!automatic) {
+        setNotice(result.installedNow
+          ? `Codex CLI 已安装并验证：${result.version}`
+          : `已检测到可用的 Codex CLI：${result.version}`);
+      }
+    } catch (installFailure) {
+      setInstallError(installFailure instanceof Error ? installFailure.message : String(installFailure));
     } finally {
       setInstallBusy(false);
     }
@@ -384,6 +395,46 @@ export default function SetupCenter({
     }
   }
 
+  async function updateRuntime() {
+    setCodexRuntimeBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await workbench.updateCodexRuntime();
+      if (!result.ok) {
+        setError(result.error || "Codex Runtime 更新失败，当前版本保持不变。");
+        return;
+      }
+      setCodexRuntime(result.runtime || result);
+      await onRefresh();
+      setNotice(`Codex Runtime 已更新：${result.version || "当前版本已生效"}。`);
+    } catch (runtimeError) {
+      setError(runtimeError instanceof Error ? runtimeError.message : String(runtimeError));
+    } finally {
+      setCodexRuntimeBusy(false);
+    }
+  }
+
+  async function rollbackRuntime() {
+    setCodexRuntimeBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await workbench.rollbackCodexRuntime();
+      if (!result.ok) {
+        setError(result.error || "没有可恢复的 Codex Runtime。");
+        return;
+      }
+      setCodexRuntime(result);
+      await onRefresh();
+      setNotice(`已恢复 Codex Runtime：${result.version || "上一版本"}。`);
+    } catch (runtimeError) {
+      setError(runtimeError instanceof Error ? runtimeError.message : String(runtimeError));
+    } finally {
+      setCodexRuntimeBusy(false);
+    }
+  }
+
   const updateStateLabel = updateStatus
     ? {
         disabled: "开发版不执行安装更新",
@@ -414,6 +465,27 @@ export default function SetupCenter({
     : codexStatus?.error || (draft.authMode === "relay"
       ? "请填写中转站信息并保存测试"
       : "请登录 ChatGPT 后重新测试");
+  const installStepState = codexInstalled
+    ? "ok"
+    : installError
+      ? "error"
+      : installBusy || required
+        ? "working"
+        : "warning";
+
+  useEffect(() => {
+    if (
+      !required
+      || tab !== "connection"
+      || codexStatus === null
+      || codexInstalled
+      || autoInstallAttemptedRef.current
+    ) {
+      return;
+    }
+    autoInstallAttemptedRef.current = true;
+    void installCodex(true);
+  }, [required, tab, codexStatus, codexInstalled]);
 
   return (
     <div className="setup-overlay" role="dialog" aria-modal="true" aria-label="domi 设置">
@@ -451,7 +523,7 @@ export default function SetupCenter({
             <div>
               <span>{required ? "开始使用 domi" : "偏好设置"}</span>
               <h2>{tab === "connection"
-                ? "安装并连接 Codex"
+                ? "选择 Codex 连接方式"
                 : tab === "data"
                   ? "配置 domi 资料库"
                   : tab === "plaud"
@@ -460,7 +532,7 @@ export default function SetupCenter({
                     ? "软件更新"
                     : "系统诊断"}</h2>
               <p>{tab === "connection"
-                ? "domi 会在本机安装 Codex CLI；ChatGPT 账号和 Responses 中转站二选一，无需同时配置。"
+                ? "domi 会自动准备 Codex CLI；你只需选择 ChatGPT 账号或 Responses 中转站。"
                 : tab === "data"
                   ? "选择飞书协作资料库或完全本地的 SQLite + Markdown 资料库；配置仅保存在这台 Mac。"
                 : tab === "plaud"
@@ -476,18 +548,36 @@ export default function SetupCenter({
 
           {tab === "connection" ? (
             <div className="setup-form connection-form">
-              <div className={`codex-install-step ${codexInstalled ? "ok" : "warning"}`}>
-                <i>{codexInstalled ? <CheckCircle2 size={18} /> : <Terminal size={18} />}</i>
+              <div className={`codex-install-step ${installStepState}`}>
+                <i>{codexInstalled
+                  ? <CheckCircle2 size={18} />
+                  : installError
+                    ? <CircleAlert size={18} />
+                    : installBusy || required
+                      ? <LoaderCircle className="spinning" size={18} />
+                      : <Terminal size={18} />}</i>
                 <span>
-                  <strong>{codexInstalled ? "Codex CLI 已安装" : "先安装 Codex CLI"}</strong>
+                  <strong>{codexInstalled
+                    ? "Codex CLI 已准备好"
+                    : installError
+                      ? "Codex CLI 自动安装未完成"
+                      : "正在自动准备 Codex CLI"}</strong>
                   <small>{codexInstalled
                     ? `${codexStatus?.version || "版本已检测"} · ${codexStatus?.path}`
-                    : "从 OpenAI 官方地址下载到 ~/.local/bin；不会修改系统目录。"}</small>
+                    : installError
+                      ? installError
+                      : "正在校验并安装 domi 内置的 Codex Runtime，无需打开终端或连接 GitHub。"}</small>
                 </span>
-                <button type="button" onClick={installCodex} disabled={installBusy}>
-                  {installBusy ? <LoaderCircle className="spinning" size={15} /> : <Download size={15} />}
-                  {installBusy ? "正在安装…" : codexInstalled ? "重新检测" : "安装 Codex"}
-                </button>
+                {codexInstalled ? (
+                  <b className="codex-install-badge">已完成</b>
+                ) : installError || !required ? (
+                  <button type="button" onClick={() => void installCodex(false)} disabled={installBusy}>
+                    {installBusy ? <LoaderCircle className="spinning" size={15} /> : <RefreshCw size={15} />}
+                    {installBusy ? "正在重试…" : "重新安装"}
+                  </button>
+                ) : (
+                  <b className="codex-install-badge">自动进行</b>
+                )}
               </div>
 
               <div className="codex-mode-options" role="radiogroup" aria-label="Codex 连接方式（二选一）">
@@ -900,6 +990,32 @@ export default function SetupCenter({
                 </div>
               </div>
 
+              <section className="codex-runtime-update">
+                <div className="codex-runtime-update-copy">
+                  <Terminal size={18} />
+                  <span>
+                    <strong>Codex Runtime</strong>
+                    <small>
+                      {codexRuntime?.ok
+                        ? `${codexRuntime.version}${codexRuntime.bundledVersion ? ` · 内置基线 ${codexRuntime.bundledVersion}` : ""}`
+                        : codexRuntime?.error || "正在读取运行时版本"}
+                    </small>
+                  </span>
+                </div>
+                <div className="codex-runtime-actions">
+                  <button type="button" onClick={updateRuntime} disabled={codexRuntimeBusy}>
+                    {codexRuntimeBusy ? <LoaderCircle className="spinning" size={15} /> : <RefreshCw size={15} />}
+                    检查并更新
+                  </button>
+                  {codexRuntime?.rollbackAvailable && (
+                    <button type="button" onClick={rollbackRuntime} disabled={codexRuntimeBusy}>
+                      恢复 {codexRuntime.rollbackVersion || "上一版本"}
+                    </button>
+                  )}
+                </div>
+                <p>更新走系统网络设置；下载或校验失败时继续使用当前版本，不影响 domi 和本地资料。</p>
+              </section>
+
               <section className="update-channel-setting">
                 <div>
                   <strong>更新通道</strong>
@@ -1002,7 +1118,7 @@ export default function SetupCenter({
                 className="setup-primary"
                 type="button"
                 onClick={() => saveConnection(required)}
-                disabled={saving || connectionTestBusy}
+                disabled={saving || connectionTestBusy || installBusy || !codexInstalled}
               >
                 {(saving || connectionTestBusy) && <LoaderCircle className="spinning" size={16} />}
                 {connectionTestBusy
