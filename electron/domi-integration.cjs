@@ -5,12 +5,16 @@ const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { LocalDomiRepository, resolveHomePath } = require("./local-domi-repository.cjs");
 const { LocalToFeishuMigration } = require("./local-to-feishu-migration.cjs");
+const { normalizeWebResource } = require("./resource-target.cjs");
 const { TaskQueue } = require("./service-coordinator.cjs");
 
 const execFileAsync = promisify(execFile);
 const CACHE_KEY = "snapshot-v1";
 const WEEKLY_NEWS_CACHE_KEY = "weekly-news-v1";
 const WEEKLY_NEWS_RADAR_CHECKPOINT_KEY = "weekly-news-radar-checkpoint-v1";
+const FEISHU_RECORD_PAGE_SIZE = 200;
+const FEISHU_RECORD_MAX_PAGES = 25;
+const FEISHU_READ_RETRY_DELAYS_MS = [350, 900, 1800];
 const WEEKLY_NEWS_FIELDS = [
   "新闻标题",
   "领域",
@@ -184,6 +188,7 @@ function commandErrorMessage(error, binary, options = {}) {
   const clean = (value) => String(value || "")
     .replace(/\u001b\[[0-9;]*m/g, "")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "[REDACTED]")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[远程接口]")
     .trim();
   const rawDetail = clean(error?.stderr) || clean(error?.stdout);
   if (/Cannot find module ['"]playwright['"]/i.test(rawDetail)) {
@@ -200,6 +205,36 @@ function commandErrorMessage(error, binary, options = {}) {
   }
   const code = error?.code && error.code !== 1 ? `（${error.code}）` : "";
   return `${label}执行失败${code}：${String(detail || "未返回错误详情").slice(0, 800)}`;
+}
+
+function isRetryableFeishuReadError(error) {
+  const detail = [
+    error?.code,
+    error?.message,
+    error?.stderr,
+    error?.stdout
+  ].filter(Boolean).join(" ");
+  if (/need_user_authorization|unauthori[sz]ed|forbidden|invalid[_\s-]*token|access[_\s-]*token/i.test(detail)) {
+    return false;
+  }
+  return /\b(?:EOF|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|ENOTFOUND)\b|unexpected end of (?:json|input)|unterminated json|socket hang up|network(?: is)? unreachable|timed?\s*out|执行超时|temporar(?:y|ily)|too many requests|\b429\b|\b50[234]\b/i.test(detail);
+}
+
+function describeFeishuSyncError(error, { hasCache = false } = {}) {
+  const detail = String(error?.message || error || "").trim();
+  const cacheNote = hasCache ? "已继续使用上次同步的数据。" : "请稍后重新同步。";
+  if (/need_user_authorization|unauthori[sz]ed|forbidden|invalid[_\s-]*token|access[_\s-]*token/i.test(detail)) {
+    return `飞书授权已失效，请在“资料连接”中重新授权。${hasCache ? "当前仍显示上次同步的数据。" : ""}`;
+  }
+  if (isRetryableFeishuReadError(error)) {
+    return `飞书连接暂时不稳定，自动重试后仍未恢复。${cacheNote}`;
+  }
+  const safeDetail = detail
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[远程接口]")
+    .replace(/\/open-apis\/[^\s"'<>]+/gi, "[飞书接口]")
+    .replace(/[。.!！]+$/u, "")
+    .slice(0, 180);
+  return `飞书数据同步暂时失败${safeDetail ? `：${safeDetail}` : ""}。${cacheNote}`;
 }
 
 function resolvePlaywrightNodeModules() {
@@ -220,9 +255,10 @@ function resolvePlaywrightNodeModules() {
 }
 
 class DomiIntegration {
-  constructor({ stateStore, plaudOutputDir, plaudStateDir, configProvider, playwrightNodeModules }) {
+  constructor({ stateStore, plaudOutputDir, plaudStateDir, configProvider, playwrightNodeModules, sleep }) {
     this.stateStore = stateStore;
     this.configProvider = configProvider || (() => ({}));
+    this.sleep = sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.larkCli = this.resolveLarkCli();
     this.materialIndexCache = new Map();
     this.larkCommandQueue = new TaskQueue(2);
@@ -770,12 +806,33 @@ class DomiIntegration {
     });
   }
 
+  async withFeishuReadRetry(operation) {
+    let lastError;
+    for (let attempt = 0; attempt <= FEISHU_READ_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        if (
+          attempt >= FEISHU_READ_RETRY_DELAYS_MS.length
+          || !isRetryableFeishuReadError(error)
+        ) {
+          throw error;
+        }
+        await this.sleep(FEISHU_READ_RETRY_DELAYS_MS[attempt]);
+      }
+    }
+    throw lastError;
+  }
+
   async larkStatus() {
     try {
-      const auth = await this.runJson(
-        this.larkCli,
-        ["auth", "status", "--json", "--verify"],
-        { label: "飞书登录检查", queue: "lark" }
+      const auth = await this.withFeishuReadRetry(() =>
+        this.runJson(
+          this.larkCli,
+          ["auth", "status", "--json", "--verify"],
+          { label: "飞书登录检查", queue: "lark" }
+        )
       );
       return {
         ok: Boolean(auth?.verified),
@@ -810,18 +867,20 @@ class DomiIntegration {
   async fetchRecords({ appToken, tableId, fieldNames }) {
     const items = [];
     let pageToken = "";
-    for (let page = 0; page < 10; page += 1) {
-      const params = { page_size: 500 };
+    for (let page = 0; page < FEISHU_RECORD_MAX_PAGES; page += 1) {
+      const params = { page_size: FEISHU_RECORD_PAGE_SIZE };
       if (pageToken) params.page_token = pageToken;
-      const response = await this.lark([
-        "api",
-        "POST",
-        `/open-apis/bitable/v1/apps/${appToken}/tables/${tableId}/records/search`,
-        "--params",
-        JSON.stringify(params),
-        "--data",
-        JSON.stringify({ field_names: fieldNames })
-      ]);
+      const response = await this.withFeishuReadRetry(() =>
+        this.lark([
+          "api",
+          "POST",
+          `/open-apis/bitable/v1/apps/${appToken}/tables/${tableId}/records/search`,
+          "--params",
+          JSON.stringify(params),
+          "--data",
+          JSON.stringify({ field_names: fieldNames })
+        ])
+      );
       const data = response.data || {};
       items.push(...(data.items || []));
       if (!data.has_more) return { items, total: data.total ?? items.length };
@@ -1012,7 +1071,7 @@ class DomiIntegration {
           publishedAt: timestampValue(values["信息发布时间"]),
           summary: textValue(values["新闻核心内容"]).trim(),
           investmentMeaning: textValue(values["投资含义"]).trim(),
-          url: textValue(values["原文链接"]).trim(),
+          url: normalizeWebResource(values["原文链接"]),
           source: textValue(values["来源名称"]).trim(),
           companies: textValue(values["涉及公司"]).trim(),
           institutions: textValue(values["涉及机构"]).trim(),
@@ -1273,18 +1332,41 @@ class DomiIntegration {
       this.stateStore.saveCache(CACHE_KEY, snapshot);
       return { ok: true, snapshot, updatedAt: snapshot.syncedAt };
     }
+    const cached = this.loadCache();
     if (!health.lark.ok) {
-      throw new Error(health.lark.error || "飞书用户身份未就绪。 ");
+      return {
+        ok: false,
+        stale: Boolean(cached.snapshot),
+        snapshot: cached.snapshot,
+        updatedAt: cached.updatedAt,
+        error: describeFeishuSyncError(
+          new Error(health.lark.error || "飞书用户身份未就绪。"),
+          { hasCache: Boolean(cached.snapshot) }
+        )
+      };
     }
-    const peopleSource = this.resolvePeopleBase();
-    const projectRecords = await this.fetchRecords({
-      ...projectSource,
-      fieldNames: ["公司名称", "Notes", "领域", "子领域", "进展状态", "项目评级", "城市", "投资机构", "最后更新时间", "链接"]
-    });
-    const peopleRecords = await this.fetchRecords({
-      ...peopleSource,
-      fieldNames: ["人名", "类型", "所属组织&身份", "进展状态", "评级", "最后联系日期", "城市", "链接"]
-    });
+    let peopleSource;
+    let projectRecords;
+    let peopleRecords;
+    try {
+      peopleSource = this.resolvePeopleBase();
+      projectRecords = await this.fetchRecords({
+        ...projectSource,
+        fieldNames: ["公司名称", "Notes", "领域", "子领域", "进展状态", "项目评级", "城市", "投资机构", "最后更新时间", "链接"]
+      });
+      peopleRecords = await this.fetchRecords({
+        ...peopleSource,
+        fieldNames: ["人名", "类型", "所属组织&身份", "进展状态", "评级", "最后联系日期", "城市", "链接"]
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        stale: Boolean(cached.snapshot),
+        snapshot: cached.snapshot,
+        updatedAt: cached.updatedAt,
+        error: describeFeishuSyncError(error, { hasCache: Boolean(cached.snapshot) })
+      };
+    }
     const snapshot = {
       version: 1,
       backend: "feishu",
@@ -1311,6 +1393,8 @@ class DomiIntegration {
 
 module.exports = {
   DomiIntegration,
+  describeFeishuSyncError,
+  isRetryableFeishuReadError,
   resolveWeeklyNewsTimestamps,
   weeklyNewsContentSignature,
   weeklyNewsHasSubstantiveChange

@@ -17,7 +17,7 @@
   <a href="https://github.com/1DeepSheep/domi-workbench/issues">反馈问题</a>
 </p>
 
-> 当前公开版仅提供 Apple Silicon Mac 安装包，需要这台 Mac 已安装并登录 Codex。
+> 当前公开版仅提供 Apple Silicon Mac 安装包。首次启动向导会自动检测或安装 Codex CLI，并完成连接测试。
 
 ## 一眼看懂豆米能做什么
 
@@ -31,31 +31,30 @@
 
 ## 安装
 
-### 1. 准备 Codex
-
-豆米复用本机 Codex 已登录的 ChatGPT/Codex 身份，不要求在客户端中填写 OpenAI API Key。
-
-如果还没有 Codex，请先参考 [OpenAI Codex 官方文档](https://developers.openai.com/codex/) 完成安装与登录。也可以在终端检查：
-
-```bash
-codex --version
-codex login status
-```
-
-### 2. 下载豆米
+### 1. 下载豆米
 
 1. 打开 [Domi Releases](https://github.com/1DeepSheep/domi-releases/releases/latest)。
 2. 下载名称以 `arm64.dmg` 结尾的安装包。
 3. 打开 DMG，把「豆米」拖入“应用程序”文件夹。
 4. 启动豆米。公开安装包已经 Developer ID 签名、Apple 公证并附加公证票据。
 
-### 3. 完成首次设置
+### 2. 安装并连接 Codex
 
-首次打开时按向导完成三项选择：
+首次启动时，豆米会检测终端中的 Codex CLI；如果尚未安装，可以直接点击“安装 Codex”。豆米从 OpenAI 官方安装地址下载脚本，并把 Codex 安装到当前用户的 `~/.local/bin`，不会修改系统目录。
 
-1. 检查本机 Codex 登录状态；
-2. 选择“本地资料库”或“飞书资料库”；
-3. 根据需要连接 PLAUD，也可以直接跳过，以后再连接。
+随后选择一种身份方式：
+
+- **ChatGPT 账号**：打开 Codex 官方登录，复用本机 ChatGPT / Codex 账号；
+- **Responses 中转站**：填写兼容 OpenAI Responses API 的地址、模型名称和 API Key。密钥只写入 macOS 钥匙串，`~/.codex/config.toml` 只保存地址、模型和读取钥匙串的命令。
+
+最后点击“测试完整连接”。豆米会启动一次不保存历史、只读沙箱的临时 Codex 任务，同时验证模型响应和 Shell 工具调用；两项都通过后才允许完成首次设置。普通 Chat Completions 接口不支持完整 Codex 能力，不能作为中转站使用。安装方式与配置格式分别遵循 [Codex CLI 官方文档](https://learn.chatgpt.com/docs/codex/cli) 和 [Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+### 3. 选择资料库和可选连接
+
+继续按向导完成两项选择：
+
+1. 选择“本地资料库”或“飞书资料库”；
+2. 根据需要连接 PLAUD，也可以直接跳过，以后再连接。
 
 豆米会自动安装与当前客户端匹配的 Domi 插件。普通用户不需要另外安装插件。
 
@@ -83,7 +82,7 @@ codex login status
 ## 隐私与连接
 
 - 仓库和安装包不包含维护者的历史任务、录音、项目材料、组织名称、飞书地址或连接凭据。
-- ChatGPT/Codex 登录状态由本机 Codex 管理。
+- ChatGPT/Codex 登录状态由本机 Codex 管理；中转站 API Key 只保存在 macOS 钥匙串，不写入豆米设置、Codex 配置、日志或诊断报告。
 - 飞书、PLAUD 和目录映射由每位用户在自己的 Mac 上配置并保存在本地。
 - PLAUD 完全可选；未连接时不会启动 PLAUD 队列或读取录音。
 - Keychain、SQLite、工作区和 Codex App Server 可在“系统诊断”中进行脱敏检查。

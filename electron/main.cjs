@@ -10,6 +10,7 @@ const {
   codexEnvironment,
   resolveCodexBinary
 } = require("./codex-app-server.cjs");
+const { CodexBootstrapService } = require("./codex-bootstrap.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
 const { DomiPluginManager } = require("./domi-plugin-manager.cjs");
@@ -22,7 +23,7 @@ const { UpdateService } = require("./update-service.cjs");
 const { ServiceCoordinator } = require("./service-coordinator.cjs");
 const { classifyCodexTurnStatus } = require("./codex-turn-status.cjs");
 const {
-  codexTurnContext,
+  requestCodexTurn,
   threadPersistenceOptions
 } = require("./codex-run-context.cjs");
 const {
@@ -31,6 +32,13 @@ const {
   resolveMarkdownImagePath,
   savePastedMarkdownImage
 } = require("./markdown-assets.cjs");
+const {
+  createDocumentLibraryEntry,
+  documentLibraryLocation,
+  ensureDocumentLibraryStructure,
+  listDocumentLibrary
+} = require("./document-library.cjs");
+const { normalizeWebResource } = require("./resource-target.cjs");
 
 const execFileAsync = promisify(execFile);
 const pdfProtocol = "domi-pdf";
@@ -94,6 +102,7 @@ let stateStore = null;
 let domiIntegration = null;
 let domiPluginManager = null;
 let appSettings = null;
+let codexBootstrap = null;
 let updateService = null;
 const serviceCoordinator = new ServiceCoordinator();
 
@@ -176,7 +185,9 @@ function getDomiPluginManager() {
     domiPluginManager = new DomiPluginManager({
       userDataPath: app.getPath("userData"),
       bundledPluginRoot: bundledRoot,
-      bundledLockPath
+      bundledLockPath,
+      clientVersion: app.getVersion(),
+      remoteUpdateEnabled: process.env.DOMI_PLUGIN_AUTO_UPDATE !== "0"
     });
   }
   return domiPluginManager;
@@ -191,6 +202,13 @@ function getAppSettings() {
     });
   }
   return appSettings;
+}
+
+function getCodexBootstrap() {
+  if (!codexBootstrap) {
+    codexBootstrap = new CodexBootstrapService();
+  }
+  return codexBootstrap;
 }
 
 function getUpdateService() {
@@ -353,17 +371,70 @@ async function selectLocalDirectory(sender, requestedPath) {
   return { ok: true, canceled: false, path: result.filePaths[0] };
 }
 
+function currentDocumentLibraryLocation() {
+  const settings = getAppSettings().load().settings;
+  const location = documentLibraryLocation(settings);
+  if (location.initializeStructure) {
+    ensureDocumentLibraryStructure(location.rootPath);
+  } else if (!fs.existsSync(location.rootPath)) {
+    fs.mkdirSync(location.rootPath, { recursive: true });
+  }
+  return location;
+}
+
+function readDocumentLibrary() {
+  try {
+    const location = currentDocumentLibraryLocation();
+    return {
+      ...listDocumentLibrary(location.rootPath),
+      structured: location.initializeStructure
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      rootPath: "",
+      rootName: "本地文档库",
+      nodes: [],
+      documentCount: 0,
+      folderCount: 0,
+      truncated: false,
+      scannedAt: Date.now(),
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function createDocumentLibraryItem(request) {
+  try {
+    const location = currentDocumentLibraryLocation();
+    const created = createDocumentLibraryEntry(location.rootPath, request);
+    return {
+      ...created,
+      snapshot: {
+        ...listDocumentLibrary(location.rootPath),
+        structured: location.initializeStructure
+      }
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 async function openResource(resource) {
+  const webResource = normalizeWebResource(resource);
+  if (webResource) {
+    await shell.openExternal(webResource);
+    return { ok: true, target: webResource };
+  }
+
   if (typeof resource !== "string" || !resource.trim()) {
     return { ok: false, error: "资源地址为空。" };
   }
 
   const target = resource.trim();
-  if (/^https?:\/\//i.test(target)) {
-    await shell.openExternal(target);
-    return { ok: true, target };
-  }
-
   let localPath = target;
   if (/^file:\/\//i.test(target)) {
     try {
@@ -1134,6 +1205,8 @@ function resetCodexClient() {
 async function runCodexCheck() {
   ensureDemoWorkspace();
   const loaded = getAppSettings().load();
+  let detectedPath = "";
+  let detectedVersion = "";
   let runtime = {
     authMode: "chatgpt",
     providerLabel: "个人 ChatGPT",
@@ -1145,6 +1218,11 @@ async function runCodexCheck() {
   try {
     runtime = getAppSettings().runtime();
     const binary = resolveCodexBinary(runtime.codexPath);
+    detectedPath = binary;
+    const versionResult = await execFileAsync(binary, ["--version"], {
+      env: codexEnvironment(runtime.env)
+    });
+    detectedVersion = String(versionResult.stdout || "").trim();
     let pluginSetup = null;
     try {
       pluginSetup = await getDomiPluginManager().ensure({
@@ -1160,10 +1238,7 @@ async function runCodexCheck() {
       };
     }
     const client = getCodexClient();
-    const [{ stdout }, accountResult, modelResult, configResult] = await Promise.all([
-      execFileAsync(binary, ["--version"], {
-        env: codexEnvironment(runtime.env)
-      }),
+    const [accountResult, modelResult, configResult] = await Promise.all([
       client.request("account/read", { refreshToken: false }),
       client.request("model/list", {
         cursor: null,
@@ -1180,14 +1255,14 @@ async function runCodexCheck() {
     return {
       ok: authenticated,
       path: binary,
-      version: stdout.trim(),
+      version: detectedVersion,
       transport: "app-server",
       workspacePath: demoWorkspace,
       account,
       authMode: runtime.authMode,
       providerLabel: runtime.providerLabel,
       apiBaseUrl: runtime.apiBaseUrl,
-      credentialStored: Boolean(account),
+      credentialStored: Boolean(account || runtime.hasApiKey),
       requiresOpenaiAuth,
       configuredModel: config.model || "",
       configuredReasoningEffort: config.model_reasoning_effort || "medium",
@@ -1209,13 +1284,17 @@ async function runCodexCheck() {
           description: tier.description || ""
         }))
       })),
-      error: authenticated ? "" : "请先登录 ChatGPT Codex。"
+      error: authenticated
+        ? ""
+        : runtime.authMode === "relay"
+          ? "中转站身份未就绪，请重新保存配置并测试。"
+          : "请先登录 ChatGPT Codex。"
     };
   } catch (error) {
     return {
       ok: false,
-      path: "",
-      version: "",
+      path: detectedPath,
+      version: detectedVersion,
       transport: "app-server",
       workspacePath: demoWorkspace,
       account: null,
@@ -1285,6 +1364,10 @@ async function saveRuntimeSettings(request) {
   } = request || {};
   const connectionChanged = [
     "codexPath",
+    "authMode",
+    "apiBaseUrl",
+    "apiModel",
+    "relayCredentialConfigured",
     "externalAccessMode",
     "storageBackend",
     "projectBaseToken",
@@ -1303,6 +1386,12 @@ async function saveRuntimeSettings(request) {
   }
   try {
     let migration;
+    if (settingsRequest.authMode === "chatgpt" && current.authMode === "relay") {
+      const restored = getCodexBootstrap().restoreChatGPTConfig();
+      if (!restored.ok) {
+        return { ok: false, error: restored.error || "无法恢复 ChatGPT Codex 配置。" };
+      }
+    }
     const migratesLocalToFeishu = current.storageBackend === "local"
       && settingsRequest.storageBackend === "feishu"
       && storageMigration === "local-to-feishu";
@@ -1333,8 +1422,79 @@ async function saveRuntimeSettings(request) {
   }
 }
 
+async function installCodexCli() {
+  if (activeRuns.size > 0) {
+    return { ok: false, error: "请先停止正在执行的任务，再安装 Codex CLI。" };
+  }
+  const result = await getCodexBootstrap().install();
+  if (!result.ok) return result;
+  getAppSettings().save({ codexPath: result.path });
+  resetCodexClient();
+  return result;
+}
+
+async function configureCodexRelay(request = {}) {
+  if (activeRuns.size > 0) {
+    return { ok: false, error: "请先停止正在执行的任务，再修改 Codex 中转站。" };
+  }
+  const result = await getCodexBootstrap().configureRelay(request);
+  if (!result.ok) return result;
+  getAppSettings().save({
+    authMode: "relay",
+    apiBaseUrl: result.baseUrl,
+    apiModel: result.model,
+    relayCredentialConfigured: true,
+    codexPath: result.codexPath
+  });
+  resetCodexClient();
+  const codex = await runCodexCheck();
+  if (!codex.ok) {
+    return {
+      ok: false,
+      configured: true,
+      codex,
+      error: codex.error || "中转站已配置，但 Codex App Server 尚未就绪。"
+    };
+  }
+  const verification = await getCodexBootstrap().testConnection(result.codexPath);
+  return {
+    ok: verification.ok,
+    configured: true,
+    codex,
+    verification,
+    error: verification.ok ? "" : verification.error || "中转站测试失败。"
+  };
+}
+
+async function testCodexConnection() {
+  if (activeRuns.size > 0) {
+    return { ok: false, error: "请先停止正在执行的任务，再运行 Codex 连接测试。" };
+  }
+  resetCodexClient();
+  const codex = await runCodexCheck();
+  if (!codex.ok) return { ok: false, codex, error: codex.error || "Codex App Server 不可用。" };
+  const verification = await getCodexBootstrap().testConnection(codex.path);
+  return {
+    ok: verification.ok,
+    codex,
+    verification,
+    error: verification.ok ? "" : verification.error || "Codex 连接测试失败。"
+  };
+}
+
 async function startChatGptLogin() {
   try {
+    const restored = getCodexBootstrap().restoreChatGPTConfig();
+    if (!restored.ok) {
+      return { ok: false, error: restored.error || "无法恢复 ChatGPT Codex 配置。" };
+    }
+    getAppSettings().save({
+      authMode: "chatgpt",
+      apiBaseUrl: "",
+      apiModel: "",
+      relayCredentialConfigured: false
+    });
+    if (restored.changed) resetCodexClient();
     const response = await getCodexClient().request("account/login/start", {
       type: "chatgpt",
       appBrand: "codex",
@@ -1474,18 +1634,17 @@ function repositoryRuntimeContext(payload) {
   const settings = getAppSettings().load().settings;
   if (settings.storageBackend === "local") {
     return [
-      "Domi 资料库运行上下文（本轮刚从豆米设置读取）：",
-      "- 当前资料库后端：local。",
+      "Domi 本轮资料库事实：",
+      "- 后端：local。",
       `- SQLite：${settings.localDatabasePath}`,
-      `- Markdown 与资料目录：${settings.localRepositoryDir}`,
-      "- 必须按 domi:investment-mgmt 的 storage-backends 契约使用 domi-repo.cjs；不要要求飞书授权，不要调用 Wiki/Base。",
-      "- 飞书鉴权状态不得触发后端回退或改变本轮后端。"
+      `- Markdown 与资料目录：${settings.localRepositoryDir}。`,
+      "- 使用 domi:investment-mgmt 本地后端；本轮不调用飞书 Wiki/Base。"
     ].join("\n");
   }
   return [
-    "Domi 资料库运行上下文（本轮刚从豆米设置读取）：",
-    "- 当前资料库后端：feishu。",
-    "- 必须继续使用当前配置的 Base、Wiki 与本地材料目录；禁止因授权或网络错误静默切换到本地后端。"
+    "Domi 本轮资料库事实：",
+    "- 后端：feishu。",
+    "- 使用当前配置的 Base、Wiki 与本地材料目录；错误时不要静默切换后端。"
   ].join("\n");
 }
 
@@ -1495,18 +1654,16 @@ async function larkRuntimeContext(required) {
   const identity = status.userName ? `，当前用户：${status.userName}` : "";
   if (status.ok) {
     return [
-      "豆米客户端运行前检查（这是本轮刚刚实测的事实）：",
-      `- lark-cli 已验证可用${identity}。可执行文件：${status.cliPath}`,
-      "- 涉及飞书、Wiki、Watching List 或线上项目文档时，必须实际执行 lark-cli 查询，不能只检索本地资料库后结束。",
-      "- 未实际执行 lark-cli 并收到真实错误前，禁止声称钥匙串未初始化、未登录、权限不足或飞书不可用。",
-      "- 如果命令确实失败，请报告实际命令及原始错误摘要，不要推测失败原因。"
+      "Domi 本轮飞书连接事实：",
+      `- lark-cli 已验证可用${identity}；路径：${status.cliPath}。`,
+      "- 飞书任务应实际调用 lark-cli；失败时报告真实错误，不推测授权状态。"
     ].join("\n");
   }
   return [
-    "豆米客户端运行前检查（这是本轮刚刚实测的事实）：",
-    `- lark-cli 预检失败。可执行文件：${status.cliPath}`,
-    `- 实际错误：${status.error || "未返回错误详情"}`,
-    "- 请基于该真实错误说明飞书状态，不要另行猜测钥匙串或登录状态。"
+    "Domi 本轮飞书连接事实：",
+    `- lark-cli 预检失败；路径：${status.cliPath}。`,
+    `- 实际错误：${status.error || "未返回错误详情"}。`,
+    "- 请基于该错误处理，不推测其他授权原因。"
   ].join("\n");
 }
 
@@ -1619,14 +1776,26 @@ async function runCodex(sender, payload) {
         ? payload.serviceTier
         : undefined;
     try {
-      const response = await client.request("turn/start", {
+      const response = await requestCodexTurn(client, {
         threadId,
-        ...codexTurnContext(prompt, runtimeContext),
         model,
         effort,
         serviceTier,
         cwd: workspacePath,
         approvalPolicy: "never"
+      }, prompt, runtimeContext, {
+        onCompatibility: ({ message, error }) => {
+          if (process.env.NODE_ENV !== "production" && error) {
+            process.stderr.write(
+              `[codex compatibility] ${error instanceof Error ? error.message : String(error)}\n`
+            );
+          }
+          publishCodexEvent(sender, runId, {
+            type: "compatibility",
+            threadId,
+            summary: message
+          });
+        }
       });
       const run = activeRuns.get(runId);
       if (run) {
@@ -1818,6 +1987,9 @@ ipcMain.handle("settings:save", (_event, request) => saveRuntimeSettings(request
 ipcMain.handle("settings:select-directory", (event, currentPath) =>
   selectLocalDirectory(event.sender, currentPath)
 );
+ipcMain.handle("settings:install-codex", () => installCodexCli());
+ipcMain.handle("settings:configure-relay", (_event, request) => configureCodexRelay(request));
+ipcMain.handle("settings:test-codex", () => testCodexConnection());
 ipcMain.handle("settings:chatgpt-login", () => startChatGptLogin());
 ipcMain.handle("settings:diagnose", () => runSystemDiagnostics());
 ipcMain.handle("settings:export-diagnostics", (event, report) =>
@@ -1837,6 +2009,10 @@ ipcMain.handle("files:import-data", (_event, files, workspacePath) =>
   importLocalFileData(workspacePath, files)
 );
 ipcMain.handle("resource:open", (_event, resource) => openResource(resource));
+ipcMain.handle("document-library:list", () => readDocumentLibrary());
+ipcMain.handle("document-library:create", (_event, request) =>
+  createDocumentLibraryItem(request)
+);
 ipcMain.handle("markdown:read", (_event, request) => readMarkdownDocument(request));
 ipcMain.handle("markdown:save", (_event, request) => saveMarkdownDocument(request));
 ipcMain.handle("markdown:rename", (_event, request) => renameMarkdownDocument(request));
