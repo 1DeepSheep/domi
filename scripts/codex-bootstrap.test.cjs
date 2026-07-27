@@ -3,12 +3,14 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { EventEmitter } = require("node:events");
 const { parse } = require("smol-toml");
 const {
   DOMI_KEYCHAIN_ACCOUNT,
   DOMI_KEYCHAIN_SERVICE,
   DOMI_PROVIDER_ID,
   CodexBootstrapService,
+  createElectronNetFetcher,
   fetchOfficialInstaller,
   isOfficialCodexInstallerUrl,
   mergeRelayConfig,
@@ -40,26 +42,101 @@ test("official Codex installer accepts OpenAI release redirects and rejects look
 
 test("official installer download accepts the OpenAI releases redirect", async () => {
   const validScript = `#!/bin/sh\n# CODEX_INSTALL_DIR\n${"x".repeat(5000)}`;
+  let requests = 0;
   const script = await fetchOfficialInstaller(async (url, options) => {
-    assert.equal(url, "https://chatgpt.com/codex/install.sh");
-    assert.equal(options.redirect, "follow");
+    requests += 1;
+    assert.equal(options.redirect, "manual");
+    if (requests === 1) {
+      assert.equal(url, "https://chatgpt.com/codex/install.sh");
+      return {
+        ok: false,
+        status: 302,
+        url,
+        headers: {
+          get: (name) => name === "location"
+            ? "https://releases.openai.com/codex/install.sh"
+            : ""
+        },
+        text: async () => ""
+      };
+    }
+    assert.equal(url, "https://releases.openai.com/codex/install.sh");
     return {
       ok: true,
       status: 200,
-      url: "https://releases.openai.com/codex/install.sh",
+      url,
+      headers: { get: () => "" },
       text: async () => validScript
     };
   });
   assert.equal(script, validScript);
+  assert.equal(requests, 2);
 });
 
 test("official installer download still rejects non-OpenAI redirects", async () => {
   await assert.rejects(() => fetchOfficialInstaller(async () => ({
+    ok: false,
+    status: 302,
+    url: "https://chatgpt.com/codex/install.sh",
+    headers: {
+      get: (name) => name === "location"
+        ? "https://releases.openai.com.evil.example/codex/install.sh"
+        : ""
+    },
+    text: async () => ""
+  })), /非官方地址/);
+});
+
+test("official installer rejects a fetcher that silently follows to a non-OpenAI host", async () => {
+  await assert.rejects(() => fetchOfficialInstaller(async () => ({
     ok: true,
     status: 200,
     url: "https://releases.openai.com.evil.example/codex/install.sh",
+    headers: { get: () => "" },
     text: async () => `#!/bin/sh\n# CODEX_INSTALL_DIR\n${"x".repeat(5000)}`
   })), /非官方地址/);
+});
+
+test("Electron installer fetcher follows the system network stack without auto-following redirects", async () => {
+  const validScript = `#!/bin/sh\n# CODEX_INSTALL_DIR\n${"x".repeat(5000)}`;
+  const requested = [];
+  const fakeNet = {
+    request: (options) => {
+      requested.push(options);
+      const request = new EventEmitter();
+      request.setHeader = () => {};
+      request.abort = () => {};
+      request.end = () => queueMicrotask(() => {
+        if (requested.length === 1) {
+          request.emit(
+            "redirect",
+            302,
+            "GET",
+            "https://releases.openai.com/codex/install.sh",
+            { location: ["https://releases.openai.com/codex/install.sh"] }
+          );
+          request.emit("error", new Error("Redirect was cancelled"));
+          return;
+        }
+        const response = new EventEmitter();
+        response.statusCode = 200;
+        response.headers = { "content-type": ["text/x-shellscript"] };
+        request.emit("response", response);
+        response.emit("data", Buffer.from(validScript));
+        response.emit("end");
+      });
+      return request;
+    }
+  };
+
+  const script = await fetchOfficialInstaller(createElectronNetFetcher(fakeNet));
+
+  assert.equal(script, validScript);
+  assert.deepEqual(requested.map((request) => request.url), [
+    "https://chatgpt.com/codex/install.sh",
+    "https://releases.openai.com/codex/install.sh"
+  ]);
+  assert.equal(requested.every((request) => request.redirect === "manual"), true);
 });
 
 test("relay config preserves unrelated settings and uses a Keychain token command", () => {

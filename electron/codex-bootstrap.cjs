@@ -80,6 +80,106 @@ function isOfficialCodexInstallerUrl(value) {
   }
 }
 
+function headerValue(headers, name) {
+  if (headers && typeof headers.get === "function") {
+    return headers.get(name) || "";
+  }
+  const entry = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  const value = entry?.[1];
+  return Array.isArray(value) ? value[0] || "" : String(value || "");
+}
+
+function createElectronNetFetcher(netModule, {
+  timeoutMs = 30_000,
+  maxBodyBytes = 1024 * 1024
+} = {}) {
+  if (!netModule || typeof netModule.request !== "function") {
+    throw new Error("Electron 网络模块不可用。");
+  }
+  return (url, options = {}) => new Promise((resolve, reject) => {
+    let settled = false;
+    let responseBody;
+    let abortHandler;
+    const request = netModule.request({
+      url,
+      method: "GET",
+      redirect: "manual"
+    });
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (options.signal && abortHandler) {
+        options.signal.removeEventListener("abort", abortHandler);
+      }
+      callback();
+    };
+    const fail = (error) => finish(() => reject(error));
+    const timer = setTimeout(() => {
+      request.abort();
+      fail(new Error("Codex 官方安装程序下载超时。"));
+    }, timeoutMs);
+
+    for (const [name, value] of Object.entries(options.headers || {})) {
+      request.setHeader(name, value);
+    }
+    request.on("redirect", (statusCode, _method, redirectUrl, responseHeaders) => {
+      finish(() => resolve({
+        ok: false,
+        status: statusCode,
+        url,
+        headers: {
+          get: (name) => name.toLowerCase() === "location"
+            ? redirectUrl
+            : headerValue(responseHeaders, name)
+        },
+        text: async () => ""
+      }));
+    });
+    request.on("response", (response) => {
+      const chunks = [];
+      let receivedBytes = 0;
+      response.on("data", (chunk) => {
+        if (settled) return;
+        const value = Buffer.from(chunk);
+        receivedBytes += value.length;
+        if (receivedBytes > maxBodyBytes) {
+          request.abort();
+          fail(new Error("Codex 官方安装程序内容过大，已停止下载。"));
+          return;
+        }
+        chunks.push(value);
+      });
+      response.on("error", fail);
+      response.on("end", () => {
+        responseBody = Buffer.concat(chunks).toString("utf8");
+        finish(() => resolve({
+          ok: response.statusCode >= 200 && response.statusCode < 300,
+          status: response.statusCode,
+          url,
+          headers: {
+            get: (name) => headerValue(response.headers, name)
+          },
+          text: async () => responseBody
+        }));
+      });
+    });
+    request.on("error", fail);
+    if (options.signal) {
+      abortHandler = () => {
+        request.abort();
+        fail(options.signal.reason || new Error("Codex 官方安装程序下载已取消。"));
+      };
+      if (options.signal.aborted) {
+        abortHandler();
+        return;
+      }
+      options.signal.addEventListener("abort", abortHandler, { once: true });
+    }
+    request.end();
+  });
+}
+
 function mergeRelayConfig(source, { baseUrl, model }) {
   const config = source && typeof source === "object" ? structuredClone(source) : {};
   config.model = normalizeRelayModel(model);
@@ -100,22 +200,47 @@ function mergeRelayConfig(source, { baseUrl, model }) {
 }
 
 async function fetchOfficialInstaller(fetcher = fetch) {
-  const response = await fetcher(CODEX_INSTALLER_URL, {
-    redirect: "follow",
-    headers: { "user-agent": "domi Codex Bootstrap" },
-    signal: AbortSignal.timeout(30_000)
-  });
-  if (!response.ok) {
-    throw new Error(`Codex 官方安装程序下载失败（HTTP ${response.status}）。`);
+  let currentUrl = CODEX_INSTALLER_URL;
+  const signal = AbortSignal.timeout(30_000);
+  for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+    if (!isOfficialCodexInstallerUrl(currentUrl)) {
+      throw new Error("Codex 安装程序被重定向到了非官方地址，已停止安装。");
+    }
+    const response = await fetcher(currentUrl, {
+      redirect: "manual",
+      headers: { "user-agent": "domi Codex Bootstrap" },
+      signal
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = headerValue(response.headers, "location");
+      if (!location) {
+        throw new Error("Codex 官方安装程序返回了无效的重定向。");
+      }
+      let nextUrl;
+      try {
+        nextUrl = new URL(location, currentUrl).href;
+      } catch {
+        throw new Error("Codex 官方安装程序返回了无效的重定向。");
+      }
+      if (!isOfficialCodexInstallerUrl(nextUrl)) {
+        throw new Error("Codex 安装程序被重定向到了非官方地址，已停止安装。");
+      }
+      currentUrl = nextUrl;
+      continue;
+    }
+    if (!response.ok) {
+      throw new Error(`Codex 官方安装程序下载失败（HTTP ${response.status}）。`);
+    }
+    if (response.url && !isOfficialCodexInstallerUrl(response.url)) {
+      throw new Error("Codex 安装程序被重定向到了非官方地址，已停止安装。");
+    }
+    const script = await response.text();
+    if (!script.startsWith("#!/bin/sh") || !script.includes("CODEX_INSTALL_DIR") || script.length < 5000) {
+      throw new Error("Codex 官方安装程序内容校验失败。");
+    }
+    return script;
   }
-  if (!isOfficialCodexInstallerUrl(response.url)) {
-    throw new Error("Codex 安装程序被重定向到了非官方地址，已停止安装。");
-  }
-  const script = await response.text();
-  if (!script.startsWith("#!/bin/sh") || !script.includes("CODEX_INSTALL_DIR") || script.length < 5000) {
-    throw new Error("Codex 官方安装程序内容校验失败。");
-  }
-  return script;
+  throw new Error("Codex 官方安装程序重定向次数过多，已停止安装。");
 }
 
 function writeCredentialToKeychain(credential) {
@@ -528,6 +653,7 @@ module.exports = {
   DOMI_KEYCHAIN_SERVICE,
   DOMI_PROVIDER_ID,
   CodexBootstrapService,
+  createElectronNetFetcher,
   fetchOfficialInstaller,
   isOfficialCodexInstallerUrl,
   keychainAuthConfig,

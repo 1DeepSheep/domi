@@ -10,7 +10,11 @@ const {
   codexEnvironment,
   resolveCodexBinary
 } = require("./codex-app-server.cjs");
-const { CodexBootstrapService } = require("./codex-bootstrap.cjs");
+const {
+  CodexBootstrapService,
+  createElectronNetFetcher,
+  fetchOfficialInstaller
+} = require("./codex-bootstrap.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
 const { DomiPluginManager } = require("./domi-plugin-manager.cjs");
@@ -208,7 +212,10 @@ function getAppSettings() {
 
 function getCodexBootstrap() {
   if (!codexBootstrap) {
-    codexBootstrap = new CodexBootstrapService();
+    const electronFetcher = createElectronNetFetcher(net);
+    codexBootstrap = new CodexBootstrapService({
+      fetchInstaller: () => fetchOfficialInstaller(electronFetcher)
+    });
   }
   return codexBootstrap;
 }
