@@ -176,7 +176,9 @@ function getDomiPluginManager() {
     domiPluginManager = new DomiPluginManager({
       userDataPath: app.getPath("userData"),
       bundledPluginRoot: bundledRoot,
-      bundledLockPath
+      bundledLockPath,
+      clientVersion: app.getVersion(),
+      remoteUpdateEnabled: process.env.DOMI_PLUGIN_AUTO_UPDATE !== "0"
     });
   }
   return domiPluginManager;
