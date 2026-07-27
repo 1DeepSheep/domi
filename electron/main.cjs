@@ -232,9 +232,7 @@ function getCodexRuntimeManager() {
       : path.join(rootDir, "build", "codex-runtime");
     codexRuntimeManager = new CodexRuntimeManager({
       archivePath: path.join(runtimeRoot, "codex-package.tar.gz"),
-      manifestPath: app.isPackaged
-        ? path.join(runtimeRoot, "manifest.json")
-        : path.join(rootDir, "resources", "codex-runtime.json")
+      manifestPath: path.join(runtimeRoot, "manifest.json")
     });
   }
   return codexRuntimeManager;
