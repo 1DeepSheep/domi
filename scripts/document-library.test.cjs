@@ -5,11 +5,37 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   DOCUMENT_LIBRARY_DIRECTORIES,
+  LOCAL_TODO_DOCUMENT_NAME,
   createDocumentLibraryEntry,
   documentLibraryLocation,
+  domiWorkspaceRoot,
   ensureDocumentLibraryStructure,
   listDocumentLibrary
 } = require("../electron/document-library.cjs");
+
+test("new local libraries are rooted in a domi工作区 folder", () => {
+  const selectedDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-workspace-parent-"));
+  try {
+    const workspaceRoot = domiWorkspaceRoot(selectedDirectory);
+    assert.equal(workspaceRoot, path.join(selectedDirectory, "domi工作区"));
+    assert.equal(domiWorkspaceRoot(workspaceRoot), workspaceRoot);
+    ensureDocumentLibraryStructure(workspaceRoot);
+    assert.ok(fs.existsSync(path.join(workspaceRoot, "3.项目库")));
+    assert.ok(fs.existsSync(path.join(workspaceRoot, "4.人脉库")));
+    const todoDocumentPath = path.join(workspaceRoot, LOCAL_TODO_DOCUMENT_NAME);
+    assert.ok(fs.existsSync(todoDocumentPath));
+    assert.match(fs.readFileSync(todoDocumentPath, "utf8"), /^# 待办事项/m);
+    assert.match(fs.readFileSync(todoDocumentPath, "utf8"), /## 项目跟踪/);
+    assert.equal(fs.existsSync(path.join(selectedDirectory, "3.项目库")), false);
+    assert.equal(fs.existsSync(path.join(selectedDirectory, LOCAL_TODO_DOCUMENT_NAME)), false);
+
+    fs.writeFileSync(todoDocumentPath, "# 用户维护的待办事项\n");
+    ensureDocumentLibraryStructure(workspaceRoot);
+    assert.equal(fs.readFileSync(todoDocumentPath, "utf8"), "# 用户维护的待办事项\n");
+  } finally {
+    fs.rmSync(selectedDirectory, { recursive: true, force: true });
+  }
+});
 
 test("document library reflects the canonical local repository structure", () => {
   const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "domi-document-library-"));
@@ -23,7 +49,7 @@ test("document library reflects the canonical local repository structure", () =>
 
     const snapshot = listDocumentLibrary(rootPath);
     assert.equal(snapshot.ok, true);
-    assert.equal(snapshot.documentCount, 2);
+    assert.equal(snapshot.documentCount, 3);
     assert.deepEqual(
       snapshot.nodes.slice(0, 4).map((node) => node.name),
       DOCUMENT_LIBRARY_DIRECTORIES

@@ -33,6 +33,7 @@ test("brand migration moves existing user data and workspace to domi paths", (t)
 
   assert.equal(result.appName, "domi");
   assert.equal(result.userDataPath, path.join(appData, "domi"));
+  assert.equal(result.pluginRuntimePath, path.join(appData, "domi"));
   assert.equal(result.workspacePath, path.join(documents, "domi"));
   assert.equal(fs.readFileSync(path.join(result.userDataPath, "domi.sqlite3"), "utf8"), "history");
   assert.equal(fs.readFileSync(path.join(result.workspacePath, "task.md"), "utf8"), "task");
@@ -57,6 +58,36 @@ test("brand migration keeps the legacy path when a move cannot be completed", ()
   });
   assert.equal(result.path, source);
   assert.match(result.error, /read only/);
+});
+
+test("development uses isolated user data without copying production state", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-brand-dev-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const appData = path.join(root, "Application Support");
+  const documents = path.join(root, "Documents");
+  const productionUserData = path.join(appData, "domi");
+  fs.mkdirSync(productionUserData, { recursive: true });
+  fs.writeFileSync(path.join(productionUserData, "domi.sqlite3"), "production");
+
+  const calls = [];
+  const fakeApp = {
+    isPackaged: false,
+    getPath: (name) => name === "appData" ? appData : documents,
+    setName: (name) => calls.push(["name", name]),
+    setPath: (name, value) => calls.push([name, value])
+  };
+  const result = prepareApplicationBrandPaths(fakeApp);
+
+  assert.equal(result.development, true);
+  assert.equal(result.userDataPath, path.join(appData, "domi-dev"));
+  assert.equal(result.pluginRuntimePath, path.join(appData, "domi"));
+  assert.equal(result.workspacePath, path.join(documents, "domi开发工作区"));
+  assert.equal(fs.existsSync(path.join(result.userDataPath, "domi.sqlite3")), false);
+  assert.equal(fs.readFileSync(path.join(productionUserData, "domi.sqlite3"), "utf8"), "production");
+  assert.deepEqual(calls, [
+    ["name", "domi"],
+    ["userData", path.join(appData, "domi-dev")]
+  ]);
 });
 
 test("brand migration merges missing files without overwriting current data", (t) => {

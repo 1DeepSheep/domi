@@ -24,6 +24,7 @@ const forbiddenRuntimeNames = [
   /^\.privacy-terms\.local$/i,
   /^domi-plugin-config\.json$/i,
   /^domi\.sqlite3?(?:-.+)?$/i,
+  /^(?:Cookies|Cookies-journal|Login Data|Local State|Web Data|DevToolsActivePort)$/i,
   /^(?:threads?|sessions?|history|runtime-state)\.json$/i,
   /^(?:plaud|lark|feishu).*(?:session|cookie|token|credential)/i
 ];
@@ -63,6 +64,11 @@ function displayPath(filePath, scanRoot) {
 function isPrivacyChecker(filePath) {
   return new Set(["privacy-check.cjs", "public-release-check.cjs"])
     .has(path.basename(filePath));
+}
+
+function isApprovedMediaRuntimeBinary(filePath) {
+  const normalized = path.resolve(filePath).split(path.sep).join("/");
+  return /\/media-runtime\/bin\/(?:ffmpeg|ffprobe)$/.test(normalized);
 }
 
 function inspectContent(content, filePath, scanRoot, options = {}) {
@@ -128,6 +134,10 @@ function scanTree(scanRoot, options = {}) {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const target = path.join(current, entry.name);
       if (entry.isDirectory()) {
+        if (entry.name === "plaud-browser") {
+          fail("禁止发布 PLAUD 浏览器 Profile", displayPath(target, scanRoot));
+          continue;
+        }
         if (!shouldSkipDirectory(entry.name)) stack.push(target);
         continue;
       }
@@ -142,6 +152,7 @@ function scanTree(scanRoot, options = {}) {
         fail("禁止发布运行数据或敏感文件", relative);
         continue;
       }
+      if (isApprovedMediaRuntimeBinary(target)) continue;
       if (stat.size > (options.maxTextSize || 4 * 1024 * 1024)) continue;
       inspectContent(
         fs.readFileSync(target).toString("utf8"),
@@ -169,6 +180,10 @@ function scanSource() {
   const candidates = gitReleaseCandidates();
   if (candidates) {
     for (const relativePath of candidates) {
+      if (relativePath.split(/[\\/]/).includes("plaud-browser")) {
+        fail("禁止发布 PLAUD 浏览器 Profile", relativePath);
+        continue;
+      }
       const target = path.join(root, relativePath);
       if (!fs.existsSync(target)) continue;
       const stat = fs.lstatSync(target);
@@ -182,6 +197,7 @@ function scanSource() {
         fail("禁止发布运行数据或敏感文件", relativePath);
         continue;
       }
+      if (isApprovedMediaRuntimeBinary(target)) continue;
       if (stat.size > 4 * 1024 * 1024) continue;
       inspectContent(
         fs.readFileSync(target).toString("utf8"),
@@ -216,6 +232,10 @@ function scanHistory() {
       { encoding: "utf8" }
     ).split("\0").filter(Boolean);
     for (const relativePath of files) {
+      if (relativePath.split(/[\\/]/).includes("plaud-browser")) {
+        fail("Git 历史包含 PLAUD 浏览器 Profile", `${commit.slice(0, 12)}:${relativePath}`);
+        continue;
+      }
       const extension = path.extname(relativePath).toLowerCase();
       const name = path.basename(relativePath);
       const historyPath = `${commit.slice(0, 12)}:${relativePath}`;

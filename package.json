@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -15,18 +15,20 @@
     "privacy:check": "node scripts/privacy-check.cjs",
     "privacy:history": "node scripts/privacy-check.cjs --history",
     "privacy:artifact": "node scripts/privacy-check.cjs --artifact",
-    "check": "npm run privacy:check && npm run build && node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/brand-migration.cjs && node --check electron/codex-app-server.cjs && node --check electron/codex-bootstrap.cjs && node --check electron/codex-runtime.cjs && node --check electron/codex-protocol.cjs && node --check electron/codex-run-context.cjs && node --check electron/codex-turn-status.cjs && node --check electron/app-settings.cjs && node --check electron/document-library.cjs && node --check electron/domi-integration.cjs && node --check electron/local-domi-repository.cjs && node --check electron/local-to-feishu-migration.cjs && node --check electron/markdown-assets.cjs && node --check electron/resource-target.cjs && node --check electron/domi-plugin-manager.cjs && node --check electron/domi-plugin-updater.cjs && node --check electron/plaud-worker.cjs && node --check electron/service-coordinator.cjs && node --check electron/state-store.cjs && node --check electron/update-service.cjs && node --check scripts/prepare-codex-runtime.cjs && node --check scripts/prepare-domi-plugin.cjs && node scripts/renderer-resilience.test.cjs && node scripts/brand-contract.test.cjs && node scripts/brand-migration.test.cjs && node scripts/app-settings.test.cjs && node scripts/codex-app-server.test.cjs && node scripts/codex-bootstrap.test.cjs && node scripts/codex-runtime.test.cjs && node scripts/codex-run-context.test.cjs && node scripts/codex-turn-status.test.cjs && node scripts/document-library.test.cjs && node scripts/domi-integration.test.cjs && node scripts/local-to-feishu-migration.test.cjs && node scripts/domi-plugin-manager.test.cjs && node scripts/domi-plugin-updater.test.cjs && node scripts/markdown-assets.test.cjs && node scripts/resource-target.test.cjs && node scripts/radar-workflow.test.cjs && node scripts/service-coordinator.test.cjs && node scripts/state-store.test.cjs",
+    "check": "npm run privacy:check && npm run build && node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/brand-migration.cjs && node --check electron/codex-app-server.cjs && node --check electron/codex-bootstrap.cjs && node --check electron/codex-runtime.cjs && node --check electron/codex-protocol.cjs && node --check electron/codex-run-context.cjs && node --check electron/codex-turn-status.cjs && node --check electron/app-settings.cjs && node --check electron/document-library.cjs && node --check electron/domi-integration.cjs && node --check electron/local-domi-repository.cjs && node --check electron/local-to-feishu-migration.cjs && node --check electron/markdown-assets.cjs && node --check electron/media-runtime.cjs && node --check electron/resource-target.cjs && node --check electron/domi-plugin-manager.cjs && node --check electron/domi-plugin-updater.cjs && node --check electron/plaud-worker.cjs && node --check electron/service-coordinator.cjs && node --check electron/state-store.cjs && node --check electron/update-service.cjs && node --check scripts/prepare-codex-runtime.cjs && node --check scripts/prepare-domi-plugin.cjs && node --check scripts/prepare-media-runtime.cjs && node scripts/renderer-resilience.test.cjs && node scripts/brand-contract.test.cjs && node scripts/brand-migration.test.cjs && node scripts/app-settings.test.cjs && node scripts/codex-app-server.test.cjs && node scripts/codex-bootstrap.test.cjs && node scripts/codex-runtime.test.cjs && node scripts/codex-run-context.test.cjs && node scripts/codex-turn-status.test.cjs && node scripts/document-library.test.cjs && node scripts/domi-integration.test.cjs && node scripts/local-to-feishu-migration.test.cjs && node scripts/media-runtime.test.cjs && node scripts/plaud-worker.test.cjs && node scripts/domi-plugin-manager.test.cjs && node scripts/domi-plugin-updater.test.cjs && node scripts/markdown-assets.test.cjs && node scripts/resource-target.test.cjs && node scripts/radar-workflow.test.cjs && node scripts/service-coordinator.test.cjs && node scripts/state-store.test.cjs",
     "codex:prepare": "node scripts/prepare-codex-runtime.cjs",
     "codex:prepare:release": "node scripts/prepare-codex-runtime.cjs --release",
+    "media:prepare": "node scripts/prepare-media-runtime.cjs",
     "plugin:prepare": "node scripts/prepare-domi-plugin.cjs",
     "plugin:prepare:release": "node scripts/prepare-domi-plugin.cjs --release",
     "icon:mac": "bash scripts/build-mac-icon.sh",
     "preview": "npm run build && NODE_ENV=production electron .",
-    "pack:mac": "npm run codex:prepare && npm run plugin:prepare && npm run build && npm run icon:mac && bash scripts/package-mac.sh dir",
-    "dist:mac": "npm run codex:prepare:release && npm run plugin:prepare:release && npm run privacy:check && npm run build && npm run icon:mac && bash scripts/package-mac.sh dist",
+    "pack:mac": "npm run codex:prepare && npm run media:prepare && npm run plugin:prepare && npm run build && npm run icon:mac && bash scripts/package-mac.sh dir",
+    "dist:mac": "npm run codex:prepare:release && npm run media:prepare && npm run plugin:prepare:release && npm run privacy:check && npm run build && npm run icon:mac && bash scripts/package-mac.sh dist",
     "dist:mac:resume": "npm run privacy:check && bash scripts/package-mac.sh resume"
   },
   "dependencies": {
+    "@floating-ui/dom": "^1.8.0",
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/instrument-sans": "^5.2.8",
     "@fontsource-variable/newsreader": "^5.2.10",
@@ -38,8 +40,6 @@
     "@tiptap/pm": "^3.27.4",
     "@tiptap/react": "^3.27.4",
     "@tiptap/starter-kit": "^3.27.4",
-    "@vitejs/plugin-react": "^5.0.0",
-    "concurrently": "^9.2.1",
     "electron-updater": "^6.8.9",
     "lucide-react": "^0.468.0",
     "marked": "^17.0.6",
@@ -48,16 +48,19 @@
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "smol-toml": "^1.7.0",
-    "typescript": "^5.9.2",
-    "vite": "^7.0.6",
-    "wait-on": "^8.0.4"
+    "smol-toml": "^1.7.0"
   },
   "devDependencies": {
     "@types/react": "^19.1.9",
     "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.2.0",
+    "concurrently": "^9.2.4",
     "electron": "^43.1.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "postcss": "^8.5.24",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "wait-on": "^8.0.5"
   },
   "build": {
     "appId": "com.domi.workbench",
@@ -92,6 +95,17 @@
         "to": "codex-runtime",
         "filter": [
           "codex-package.tar.gz",
+          "manifest.json"
+        ]
+      },
+      {
+        "from": "build/media-runtime",
+        "to": "media-runtime",
+        "filter": [
+          "bin/ffmpeg",
+          "bin/ffprobe",
+          "licenses/**/*",
+          "source/**/*",
           "manifest.json"
         ]
       },

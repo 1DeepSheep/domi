@@ -1,5 +1,6 @@
 import {
   BadgeCheck,
+  CalendarDays,
   CheckCircle2,
   CircleAlert,
   Cloud,
@@ -45,6 +46,53 @@ type SetupCenterProps = {
   onRefresh: () => Promise<void>;
 };
 
+function domiWorkspacePath(selectedDirectory: string) {
+  const normalized = selectedDirectory.trim().replace(/[\\/]+$/, "");
+  if (!normalized) return "";
+  const name = normalized.split(/[\\/]/).filter(Boolean).pop();
+  return name === "domi工作区" ? normalized : `${normalized}/domi工作区`;
+}
+
+function outlookProfileEmail(output: string) {
+  const candidate = String(output || "")
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "");
+  try {
+    const parsed = JSON.parse(candidate);
+    const email = String(parsed?.email || "").trim();
+    return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email) ? email : "";
+  } catch {
+    return "";
+  }
+}
+
+function outlookVerificationTime(timestamp: number) {
+  if (!timestamp) return "";
+  try {
+    return new Intl.DateTimeFormat("zh-CN", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(new Date(timestamp));
+  } catch {
+    return "";
+  }
+}
+
+function plaudStatusLabel(status: string) {
+  return {
+    auth_required: "需要重新登录",
+    profile_locked: "专用浏览器被占用",
+    browser_unavailable: "浏览器连接不可用",
+    runtime_unavailable: "内置音频组件不完整",
+    network_error: "网络不可用",
+    service_changed: "PLAUD 服务可能已更新",
+    unknown: "需要继续诊断"
+  }[status] || "";
+}
+
 export default function SetupCenter({
   initialTab = "connection",
   settings,
@@ -70,6 +118,10 @@ export default function SetupCenter({
   const [report, setReport] = useState<DiagnosticReport | null>(null);
   const [plaudCheck, setPlaudCheck] = useState<DiagnosticCheck | null>(null);
   const [plaudChecking, setPlaudChecking] = useState(false);
+  const [plaudCheckedAt, setPlaudCheckedAt] = useState(0);
+  const [plaudStatus, setPlaudStatus] = useState("");
+  const [plaudAssistBusy, setPlaudAssistBusy] = useState(false);
+  const [plaudAssistMessage, setPlaudAssistMessage] = useState("");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [codexRuntime, setCodexRuntime] = useState<CodexRuntimeStatus | null>(null);
@@ -77,6 +129,7 @@ export default function SetupCenter({
   const [migrateLocalDocuments, setMigrateLocalDocuments] = useState(true);
   const [migrationPreview, setMigrationPreview] = useState<StorageMigrationPreview | null>(null);
   const [migrationPreviewBusy, setMigrationPreviewBusy] = useState(false);
+  const [outlookProfileBusy, setOutlookProfileBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const switchingLocalToFeishu = settings.storageBackend === "local"
@@ -165,23 +218,94 @@ export default function SetupCenter({
     if (await save(false)) setTab("plaud");
   }
 
+  async function checkOutlookProfile() {
+    if (!codexStatus?.ok) {
+      setError("Codex 尚未就绪，无法读取 Outlook 当前登录账号。");
+      return;
+    }
+    setOutlookProfileBusy(true);
+    setError("");
+    setNotice("正在通过 Outlook Calendar 只读检测当前发送账号…");
+    try {
+      const result = await workbench.runCodex({
+        runId: `outlook-profile-${Date.now()}`,
+        prompt: [
+          "DOMI_OUTLOOK_PROFILE_CHECK_V1",
+          "使用已安装 domi 插件中的 $schedule，只执行 Outlook 发送账号检测。",
+          "必须调用 Outlook Calendar 连接器的 get_profile；不得读取日程、不得创建或修改任何事件。",
+          "最终只输出单行 JSON，不要 Markdown、解释或脱敏：{\"email\":\"当前登录账号的完整邮箱\"}。",
+          "该结果由 domi 作为私密输出接收，只保存到本机 Application Support，不写入任务产物或日志。"
+        ].join("\n"),
+        requestText: "检测 Outlook 发送账号",
+        ephemeral: true,
+        background: true,
+        privateOutput: true,
+        workflowId: "schedule",
+        workspacePath: codexStatus.workspacePath
+      });
+      if (!result.ok) {
+        setNotice("");
+        setError(result.error || "Outlook 当前登录账号检测失败。");
+        return;
+      }
+      const email = outlookProfileEmail(result.output || "");
+      if (!email) {
+        setNotice("");
+        setError("Outlook 未返回可识别的登录邮箱，请确认已连接自己的 Outlook Calendar 账号后重试。");
+        return;
+      }
+      const verifiedAt = Date.now();
+      const saved = await onSave({
+        outlookCalendarEmail: email,
+        outlookCalendarEmailVerifiedAt: verifiedAt
+      });
+      if (!saved.ok) {
+        setNotice("");
+        setError(saved.error || "已读取 Outlook 账号，但无法保存本机显示状态。");
+        return;
+      }
+      setDraft((current) => ({
+        ...current,
+        outlookCalendarEmail: email,
+        outlookCalendarEmailVerifiedAt: verifiedAt
+      }));
+      setNotice("已验证 Outlook 当前发送账号；实际发送前还会再次核对当前登录身份。");
+    } catch (profileError) {
+      setNotice("");
+      setError(profileError instanceof Error ? profileError.message : String(profileError));
+    } finally {
+      setOutlookProfileBusy(false);
+    }
+  }
+
   async function checkPlaudConnection() {
     setPlaudChecking(true);
     setError("");
     setNotice("");
     try {
-      const saved = await onSave({ plaudConnectionMode: "enabled" });
+      const browser = draft.plaudBrowser === "tabbit" ? "tabbit" : "chrome";
+      const saved = await onSave({ plaudConnectionMode: "enabled", plaudBrowser: browser });
       if (!saved.ok) {
         setError(saved.error || "无法保存 PLAUD 设置。");
         return;
       }
-      const diagnosticReport = await workbench.runDiagnostics();
-      const check = diagnosticReport.checks.find((item) => item.id === "plaud") || null;
+      const result = await workbench.checkPlaudConnection({ browser });
+      setPlaudCheckedAt(result.checkedAt || Date.now());
+      setPlaudStatus(result.status || (result.connected ? "connected" : "unknown"));
+      const browserLabel = result.browserLabel || (browser === "tabbit" ? "Tabbit" : "Google Chrome");
+      const check = {
+        id: "plaud",
+        label: "PLAUD 录音转写",
+        ok: Boolean(result.ok && result.connected),
+        detail: result.ok && result.connected
+          ? `已通过 ${browserLabel} 只读验证当前 PLAUD 账号`
+          : result.error || `未检测到 ${browserLabel} 中的 PLAUD 登录`
+      };
       setPlaudCheck(check);
       if (!check?.ok) {
-        setError(check?.detail || "尚未检测到 PLAUD 登录，请先在 Tabbit 中登录 PLAUD。");
+        setError(check.detail);
       } else {
-        setNotice("已检测到本机 PLAUD 登录，domi 可以读取录音队列。");
+        setNotice(`${check.detail}，domi 可以读取该账号的录音队列。`);
       }
     } catch (diagnosticError) {
       setError(diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError));
@@ -190,11 +314,136 @@ export default function SetupCenter({
     }
   }
 
-  async function openTabbit() {
+  async function loginPlaud() {
+    setPlaudChecking(true);
     setError("");
-    const result = await workbench.openResource("/Applications/Tabbit.app");
-    if (!result.ok) {
-      setError("未找到 Tabbit。请先安装 Tabbit，在其中登录 PLAUD 后回到这里检测。");
+    setNotice("");
+    try {
+      const browser = draft.plaudBrowser === "tabbit" ? "tabbit" : "chrome";
+      const saved = await onSave({ plaudConnectionMode: "enabled", plaudBrowser: browser });
+      if (!saved.ok) {
+        setError(saved.error || "无法保存 PLAUD 设置。");
+        return;
+      }
+      const result = await workbench.loginPlaud({ browser });
+      setPlaudCheckedAt(result.checkedAt || Date.now());
+      setPlaudStatus(result.status || (result.connected ? "connected" : "unknown"));
+      const browserLabel = result.browserLabel || (browser === "tabbit" ? "Tabbit" : "Google Chrome");
+      const check = {
+        id: "plaud",
+        label: "PLAUD 录音转写",
+        ok: Boolean(result.ok && result.connected),
+        detail: result.ok && result.connected
+          ? `已通过 ${browserLabel} 登录并只读验证当前 PLAUD 账号`
+          : result.error || `${browserLabel} 中的 PLAUD 登录未完成`
+      };
+      setPlaudCheck(check);
+      if (check.ok) {
+        setPlaudAssistMessage("");
+        setNotice(`${check.detail}。`);
+      }
+      else setError(check.detail);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : String(loginError));
+    } finally {
+      setPlaudChecking(false);
+    }
+  }
+
+  async function disconnectPlaud() {
+    setPlaudChecking(true);
+    setError("");
+    setNotice("");
+    try {
+      const browser = draft.plaudBrowser === "tabbit" ? "tabbit" : "chrome";
+      const result = await workbench.disconnectPlaud({ browser });
+      if (!result.ok) {
+        setError(result.error || "PLAUD 本地登录清理失败。");
+        return;
+      }
+      const saved = await onSave({ plaudConnectionMode: "disabled", plaudBrowser: browser });
+      if (!saved.ok) {
+        setError(saved.error || "PLAUD 已断开，但无法保存关闭状态。");
+        return;
+      }
+      setDraft((current) => ({ ...current, plaudConnectionMode: "disabled" }));
+      setPlaudCheck(null);
+      setPlaudCheckedAt(0);
+      setPlaudStatus("");
+      setPlaudAssistMessage("");
+      setNotice("已断开 PLAUD，并删除 domi 专用浏览器登录数据。");
+    } catch (disconnectError) {
+      setError(disconnectError instanceof Error ? disconnectError.message : String(disconnectError));
+    } finally {
+      setPlaudChecking(false);
+    }
+  }
+
+  async function assistPlaudConnection() {
+    if (!codexStatus?.ok) {
+      setError("Codex 尚未就绪，请先完成 Codex 连接。");
+      return;
+    }
+    const browser = draft.plaudBrowser === "tabbit" ? "tabbit" : "chrome";
+    const browserLabel = browser === "tabbit" ? "Tabbit" : "Google Chrome";
+    const currentError = error || plaudCheck?.detail || "PLAUD 连接未完成";
+    setPlaudAssistBusy(true);
+    setPlaudAssistMessage("");
+    setError("");
+    setNotice(`Codex 正在检查 ${browserLabel}、PLAUD 专用 Profile 和内置音频运行时…`);
+    try {
+      const result = await workbench.runCodex({
+        runId: `plaud-assist-${Date.now()}`,
+        prompt: [
+          "请协助当前用户完成 domi 的 PLAUD 连接。",
+          `用户选择的浏览器：${browser}（${browserLabel}）。`,
+          `当前脱敏错误：${currentError}`,
+          "",
+          "必须采用已安装 domi 插件中的 $plaud skill，并遵守其隐私与授权规则：",
+          `1. 先运行 doctor ${browser}，检查 domi 内置 ffmpeg/ffprobe、Playwright 和所选浏览器。`,
+          "2. 可以执行安全、可逆且仅作用于 domi 本地配置或 domi 专用 PLAUD Profile 的修复。",
+          `3. 如果环境正常但尚未登录，可以运行 login ${browser}，打开 domi 专用浏览器窗口，等待用户亲自登录自己的 PLAUD 账号。`,
+          `4. 完成后运行 connection ${browser} 做只读验证。`,
+          "5. 不得读取、复制或改动用户日常 Chrome/Tabbit Profile；不得输出 Cookie、鉴权头、账号标识或预签名 URL。",
+          "6. 不得提交或推送 Git，不得把本地配置写入仓库；安装第三方浏览器等系统级操作必须先让用户明确确认。",
+          "7. 如果仍需用户处理验证码、账号登录、网络代理或浏览器安装，请用简短步骤说明。",
+          "",
+          "最终只报告：已完成的检查/修复、当前连接状态、仍需用户做的动作。"
+        ].join("\n"),
+        requestText: "诊断并协助完成 PLAUD 连接",
+        ephemeral: true,
+        background: false,
+        workflowId: "plaud-connection-assist",
+        workspacePath: codexStatus.workspacePath
+      });
+      if (!result.ok) {
+        setError(result.error || "Codex 未能完成 PLAUD 连接诊断。");
+        return;
+      }
+      const message = String(result.output || "Codex 已完成检查。").trim().slice(0, 4000);
+      setPlaudAssistMessage(message);
+      const checked = await workbench.checkPlaudConnection({ browser });
+      const connected = Boolean(checked.ok && checked.connected);
+      const detail = connected
+        ? `已通过 ${checked.browserLabel || browserLabel} 只读验证当前 PLAUD 账号`
+        : checked.error || `${browserLabel} 中的 PLAUD 登录仍未完成`;
+      setPlaudCheck({
+        id: "plaud",
+        label: "PLAUD 录音转写",
+        ok: connected,
+        detail
+      });
+      if (connected) {
+        setNotice(`${detail}。`);
+        setError("");
+      } else {
+        setNotice("");
+        setError(detail);
+      }
+    } catch (assistError) {
+      setError(assistError instanceof Error ? assistError.message : String(assistError));
+    } finally {
+      setPlaudAssistBusy(false);
     }
   }
 
@@ -325,8 +574,17 @@ export default function SetupCenter({
       return;
     }
     if (result.canceled || !result.path) return;
-    setDraft((current) => ({ ...current, [targetField]: result.path }));
-    setNotice("已选择本地资料库目录，保存后生效。");
+    const selectedPath = result.path.trim().replace(/[\\/]+$/, "");
+    const preservesExistingLocalRoot = targetField === "localRepositoryDir"
+      && settings.onboardingComplete
+      && selectedPath === draft.localRepositoryDir.trim().replace(/[\\/]+$/, "");
+    const nextPath = targetField === "localRepositoryDir" && !preservesExistingLocalRoot
+      ? domiWorkspacePath(selectedPath)
+      : selectedPath;
+    setDraft((current) => ({ ...current, [targetField]: nextPath }));
+    setNotice(targetField === "localRepositoryDir"
+      ? "已选择上级目录；domi 将在其中创建“domi工作区”，保存后生效。"
+      : "已选择本地资料库目录，保存后生效。");
   }
 
   async function diagnose() {
@@ -750,20 +1008,6 @@ export default function SetupCenter({
                 <button
                   type="button"
                   role="radio"
-                  aria-checked={draft.storageBackend === "feishu"}
-                  className={draft.storageBackend === "feishu" ? "selected" : ""}
-                  onClick={() => setDraft((current) => ({ ...current, storageBackend: "feishu" }))}
-                >
-                  <Cloud size={19} />
-                  <span>
-                    <strong>飞书资料库</strong>
-                    <small>Base 管理项目、人脉与行业动态，Wiki 保存项目文档，本地目录归档材料。</small>
-                  </span>
-                  <i>{draft.storageBackend === "feishu" ? <CheckCircle2 size={17} /> : null}</i>
-                </button>
-                <button
-                  type="button"
-                  role="radio"
                   aria-checked={draft.storageBackend === "local"}
                   className={draft.storageBackend === "local" ? "selected" : ""}
                   onClick={() => setDraft((current) => ({ ...current, storageBackend: "local" }))}
@@ -774,6 +1018,20 @@ export default function SetupCenter({
                     <small>SQLite 管理结构化数据，Markdown 保存文档，附件全部留在所选文件夹。</small>
                   </span>
                   <i>{draft.storageBackend === "local" ? <CheckCircle2 size={17} /> : null}</i>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={draft.storageBackend === "feishu"}
+                  className={draft.storageBackend === "feishu" ? "selected" : ""}
+                  onClick={() => setDraft((current) => ({ ...current, storageBackend: "feishu" }))}
+                >
+                  <Cloud size={19} />
+                  <span>
+                    <strong>飞书资料库</strong>
+                    <small>Base 管理项目、人脉与行业动态，Wiki 保存项目文档，本地目录归档材料。</small>
+                  </span>
+                  <i>{draft.storageBackend === "feishu" ? <CheckCircle2 size={17} /> : null}</i>
                 </button>
               </div>
               <div className="data-privacy-note">
@@ -873,19 +1131,19 @@ export default function SetupCenter({
                     </span>
                   </div>
                   <label className="local-library-setting">
-                    <span>Markdown 与附件目录</span>
+                    <span>domi 工作区</span>
                     <div className="directory-picker">
                       <input
                         value={draft.localRepositoryDir}
                         onChange={(event) => setDraft((current) => ({ ...current, localRepositoryDir: event.target.value }))}
-                        placeholder="请选择本地资料库目录"
+                        placeholder="请选择工作区的上级目录"
                         spellCheck={false}
                       />
                       <button type="button" onClick={chooseLocalLibraryDirectory} title="选择本地资料库目录" aria-label="选择本地资料库目录">
                         <FolderOpen size={16} />
                       </button>
                     </div>
-                    <small>domi 会建立行业研究、行业动态、项目库和人脉库目录；已有文件不会被删除。</small>
+                    <small>选择上级目录后，domi 会先创建“domi工作区”，在根目录生成“0.待办事项.md”，再建立行业研究、行业动态、项目库和人脉库；已有文件不会被删除或覆盖。</small>
                   </label>
                   <div className="local-database-location">
                     <span>SQLite 数据库</span>
@@ -894,6 +1152,78 @@ export default function SetupCenter({
                   </div>
                 </div>
               )}
+              <section className="task-calendar-settings">
+                <div className="task-calendar-settings-heading">
+                  <CalendarDays size={20} />
+                  <span>
+                    <strong>待办事项与日历</strong>
+                    <small>{draft.storageBackend === "feishu"
+                      ? "domi 自动维护飞书文档库中的“1.待办事项”；日程邀请由当前 Outlook 账号的默认日历发出。"
+                      : "domi 使用工作区根目录的“0.待办事项.md”；日程邀请由当前 Outlook 账号的默认日历发出。"}</small>
+                  </span>
+                </div>
+                <div className={`outlook-account-card ${draft.outlookCalendarEmailVerifiedAt ? "verified" : ""}`}>
+                  <span className="outlook-account-icon">
+                    {draft.outlookCalendarEmailVerifiedAt
+                      ? <BadgeCheck size={19} />
+                      : <CalendarDays size={19} />}
+                  </span>
+                  <span className="outlook-account-copy">
+                    <strong>发送账号</strong>
+                    <b>{draft.outlookCalendarEmail || "尚未检测当前 Outlook 登录账号"}</b>
+                    <small>{draft.outlookCalendarEmailVerifiedAt
+                      ? `上次通过 Outlook Calendar 验证：${outlookVerificationTime(draft.outlookCalendarEmailVerifiedAt)}。该账号将作为日程组织者发送邀请。`
+                      : draft.outlookCalendarEmail
+                        ? "这是旧版保存的账号提示，尚未与 Outlook 当前登录身份核对。"
+                        : "连接 Outlook 后点击检测；domi 不使用 SMTP，也不会自行选择其他邮箱。"}</small>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={checkOutlookProfile}
+                    disabled={outlookProfileBusy || !codexStatus?.ok}
+                  >
+                    {outlookProfileBusy
+                      ? <LoaderCircle className="spinning" size={14} />
+                      : <RefreshCw size={14} />}
+                    {outlookProfileBusy
+                      ? "检测中"
+                      : draft.outlookCalendarEmailVerifiedAt
+                        ? "重新检测"
+                        : "检测账号"}
+                  </button>
+                </div>
+                <div className="task-calendar-settings-grid">
+                  <section className="calendar-timezone-setting">
+                    <label>
+                      <span>默认时区</span>
+                      <input
+                        value={draft.outlookCalendarTimezone}
+                        onChange={(event) => setDraft((current) => ({ ...current, outlookCalendarTimezone: event.target.value }))}
+                        placeholder="Asia/Shanghai"
+                        spellCheck={false}
+                      />
+                      <small>使用 IANA 时区名称；跨城市日程仍以当次明确输入为准。</small>
+                    </label>
+                  </section>
+                  <section className="calendar-recipient-setting">
+                    <label>
+                      <span>常用参会人（可多个）</span>
+                      <textarea
+                        rows={3}
+                        value={draft.outlookCalendarRecipients}
+                        onChange={(event) => setDraft((current) => ({
+                          ...current,
+                          outlookCalendarRecipients: event.target.value
+                        }))}
+                        placeholder={"张三 <zhangsan@example.com>\n李四 <lisi@example.com>"}
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                      <small>使用逗号、分号或换行分隔。约日程时由用户选择一个或多个，不会默认全部发送。</small>
+                    </label>
+                  </section>
+                </div>
+              </section>
               {(error || notice) && <div className={`setup-feedback ${error ? "error" : "success"}`}>{error || notice}</div>}
             </div>
           ) : tab === "plaud" ? (
@@ -907,6 +1237,7 @@ export default function SetupCenter({
                   onClick={() => {
                     setDraft((current) => ({ ...current, plaudConnectionMode: "enabled" }));
                     setPlaudCheck(null);
+                    setPlaudAssistMessage("");
                     setError("");
                     setNotice("");
                   }}
@@ -926,6 +1257,7 @@ export default function SetupCenter({
                   onClick={() => {
                     setDraft((current) => ({ ...current, plaudConnectionMode: "disabled" }));
                     setPlaudCheck(null);
+                    setPlaudAssistMessage("");
                     setError("");
                     setNotice("已选择暂时不用；之后可在设置的“录音转写”中重新开启。");
                   }}
@@ -941,28 +1273,97 @@ export default function SetupCenter({
 
               {draft.plaudConnectionMode === "enabled" ? (
                 <div className={`plaud-setup-panel ${plaudCheck?.ok ? "ok" : ""}`}>
+                  <div className="plaud-browser-options" role="radiogroup" aria-label="PLAUD 登录浏览器">
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={draft.plaudBrowser === "chrome"}
+                      className={draft.plaudBrowser === "chrome" ? "selected" : ""}
+                      onClick={() => {
+                        setDraft((current) => ({ ...current, plaudBrowser: "chrome" }));
+                        setPlaudCheck(null);
+                        setPlaudAssistMessage("");
+                        setError("");
+                        setNotice("");
+                      }}
+                    >
+                      <strong>Google Chrome</strong>
+                      <small>使用 domi 专用 Chrome Profile</small>
+                    </button>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={draft.plaudBrowser === "tabbit"}
+                      className={draft.plaudBrowser === "tabbit" ? "selected" : ""}
+                      onClick={() => {
+                        setDraft((current) => ({ ...current, plaudBrowser: "tabbit" }));
+                        setPlaudCheck(null);
+                        setPlaudAssistMessage("");
+                        setError("");
+                        setNotice("");
+                      }}
+                    >
+                      <strong>Tabbit</strong>
+                      <small>使用 domi 专用 Tabbit Profile</small>
+                    </button>
+                  </div>
                   <div className="plaud-setup-copy">
                     <span className="plaud-setup-icon">
                       {plaudCheck?.ok ? <BadgeCheck size={21} /> : <Mic size={21} />}
                     </span>
                     <div>
-                      <strong>{plaudCheck?.ok ? "PLAUD 已连接" : "在 Tabbit 中登录 PLAUD"}</strong>
+                      <strong>{plaudCheck?.ok
+                        ? "PLAUD 已连接"
+                        : `使用 ${draft.plaudBrowser === "tabbit" ? "Tabbit" : "Chrome"} 登录 PLAUD`}</strong>
                       <small>{plaudCheck?.detail
-                        || "domi 复用本机 Tabbit 的已登录会话，不保存 Cookie、授权头或账号密码。"}</small>
+                        || "domi 会打开独立的本地浏览器 Profile；请登录你自己的 PLAUD 账号，不读取日常浏览器 Profile。"}</small>
+                      {plaudCheckedAt ? (
+                        <small>
+                          最近检测：{outlookVerificationTime(plaudCheckedAt)}
+                          {plaudStatus && plaudStatus !== "connected"
+                            ? ` · ${plaudStatusLabel(plaudStatus)}`
+                            : ""}
+                        </small>
+                      ) : null}
                     </div>
                   </div>
                   <ol>
-                    <li>打开 Tabbit，并完成 PLAUD 登录。</li>
-                    <li>回到 domi，点击“检测 PLAUD”。</li>
-                    <li>检测成功后即可读取录音；安装向导也允许稍后再登录。</li>
+                    <li>domi 已内置离线音频转换组件，新用户不需要安装 Homebrew 或 ffmpeg。</li>
+                    <li>点击“登录并验证”，在打开的专用窗口中登录自己的 PLAUD 账号。</li>
+                    <li>domi 会发起一次只读远端请求，确认该账号确实可以读取录音。</li>
+                    <li>登录数据只保存在本机 domi Application Support；不会读取或复制 Chrome/Tabbit 的日常 Profile。</li>
                   </ol>
                   <div className="setup-inline-actions">
-                    <button type="button" onClick={openTabbit}><ExternalLink size={15} />打开 Tabbit</button>
+                    <button type="button" onClick={loginPlaud} disabled={plaudChecking}>
+                      {plaudChecking ? <LoaderCircle className="spinning" size={15} /> : <ExternalLink size={15} />}
+                      登录并验证
+                    </button>
                     <button type="button" onClick={checkPlaudConnection} disabled={plaudChecking}>
                       {plaudChecking ? <LoaderCircle className="spinning" size={15} /> : <RefreshCw size={15} />}
-                      检测 PLAUD
+                      重新检测
                     </button>
+                    <button type="button" onClick={disconnectPlaud} disabled={plaudChecking}>
+                      <ShieldCheck size={15} />断开并清除登录
+                    </button>
+                    {(error || (plaudCheck && !plaudCheck.ok)) && codexStatus?.ok ? (
+                      <button
+                        type="button"
+                        onClick={assistPlaudConnection}
+                        disabled={plaudChecking || plaudAssistBusy}
+                      >
+                        {plaudAssistBusy
+                          ? <LoaderCircle className="spinning" size={15} />
+                          : <Sparkles size={15} />}
+                        {plaudAssistBusy ? "Codex 正在处理" : "让 Codex 帮我解决"}
+                      </button>
+                    ) : null}
                   </div>
+                  {plaudAssistMessage ? (
+                    <div className="plaud-assist-result">
+                      <strong>Codex 连接助手</strong>
+                      <p>{plaudAssistMessage}</p>
+                    </div>
+                  ) : null}
                 </div>
               ) : draft.plaudConnectionMode === "disabled" ? (
                 <div className="plaud-skip-note">
@@ -1109,7 +1510,7 @@ export default function SetupCenter({
               : tab === "data"
                 ? "配置保存在 Application Support；覆盖安装和自动更新会继续沿用，无需重复配置。"
               : tab === "plaud"
-                ? "PLAUD 登录保留在 Tabbit；domi 只保存是否启用这项能力。"
+                ? "PLAUD 登录只保存在本机 domi 专用浏览器 Profile；不会进入插件、Git 或诊断报告。"
               : tab === "updates"
                 ? "更新包必须通过 Developer ID 签名与 Apple 公证。"
                 : "诊断报告不包含登录令牌或 Base 标识。"}</span>
@@ -1145,7 +1546,9 @@ export default function SetupCenter({
                 className="setup-primary"
                 type="button"
                 onClick={() => save(required)}
-                disabled={saving || draft.plaudConnectionMode === "unconfigured"}
+                disabled={saving
+                  || draft.plaudConnectionMode === "unconfigured"
+                  || (draft.plaudConnectionMode === "enabled" && !plaudCheck?.ok)}
               >
                 {saving && <LoaderCircle className="spinning" size={16} />}
                 {required ? "保存并进入 domi" : "保存 PLAUD 设置"}
