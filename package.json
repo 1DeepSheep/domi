@@ -28,6 +28,7 @@
     "dist:mac:resume": "npm run privacy:check && bash scripts/package-mac.sh resume"
   },
   "dependencies": {
+    "@floating-ui/dom": "^1.8.0",
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/instrument-sans": "^5.2.8",
     "@fontsource-variable/newsreader": "^5.2.10",
