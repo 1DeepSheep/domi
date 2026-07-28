@@ -46,6 +46,8 @@ Release 前必须确认保护检查成功。不要绕过失败检查手工上传
 
 `dist:mac:resume` 不会重新拉取插件，因为它必须继续处理已经签名并提交公证的同一份 `.app`。如果 domi 在公证等待期间又更新，应提升客户端版本并重新执行一次完整的 `npm run dist:mac`，不能把新插件塞进已提交公证的产物。
 
+`npm run dist:mac` 会先生成 Developer ID 签名的 `.app`，再使用 `APPLE_KEYCHAIN_PROFILE`（未设置时为 `domi-notary`）提交 Apple 公证并等待成功、贴票和验证，最后才从这份已贴票的 `.app` 生成 DMG、ZIP、blockmap 与更新清单。缺少公证凭据或公证失败时命令必须失败，不能上传未公证产物。
+
 ## 升级数据保护
 
 更新只替换 `/Applications/domi.app`。数据库继续使用固定路径 `~/Library/Application Support/domi/domi.sqlite3`，任务文件继续使用 `~/Documents/domi/`。
