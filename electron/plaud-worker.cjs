@@ -1,13 +1,20 @@
 const path = require("node:path");
+const os = require("node:os");
 
 function print(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 function safeError(error) {
-  const message = error instanceof Error ? error.message : String(error);
+  const homeDirectory = os.homedir();
+  const message = (error instanceof Error ? error.message : String(error))
+    .split(homeDirectory)
+    .join("~");
   if (/Cannot find module ['"]playwright['"]/i.test(message)) {
     return "PLAUD 缺少浏览器运行组件。请重启 domi；如果仍然失败，请重新安装最新版 domi。";
+  }
+  if (/browserType\.connectOverCDP|WebSocket error:[\s\S]*ECONNREFUSED|connect ECONNREFUSED 127\.0\.0\.1/i.test(message)) {
+    return "PLAUD 专用浏览器未能建立本机连接。请重新同步；domi 会清理旧连接后自动重试。";
   }
   return message
     .replace(/\b(?:authorization|cookie|x-pld-user|x-device-id)\s*[:=]\s*[^\r\n]+/gi, "[REDACTED]")
@@ -47,7 +54,7 @@ function compareRemoteFiles(left, right) {
 }
 
 function isTransientNavigationError(error) {
-  return /page\.goto|ERR_CONNECTION_(?:CLOSED|RESET|REFUSED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|socket hang up/i
+  return /page\.goto|connectOverCDP|WebSocket error|ECONNREFUSED|ERR_CONNECTION_(?:CLOSED|RESET|REFUSED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|socket hang up/i
     .test(error instanceof Error ? error.message : String(error));
 }
 
@@ -152,8 +159,15 @@ async function main() {
   throw new Error(`未知的 PLAUD worker 命令：${command || "(空)"}`);
 }
 
-main()
-  .then(print)
-  .catch((error) => {
-    print({ ok: false, error: safeError(error) });
-  });
+if (require.main === module) {
+  main()
+    .then(print)
+    .catch((error) => {
+      print({ ok: false, error: safeError(error) });
+    });
+}
+
+module.exports = {
+  isTransientNavigationError,
+  safeError
+};

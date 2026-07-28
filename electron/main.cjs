@@ -22,6 +22,7 @@ const { DomiPluginManager } = require("./domi-plugin-manager.cjs");
 const {
   AppSettingsService,
   normalizeSettings,
+  parseCalendarRecipients,
   validateDomiConfig
 } = require("./app-settings.cjs");
 const { UpdateService } = require("./update-service.cjs");
@@ -48,8 +49,10 @@ const {
 } = require("./document-library.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
 const { prepareApplicationBrandPaths } = require("./brand-migration.cjs");
+const { withMediaRuntimeEnvironment } = require("./media-runtime.cjs");
 
 const brandPaths = prepareApplicationBrandPaths(app);
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 const execFileAsync = promisify(execFile);
 const pdfProtocol = "domi-pdf";
 const markdownAssetProtocol = "domi-asset";
@@ -80,17 +83,20 @@ const CODEX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const externalDomiWorkflows = new Map([
   ["domi-analyst", "使用 domi-AI分析师，并可能读取当前 domi 资料库"],
   ["domi-router", "访问 PLAUD、domi 恢复队列和当前资料库，并可能按工作流更新记录"],
+  ["plaud-connection-assist", "检查 domi 内置音频运行时和 PLAUD 专用浏览器 Profile，并协助完成用户自己的 PLAUD 登录"],
   ["meeting-prep", "读取当前项目、人脉、文档和材料及公开信息，生成只读会前简报"],
   ["people-intake", "使用 domi 人物研究入库工作流检索公开信息、查重并更新当前人脉库"],
   ["project-research", "使用 domi Router 读取内部项目材料、当前文档库与公开信息源，完成项目只读研究"],
   ["project-intake", "使用 domi Router 完成项目研究、投资快评，并更新当前项目库"],
   ["quick-discussion", "使用 domi Router 调用本机麦克风、PLAUD 与本地文件，生成讨论纪要和跟进事项"],
   ["investment-radar", "联网检索和核验最新行业新闻，并更新当前行业事件库"],
+  ["task", "读取项目、人脉、行业动态和 1.待办事项文档，并更新待办事项与状态"],
+  ["schedule", "整理主题、时间和地点，并向用户指定的一个或多个参会人发送 Outlook 日程邀请"],
   ["desk-research", "访问当前项目库、文档、材料和联网数据源，并可能按要求回填研究成果"],
   ["sourcing", "访问当前人脉库和公开信息源，并可能按要求更新人脉记录"],
   ["investment-mgmt", "访问并可能更新当前项目库、文档与本地材料"]
 ]);
-const larkRequestPattern = /(?:飞书|lark|wiki|watching\s*list|项目库|人脉库|people|onedrive|项目文档|交流文档|线上文档)/i;
+const larkRequestPattern = /(?:飞书|lark|wiki|watching\s*list|项目库|人脉库|people|onedrive|项目文档|交流文档|线上文档|1\.\s*待办事项|1\.\s*task|待办事项|任务建议)/i;
 const explicitFeishuRequestPattern = /(?:飞书|lark|wiki|watching\s*list|线上文档)/i;
 
 const appName = brandPaths.appName;
@@ -113,6 +119,10 @@ let codexBootstrap = null;
 let codexRuntimeManager = null;
 let updateService = null;
 const serviceCoordinator = new ServiceCoordinator();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
 
 function boundedRuntimeText(value, limit = 8_000) {
   if (value === undefined || value === null) return "";
@@ -176,6 +186,7 @@ function getDomiIntegration() {
     domiIntegration = new DomiIntegration({
       stateStore: getStateStore(),
       configProvider: () => getAppSettings().load().settings,
+      domiConfigPath: path.join(app.getPath("userData"), "domi-plugin-config.json"),
       plaudOutputDir: path.join(demoWorkspace, "work", "domi", "plaud")
     });
   }
@@ -191,7 +202,7 @@ function getDomiPluginManager() {
       ? path.join(process.resourcesPath, "domi-plugin-lock.json")
       : path.join(rootDir, "build", "domi-plugin-lock.json");
     domiPluginManager = new DomiPluginManager({
-      userDataPath: app.getPath("userData"),
+      userDataPath: brandPaths.pluginRuntimePath,
       bundledPluginRoot: bundledRoot,
       bundledLockPath,
       clientVersion: app.getVersion(),
@@ -199,6 +210,10 @@ function getDomiPluginManager() {
     });
   }
   return domiPluginManager;
+}
+
+function getCodexRuntime() {
+  return withMediaRuntimeEnvironment(getAppSettings().runtime());
 }
 
 function getAppSettings() {
@@ -1100,7 +1115,7 @@ function finishRun(run, type, details = {}) {
   const stopped = type === "stopped";
   const ok = type === "completed" || stopped;
   let outputPath = "";
-  if (type === "completed" && run.output.trim()) {
+  if (type === "completed" && run.output.trim() && !run.privateOutput) {
     const archiveDir = path.join(run.workspacePath || demoWorkspace, "outputs");
     fs.mkdirSync(archiveDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -1124,7 +1139,7 @@ function finishRun(run, type, details = {}) {
     type,
     threadId: run.threadId,
     turnId: run.turnId,
-    output: run.output,
+    output: run.privateOutput ? "" : run.output,
     error: result.error,
     outputPath,
     eventCount: run.eventCount
@@ -1253,7 +1268,7 @@ function getCodexClient() {
     codexClient = new CodexAppServer({
       cwd: demoWorkspace,
       version: app.getVersion(),
-      runtimeProvider: () => getAppSettings().runtime(),
+      runtimeProvider: getCodexRuntime,
       onNotification: handleCodexNotification,
       onLog: (text) => {
         if (process.env.NODE_ENV !== "production") {
@@ -1289,7 +1304,7 @@ async function runCodexCheck() {
     env: {}
   };
   try {
-    runtime = getAppSettings().runtime();
+    runtime = getCodexRuntime();
     const binary = resolveCodexBinary(runtime.codexPath);
     detectedPath = binary;
     const versionResult = await execFileAsync(binary, ["--version"], {
@@ -1458,10 +1473,27 @@ async function saveRuntimeSettings(request) {
     "radarBaseToken",
     "radarTableId",
     "wikiSpaceId",
+    "taskDocumentUrl",
     "localLibraryDir",
     "localRepositoryDir"
   ].some((key) => Object.prototype.hasOwnProperty.call(settingsRequest, key)
     && settingsRequest[key] !== current[key]);
+  const targetStorageBackend = Object.prototype.hasOwnProperty.call(settingsRequest, "storageBackend")
+    ? settingsRequest.storageBackend
+    : current.storageBackend;
+  const targetWikiSpaceId = Object.prototype.hasOwnProperty.call(settingsRequest, "wikiSpaceId")
+    ? String(settingsRequest.wikiSpaceId || "").trim()
+    : String(current.wikiSpaceId || "").trim();
+  const targetOnboardingComplete = Object.prototype.hasOwnProperty.call(settingsRequest, "onboardingComplete")
+    ? Boolean(settingsRequest.onboardingComplete)
+    : Boolean(current.onboardingComplete);
+  const shouldInitializeTaskDocument = targetStorageBackend === "feishu"
+    && Boolean(targetWikiSpaceId)
+    && (
+      current.storageBackend !== "feishu"
+      || String(current.wikiSpaceId || "").trim() !== targetWikiSpaceId
+      || (!current.onboardingComplete && targetOnboardingComplete)
+    );
   if (connectionChanged) {
     const maintenance = prepareCodexConnectionMaintenance(
       "请先停止正在执行的用户任务，再修改 Codex 或资料库连接。"
@@ -1497,10 +1529,23 @@ async function saveRuntimeSettings(request) {
     }
     const result = getAppSettings().save(settingsRequest);
     getUpdateService().configureChannel(result.settings.updateChannel);
-    if (!connectionChanged) return { ok: true, ...result, migration };
+    let taskDocument;
+    if (shouldInitializeTaskDocument) {
+      try {
+        taskDocument = await getDomiIntegration().ensureTaskDocument();
+      } catch (error) {
+        return {
+          ok: false,
+          ...result,
+          migration,
+          error: `资料库设置已保存，但无法自动准备“1.待办事项”：${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+    }
+    if (!connectionChanged) return { ok: true, ...result, migration, taskDocument };
     resetCodexClient();
     const codex = await runCodexCheck();
-    return { ok: true, ...result, codex, migration };
+    return { ok: true, ...result, codex, migration, taskDocument };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -1691,7 +1736,7 @@ async function runSystemDiagnostics() {
         ? "未启用（已跳过连接检测）"
         : health.plaud?.ok
           ? `已连接 · ${health.plaud.queueCount || 0} 条本机队列记录`
-          : health.plaud?.error || "未检测到 Tabbit 中的 PLAUD 登录"
+          : health.plaud?.error || "未检测到 domi 专用浏览器中的 PLAUD 登录"
     );
   } catch (error) {
     push("domi", "domi 插件", false, error instanceof Error ? error.message : String(error));
@@ -1736,6 +1781,7 @@ function needsLarkAccess(payload) {
   const backend = getAppSettings().load().settings.storageBackend;
   if (backend === "local") return false;
   if (explicitFeishuRequestPattern.test(requestText)) return true;
+  if (payload?.workflowId === "schedule") return larkRequestPattern.test(requestText);
   if (payload?.workflowId === "domi-analyst") {
     return larkRequestPattern.test(requestText);
   }
@@ -1749,6 +1795,16 @@ function repositoryRuntimeContext(payload) {
     return "";
   }
   const settings = getAppSettings().load().settings;
+  if (payload?.workflowId === "schedule") {
+    return [
+      "domi 本轮日历配置事实：",
+      `- 默认解释时区：${settings.outlookCalendarTimezone || "Asia/Shanghai"}。`,
+      "- 实际发送账号必须通过 Outlook Calendar get_profile 实时取得；本机记录只用于设置界面展示，不能切换或替代连接器身份。",
+      `- 本机保存了 ${parseCalendarRecipients(settings.outlookCalendarRecipients).length} 个常用参会人候选；只有客户端已加入本轮输入的邮箱才算选中。`,
+      "- 一个或多个参会人邮箱必须来自本轮用户输入；未提供时主动询问，不得自动群发常用参会人列表。",
+      "- 不得把私人邮箱写入产物或日志。"
+    ].join("\n");
+  }
   if (settings.storageBackend === "local") {
     return [
       "domi 本轮资料库事实：",
@@ -1871,6 +1927,7 @@ async function runCodex(sender, payload) {
         output: "",
         eventCount: 0,
         workspacePath,
+        privateOutput: payload?.privateOutput === true,
         finished: false,
         resolve
       };
@@ -1941,12 +1998,18 @@ async function runCodex(sender, payload) {
 }
 
 async function stopCodex(runId) {
-  const run = activeRuns.get(runId);
+  let run = activeRuns.get(runId);
   if (!run) {
     return { ok: false, error: "没有找到正在执行的任务。" };
   }
+
+  for (let attempt = 0; attempt < 25 && !run.turnId; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    run = activeRuns.get(runId);
+    if (!run) return { ok: true };
+  }
   if (!run.turnId) {
-    return { ok: false, error: "Codex 正在启动，请稍后再停止。" };
+    return { ok: false, error: "Codex 启动超时，尚未取得可停止的运行标识。" };
   }
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -1955,6 +2018,12 @@ async function stopCodex(runId) {
         threadId: run.threadId,
         turnId: run.turnId
       });
+      for (let waitAttempt = 0; waitAttempt < 30; waitAttempt += 1) {
+        if (!activeRuns.has(runId)) return { ok: true };
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      const unfinished = activeRuns.get(runId);
+      if (unfinished) finishRun(unfinished, "stopped");
       return { ok: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2013,7 +2082,7 @@ async function recoverCodexThread(threadId) {
   }
 }
 
-app.whenReady().then(() => {
+if (hasSingleInstanceLock) app.whenReady().then(() => {
   appendRuntimeLog("app-ready", {
     version: app.getVersion(),
     packaged: app.isPackaged,
@@ -2039,6 +2108,14 @@ app.whenReady().then(() => {
   });
 });
 
+app.on("second-instance", () => {
+  const win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+});
+
 app.on("before-quit", () => {
   appendRuntimeLog("app-before-quit");
   updateService?.stop();
@@ -2060,7 +2137,8 @@ ipcMain.on("app:renderer-report", (_event, payload) => {
     "section-boundary",
     "document-operation",
     "markdown-editor-boundary",
-    "markdown-editor-operation"
+    "markdown-editor-operation",
+    "workflow-metric"
   ].includes(payload?.kind)
     ? payload.kind
     : "error";
@@ -2221,6 +2299,60 @@ ipcMain.handle("domi:weekly-news-checkpoint", (_event, request) => {
   const result = getDomiIntegration().recordWeeklyNewsRadarCheckpoint(request);
   if (result.ok) serviceCoordinator.invalidate("domi:weekly-news:");
   return result;
+});
+ipcMain.handle("domi:task-list", async (_event, request) => {
+  try {
+    const normalizedRequest = {
+      cacheOnly: Boolean(request?.cacheOnly),
+      fresh: request?.fresh === true
+    };
+    return await serviceCoordinator.run(
+      `domi:task-list:${normalizedRequest.cacheOnly ? "cache" : "fresh"}`,
+      () => getDomiIntegration().taskBoard(normalizedRequest),
+      {
+        ttlMs: normalizedRequest.cacheOnly ? 2_000 : 10_000,
+        retries: normalizedRequest.cacheOnly ? 0 : 1,
+        force: normalizedRequest.fresh,
+        allowStale: true,
+        isSuccess: (value) => value?.ok !== false || value?.stale
+      }
+    );
+  } catch (error) {
+    return { ok: false, configured: true, stale: false, tasks: [], error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:task-update", async (_event, request) => {
+  try {
+    const result = await getDomiIntegration().updateTask(request);
+    serviceCoordinator.invalidate("domi:task-list:");
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:plaud-login", async (_event, request) => {
+  try {
+    return await getDomiIntegration().loginPlaud(request);
+  } catch (error) {
+    return { ok: false, connected: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:plaud-connection", async (_event, request) => {
+  try {
+    return await getDomiIntegration().plaudConnection(request);
+  } catch (error) {
+    return { ok: false, connected: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:plaud-disconnect", async (_event, request) => {
+  try {
+    const result = await getDomiIntegration().disconnectPlaud(request);
+    serviceCoordinator.invalidate("domi:plaud-list");
+    serviceCoordinator.invalidate("domi:status");
+    return result;
+  } catch (error) {
+    return { ok: false, connected: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });
 ipcMain.handle("domi:plaud-list", async (_event, request) => {
   try {

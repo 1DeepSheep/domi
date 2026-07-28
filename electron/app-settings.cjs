@@ -1,9 +1,50 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const {
+  documentLibraryLocation,
+  domiWorkspaceRoot,
+  ensureDocumentLibraryStructure
+} = require("./document-library.cjs");
 
 const SETTINGS_KEY = "runtime";
+const EMAIL_PATTERN = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+const MAX_CALENDAR_RECIPIENTS = 50;
+
+function parseCalendarRecipients(value = "") {
+  const entries = String(value || "")
+    .split(/[,;\n]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (entries.length > MAX_CALENDAR_RECIPIENTS) {
+    throw new Error(`常用参会人最多保存 ${MAX_CALENDAR_RECIPIENTS} 个。`);
+  }
+  const seen = new Set();
+  const recipients = [];
+  for (const entry of entries) {
+    const labeled = entry.match(/^(.*?)\s*<([^<>]+)>$/);
+    const name = labeled ? labeled[1].trim() : "";
+    const email = (labeled ? labeled[2] : entry).trim();
+    if (!EMAIL_PATTERN.test(email)) {
+      throw new Error("常用参会人邮箱格式不正确，请使用“姓名 <邮箱>”并以逗号、分号或换行分隔。");
+    }
+    const key = email.toLocaleLowerCase("en-US");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    recipients.push({
+      name,
+      email,
+      label: name ? `${name} <${email}>` : email
+    });
+  }
+  return recipients;
+}
+
+function normalizeCalendarRecipients(value = "") {
+  return parseCalendarRecipients(value).map((recipient) => recipient.label).join(", ");
+}
+
 const defaultSettings = Object.freeze({
-  version: 5,
+  version: 7,
   onboardingComplete: false,
   authMode: "chatgpt",
   apiBaseUrl: "",
@@ -11,7 +52,8 @@ const defaultSettings = Object.freeze({
   relayCredentialConfigured: false,
   codexPath: "",
   plaudConnectionMode: "unconfigured",
-  storageBackend: "feishu",
+  plaudBrowser: "chrome",
+  storageBackend: "local",
   projectBaseToken: "",
   projectTableId: "",
   peopleBaseToken: "",
@@ -19,6 +61,11 @@ const defaultSettings = Object.freeze({
   radarBaseToken: "",
   radarTableId: "",
   wikiSpaceId: "",
+  taskDocumentUrl: "",
+  outlookCalendarEmail: "",
+  outlookCalendarEmailVerifiedAt: 0,
+  outlookCalendarRecipients: "",
+  outlookCalendarTimezone: "Asia/Shanghai",
   localLibraryDir: "",
   localRepositoryDir: "",
   localDatabasePath: "",
@@ -28,6 +75,7 @@ const defaultSettings = Object.freeze({
 
 const domiConfigKeys = Object.freeze([
   "plaudConnectionMode",
+  "plaudBrowser",
   "storageBackend",
   "projectBaseToken",
   "projectTableId",
@@ -36,6 +84,11 @@ const domiConfigKeys = Object.freeze([
   "radarBaseToken",
   "radarTableId",
   "wikiSpaceId",
+  "taskDocumentUrl",
+  "outlookCalendarEmail",
+  "outlookCalendarEmailVerifiedAt",
+  "outlookCalendarRecipients",
+  "outlookCalendarTimezone",
   "localLibraryDir",
   "localRepositoryDir",
   "localDatabasePath"
@@ -47,11 +100,38 @@ function normalizeSettings(value = {}) {
   const localLibraryDir = String(value.localLibraryDir || value.oneDriveProjectDir || "").trim();
   const localRepositoryDir = String(value.localRepositoryDir || "").trim();
   const localDatabasePath = String(value.localDatabasePath || "").trim();
+  const taskDocumentUrl = String(value.taskDocumentUrl || "").trim();
+  const outlookCalendarEmail = String(value.outlookCalendarEmail || "").trim();
+  const outlookCalendarEmailVerifiedAt = outlookCalendarEmail
+    ? Math.max(0, Number(value.outlookCalendarEmailVerifiedAt) || 0)
+    : 0;
+  const outlookCalendarRecipients = normalizeCalendarRecipients(
+    value.outlookCalendarRecipients || ""
+  );
+  const outlookCalendarTimezone = String(value.outlookCalendarTimezone || "Asia/Shanghai").trim();
   if (codexPath && !path.isAbsolute(codexPath)) {
     throw new Error("Codex 路径必须是绝对路径。");
   }
   if (localDatabasePath && !path.isAbsolute(localDatabasePath)) {
     throw new Error("本地资料库数据库路径必须是绝对路径。");
+  }
+  if (
+    taskDocumentUrl
+    && !(/^https:\/\/\S+$/i.test(taskDocumentUrl)
+      || /^[A-Za-z0-9_-]{6,}$/.test(taskDocumentUrl))
+  ) {
+    throw new Error("1.待办事项文档链接或 token 格式不正确。");
+  }
+  if (
+    outlookCalendarEmail
+    && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(outlookCalendarEmail)
+  ) {
+    throw new Error("Outlook 日历邮箱格式不正确。");
+  }
+  try {
+    new Intl.DateTimeFormat("zh-CN", { timeZone: outlookCalendarTimezone }).format();
+  } catch {
+    throw new Error("Outlook 日历时区格式不正确，请使用 IANA 时区名称。");
   }
   const plaudConnectionMode = ["enabled", "disabled"].includes(value.plaudConnectionMode)
     ? value.plaudConnectionMode
@@ -60,7 +140,7 @@ function normalizeSettings(value = {}) {
       : "unconfigured";
   const authMode = version >= 5 && value.authMode === "relay" ? "relay" : "chatgpt";
   return {
-    version: 5,
+    version: 7,
     onboardingComplete: Boolean(value.onboardingComplete),
     authMode,
     apiBaseUrl: authMode === "relay" ? String(value.apiBaseUrl || "").trim() : "",
@@ -68,7 +148,8 @@ function normalizeSettings(value = {}) {
     relayCredentialConfigured: authMode === "relay" && Boolean(value.relayCredentialConfigured),
     codexPath,
     plaudConnectionMode,
-    storageBackend: value.storageBackend === "local" ? "local" : "feishu",
+    plaudBrowser: value.plaudBrowser === "tabbit" ? "tabbit" : "chrome",
+    storageBackend: value.storageBackend === "feishu" ? "feishu" : "local",
     projectBaseToken: String(value.projectBaseToken || "").trim(),
     projectTableId: String(value.projectTableId || "").trim(),
     peopleBaseToken: String(value.peopleBaseToken || "").trim(),
@@ -76,6 +157,11 @@ function normalizeSettings(value = {}) {
     radarBaseToken: String(value.radarBaseToken || "").trim(),
     radarTableId: String(value.radarTableId || "").trim(),
     wikiSpaceId: String(value.wikiSpaceId || "").trim(),
+    taskDocumentUrl,
+    outlookCalendarEmail,
+    outlookCalendarEmailVerifiedAt,
+    outlookCalendarRecipients,
+    outlookCalendarTimezone,
     localLibraryDir,
     localRepositoryDir,
     localDatabasePath,
@@ -149,7 +235,7 @@ class AppSettingsService {
 
   writeDomiConfig(settings) {
     if (!this.domiConfigPath) return;
-    const config = { version: 4 };
+    const config = { version: 6 };
     for (const key of domiConfigKeys) config[key] = settings[key];
     // Older domi plugin builds read this key. Keep the alias until every
     // supported plugin version understands localLibraryDir.
@@ -185,8 +271,22 @@ class AppSettingsService {
     let settings;
     try {
       const storedSettings = { ...defaultSettings, ...stored.value };
+      const hasStoredBackend = Object.prototype.hasOwnProperty.call(
+        stored.value || {},
+        "storageBackend"
+      );
+      const hasLocalConfigBackend = Object.prototype.hasOwnProperty.call(
+        localDomiConfig,
+        "storageBackend"
+      );
+      if (stored.updatedAt && !hasStoredBackend && !hasLocalConfigBackend) {
+        storedSettings.storageBackend = "feishu";
+      }
       for (const key of domiConfigKeys) {
-        if (!storedSettings[key] && localDomiConfig[key]) storedSettings[key] = localDomiConfig[key];
+        const hasStoredValue = Object.prototype.hasOwnProperty.call(stored.value || {}, key);
+        if ((!stored.updatedAt || !hasStoredValue || !storedSettings[key]) && localDomiConfig[key]) {
+          storedSettings[key] = localDomiConfig[key];
+        }
       }
       if (!storedSettings.localDatabasePath) storedSettings.localDatabasePath = this.localDatabasePath;
       settings = normalizeSettings(storedSettings);
@@ -207,6 +307,23 @@ class AppSettingsService {
 
   save(request = {}) {
     const current = this.load();
+    const settingsRequest = { ...request };
+    const requestedStorageBackend = Object.prototype.hasOwnProperty.call(settingsRequest, "storageBackend")
+      ? settingsRequest.storageBackend
+      : current.settings.storageBackend;
+    const requestedLocalRepositoryDir = String(settingsRequest.localRepositoryDir || "").trim();
+    const initializesLocalWorkspace = requestedStorageBackend === "local"
+      && requestedLocalRepositoryDir
+      && (
+        !current.settings.localRepositoryDir
+        || (
+          !current.settings.onboardingComplete
+          && requestedLocalRepositoryDir !== current.settings.localRepositoryDir
+        )
+      );
+    if (initializesLocalWorkspace) {
+      settingsRequest.localRepositoryDir = domiWorkspaceRoot(requestedLocalRepositoryDir);
+    }
     const requestedPlaudMode = Object.prototype.hasOwnProperty.call(request, "plaudConnectionMode")
       ? request.plaudConnectionMode
       : current.settings.plaudConnectionMode;
@@ -217,13 +334,17 @@ class AppSettingsService {
     ) {
       throw new Error("请选择连接 PLAUD，或选择暂时不用。");
     }
-    const settings = normalizeSettings({ ...current.settings, ...request });
+    const settings = normalizeSettings({ ...current.settings, ...settingsRequest });
     const updatesDomiConfig = domiConfigKeys.some((key) =>
-      Object.prototype.hasOwnProperty.call(request, key)
-    ) || Object.prototype.hasOwnProperty.call(request, "oneDriveProjectDir");
+      Object.prototype.hasOwnProperty.call(settingsRequest, key)
+    ) || Object.prototype.hasOwnProperty.call(settingsRequest, "oneDriveProjectDir");
     if ((!current.settings.onboardingComplete && settings.onboardingComplete)
       || (settings.onboardingComplete && updatesDomiConfig)) {
       validateDomiConfig(settings);
+    }
+    if (initializesLocalWorkspace) {
+      const location = documentLibraryLocation(settings);
+      ensureDocumentLibraryStructure(location.rootPath);
     }
 
     const saved = this.stateStore.saveAppSettings(SETTINGS_KEY, settings);
@@ -257,6 +378,8 @@ module.exports = {
   AppSettingsService,
   defaultSettings,
   domiConfigKeys,
+  normalizeCalendarRecipients,
   normalizeSettings,
+  parseCalendarRecipients,
   validateDomiConfig
 };

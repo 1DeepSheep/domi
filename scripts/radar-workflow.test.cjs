@@ -9,8 +9,10 @@ async function main() {
   const {
     RADAR_MAX_LOOKBACK_MS,
     RADAR_OVERLAP_MS,
+    TODO_NEW_ENTRY_WINDOW_MS,
     radarDiscoveryWindow,
     radarPriorityPeopleContext,
+    todoRecentEntriesContext,
     workflowPrompt,
     workflows
   } = workflowsModule;
@@ -61,6 +63,40 @@ async function main() {
   assert.doesNotMatch(peopleContext, /普通人物/);
   assert.equal((peopleContext.match(/重点人物甲/g) || []).length, 1);
   assert.match(peopleContext, /关系进展只作消歧，不作为雷达准入条件/);
+
+  assert.equal(TODO_NEW_ENTRY_WINDOW_MS, 28 * 24 * 60 * 60 * 1000);
+  const todoContext = todoRecentEntriesContext(
+    [
+      {
+        recordId: "project-new",
+        name: "四周内项目",
+        domain: "AI",
+        rating: "A",
+        status: "待交流",
+        createdAt: now - 27 * 24 * 60 * 60 * 1000
+      },
+      {
+        recordId: "project-old",
+        name: "四周外项目",
+        rating: "S",
+        createdAt: now - 29 * 24 * 60 * 60 * 1000
+      }
+    ],
+    [{
+      recordId: "person-new",
+      name: "四周内人物",
+      organization: "示例机构",
+      rating: "S",
+      status: "待 Pitch",
+      createdAt: now - 2 * 24 * 60 * 60 * 1000
+    }],
+    now
+  );
+  assert.match(todoContext, /共 1 个项目、1 个人/);
+  assert.match(todoContext, /project｜project-new｜四周内项目/);
+  assert.match(todoContext, /person｜person-new｜四周内人物/);
+  assert.doesNotMatch(todoContext, /四周外项目/);
+  assert.match(todoContext, /其他分类已有同一对象，不得作为压制 new-entry 的理由/);
 
   const radarWorkflow = workflows.find((workflow) => workflow.id === "investment-radar");
   assert.ok(radarWorkflow);

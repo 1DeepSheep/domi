@@ -47,12 +47,20 @@ function prepareApplicationBrandPaths(app, options = {}) {
   const applicationSupport = app.getPath("appData");
   const documents = app.getPath("documents");
   const legacyName = legacyProductName();
-  const developmentSuffix = app.isPackaged ? "" : "开发工作区";
-  const userData = migrateBrandDirectory(
-    path.join(applicationSupport, legacyName),
-    path.join(applicationSupport, PRODUCT_NAME),
-    fileSystem
-  );
+  const development = !app.isPackaged;
+  const developmentSuffix = development ? "开发工作区" : "";
+  const userDataName = development ? `${PRODUCT_NAME}-dev` : PRODUCT_NAME;
+  const userData = development
+    ? {
+        path: path.join(applicationSupport, userDataName),
+        migrated: false,
+        copied: false
+      }
+    : migrateBrandDirectory(
+        path.join(applicationSupport, legacyName),
+        path.join(applicationSupport, userDataName),
+        fileSystem
+      );
   const workspace = migrateBrandDirectory(
     path.join(documents, `${legacyName}${developmentSuffix}`),
     path.join(documents, `${PRODUCT_NAME}${developmentSuffix}`),
@@ -64,7 +72,12 @@ function prepareApplicationBrandPaths(app, options = {}) {
 
   return {
     appName: PRODUCT_NAME,
+    development,
     userDataPath: userData.path,
+    // Codex marketplaces are registered globally for the current macOS user.
+    // Keep one stable managed marketplace across development and production so
+    // the same marketplace name never points at two different directories.
+    pluginRuntimePath: path.join(applicationSupport, PRODUCT_NAME),
     workspacePath: workspace.path,
     userDataMigration: userData,
     workspaceMigration: workspace

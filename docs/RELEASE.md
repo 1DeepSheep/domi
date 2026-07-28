@@ -5,6 +5,8 @@
 - `domi`：公开客户端源码与发行仓库，保存代码、公共素材、测试、文档，并通过 GitHub Releases 发布签名、公证后的 DMG、ZIP、blockmap 和更新清单。
 - `domi-plugin`：公开 domi 插件源码仓库；每次客户端发布只接受该仓库 `main` 的最新提交。
 - `~/Library/Application Support/domi/`：每台 Mac 的数据库、设置、缓存索引与运行时快照，不进入 Git。
+- `~/Library/Application Support/domi-dev/`：源码开发版的独立数据库与设置，不读取或覆盖正式版目录。
+- `~/Library/Application Support/domi/runtime/domi-marketplace/`：开发版与正式版共享的无用户资料插件代码目录；Codex Marketplace 对当前 macOS 用户全局注册，不能让同名 Marketplace 指向两个路径。
 - `~/Documents/domi/`：正式版任务材料与输出，不进入 Git。
 - macOS Keychain：API Key、登录令牌、签名私钥和公证凭据，不进入 Git 或安装包。
 
@@ -47,6 +49,8 @@ Release 前必须确认保护检查成功。不要绕过失败检查手工上传
 ## 升级数据保护
 
 更新只替换 `/Applications/domi.app`。数据库继续使用固定路径 `~/Library/Application Support/domi/domi.sqlite3`，任务文件继续使用 `~/Documents/domi/`。
+
+正式版采用单实例锁，避免重复启动后台同步器；源码开发版使用独立的 `domi-dev` userData 和 `domi开发工作区`，可以与正式版并行运行而不共享数据库、PLAUD Profile 或日志。两者只共享无用户资料的 Codex Marketplace 插件代码目录。
 
 数据库 schema 变更前会在 `~/Library/Application Support/domi/backups/` 自动保存最多三份备份。迁移失败时启动会中止，不会以空白数据库覆盖原历史。
 
