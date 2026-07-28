@@ -14,6 +14,7 @@ export type Workflow = {
 
 export const RADAR_MAX_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 export const RADAR_OVERLAP_MS = 48 * 60 * 60 * 1000;
+export const TODO_NEW_ENTRY_WINDOW_MS = 28 * 24 * 60 * 60 * 1000;
 
 export function radarDiscoveryWindow(now: number, checkpoint: number) {
   const earliestStart = now - RADAR_MAX_LOOKBACK_MS;
@@ -79,6 +80,86 @@ export function radarPriorityPeopleContext(people: RadarPriorityPerson[] = []) {
   ].filter(Boolean).join("\n");
 }
 
+type TodoRecentProject = {
+  recordId?: string;
+  name?: string;
+  domain?: string;
+  status?: string;
+  rating?: string;
+  createdAt?: number | null;
+};
+
+type TodoRecentPerson = {
+  recordId?: string;
+  name?: string;
+  organization?: string;
+  status?: string;
+  rating?: string;
+  createdAt?: number | null;
+};
+
+function todoRecentEntryLine(
+  kind: "project" | "person",
+  item: TodoRecentProject | TodoRecentPerson
+) {
+  const detail = kind === "project"
+    ? singleLine((item as TodoRecentProject).domain)
+    : singleLine((item as TodoRecentPerson).organization);
+  return [
+    kind,
+    singleLine(item.recordId),
+    singleLine(item.name),
+    new Date(Number(item.createdAt)).toISOString(),
+    singleLine(item.rating) || "未评级",
+    singleLine(item.status) || "进展未填写",
+    detail || (kind === "project" ? "领域未填写" : "组织未填写")
+  ].join("｜");
+}
+
+export function todoRecentEntriesContext(
+  projects: TodoRecentProject[] = [],
+  people: TodoRecentPerson[] = [],
+  now = Date.now()
+) {
+  const cutoff = now - TODO_NEW_ENTRY_WINDOW_MS;
+  const recentProjects = projects
+    .filter((item) =>
+      singleLine(item.recordId)
+      && singleLine(item.name)
+      && Number(item.createdAt) >= cutoff
+      && Number(item.createdAt) <= now
+    )
+    .sort((left, right) => Number(right.createdAt) - Number(left.createdAt));
+  const recentPeople = people
+    .filter((item) =>
+      singleLine(item.recordId)
+      && singleLine(item.name)
+      && Number(item.createdAt) >= cutoff
+      && Number(item.createdAt) <= now
+    )
+    .sort((left, right) => Number(right.createdAt) - Number(left.createdAt));
+
+  if (!recentProjects.length && !recentPeople.length) return "";
+
+  const limit = 120;
+  const candidates = [
+    ...recentProjects.map((item) => ({ kind: "project" as const, item })),
+    ...recentPeople.map((item) => ({ kind: "person" as const, item }))
+  ]
+    .sort((left, right) => Number(right.item.createdAt) - Number(left.item.createdAt))
+    .slice(0, limit);
+
+  return [
+    `最近 4 周新入库候选索引（刚由客户端刷新，共 ${recentProjects.length} 个项目、${recentPeople.length} 个人；格式：类型｜recordId｜名称｜系统入库时间｜评级｜进展｜领域或组织）：`,
+    ...candidates.map(({ kind, item }) => `- ${todoRecentEntryLine(kind, item)}`),
+    recentProjects.length + recentPeople.length > limit
+      ? `- 另有 ${recentProjects.length + recentPeople.length - limit} 个较早候选未随上下文传入；需要时从实时资料库继续读取。`
+      : "",
+    "该索引是本轮已刷新资料的 new-entry 权威候选集；不要再次全量读取项目表或人脉表。其他分类已有同一对象，不得作为压制 new-entry 的理由；但同一对象最终都要求联系或约见时，应合并理由并只保留一个开放事项。",
+    "若存在符合规则且未受 done/ignored 冷却约束的候选，本轮 new-entry 不得为 0；若全部排除，必须在执行结果中给出逐类排除数量。"
+  ].filter(Boolean).join("\n");
+}
+
 export const workflows: Workflow[] = [
   {
     id: "domi-router",
@@ -102,6 +183,28 @@ export const workflows: Workflow[] = [
       "请以 quick_scan 增量模式更新 domi 首页行业动态：使用 48 小时重叠回看发现迟发、迟索引内容，整体最长最近 72 小时；上次成功水位只用于标记增量，不得直接截断发现窗口。只覆盖 AI、半导体、智能出行、前沿科技、具身智能&机器人；不要扫描或返回消费、消费科技、互联网科技。直接使用本机重点项目快照、调用方提供的 A/S 重点人物别名索引和缓存分类，不重新读取完整项目库、人脉库或完整 schema；先一次性读取时间窗内既有事件建立去重索引，再并发检索五个一级领域。每轮必须完成一次中文专业科技媒体定向扫源，覆盖 DeepTech 深科技，并为对话、访谈、专访、公开观点等投资论点信号预留候选位。仅对宽搜已出现明确信号的重点对象做定向补查，不逐一扫描全部重点名单。完成原文核验、实体归一、事件级去重与评分后写入当前资料库的行业事件库，最后一次性回读验证并输出带候选/拒绝统计的 RADAR_RESULT。目标在 6 分钟内完成；没有合格增量也必须正常完成并返回 added=0。",
     hidden: true,
     webSearch: true
+  },
+  {
+    id: "task",
+    title: "同步待办事项",
+    shortTitle: "待办事项",
+    skill: "$domi:todo",
+    description: "扫描项目、人脉、关键节点与最新动态，维护当前资料库的待办事项文档。",
+    output: "按优先级去重的待办事项、下一动作和待办事项文档写入回执",
+    defaultPrompt:
+      "扫描当前项目库、人脉库、行业动态和关键日期，按关键节点、最近 4 周新入库约见、人脉跟进、项目跟踪四类更新当前资料库的待办事项文档：飞书模式使用 1.待办事项，本地模式使用工作区根目录的 0.待办事项.md。保留待办事项的内部状态，客户端只展示仍需行动的事项；写后回读验证，不要输出任何私人链接、邮箱、Base 标识或本机路径。",
+    hidden: true
+  },
+  {
+    id: "schedule",
+    title: "约日程",
+    shortTitle: "日程",
+    skill: "$domi:schedule",
+    description: "整理日程主题、时间和地点，并向用户指定的一个或多个参会人发送 Outlook 日程邀请。",
+    output: "已发送的 Outlook 日程邀请及主题、时间、地点和参会人状态",
+    defaultPrompt:
+      "整理我提供的日程主题、时间和地点，并向一个或多个指定参会人发送 Outlook 日程邀请。若我没有选择参会人邮箱，必须先主动询问；不要自动群发常用参会人，也不要读取项目库、人脉库或待办事项文档。",
+    quickStart: true
   },
   {
     id: "meeting-prep",
@@ -163,7 +266,6 @@ export const workflows: Workflow[] = [
     output: "PLAUD 文字稿、结构化纪要、核心要点和跟进事项",
     defaultPrompt:
       "开始 domi 快速讨论工作流：立即使用 mac-recording 以 workflow-kind quick-discussion 开始本机录音，不要先运行 doctor 或 status。用户停止录音后，继续执行 PLAUD 文字稿、ASR Notes 结构化纪要、核心要点和跟进事项。",
-    quickStart: true,
     hidden: true,
     requiresPlaud: true
   },

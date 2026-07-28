@@ -2,6 +2,26 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
+const DOMI_WORKSPACE_DIRECTORY = "domi工作区";
+const LOCAL_TODO_DOCUMENT_NAME = "0.待办事项.md";
+const LOCAL_TODO_DOCUMENT_CONTENT = `# 待办事项
+
+> 本文档用于 domi 本地待办事项维护。初始化和升级不会覆盖已有内容。
+
+## 关键节点
+
+## 新入库约见
+
+## 人脉跟进
+
+## 项目跟踪
+
+<pre lang="json" caption="domi-task-board-v1"><code>{
+  "schemaVersion": 1,
+  "updatedAt": "1970-01-01T00:00:00.000Z",
+  "tasks": []
+}</code></pre>
+`;
 const DOCUMENT_LIBRARY_DIRECTORIES = Object.freeze([
   "1.行业研究",
   "2.行业动态",
@@ -17,6 +37,15 @@ const DOCUMENT_EXTENSIONS = new Map([
 function expandHomePath(value) {
   const input = String(value || "").trim();
   return input.startsWith("~/") ? path.join(os.homedir(), input.slice(2)) : input;
+}
+
+function domiWorkspaceRoot(selectedDirectory) {
+  const input = String(selectedDirectory || "").trim();
+  if (!input) return "";
+  const normalized = path.normalize(input);
+  return path.basename(normalized) === DOMI_WORKSPACE_DIRECTORY
+    ? normalized
+    : path.join(normalized, DOMI_WORKSPACE_DIRECTORY);
 }
 
 function documentLibraryLocation(settings = {}) {
@@ -51,8 +80,27 @@ function assertInsideRoot(rootPath, candidatePath, allowRoot = true) {
   return resolved;
 }
 
+function ensureLocalTodoDocument(rootPath) {
+  const todoDocumentPath = path.join(rootPath, LOCAL_TODO_DOCUMENT_NAME);
+  try {
+    fs.writeFileSync(todoDocumentPath, LOCAL_TODO_DOCUMENT_CONTENT, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600
+    });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const stat = fs.lstatSync(todoDocumentPath);
+    if (!stat.isFile()) {
+      throw new Error(`${LOCAL_TODO_DOCUMENT_NAME} 已存在，但不是普通文件。`);
+    }
+  }
+  return todoDocumentPath;
+}
+
 function ensureDocumentLibraryStructure(rootPath) {
   fs.mkdirSync(rootPath, { recursive: true });
+  ensureLocalTodoDocument(rootPath);
   for (const directory of DOCUMENT_LIBRARY_DIRECTORIES) {
     fs.mkdirSync(path.join(rootPath, directory), { recursive: true });
   }
@@ -198,11 +246,16 @@ function createDocumentLibraryEntry(rootPath, request = {}) {
 }
 
 module.exports = {
+  DOMI_WORKSPACE_DIRECTORY,
   DOCUMENT_LIBRARY_DIRECTORIES,
+  LOCAL_TODO_DOCUMENT_CONTENT,
+  LOCAL_TODO_DOCUMENT_NAME,
   assertInsideRoot,
   createDocumentLibraryEntry,
   documentLibraryLocation,
+  domiWorkspaceRoot,
   ensureDocumentLibraryStructure,
+  ensureLocalTodoDocument,
   isInsideRoot,
   listDocumentLibrary,
   normalizeEntryName

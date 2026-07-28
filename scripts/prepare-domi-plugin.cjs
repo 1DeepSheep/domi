@@ -31,8 +31,11 @@ function resolveSource() {
   if (provided) return { root: path.resolve(provided), temporaryRoot: "" };
 
   if (!releaseMode) {
+    const siblingWorktree = path.resolve(root, "..", "domi-plugin");
     return {
-      root: path.join(os.homedir(), "plugins", "domi"),
+      root: fs.existsSync(path.join(siblingWorktree, ".codex-plugin", "plugin.json"))
+        ? siblingWorktree
+        : path.join(os.homedir(), "plugins", "domi"),
       temporaryRoot: ""
     };
   }
@@ -124,6 +127,7 @@ function safePluginFile(relativePath) {
   const normalized = relativePath.split(path.sep).join("/");
   if (!normalized || normalized.startsWith("../") || path.isAbsolute(relativePath)) return false;
   if (normalized === ".gitignore") return true;
+  if (normalized === ".app.json") return true;
   return normalized.startsWith(".codex-plugin/")
     || normalized.startsWith("assets/")
     || normalized.startsWith("scripts/")

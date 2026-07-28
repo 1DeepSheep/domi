@@ -21,7 +21,7 @@ const browserFallback: Window["workbench"] = {
   loadSettings: async () => ({
     ok: true,
     settings: {
-      version: 5,
+      version: 7,
       onboardingComplete: true,
       authMode: "chatgpt",
       apiBaseUrl: "",
@@ -29,7 +29,8 @@ const browserFallback: Window["workbench"] = {
       relayCredentialConfigured: false,
       codexPath: "",
       plaudConnectionMode: "disabled",
-      storageBackend: "feishu",
+      plaudBrowser: "chrome",
+      storageBackend: "local",
       projectBaseToken: "",
       projectTableId: "",
       peopleBaseToken: "",
@@ -37,6 +38,11 @@ const browserFallback: Window["workbench"] = {
       radarBaseToken: "",
       radarTableId: "",
       wikiSpaceId: "",
+      taskDocumentUrl: "",
+      outlookCalendarEmail: "",
+      outlookCalendarEmailVerifiedAt: 0,
+      outlookCalendarRecipients: "",
+      outlookCalendarTimezone: "Asia/Shanghai",
       localLibraryDir: "",
       localRepositoryDir: "",
       localDatabasePath: "",
@@ -50,7 +56,7 @@ const browserFallback: Window["workbench"] = {
   saveSettings: async (request) => ({
     ok: true,
     settings: {
-      version: 5,
+      version: 7,
       onboardingComplete: Boolean(request.onboardingComplete),
       authMode: request.authMode === "relay" ? "relay" : "chatgpt",
       apiBaseUrl: request.authMode === "relay" ? request.apiBaseUrl || "" : "",
@@ -58,7 +64,8 @@ const browserFallback: Window["workbench"] = {
       relayCredentialConfigured: request.authMode === "relay" && Boolean(request.relayCredentialConfigured),
       codexPath: request.codexPath || "",
       plaudConnectionMode: request.plaudConnectionMode === "enabled" ? "enabled" : "disabled",
-      storageBackend: request.storageBackend === "local" ? "local" : "feishu",
+      plaudBrowser: request.plaudBrowser === "tabbit" ? "tabbit" : "chrome",
+      storageBackend: request.storageBackend === "feishu" ? "feishu" : "local",
       projectBaseToken: request.projectBaseToken || "",
       projectTableId: request.projectTableId || "",
       peopleBaseToken: request.peopleBaseToken || "",
@@ -66,6 +73,13 @@ const browserFallback: Window["workbench"] = {
       radarBaseToken: request.radarBaseToken || "",
       radarTableId: request.radarTableId || "",
       wikiSpaceId: request.wikiSpaceId || "",
+      taskDocumentUrl: request.taskDocumentUrl || "",
+      outlookCalendarEmail: request.outlookCalendarEmail || "",
+      outlookCalendarEmailVerifiedAt: request.outlookCalendarEmail
+        ? Number(request.outlookCalendarEmailVerifiedAt) || 0
+        : 0,
+      outlookCalendarRecipients: request.outlookCalendarRecipients || "",
+      outlookCalendarTimezone: request.outlookCalendarTimezone || "Asia/Shanghai",
       localLibraryDir: request.localLibraryDir || "",
       localRepositoryDir: request.localRepositoryDir || "",
       localDatabasePath: request.localDatabasePath || "",
@@ -316,6 +330,37 @@ const browserFallback: Window["workbench"] = {
   saveWeeklyNewsCheckpoint: async () => ({
     ok: false,
     error: "浏览器预览模式不能保存 domi 行业雷达水位。"
+  }),
+  listDomiTasks: async () => ({
+    ok: false,
+    configured: false,
+    stale: false,
+    syncedAt: 0,
+    updatedAt: null,
+    tasks: [],
+    error: "浏览器预览模式不能读取 1.待办事项。"
+  }),
+  updateDomiTask: async () => ({
+    ok: false,
+    error: "浏览器预览模式不能更新 1.待办事项。"
+  }),
+  loginPlaud: async ({ browser }) => ({
+    ok: false,
+    connected: false,
+    browser: browser === "tabbit" ? "tabbit" : "chrome",
+    error: "请在 Electron 窗口中登录 PLAUD。"
+  }),
+  checkPlaudConnection: async ({ browser } = {}) => ({
+    ok: false,
+    connected: false,
+    browser: browser === "tabbit" ? "tabbit" : "chrome",
+    error: "请在 Electron 窗口中检测 PLAUD。"
+  }),
+  disconnectPlaud: async ({ browser } = {}) => ({
+    ok: false,
+    connected: false,
+    browser: browser === "tabbit" ? "tabbit" : "chrome",
+    error: "请在 Electron 窗口中断开 PLAUD。"
   }),
   listPlaud: async () => ({
     ok: false,

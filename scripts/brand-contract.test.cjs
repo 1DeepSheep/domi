@@ -42,5 +42,8 @@ for (const relativePath of publicFiles) visit(relativePath);
 const mainSource = fs.readFileSync(path.join(root, "electron/main.cjs"), "utf8");
 assert.match(mainSource, /prepareApplicationBrandPaths\(app\)/);
 assert.match(mainSource, /const appName = brandPaths\.appName/);
+assert.match(mainSource, /userDataPath: brandPaths\.pluginRuntimePath/);
+assert.match(mainSource, /app\.requestSingleInstanceLock\(\)/);
+assert.match(mainSource, /app\.on\("second-instance"/);
 
 console.log("domi brand contract tests passed.");
