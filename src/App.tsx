@@ -3,6 +3,7 @@ import {
   ArrowUp,
   BriefcaseBusiness,
   Brain,
+  CalendarPlus,
   CheckCircle2,
   Check,
   Clock3,
@@ -85,6 +86,8 @@ import {
   DomiProject,
   DomiEntityMaterials,
   DomiSnapshot,
+  DomiTask,
+  DomiTaskBoardSnapshot,
   DomiWeeklyNewsSnapshot,
   DocumentLibraryNode,
   DocumentLibrarySnapshot,
@@ -96,6 +99,8 @@ import {
   quickStartWorkflows,
   radarDiscoveryWindow,
   radarPriorityPeopleContext,
+  TODO_NEW_ENTRY_WINDOW_MS,
+  todoRecentEntriesContext,
   Workflow,
   workflowPrompt,
   workflows
@@ -112,6 +117,32 @@ const MessageContent = lazy(() => import("./MessageContent"));
 
 type Role = "user" | "assistant" | "system";
 type WorkspaceView = "conversation" | "tasks" | "news" | "documents";
+
+type CalendarRecipientOption = {
+  name: string;
+  email: string;
+  label: string;
+};
+
+function calendarRecipientOptions(value: string): CalendarRecipientOption[] {
+  const seen = new Set<string>();
+  return String(value || "")
+    .split(/[,;\n]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const labeled = entry.match(/^(.*?)\s*<([^<>]+)>$/);
+      const name = labeled ? labeled[1].trim() : "";
+      const email = (labeled ? labeled[2] : entry).trim();
+      return { name, email, label: name ? `${name} <${email}>` : email };
+    })
+    .filter((recipient) => {
+      const key = recipient.email.toLocaleLowerCase("en-US");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
 
 function filterDocumentLibraryNodes(nodes: DocumentLibraryNode[], rawQuery: string) {
   const query = rawQuery.trim().toLocaleLowerCase("zh-CN");
@@ -165,6 +196,7 @@ type SubmitToCodexOptions = {
   useDomiPlugin?: boolean;
   displayText?: string;
   attachments?: LocalAttachment[];
+  background?: boolean;
   model?: string;
   reasoningEffort?: string;
   serviceTier?: string;
@@ -396,6 +428,38 @@ const NEW_THREAD_GREETING = "新对话已创建。选择一个 workflow，或直
 const NEW_THREAD_MODEL = "default";
 const NEW_THREAD_REASONING_EFFORT = "max";
 const NEW_THREAD_SERVICE_TIER = "priority";
+const TODO_SYNC_TIMEOUT_MS = 4 * 60 * 1000;
+type TodoSyncPhase =
+  | "idle"
+  | "refreshing"
+  | "preparing"
+  | "generating"
+  | "stopping"
+  | "reading"
+  | "completed"
+  | "failed";
+type TodoSyncState = {
+  phase: TodoSyncPhase;
+  label: string;
+  startedAt: number | null;
+  completedAt: number | null;
+  candidateCount: number;
+};
+const IDLE_TODO_SYNC_STATE: TodoSyncState = {
+  phase: "idle",
+  label: "",
+  startedAt: null,
+  completedAt: null,
+  candidateCount: 0
+};
+
+function recentTodoCandidateCount(snapshot?: DomiSnapshot | null, now = Date.now()) {
+  if (!snapshot) return 0;
+  const cutoff = now - TODO_NEW_ENTRY_WINDOW_MS;
+  return [...snapshot.projects, ...snapshot.people].filter((item) =>
+    Number(item.createdAt) >= cutoff && Number(item.createdAt) <= now
+  ).length;
+}
 const COMPOSER_SUGGESTIONS = [
   "分析 NetShort 付费 Cohort 和增长质量",
   "整理今天的项目交流录音并生成纪要",
@@ -434,6 +498,16 @@ function compactUnusedDraftThreads(threads: Thread[], activeThreadId: string) {
   return threads.filter(
     (thread) => !isUnusedDraftThread(thread) || thread.id === keeperId
   );
+}
+
+function migrateLegacyTodoThreadLabels(thread: Thread) {
+  const title = thread.title === "更新任务建议" ? "同步待办事项" : thread.title;
+  const project = thread.project === "1.Task · 更新建议"
+    ? "1.待办事项 · 同步"
+    : thread.project;
+  return title === thread.title && project === thread.project
+    ? thread
+    : { ...thread, title, project };
 }
 
 const EXECUTION_FOCUS_PRESETS = [
@@ -626,6 +700,20 @@ function formatTaskTimestamp(timestamp?: number) {
   ).format(date);
 }
 
+function formatManagedTaskDate(value?: string | null) {
+  if (!value) return "";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(timestamp);
+}
+
 function weeklyNewsScanStageFromOutput(output: string) {
   const recent = output.slice(-1600);
   if (/写入|创建.*记录|回读|归档/.test(recent)) return "正在写入并回读新动态";
@@ -755,6 +843,7 @@ function projectOverview(
     `| 项目评级 | ${project.rating || "未填写"} |`,
     `| 城市 | ${project.cities?.join("、") || "未填写"} |`,
     `| 投资机构 | ${project.investors?.join("、") || "未填写"} |`,
+    `| 入库时间 | ${project.createdAt ? new Date(project.createdAt).toLocaleString("zh-CN") : "未填写"} |`,
     `| 最后更新 | ${project.lastFollowup ? new Date(project.lastFollowup).toLocaleDateString("zh-CN") : "未填写"} |`,
     "",
     "### 库内入口"
@@ -797,6 +886,7 @@ function personOverview(
     `| 类型 | ${person.types.join("、") || "未填写"} |`,
     `| 关系进展 | ${cleanPeopleStatus(person.status)} |`,
     `| 人脉评级 | ${person.rating || "未填写"} |`,
+    `| 入库时间 | ${person.createdAt ? new Date(person.createdAt).toLocaleString("zh-CN") : "未填写"} |`,
     `| 最后联系 | ${person.lastContact ? new Date(person.lastContact).toLocaleDateString("zh-CN") : "未填写"} |`,
     `| 城市 | ${person.cities.join("、") || "未填写"} |`,
     "",
@@ -841,6 +931,7 @@ function domiContextForThread(snapshot: DomiSnapshot | null, thread: Thread) {
       `城市：${project.cities?.join("、") || "未填写"}`,
       `投资机构：${project.investors?.join("、") || "未填写"}`,
       `Notes：${project.notes || "未填写"}`,
+      `入库时间：${project.createdAt ? new Date(project.createdAt).toISOString() : "未填写"}`,
       `最近跟进时间：${project.lastFollowup ? new Date(project.lastFollowup).toISOString().slice(0, 10) : "未填写"}`,
       `Wiki链接：${project.link || "未填写"}`
     ].join("\n");
@@ -855,6 +946,7 @@ function domiContextForThread(snapshot: DomiSnapshot | null, thread: Thread) {
     `类型：${person.types.join("、") || "未填写"}`,
     `进展状态：${person.status || "未填写"}`,
     `评级：${person.rating || "未填写"}`,
+    `入库时间：${person.createdAt ? new Date(person.createdAt).toISOString() : "未填写"}`,
     `最后联系日期：${person.lastContact ? new Date(person.lastContact).toISOString().slice(0, 10) : "未填写"}`,
     `城市：${person.cities.join("、") || "未填写"}`,
     `链接：${person.link || "未填写"}`
@@ -917,6 +1009,8 @@ const workflowIconMap: Record<string, typeof FileText> = {
   "deal-negotiation": Scale,
   "investment-analysis": LayoutDashboard,
   "investment-mgmt": Database,
+  task: ListChecks,
+  schedule: CalendarPlus,
   sourcing: UsersRound
 };
 
@@ -963,6 +1057,14 @@ function App() {
   const [weeklyNewsAutomation, setWeeklyNewsAutomation] = useState<WeeklyNewsAutomationState>(
     readWeeklyNewsAutomationState
   );
+  const [domiTaskBoard, setDomiTaskBoard] = useState<DomiTaskBoardSnapshot | null>(null);
+  const [domiTaskLoading, setDomiTaskLoading] = useState(false);
+  const [domiTaskMutationId, setDomiTaskMutationId] = useState<string | null>(null);
+  const [domiTaskError, setDomiTaskError] = useState("");
+  const [domiTaskSyncState, setDomiTaskSyncState] = useState<TodoSyncState>(
+    IDLE_TODO_SYNC_STATE
+  );
+  const [domiTaskSyncElapsed, setDomiTaskSyncElapsed] = useState(0);
   const [documentLibrary, setDocumentLibrary] = useState<DocumentLibrarySnapshot | null>(null);
   const [documentLibraryLoading, setDocumentLibraryLoading] = useState(false);
   const [documentLibraryError, setDocumentLibraryError] = useState("");
@@ -1281,9 +1383,16 @@ function App() {
     [selectedWorkflowId]
   );
   const plaudEnabled = appSettings?.plaudConnectionMode === "enabled";
+  const todoDocumentLabel = appSettings?.storageBackend === "local"
+    ? "0.待办事项.md"
+    : "1.待办事项";
   const visibleQuickStartWorkflows = useMemo(
     () => quickStartWorkflows.filter((workflow) => !workflow.requiresPlaud || plaudEnabled),
     [plaudEnabled]
+  );
+  const commonCalendarRecipients = useMemo(
+    () => calendarRecipientOptions(appSettings?.outlookCalendarRecipients || ""),
+    [appSettings?.outlookCalendarRecipients]
   );
 
   const selectedModel = useMemo(() => {
@@ -1531,8 +1640,28 @@ function App() {
     .slice(0, 12),
   [activeRunsByThread, threads]);
 
-  const taskNavigationCount = taskBoardSuggestions.length
-    + snoozedTaskSuggestions.length
+  const managedTasksByCategory = useMemo(() => {
+    const priorityWeight: Record<DomiTask["priority"], number> = { P1: 3, P2: 2, P3: 1 };
+    const sorted = [...(domiTaskBoard?.tasks || [])].sort((left, right) =>
+      priorityWeight[right.priority] - priorityWeight[left.priority]
+      || (Date.parse(left.dueAt || "") || Number.MAX_SAFE_INTEGER)
+        - (Date.parse(right.dueAt || "") || Number.MAX_SAFE_INTEGER)
+      || Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+    );
+    const active = sorted.filter((task) => task.status === "open" || task.status === "in_progress");
+    return {
+      active,
+      keyMilestone: active.filter((task) => task.category === "key-milestone"),
+      newEntry: active.filter((task) => task.category === "new-entry"),
+      relationshipFollowUp: active.filter((task) => task.category === "relationship-follow-up"),
+      projectFollowUp: active.filter((task) => task.category === "project-follow-up")
+    };
+  }, [domiTaskBoard]);
+
+  const managedTaskCount = managedTasksByCategory.active.length;
+  const taskNavigationCount = (domiTaskBoard?.configured
+    ? managedTaskCount
+    : taskBoardSuggestions.length + snoozedTaskSuggestions.length)
     + queuedTaskItems.length
     + failedTaskThreads.length
     + runningTaskThreads.length;
@@ -1658,10 +1787,6 @@ function App() {
   }, [hasConversation, input]);
 
   useEffect(() => {
-    workbench.checkCodex().then(setCodexStatus);
-  }, []);
-
-  useEffect(() => {
     let cancelled = false;
     workbench.loadSettings().then((result) => {
       if (cancelled || !result.ok || !result.settings) return;
@@ -1686,21 +1811,38 @@ function App() {
       }
 
       try {
-        const cachedNews = await workbench.listWeeklyNews({
-          days: 7,
-          limit: 100,
-          page: 0,
-          cacheOnly: true
-        });
+        const [cachedNews, cachedTasks] = await Promise.all([
+          workbench.listWeeklyNews({
+            days: 7,
+            limit: 100,
+            page: 0,
+            cacheOnly: true
+          }),
+          workbench.listDomiTasks({ cacheOnly: true })
+        ]);
         const hasCachedNews = Boolean(cachedNews.ok && cachedNews.items);
         if (hasCachedNews) {
           weeklyNewsSnapshotRef.current = cachedNews;
           weeklyNewsLatestSnapshotRef.current = cachedNews;
           setWeeklyNews(cachedNews);
         }
+        if (cachedTasks.configured || cachedTasks.tasks.length > 0) {
+          setDomiTaskBoard(cachedTasks);
+        }
+        const status = await workbench.checkCodex();
+        setCodexStatus(status);
+        if (!status.pluginSetup?.ok) {
+          const pluginError = status.pluginSetup?.error
+            || "domi 插件尚未准备完成，请在 Codex 连接中重新检测。";
+          setDomiError(pluginError);
+          setDomiTaskError(pluginError);
+          setWeeklyNewsError(pluginError);
+          return;
+        }
 
         await Promise.allSettled([
           refreshWeeklyNews(0, { silent: hasCachedNews, preserveView: true }),
+          refreshDomiTaskBoard({ silent: Boolean(cachedTasks.tasks.length) }),
           refreshDomi()
         ]);
       } finally {
@@ -1708,6 +1850,11 @@ function App() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (workspaceView !== "tasks" || !hasNativeWorkbench || domiTaskLoading) return;
+    if (!domiTaskBoard) void refreshDomiTaskBoard();
+  }, [workspaceView, domiTaskBoard, domiTaskLoading]);
 
   useEffect(() => {
     if (!appSettings) return;
@@ -1757,6 +1904,24 @@ function App() {
   }, [weeklyNewsScanning, weeklyNewsScanStartedAt]);
 
   useEffect(() => {
+    if (!domiTaskSyncState.startedAt) {
+      setDomiTaskSyncElapsed(0);
+      return;
+    }
+    const updateElapsed = () => {
+      const end = domiTaskSyncState.completedAt || Date.now();
+      setDomiTaskSyncElapsed(Math.max(
+        0,
+        Math.floor((end - domiTaskSyncState.startedAt!) / 1000)
+      ));
+    };
+    updateElapsed();
+    if (domiTaskSyncState.completedAt) return;
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timer);
+  }, [domiTaskSyncState.startedAt, domiTaskSyncState.completedAt]);
+
+  useEffect(() => {
     let cancelled = false;
     workbench.loadState(initialSnapshot).then((result) => {
       if (cancelled) {
@@ -1764,7 +1929,10 @@ function App() {
       }
       const state = result.state as WorkbenchSnapshot | undefined;
       if (result.ok && state?.threads?.length) {
-        const loadedThreads = compactUnusedDraftThreads(state.threads, state.activeThreadId);
+        const loadedThreads = compactUnusedDraftThreads(
+          state.threads.map(migrateLegacyTodoThreadLabels),
+          state.activeThreadId
+        );
         const loadedActiveThreadId = loadedThreads.some(
           (thread) => thread.id === state.activeThreadId
         )
@@ -2193,6 +2361,25 @@ function App() {
       setDomiError(error instanceof Error ? error.message : String(error));
     } finally {
       setDomiSyncing(false);
+    }
+  }
+
+  async function refreshDomiTaskBoard(options: { silent?: boolean; fresh?: boolean } = {}) {
+    if (!options.silent) setDomiTaskLoading(true);
+    setDomiTaskError("");
+    try {
+      const result = await workbench.listDomiTasks({ fresh: options.fresh === true });
+      setDomiTaskBoard(result);
+      if (!result.ok && !result.stale && result.configured) {
+        setDomiTaskError(result.error || `无法读取 ${todoDocumentLabel}。`);
+      }
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDomiTaskError(message);
+      return null;
+    } finally {
+      if (!options.silent) setDomiTaskLoading(false);
     }
   }
 
@@ -2869,7 +3056,6 @@ function App() {
       setAppSettings(result.settings);
       if (result.codex) setCodexStatus(result.codex);
       const dataConnectionChanged = [
-        "plaudConnectionMode",
         "storageBackend",
         "projectBaseToken",
         "projectTableId",
@@ -2878,6 +3064,7 @@ function App() {
         "radarBaseToken",
         "radarTableId",
         "wikiSpaceId",
+        "taskDocumentUrl",
         "localLibraryDir",
         "localRepositoryDir"
       ].some((key) => Object.prototype.hasOwnProperty.call(request, key));
@@ -2888,6 +3075,9 @@ function App() {
           const synced = await workbench.syncDomi();
           if (synced.snapshot) setDomiSnapshot(synced.snapshot);
           if (!synced.ok) setDomiError(synced.error || "资料库设置已保存，但首次同步失败。");
+          if (result.settings.storageBackend === "feishu") {
+            await refreshDomiTaskBoard({ fresh: true });
+          }
         } catch (syncError) {
           setDomiError(syncError instanceof Error ? syncError.message : String(syncError));
         } finally {
@@ -2910,6 +3100,25 @@ function App() {
   function chooseWorkflow(workflow: Workflow) {
     setWorkspaceView("conversation");
     setSelectedWorkflowId(workflow.id);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  function addCalendarRecipient(recipient: CalendarRecipientOption) {
+    setInput((current) => {
+      if (current.toLocaleLowerCase("en-US").includes(recipient.email.toLocaleLowerCase("en-US"))) {
+        return current;
+      }
+      const attendeeLine = /(^|\n)参会人：([^\n]*)/;
+      if (attendeeLine.test(current)) {
+        return current.replace(
+          attendeeLine,
+          (_match, prefix: string, attendees: string) =>
+            `${prefix}参会人：${attendees.trim()}、${recipient.label}`
+        );
+      }
+      const prefix = current.trimEnd();
+      return `${prefix}${prefix ? "\n" : ""}参会人：${recipient.label}`;
+    });
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }
 
@@ -2947,11 +3156,11 @@ function App() {
   }
 
   async function executeSuggestion(suggestion: ExecutionSuggestion) {
-    if (executingSuggestionId) return;
+    if (executingSuggestionId) return false;
     const workflow = workflows.find((item) => item.id === suggestion.workflowId);
     if (!workflow) {
       setExecutionSuggestionError(`未找到“${suggestion.title}”对应的 domi 工作流。`);
-      return;
+      return false;
     }
 
     setExecutingSuggestionId(suggestion.id);
@@ -2994,16 +3203,182 @@ function App() {
         }
       }));
 
-      await submitToCodex(workflow, suggestion.prompt, {
+      const result = await submitToCodex(workflow, suggestion.prompt, {
         thread: nextThread,
         useDomiPlugin: true,
         displayText: suggestion.title,
         attachments: []
       });
+      if (!result?.ok || result.stopped) {
+        setExecutionSuggestionError(
+          result?.error || (result?.stopped ? "任务同步已停止。" : "任务 Skill 未能启动。")
+        );
+        return false;
+      }
+      return true;
     } catch (error) {
       setExecutionSuggestionError(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setExecutingSuggestionId(null);
+    }
+  }
+
+  async function updateManagedTask(taskId: string, status: DomiTask["status"]) {
+    setDomiTaskMutationId(taskId);
+    setDomiTaskError("");
+    try {
+      const result = await workbench.updateDomiTask({ taskId, status });
+      if (!result.ok || !result.snapshot) {
+        setDomiTaskError(result.error || `${todoDocumentLabel} 状态更新失败。`);
+        return false;
+      }
+      setDomiTaskBoard(result.snapshot);
+      return true;
+    } catch (error) {
+      setDomiTaskError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      setDomiTaskMutationId(null);
+    }
+  }
+
+  async function executeManagedTask(task: DomiTask) {
+    if (domiTaskMutationId || executingSuggestionId) return;
+    const marked = await updateManagedTask(task.id, "in_progress");
+    if (!marked) return;
+    const workflowId = task.suggestedAction.kind === "schedule" ? "schedule" : "task";
+    const executed = await executeSuggestion({
+      id: `managed:${task.id}`,
+      title: task.title,
+      context: task.summary || task.source.displayName || todoDocumentLabel,
+      reason: task.reason,
+      priority: task.priority,
+      workflowId,
+      prompt: [
+        `taskId=${task.id}`,
+        task.suggestedAction.prompt || `执行 ${todoDocumentLabel} 中“${task.title}”的下一动作。`,
+        workflowId === "schedule"
+          ? "只整理并发送本次 Outlook 日程邀请；客户端会在成功后更新待办事项状态，不要读取资料库或待办事项文档。"
+          : `先读取 ${todoDocumentLabel} 中该待办事项的最新状态和证据；只执行下一动作，状态由客户端在成功后更新。`
+      ].join("\n"),
+      projectLabel: `${todoDocumentLabel} · ${task.source.displayName || task.title}`,
+      externalType: task.source.kind === "project" || task.source.kind === "person"
+        ? task.source.kind
+        : undefined,
+      externalRecordId: task.source.recordId || undefined
+    });
+    if (!executed) {
+      await updateManagedTask(task.id, "open");
+    } else {
+      await updateManagedTask(task.id, "done");
+    }
+  }
+
+  async function syncManagedTasks() {
+    if (executingSuggestionId) return;
+    const todoWorkflow = workflows.find((workflow) => workflow.id === "task");
+    if (!todoWorkflow) {
+      setDomiTaskError("未找到 domi 待办事项工作流。");
+      return;
+    }
+    const requestText = todoWorkflow.defaultPrompt || `更新 ${todoDocumentLabel}。`;
+    const runId = createId("todo-sync");
+    let timeoutHandle: number | undefined;
+    const startedAt = Date.now();
+    let candidateCount = 0;
+    let outcome = "failed";
+    let boardRefreshedAfterFailure = false;
+    const updateSyncPhase = (phase: TodoSyncPhase, label: string) => {
+      setDomiTaskSyncState({
+        phase,
+        label,
+        startedAt,
+        completedAt: ["completed", "failed"].includes(phase) ? Date.now() : null,
+        candidateCount
+      });
+    };
+    setExecutingSuggestionId("managed-refresh");
+    setDomiTaskError("");
+    updateSyncPhase("refreshing", "正在刷新项目与人脉资料");
+    try {
+      const synced = await workbench.syncDomi();
+      const currentSnapshot = synced.snapshot || domiSnapshot;
+      if (synced.snapshot) setDomiSnapshot(synced.snapshot);
+      if (!synced.ok && !currentSnapshot) {
+        throw new Error(synced.error || "资料库刷新失败，暂时无法生成待办事项。");
+      }
+      candidateCount = recentTodoCandidateCount(currentSnapshot);
+      updateSyncPhase(
+        "preparing",
+        candidateCount
+          ? `已发现 ${candidateCount} 个近 4 周新入库候选`
+          : "正在整理关键节点与长期跟进候选"
+      );
+      const recentEntriesContext = todoRecentEntriesContext(
+        currentSnapshot?.projects,
+        currentSnapshot?.people
+      );
+      updateSyncPhase("generating", "Todo Skill 正在排序并维护待办事项文档");
+      const runPromise = workbench.runCodex({
+          runId,
+          prompt: workflowPrompt(todoWorkflow, requestText, recentEntriesContext, true),
+          requestText,
+          ephemeral: true,
+          background: true,
+          workflowId: todoWorkflow.id,
+          model,
+          reasoningEffort: "medium",
+          serviceTier,
+          workspacePath: activeThread.workspacePath
+        });
+      const resultOrTimeout = await Promise.race([
+        runPromise.then((result) => ({ timedOut: false as const, result })),
+        new Promise<{ timedOut: true }>((resolve) => {
+          timeoutHandle = window.setTimeout(() => {
+            resolve({ timedOut: true });
+          }, TODO_SYNC_TIMEOUT_MS);
+        })
+      ]);
+      if (resultOrTimeout.timedOut) {
+        updateSyncPhase("stopping", "运行超过 4 分钟，正在安全停止并保留已写入内容");
+        const stopResult = await workbench.stopCodex(runId);
+        updateSyncPhase("reading", "正在回读待办事项文档");
+        await refreshDomiTaskBoard({ silent: true, fresh: true });
+        boardRefreshedAfterFailure = true;
+        throw new Error(stopResult.ok
+          ? "后台待办事项同步超过 4 分钟，已安全停止；看板已回读最新文档内容。"
+          : `后台待办事项同步超过 4 分钟，但停止确认失败：${stopResult.error || "未知错误"}`);
+      }
+      const result = resultOrTimeout.result;
+      if (result.stopped) {
+        throw new Error("后台待办事项同步已暂停，Codex 连接维护完成后可重新同步。");
+      }
+      if (!result.ok) {
+        throw new Error(result.error || "待办事项后台同步失败。");
+      }
+      updateSyncPhase("reading", "写入完成，正在验证并刷新看板");
+      await refreshDomiTaskBoard({ fresh: true });
+      outcome = "completed";
+      updateSyncPhase("completed", `同步完成，已核验 ${candidateCount} 个新入库候选`);
+    } catch (error) {
+      if (!boardRefreshedAfterFailure) {
+        await refreshDomiTaskBoard({ silent: true, fresh: true });
+      }
+      setDomiTaskError(error instanceof Error ? error.message : String(error));
+      updateSyncPhase("failed", "本轮同步未完整完成，当前看板保留最近一次有效内容");
+    } finally {
+      if (timeoutHandle !== undefined) window.clearTimeout(timeoutHandle);
+      setExecutingSuggestionId(null);
+      workbench.reportRendererIssue({
+        kind: "workflow-metric",
+        message: JSON.stringify({
+          workflow: "todo-sync",
+          outcome,
+          durationMs: Date.now() - startedAt,
+          candidateCount
+        })
+      });
     }
   }
 
@@ -3435,6 +3810,7 @@ function App() {
       model: options.model ?? model,
       reasoningEffort: options.reasoningEffort ?? reasoningEffort,
       serviceTier: options.serviceTier ?? serviceTier,
+      background: options.background,
       workspacePath: targetThread.workspacePath
     });
 
@@ -3475,6 +3851,7 @@ function App() {
       });
       runContextRef.current.delete(runId);
     }
+    return result;
   }
 
   function handleSubmit(event: FormEvent) {
@@ -4689,6 +5066,205 @@ function App() {
   }
 
   function renderTaskBoard() {
+    const suggestionCount = managedTasksByCategory.active.length;
+    const columns: Array<{
+      id: string;
+      title: string;
+      icon: ReactNode;
+      tasks: DomiTask[];
+      empty: string;
+    }> = [
+      {
+        id: "new-entry",
+        title: "新入库约见",
+        icon: <Sparkles size={15} />,
+        tasks: managedTasksByCategory.newEntry,
+        empty: "近 4 周没有值得优先约见的新对象"
+      },
+      {
+        id: "project-follow-up",
+        title: "项目跟踪",
+        icon: <BriefcaseBusiness size={15} />,
+        tasks: managedTasksByCategory.projectFollowUp,
+        empty: "当前没有重点项目需要跟踪"
+      },
+      {
+        id: "relationship-follow-up",
+        title: "人脉跟进",
+        icon: <UsersRound size={15} />,
+        tasks: managedTasksByCategory.relationshipFollowUp,
+        empty: "当前没有重要人脉需要跟进"
+      },
+      {
+        id: "key-milestone",
+        title: "关键节点",
+        icon: <Clock3 size={15} />,
+        tasks: managedTasksByCategory.keyMilestone,
+        empty: "近期没有需要提醒的关键节点"
+      }
+    ];
+
+    return (
+      <section className="task-board managed-task-board" aria-labelledby="task-board-title">
+        <div className="task-board-header">
+          <div className="task-board-heading">
+            <span className="task-board-heading-icon"><ListChecks size={20} /></span>
+            <div>
+              <h1 id="task-board-title">待办事项</h1>
+              <p>
+                {domiTaskBoard?.configured
+                  ? `${suggestionCount} 个待办事项 · 与 ${todoDocumentLabel} 同步`
+                  : "完成资料库连接后显示行动看板"}
+              </p>
+            </div>
+          </div>
+          <div className="task-board-header-actions">
+            {domiTaskBoard?.stale && <span className="managed-task-stale">正在显示上次同步</span>}
+            {domiTaskSyncState.phase !== "idle" && (
+              <span
+                className={`managed-task-sync-status ${domiTaskSyncState.phase}`}
+                title={domiTaskSyncState.label}
+              >
+                {domiTaskSyncState.phase !== "completed"
+                  && domiTaskSyncState.phase !== "failed"
+                  && <RefreshCw className="spinning" size={13} />}
+                {domiTaskSyncState.label}
+                {domiTaskSyncState.startedAt
+                  ? ` · ${domiTaskSyncElapsed < 60
+                    ? `${domiTaskSyncElapsed}s`
+                    : `${Math.floor(domiTaskSyncElapsed / 60)}m ${domiTaskSyncElapsed % 60}s`}`
+                  : ""}
+              </span>
+            )}
+            {runningTaskThreads.length > 0 && (
+              <button
+                className="task-board-running-status"
+                type="button"
+                onClick={() => selectThread(runningTaskThreads[0].id)}
+                title="打开最近运行中的任务"
+              >
+                <RefreshCw className="spinning" size={14} />
+                运行中 {runningTaskThreads.length}
+              </button>
+            )}
+            <button
+              className="task-board-generate"
+              type="button"
+              onClick={() => void syncManagedTasks()}
+              disabled={Boolean(executingSuggestionId)
+                || !domiTaskBoard?.configured}
+              title={`运行 Todo Skill，更新 ${todoDocumentLabel} 后刷新看板`}
+            >
+              <RefreshCw
+                className={executingSuggestionId === "managed-refresh"
+                  ? "spinning"
+                  : ""}
+                size={14}
+              />
+              {executingSuggestionId === "managed-refresh" ? "同步中" : "同步"}
+            </button>
+          </div>
+        </div>
+
+        {!domiTaskBoard?.configured ? (
+          <div className="managed-task-setup">
+            <span><ListChecks size={26} /></span>
+            <div>
+              <strong>完成资料库连接</strong>
+              <p>{appSettings?.storageBackend === "local"
+                ? "domi 会在本地工作区根目录自动创建“0.待办事项.md”。"
+                : "domi 会在同一飞书文档库中自动发现或创建“1.待办事项”，无需另贴文档链接。"}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsInitialTab("data");
+                setSettingsOpen(true);
+              }}
+            >
+              打开资料连接
+            </button>
+          </div>
+        ) : (
+          <div className="task-board-scroll">
+            <div className="task-board-grid managed-task-grid">
+              {columns.map((column) => (
+                <section className={`task-column managed-${column.id}`} aria-labelledby={`managed-task-${column.id}`} key={column.id}>
+                  <header className="task-column-header">
+                    <span>{column.icon}<strong id={`managed-task-${column.id}`}>{column.title}</strong></span>
+                    <b>{column.tasks.length}</b>
+                  </header>
+                  <div className="task-column-list">
+                    {column.tasks.length === 0 && (
+                      <div className="task-column-empty">{column.empty}</div>
+                    )}
+                    {column.tasks.map((task) => {
+                      const busy = domiTaskMutationId === task.id
+                        || executingSuggestionId === `managed:${task.id}`;
+                      const actionable = task.status === "open" || task.status === "in_progress";
+                      return (
+                        <article className={`task-card managed-task-card priority-${task.priority.toLocaleLowerCase()}`} key={task.id}>
+                          <div className="task-card-topline">
+                            <span className="task-card-kind">
+                              {task.source.displayName || task.source.kind}
+                            </span>
+                            <b>{task.priority}</b>
+                          </div>
+                          <strong className="task-card-title">{task.title}</strong>
+                          {task.summary && <p>{task.summary}</p>}
+                          {task.reason && <small title={task.reason}>{task.reason}</small>}
+                          {task.dueAt && (
+                            <div className="managed-task-meta">
+                              <time><Clock3 size={12} />{formatManagedTaskDate(task.dueAt)}</time>
+                            </div>
+                          )}
+                          {actionable && (
+                            <div className="task-card-actions">
+                              <button
+                                className="task-card-primary"
+                                type="button"
+                                onClick={() => void executeManagedTask(task)}
+                                disabled={Boolean(domiTaskMutationId || executingSuggestionId)}
+                              >
+                                {busy
+                                  ? <RefreshCw className="spinning" size={13} />
+                                  : task.suggestedAction.kind === "schedule"
+                                    ? <CalendarPlus size={13} />
+                                    : <Play size={13} fill="currentColor" />}
+                                {task.suggestedAction.label || "执行下一动作"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void updateManagedTask(task.id, "ignored")}
+                                disabled={Boolean(domiTaskMutationId || executingSuggestionId)}
+                                title="忽略这个任务"
+                                aria-label={`忽略 ${task.title}`}
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                          )}
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {(domiTaskError || executionSuggestionError) && (
+          <div className="task-board-error">
+            <AlertCircle size={15} />
+            {domiTaskError || executionSuggestionError}
+          </div>
+        )}
+      </section>
+    );
+  }
+
+  function renderLegacyTaskBoard() {
     const pendingCount = taskBoardSuggestions.length
       + snoozedTaskSuggestions.length
       + queuedTaskItems.length
@@ -4700,7 +5276,7 @@ function App() {
           <div className="task-board-heading">
             <span className="task-board-heading-icon"><ClipboardList size={20} /></span>
             <div>
-              <h1 id="task-board-title">任务</h1>
+              <h1 id="task-board-title">待办事项</h1>
               <p>{pendingCount} 个待处理</p>
             </div>
           </div>
@@ -4819,7 +5395,7 @@ function App() {
               </header>
               <div className="task-column-list">
                 {snoozedTaskSuggestions.length === 0 && queuedTaskItems.length === 0 && failedTaskThreads.length === 0 && (
-                  <div className="task-column-empty">没有待办或需要处理的任务</div>
+                  <div className="task-column-empty">没有需要处理的待办事项</div>
                 )}
                 {queuedTaskItems.map(({ submission, thread }) => (
                   <article className="task-card queued" key={submission.id}>
@@ -5262,6 +5838,32 @@ function App() {
             }}
           />
 
+          {selectedWorkflow?.id === "schedule" && commonCalendarRecipients.length > 0 && (
+            <div className="schedule-recipient-picker" aria-label="选择常用参会人">
+              <span>常用参会人</span>
+              <div>
+                {commonCalendarRecipients.map((recipient) => {
+                  const selected = input
+                    .toLocaleLowerCase("en-US")
+                    .includes(recipient.email.toLocaleLowerCase("en-US"));
+                  return (
+                    <button
+                      type="button"
+                      className={selected ? "selected" : ""}
+                      onClick={() => addCalendarRecipient(recipient)}
+                      disabled={selected}
+                      title={recipient.email}
+                      key={recipient.email.toLocaleLowerCase("en-US")}
+                    >
+                      {recipient.name || recipient.email}
+                      {selected && <Check size={12} />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {attachments.length > 0 && (
             <div className="attachment-list" aria-label="已添加材料">
               {attachments.map((file) => (
@@ -5489,7 +6091,7 @@ function App() {
             }}
           >
             <ListChecks className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
-            <strong>任务</strong>
+            <strong>待办事项</strong>
             <span className="sidebar-nav-meta">
               {taskNavigationCount > 0 && (
                 <span className="sidebar-nav-count">{Math.min(taskNavigationCount, 99)}</span>
@@ -5756,14 +6358,14 @@ function App() {
         <header className={`topbar ${workspaceView === "conversation" && !hasConversation ? "new-task-topbar" : ""}`}>
           <div className="project-title">
             <strong>{workspaceView === "tasks"
-              ? "任务"
+              ? "待办事项"
               : workspaceView === "news"
                 ? "行业动态"
                 : workspaceView === "documents"
                   ? "文档库"
                 : activeThread.title}</strong>
             <span>{workspaceView === "tasks"
-              ? `${taskNavigationCount} 个待处理或进行中`
+              ? `${taskNavigationCount} 个待办事项`
               : workspaceView === "news"
                 ? "domi 行业雷达"
                 : workspaceView === "documents"
@@ -5792,7 +6394,7 @@ function App() {
                   ? documentLibraryLoading
                 : domiSyncing || (workspaceView === "tasks" && plaudEnabled && (plaudLoading || plaudSyncing))}
               title={workspaceView === "tasks"
-                ? "刷新任务来源"
+                ? "刷新待办事项来源"
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
                   : workspaceView === "documents"

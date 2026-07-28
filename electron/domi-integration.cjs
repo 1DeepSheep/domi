@@ -1,10 +1,16 @@
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const {
+  ensureDocumentLibraryStructure,
+  LOCAL_TODO_DOCUMENT_NAME
+} = require("./document-library.cjs");
 const { LocalDomiRepository, resolveHomePath } = require("./local-domi-repository.cjs");
 const { LocalToFeishuMigration } = require("./local-to-feishu-migration.cjs");
+const { resolveMediaRuntime } = require("./media-runtime.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
 const { TaskQueue } = require("./service-coordinator.cjs");
 
@@ -12,6 +18,28 @@ const execFileAsync = promisify(execFile);
 const CACHE_KEY = "snapshot-v1";
 const WEEKLY_NEWS_CACHE_KEY = "weekly-news-v1";
 const WEEKLY_NEWS_RADAR_CHECKPOINT_KEY = "weekly-news-radar-checkpoint-v1";
+const TASK_BOARD_CACHE_KEY_PREFIX = "task-board-v1";
+const TASK_BOARD_MARKER = "domi-task-board-v1";
+const TASK_DOCUMENT_TITLE = "1.待办事项";
+const LEGACY_TASK_DOCUMENT_TITLES = ["1.Task"];
+const MAX_TASK_WIKI_NODES = 5000;
+const MAX_TASK_WIKI_LIST_CALLS = 500;
+const MAX_TASK_WIKI_DEPTH = 8;
+const TASK_BOARD_CATEGORIES = new Set([
+  "key-milestone",
+  "new-entry",
+  "relationship-follow-up",
+  "project-follow-up"
+]);
+const LEGACY_TASK_BOARD_CATEGORIES = new Map([
+  ["relationship-milestone", "key-milestone"],
+  ["new-project-meeting", "new-entry"],
+  ["new-person-meeting", "new-entry"],
+  ["person-update", "relationship-follow-up"],
+  ["stale-relationship", "relationship-follow-up"],
+  ["project-update", "project-follow-up"],
+  ["stale-project", "project-follow-up"]
+]);
 const FEISHU_RECORD_PAGE_SIZE = 200;
 const FEISHU_RECORD_MAX_PAGES = 25;
 const FEISHU_READ_RETRY_DELAYS_MS = [350, 900, 1800];
@@ -39,6 +67,45 @@ const SKIPPED_MATERIAL_DIRECTORIES = new Set([
   "node_modules",
   "$RECYCLE.BIN"
 ]);
+
+function plaudBrowserLabel(browser) {
+  return browser === "tabbit" ? "Tabbit" : "Google Chrome";
+}
+
+function classifyPlaudConnectionFailure(error, browser) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  const normalized = message.toLocaleLowerCase("en-US");
+  let status = "unknown";
+  let guidance = "请重新检测；如果仍然失败，可以让 Codex 连接助手继续诊断。";
+  if (/音频运行时|ffmpeg|ffprobe/.test(normalized)) {
+    status = "runtime_unavailable";
+    guidance = "domi 内置音频运行时不完整，请重新安装最新版 domi。";
+  } else if (/singleton|profile.*(?:lock|use)|already in use|ebusy|process.*running/.test(normalized)) {
+    status = "profile_locked";
+    guidance = "PLAUD 专用浏览器 Profile 正被另一个 domi 实例占用，请关闭重复实例后重试。";
+  } else if (/401|403|unauthori|login|登录|not completed|未完成/.test(normalized)) {
+    status = "auth_required";
+    guidance = `请点击“登录并验证”，在 domi 专用 ${plaudBrowserLabel(browser)} 窗口中登录自己的 PLAUD 账号。`;
+  } else if (/econnrefused|devtools|browser.*(?:closed|launch)|executable|找不到.*浏览器/.test(normalized)) {
+    status = "browser_unavailable";
+    guidance = `${plaudBrowserLabel(browser)} 未能启动或调试连接已关闭，请重新打开登录流程。`;
+  } else if (/enotfound|enetunreach|network|fetch failed|etimedout|timeout|超时|网络/.test(normalized)) {
+    status = "network_error";
+    guidance = "网络暂时不可用或 PLAUD 服务响应超时，请确认网络后重试。";
+  } else if (/selector|unexpected response|parse|json|页面结构/.test(normalized)) {
+    status = "service_changed";
+    guidance = "PLAUD 页面或接口可能已更新，请使用 Codex 连接助手诊断并检查插件更新。";
+  }
+  return {
+    ok: false,
+    connected: false,
+    browser,
+    browserLabel: plaudBrowserLabel(browser),
+    status,
+    checkedAt: Date.now(),
+    error: guidance
+  };
+}
 
 function normalizedMaterialText(value) {
   return String(value || "")
@@ -81,6 +148,260 @@ function textValue(value) {
       .join("");
   }
   return value.text || value.name || "";
+}
+
+function boundedTaskText(value, limit = 800) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+function taskIsoTime(value, fallback = null) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback;
+}
+
+function decodeTaskXml(value) {
+  return String(value || "")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#([0-9]+);/g, (_, decimal) => String.fromCodePoint(Number.parseInt(decimal, 10)))
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function encodeTaskXml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function taskXmlAttributes(value) {
+  const attributes = {};
+  for (const match of String(value || "").matchAll(/([A-Za-z0-9_-]+)\s*=\s*(["'])(.*?)\2/gs)) {
+    attributes[match[1]] = decodeTaskXml(match[3]);
+  }
+  return attributes;
+}
+
+function taskDocumentStrings(value, output = []) {
+  if (typeof value === "string") output.push(value);
+  else if (Array.isArray(value)) value.forEach((item) => taskDocumentStrings(item, output));
+  else if (value && typeof value === "object") {
+    Object.values(value).forEach((item) => taskDocumentStrings(item, output));
+  }
+  return output;
+}
+
+function normalizeTaskBoardItem(value = {}, now = new Date().toISOString()) {
+  const statuses = new Set(["open", "in_progress", "done", "ignored"]);
+  const priorities = new Set(["P1", "P2", "P3"]);
+  const sourceKinds = new Set(["project", "person", "news", "manual"]);
+  const actionKinds = new Set(["schedule", "research", "contact", "review", "custom"]);
+  const id = boundedTaskText(value.id, 120);
+  const title = boundedTaskText(value.title, 160);
+  if (!id || !title) return null;
+  const status = statuses.has(value.status) ? value.status : "open";
+  const sourceKind = sourceKinds.has(value.source?.kind) ? value.source.kind : "manual";
+  const dueAt = taskIsoTime(value.dueAt);
+  const legacyCategory = LEGACY_TASK_BOARD_CATEGORIES.get(value.category);
+  const category = TASK_BOARD_CATEGORIES.has(value.category)
+    ? value.category
+    : legacyCategory
+      || (dueAt
+        ? "key-milestone"
+        : sourceKind === "person"
+          ? "relationship-follow-up"
+          : "project-follow-up");
+  const item = {
+    id,
+    title,
+    summary: boundedTaskText(value.summary, 500),
+    reason: boundedTaskText(value.reason, 800),
+    priority: priorities.has(value.priority) ? value.priority : "P3",
+    category,
+    status,
+    signalKey: boundedTaskText(value.signalKey, 160),
+    source: {
+      kind: sourceKind,
+      recordId: boundedTaskText(value.source?.recordId, 160),
+      displayName: boundedTaskText(value.source?.displayName, 160)
+    },
+    dueAt,
+    suggestedAction: {
+      kind: actionKinds.has(value.suggestedAction?.kind) ? value.suggestedAction.kind : "custom",
+      label: boundedTaskText(value.suggestedAction?.label, 80) || "执行",
+      prompt: String(value.suggestedAction?.prompt || "").trim().slice(0, 4000)
+    },
+    createdAt: taskIsoTime(value.createdAt, now),
+    updatedAt: taskIsoTime(value.updatedAt, now)
+  };
+  if (status === "ignored") item.ignoredAt = taskIsoTime(value.ignoredAt, item.updatedAt);
+  if (status === "done") item.completedAt = taskIsoTime(value.completedAt, item.updatedAt);
+  return item;
+}
+
+function normalizeTaskLedger(value = {}, now = new Date().toISOString()) {
+  const seen = new Set();
+  return {
+    schemaVersion: 1,
+    updatedAt: taskIsoTime(value.updatedAt, now),
+    tasks: (Array.isArray(value.tasks) ? value.tasks : [])
+      .map((task) => normalizeTaskBoardItem(task, now))
+      .filter((task) => task && !seen.has(task.id) && seen.add(task.id))
+  };
+}
+
+function parseTaskLedger(value) {
+  for (const candidate of taskDocumentStrings(value)) {
+    if (!candidate.includes(TASK_BOARD_MARKER)) continue;
+    for (const match of candidate.matchAll(/<pre\b([^>]*)>\s*<code>([\s\S]*?)<\/code>\s*<\/pre>/gi)) {
+      const attributes = taskXmlAttributes(match[1]);
+      if (String(attributes.caption || "").trim() !== TASK_BOARD_MARKER) continue;
+      const blockId = boundedTaskText(attributes.id || attributes["block-id"], 200);
+      try {
+        const renderedCode = match[2].replace(/<br\s*\/?>/gi, "\n");
+        return {
+          found: true,
+          blockId,
+          ledger: normalizeTaskLedger(JSON.parse(decodeTaskXml(renderedCode)))
+        };
+      } catch (error) {
+        return {
+          found: false,
+          blockId,
+          ledger: normalizeTaskLedger(),
+          error: `${TASK_DOCUMENT_TITLE} 数据块无法解析：${error.message}`
+        };
+      }
+    }
+  }
+  return { found: false, blockId: "", ledger: normalizeTaskLedger() };
+}
+
+function renderTaskLedger(value) {
+  const ledger = normalizeTaskLedger(value);
+  return `<pre lang="json" caption="${TASK_BOARD_MARKER}"><code>${encodeTaskXml(JSON.stringify(ledger, null, 2))}</code></pre>`;
+}
+
+function replaceTaskLedgerDocumentContent(content, ledger) {
+  let replaced = false;
+  const next = String(content || "").replace(
+    /<pre\b([^>]*)>\s*<code>[\s\S]*?<\/code>\s*<\/pre>/gi,
+    (block, attributesText) => {
+      if (replaced || taskXmlAttributes(attributesText).caption !== TASK_BOARD_MARKER) return block;
+      replaced = true;
+      return renderTaskLedger(ledger);
+    }
+  );
+  if (!replaced) {
+    throw new Error(`${LOCAL_TODO_DOCUMENT_NAME} 缺少 ${TASK_BOARD_MARKER} 数据块，无法安全更新。`);
+  }
+  return next;
+}
+
+function taskBoardCacheKey(document) {
+  const fingerprint = crypto
+    .createHash("sha256")
+    .update(String(document || "").trim())
+    .digest("hex")
+    .slice(0, 20);
+  return `${TASK_BOARD_CACHE_KEY_PREFIX}:${fingerprint}`;
+}
+
+function larkResponseData(response) {
+  const first = response?.data ?? response ?? {};
+  return first?.data ?? first;
+}
+
+function larkResponseItems(response) {
+  const data = larkResponseData(response);
+  if (Array.isArray(data)) return data;
+  return data?.nodes || data?.items || data?.records || [];
+}
+
+function taskWikiNodeToken(node) {
+  return String(node?.node_token || node?.nodeToken || node?.token || "");
+}
+
+function taskWikiDocumentToken(node) {
+  const value = node?.node || node;
+  return String(
+    value?.obj_token
+    || value?.objToken
+    || value?.document_id
+    || value?.documentId
+    || ""
+  );
+}
+
+function taskWikiNodeTitle(node) {
+  return textValue(node?.title || node?.name)
+    .normalize("NFKC")
+    .trim();
+}
+
+function taskDocumentTitleKey(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\s+/g, "");
+}
+
+function isTaskDocumentTitle(value) {
+  const key = taskDocumentTitleKey(value);
+  return [TASK_DOCUMENT_TITLE, ...LEGACY_TASK_DOCUMENT_TITLES]
+    .some((title) => taskDocumentTitleKey(title) === key);
+}
+
+function isLegacyTaskDocumentTitle(value) {
+  const key = taskDocumentTitleKey(value);
+  return LEGACY_TASK_DOCUMENT_TITLES
+    .some((title) => taskDocumentTitleKey(title) === key);
+}
+
+function taskSearchResultTitle(result) {
+  return decodeTaskXml(result?.title_highlighted || result?.titleHighlighted || result?.title || "")
+    .replace(/<[^>]+>/g, "")
+    .trim();
+}
+
+function taskSearchResultLocator(result) {
+  const rawToken = String(
+    result?.result_meta?.token
+    || result?.resultMeta?.token
+    || result?.node_token
+    || result?.nodeToken
+    || ""
+  );
+  const resourceUrl = String(
+    result?.result_meta?.url
+    || result?.resultMeta?.url
+    || result?.url
+    || ""
+  );
+  const entityType = String(
+    result?.entity_type
+    || result?.entityType
+    || result?.result_meta?.type
+    || result?.resultMeta?.type
+    || ""
+  ).toLocaleLowerCase("en-US");
+  const docTypes = stringList(
+    result?.result_meta?.doc_types
+    || result?.resultMeta?.docTypes
+  ).map((value) => value.toLocaleLowerCase("en-US"));
+  const supportedObjTypes = new Set(["doc", "docx", "sheet", "bitable", "mindnote", "slides", "file"]);
+  const objType = supportedObjTypes.has(entityType)
+    ? entityType
+    : docTypes.find((value) => supportedObjTypes.has(value)) || "";
+  const wikiUrl = entityType === "wiki" && /\/wiki\//i.test(resourceUrl)
+    ? resourceUrl
+    : "";
+  return {
+    token: wikiUrl || rawToken,
+    objType: wikiUrl || rawToken.startsWith("wik") ? "" : objType
+  };
 }
 
 function stringList(value) {
@@ -255,7 +576,16 @@ function resolvePlaywrightNodeModules() {
 }
 
 class DomiIntegration {
-  constructor({ stateStore, plaudOutputDir, plaudStateDir, configProvider, playwrightNodeModules, sleep }) {
+  constructor({
+    stateStore,
+    plaudOutputDir,
+    plaudStateDir,
+    configProvider,
+    domiConfigPath,
+    playwrightNodeModules,
+    mediaRuntime,
+    sleep
+  }) {
     this.stateStore = stateStore;
     this.configProvider = configProvider || (() => ({}));
     this.sleep = sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -263,13 +593,17 @@ class DomiIntegration {
     this.materialIndexCache = new Map();
     this.larkCommandQueue = new TaskQueue(2);
     this.plaudCommandQueue = new TaskQueue(1);
+    this.plaudRemoteHealth = null;
+    this.taskDocumentSources = new Map();
     this.plaudOutputDir = path.resolve(plaudOutputDir || path.join(os.homedir(), "Documents", "domi", "work", "domi", "plaud"));
     this.plaudStateFile = path.join(
       path.resolve(plaudStateDir || process.env.DOMI_PLAUD_STATE_DIR || path.join(os.homedir(), ".domi")),
       "plaud-workflow.json"
     );
     this.plaudWorker = path.join(__dirname, "plaud-worker.cjs");
+    this.domiConfigPath = String(domiConfigPath || process.env.DOMI_CONFIG_PATH || "").trim();
     this.playwrightNodeModules = playwrightNodeModules || resolvePlaywrightNodeModules();
+    this.mediaRuntime = mediaRuntime || resolveMediaRuntime();
   }
 
   async buildMaterialIndex(rootPath) {
@@ -558,6 +892,13 @@ class DomiIntegration {
     ].filter(Boolean);
     return {
       ELECTRON_RUN_AS_NODE: "1",
+      ...(this.domiConfigPath ? { DOMI_CONFIG_PATH: this.domiConfigPath } : {}),
+      ...(this.mediaRuntime.ffmpegPath
+        ? { DOMI_FFMPEG_PATH: this.mediaRuntime.ffmpegPath }
+        : {}),
+      ...(this.mediaRuntime.ffprobePath
+        ? { DOMI_FFPROBE_PATH: this.mediaRuntime.ffprobePath }
+        : {}),
       ...(nodePaths.length ? { NODE_PATH: [...new Set(nodePaths)].join(path.delimiter) } : {})
     };
   }
@@ -577,6 +918,123 @@ class DomiIntegration {
       queue: "plaud",
       env: this.plaudRuntimeEnv()
     });
+  }
+
+  async ensureIntakeTimeFields(pluginInput) {
+    const plugin = pluginInput || this.findPlugin();
+    const script = path.join(
+      plugin.root,
+      "skills",
+      "investment-mgmt",
+      "scripts",
+      "ensure-intake-time-fields.js"
+    );
+    if (!fs.existsSync(script)) {
+      throw new Error("当前 domi 插件缺少入库时间迁移组件，请先更新插件。");
+    }
+    return this.runJson(process.execPath, [script, "ensure"], {
+      label: "项目与人脉入库时间字段初始化",
+      queue: "lark",
+      timeout: 180000,
+      env: {
+        ELECTRON_RUN_AS_NODE: "1",
+        LARK_CLI_PATH: this.larkCli,
+        ...(this.domiConfigPath ? { DOMI_CONFIG_PATH: this.domiConfigPath } : {})
+      }
+    });
+  }
+
+  normalizePlaudBrowser(value) {
+    return value === "tabbit" ? "tabbit" : "chrome";
+  }
+
+  async runPlaudConnectionCommand(command, requestedBrowser) {
+    if (!this.plaudEnabled() && command !== "logout") {
+      throw new Error("PLAUD 未启用。请先在 domi 设置的“录音转写”中开启。");
+    }
+    const { script } = this.plaudPaths();
+    const browser = this.normalizePlaudBrowser(
+      requestedBrowser || this.configProvider().plaudBrowser
+    );
+    return this.runJson(process.execPath, [script, command, browser], {
+      timeout: command === "login" ? 11 * 60 * 1000 : 180000,
+      label: command === "login"
+        ? "PLAUD 浏览器登录"
+        : command === "doctor"
+          ? "PLAUD 环境检查"
+        : command === "logout"
+          ? "PLAUD 本地登录清理"
+          : "PLAUD 登录验证",
+      queue: "plaud",
+      env: this.plaudRuntimeEnv()
+    });
+  }
+
+  async loginPlaud(request = {}) {
+    const browser = this.normalizePlaudBrowser(
+      request.browser || this.configProvider().plaudBrowser
+    );
+    let result;
+    try {
+      await this.plaudDoctor({ ...request, browser });
+      result = await this.runPlaudConnectionCommand("login", browser);
+    } catch (error) {
+      result = classifyPlaudConnectionFailure(error, browser);
+    }
+    result = {
+      ...result,
+      browser,
+      browserLabel: result?.browserLabel || plaudBrowserLabel(browser),
+      status: result?.connected ? "connected" : result?.status || "auth_required",
+      checkedAt: result?.checkedAt || Date.now()
+    };
+    this.plaudRemoteHealth = {
+      ok: Boolean(result?.connected),
+      error: result?.connected ? "" : String(result?.error || ""),
+      checkedAt: result.checkedAt
+    };
+    return result;
+  }
+
+  async plaudConnection(request = {}) {
+    const browser = this.normalizePlaudBrowser(
+      request.browser || this.configProvider().plaudBrowser
+    );
+    try {
+      await this.plaudDoctor({ ...request, browser });
+      const response = await this.runPlaudConnectionCommand("connection", browser);
+      const result = {
+        ...response,
+        browser,
+        browserLabel: response?.browserLabel || plaudBrowserLabel(browser),
+        status: response?.connected ? "connected" : response?.status || "auth_required",
+        checkedAt: response?.checkedAt || Date.now()
+      };
+      this.plaudRemoteHealth = {
+        ok: Boolean(result?.connected),
+        error: result?.connected ? "" : String(result?.error || ""),
+        checkedAt: result.checkedAt
+      };
+      return result;
+    } catch (error) {
+      const result = classifyPlaudConnectionFailure(error, browser);
+      this.plaudRemoteHealth = {
+        ok: false,
+        error: result.error,
+        checkedAt: result.checkedAt
+      };
+      return result;
+    }
+  }
+
+  async plaudDoctor(request = {}) {
+    return this.runPlaudConnectionCommand("doctor", request.browser);
+  }
+
+  async disconnectPlaud(request = {}) {
+    const result = await this.runPlaudConnectionCommand("logout", request.browser);
+    this.plaudRemoteHealth = null;
+    return result;
   }
 
   normalizePlaudQueueItem(item) {
@@ -632,6 +1090,11 @@ class DomiIntegration {
     for (const item of queueItems) workflowById.set(String(item.fileId), item);
     const activeQueueById = new Map(queueItems.map((item) => [String(item.fileId), item]));
     const remoteItems = remoteResult.status === "fulfilled" ? remoteResult.value.items || [] : [];
+    this.plaudRemoteHealth = {
+      ok: remoteResult.status === "fulfilled",
+      error: remoteResult.status === "rejected" ? remoteResult.reason.message : "",
+      checkedAt: Date.now()
+    };
     const items = remoteItems.map((item) => {
       const fileId = String(item.fileId);
       const queued = workflowById.get(fileId);
@@ -1120,6 +1583,575 @@ class DomiIntegration {
     }
   }
 
+  taskBoardCacheIdentity(settings = this.configProvider()) {
+    if (settings.storageBackend === "local") {
+      const localRepositoryDir = resolveHomePath(settings.localRepositoryDir);
+      return localRepositoryDir
+        ? `local:${path.resolve(localRepositoryDir, LOCAL_TODO_DOCUMENT_NAME)}`
+        : "";
+    }
+    const legacyDocument = String(settings.taskDocumentUrl || "").trim();
+    if (legacyDocument) return legacyDocument;
+    const wikiSpaceId = String(settings.wikiSpaceId || "").trim();
+    return wikiSpaceId ? `wiki:${wikiSpaceId}` : "";
+  }
+
+  async taskWikiChildren(wikiSpaceId, parentNodeToken = "") {
+    const args = [
+      "wiki",
+      "+node-list",
+      "--space-id",
+      wikiSpaceId,
+      "--page-all",
+      "--page-limit",
+      "0",
+      "--format",
+      "json"
+    ];
+    if (parentNodeToken) args.push("--parent-node-token", parentNodeToken);
+    const response = await this.withFeishuReadRetry(() => this.lark(args, {
+      label: `${TASK_DOCUMENT_TITLE} 文档定位`,
+      timeout: 120000
+    }));
+    return larkResponseItems(response);
+  }
+
+  async findTaskDocumentBySearch(wikiSpaceId) {
+    const results = [];
+    for (const title of [TASK_DOCUMENT_TITLE, ...LEGACY_TASK_DOCUMENT_TITLES]) {
+      let pageToken = "";
+      for (let page = 0; page < 5; page += 1) {
+        const args = [
+          "drive",
+          "+search",
+          "--query",
+          `intitle:${title}`,
+          "--only-title",
+          "--space-ids",
+          wikiSpaceId,
+          "--page-size",
+          "20",
+          "--format",
+          "json"
+        ];
+        if (pageToken) args.push("--page-token", pageToken);
+        const response = await this.withFeishuReadRetry(() => this.lark(args, {
+          label: `${TASK_DOCUMENT_TITLE} 文档搜索`,
+          timeout: 90000
+        }));
+        const data = larkResponseData(response);
+        results.push(...(data?.results || data?.items || []));
+        if (!data?.has_more || !data?.page_token) break;
+        pageToken = String(data.page_token);
+      }
+    }
+
+    const matchingLocators = [...new Map(results
+      .filter((result) => isTaskDocumentTitle(taskSearchResultTitle(result)))
+      .map(taskSearchResultLocator)
+      .filter((locator) => locator.token)
+      .map((locator) => [`${locator.token}:${locator.objType}`, locator])).values()];
+    const matches = [];
+    for (const locator of matchingLocators) {
+      const args = [
+        "wiki",
+        "+node-get",
+        "--node-token",
+        locator.token,
+        "--space-id",
+        wikiSpaceId,
+        "--format",
+        "json"
+      ];
+      if (locator.objType) args.push("--obj-type", locator.objType);
+      const response = await this.withFeishuReadRetry(() => this.lark(args, {
+        label: `${TASK_DOCUMENT_TITLE} 文档解析`,
+        timeout: 90000
+      }));
+      const data = larkResponseData(response);
+      const node = data?.node || data;
+      if (isTaskDocumentTitle(taskWikiNodeTitle(node))) {
+        matches.push(node);
+      }
+    }
+    return matches;
+  }
+
+  async findTaskDocumentByTraversal(wikiSpaceId) {
+    const roots = await this.taskWikiChildren(wikiSpaceId);
+    const queue = roots.map((node) => ({ node, depth: 0 }));
+    const seen = new Set();
+    const matches = [];
+    let calls = 1;
+    let truncated = false;
+
+    while (queue.length) {
+      if (seen.size >= MAX_TASK_WIKI_NODES) {
+        truncated = true;
+        break;
+      }
+      const { node, depth } = queue.shift();
+      const nodeToken = taskWikiNodeToken(node);
+      const dedupeKey = nodeToken || `${depth}:${taskWikiNodeTitle(node)}:${seen.size}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      if (isTaskDocumentTitle(taskWikiNodeTitle(node))) {
+        matches.push(node);
+      }
+
+      const hasChild = node?.has_child ?? node?.hasChild;
+      if (hasChild === false) continue;
+      if (depth >= MAX_TASK_WIKI_DEPTH || calls >= MAX_TASK_WIKI_LIST_CALLS) {
+        truncated = true;
+        continue;
+      }
+      if (!nodeToken) continue;
+      const children = await this.taskWikiChildren(wikiSpaceId, nodeToken);
+      calls += 1;
+      queue.push(...children.map((child) => ({ node: child, depth: depth + 1 })));
+    }
+
+    if (!matches.length && truncated) {
+      throw new Error(`飞书文档库层级过深或内容过多，未能安全定位“${TASK_DOCUMENT_TITLE}”；为避免重复创建，本次没有写入。`);
+    }
+    return matches;
+  }
+
+  taskDocumentCandidate(match) {
+    const objType = String(match?.obj_type || match?.objType || "docx");
+    return {
+      document: taskWikiDocumentToken(match),
+      nodeToken: taskWikiNodeToken(match),
+      title: taskWikiNodeTitle(match),
+      objType,
+      created: false
+    };
+  }
+
+  async inspectTaskDocumentCandidate(candidate) {
+    try {
+      const response = await this.withFeishuReadRetry(() => this.lark([
+        "docs",
+        "+fetch",
+        "--doc",
+        candidate.document,
+        "--detail",
+        "with-ids"
+      ], {
+        label: `${TASK_DOCUMENT_TITLE} 重复文档核验`,
+        timeout: 90000
+      }));
+      const parsed = parseTaskLedger(response);
+      return {
+        candidate,
+        inspected: true,
+        parsed,
+        taskCount: parsed.found ? parsed.ledger.tasks.length : 0
+      };
+    } catch (error) {
+      return {
+        candidate,
+        inspected: false,
+        parsed: null,
+        taskCount: 0,
+        error
+      };
+    }
+  }
+
+  async selectTaskDocumentCandidate(matches) {
+    const candidates = [...new Map(matches
+      .map((match) => this.taskDocumentCandidate(match))
+      .map((candidate) => [
+        candidate.document || `${candidate.nodeToken}:${candidate.title}`,
+        candidate
+      ])).values()];
+    const documentCandidates = candidates.filter((candidate) =>
+      candidate.objType === "docx" && candidate.document
+    );
+    if (!documentCandidates.length) {
+      if (candidates.some((candidate) => candidate.objType !== "docx")) {
+        throw new Error(`飞书文档库中的“${TASK_DOCUMENT_TITLE}”不是文档类型，无法作为待办事项看板数据源。`);
+      }
+      throw new Error(`已找到“${TASK_DOCUMENT_TITLE}”，但飞书没有返回对应文档标识。`);
+    }
+    if (documentCandidates.length === 1) return documentCandidates[0];
+
+    const inspected = await Promise.all(
+      documentCandidates.map((candidate) => this.inspectTaskDocumentCandidate(candidate))
+    );
+    const inspectionComplete = inspected.every((item) =>
+      item.inspected && !item.parsed?.error
+    );
+    if (inspectionComplete) {
+      const taskful = inspected.filter((item) => item.taskCount > 0);
+      if (taskful.length === 1) {
+        const selected = taskful[0].candidate;
+        return {
+          ...selected,
+          skipTitleMigration: isLegacyTaskDocumentTitle(selected.title)
+            && documentCandidates.some((candidate) =>
+              taskDocumentTitleKey(candidate.title) === taskDocumentTitleKey(TASK_DOCUMENT_TITLE)
+            )
+        };
+      }
+
+      if (!taskful.length) {
+        const canonical = inspected.filter((item) =>
+          taskDocumentTitleKey(item.candidate.title) === taskDocumentTitleKey(TASK_DOCUMENT_TITLE)
+        );
+        if (canonical.length === 1) return canonical[0].candidate;
+
+        const initialized = inspected.filter((item) => item.parsed?.found);
+        if (initialized.length === 1) return initialized[0].candidate;
+      }
+    }
+
+    throw new Error(
+      `当前飞书文档库中存在多个含有效数据的“${TASK_DOCUMENT_TITLE}”或旧版“1.Task”文档，`
+      + "为避免遗漏待办事项，本次没有自动选择。"
+    );
+  }
+
+  async findTaskDocument(wikiSpaceId) {
+    let matches;
+    try {
+      matches = await this.findTaskDocumentBySearch(wikiSpaceId);
+    } catch {
+      matches = await this.findTaskDocumentByTraversal(wikiSpaceId);
+    }
+    if (!matches.length) {
+      return null;
+    }
+    return this.selectTaskDocumentCandidate(matches);
+  }
+
+  async migrateTaskDocumentTitle(wikiSpaceId, source) {
+    if (!isLegacyTaskDocumentTitle(source.title) || source.skipTitleMigration) return source;
+    if (!source.nodeToken) {
+      throw new Error(`已找到旧版“${source.title}”，但飞书没有返回可用于改名的节点标识。`);
+    }
+    await this.lark([
+      "drive",
+      "files",
+      "patch",
+      "--file-token",
+      source.nodeToken,
+      "--type",
+      "wiki",
+      "--data",
+      JSON.stringify({ new_title: TASK_DOCUMENT_TITLE }),
+      "--format",
+      "json"
+    ], {
+      label: `${TASK_DOCUMENT_TITLE} 文档改名`,
+      timeout: 90000
+    });
+    const response = await this.withFeishuReadRetry(() => this.lark([
+      "wiki",
+      "+node-get",
+      "--node-token",
+      source.nodeToken,
+      "--space-id",
+      wikiSpaceId,
+      "--format",
+      "json"
+    ], {
+      label: `${TASK_DOCUMENT_TITLE} 改名验证`,
+      timeout: 90000
+    }));
+    const node = larkResponseData(response)?.node || larkResponseData(response);
+    if (taskDocumentTitleKey(taskWikiNodeTitle(node)) !== taskDocumentTitleKey(TASK_DOCUMENT_TITLE)) {
+      throw new Error(`旧版“${source.title}”已提交改名，但回读仍不是“${TASK_DOCUMENT_TITLE}”。`);
+    }
+    return { ...source, title: TASK_DOCUMENT_TITLE, migrated: true };
+  }
+
+  async initializeTaskDocument(document) {
+    const emptyLedger = normalizeTaskLedger();
+    await this.lark([
+      "docs",
+      "+update",
+      "--doc",
+      document,
+      "--command",
+      "append",
+      "--content",
+      renderTaskLedger(emptyLedger)
+    ], {
+      label: `${TASK_DOCUMENT_TITLE} 初始化`,
+      timeout: 90000
+    });
+    const verified = await this.withFeishuReadRetry(() => this.lark([
+      "docs",
+      "+fetch",
+      "--doc",
+      document,
+      "--detail",
+      "with-ids"
+    ], {
+      label: `${TASK_DOCUMENT_TITLE} 初始化验证`,
+      timeout: 90000
+    }));
+    const parsed = parseTaskLedger(verified);
+    if (!parsed.found || !parsed.blockId) {
+      throw new Error(`${TASK_DOCUMENT_TITLE} 已创建，但待办事项数据块初始化后回读验证失败。`);
+    }
+    return parsed.ledger;
+  }
+
+  async createTaskDocument(wikiSpaceId) {
+    const response = await this.lark([
+      "wiki",
+      "+node-create",
+      "--space-id",
+      wikiSpaceId,
+      "--title",
+      TASK_DOCUMENT_TITLE,
+      "--obj-type",
+      "docx",
+      "--format",
+      "json"
+    ], {
+      label: `${TASK_DOCUMENT_TITLE} 文档创建`,
+      timeout: 120000
+    });
+    const document = taskWikiDocumentToken(larkResponseData(response));
+    if (!document) {
+      throw new Error(`飞书已执行“${TASK_DOCUMENT_TITLE}”创建请求，但没有返回可用的文档标识。`);
+    }
+    await this.initializeTaskDocument(document);
+    return { document, created: true };
+  }
+
+  async taskDocumentSource(options = {}) {
+    const settings = options.settings || this.configProvider();
+    if (settings.storageBackend === "local") {
+      const localRepositoryDir = resolveHomePath(settings.localRepositoryDir);
+      if (!localRepositoryDir) {
+        throw new Error(`本地资料库尚未配置，无法定位 ${LOCAL_TODO_DOCUMENT_NAME}。`);
+      }
+      const rootPath = path.resolve(localRepositoryDir);
+      if (options.createIfMissing) ensureDocumentLibraryStructure(rootPath);
+      const document = path.join(rootPath, LOCAL_TODO_DOCUMENT_NAME);
+      if (!fs.existsSync(document)) {
+        throw new Error(`当前本地资料库中未找到“${LOCAL_TODO_DOCUMENT_NAME}”。`);
+      }
+      return {
+        backend: "local",
+        document,
+        cacheIdentity: `local:${document}`,
+        created: false,
+        source: "library"
+      };
+    }
+    if (settings.storageBackend !== "feishu") {
+      throw new Error("当前资料库模式不支持待办事项看板。");
+    }
+    const wikiSpaceId = String(settings.wikiSpaceId || "").trim();
+    const legacyDocument = String(settings.taskDocumentUrl || "").trim();
+    const cacheIdentity = this.taskBoardCacheIdentity(settings);
+    if (legacyDocument) {
+      return { document: legacyDocument, cacheIdentity, created: false, source: "legacy" };
+    }
+    if (!wikiSpaceId) {
+      throw new Error("飞书文档库尚未配置。请先完成项目库、人脉库和 Wiki 的资料连接。");
+    }
+    const cached = this.taskDocumentSources.get(wikiSpaceId);
+    if (cached) return { ...cached, cacheIdentity, source: "library" };
+
+    const found = await this.findTaskDocument(wikiSpaceId);
+    if (found) {
+      const migrated = await this.migrateTaskDocumentTitle(wikiSpaceId, found);
+      this.taskDocumentSources.set(wikiSpaceId, migrated);
+      return { ...migrated, cacheIdentity, source: "library" };
+    }
+    if (!options.createIfMissing) {
+      throw new Error(`当前飞书文档库中未找到“${TASK_DOCUMENT_TITLE}”。`);
+    }
+    const created = await this.createTaskDocument(wikiSpaceId);
+    this.taskDocumentSources.set(wikiSpaceId, created);
+    return { ...created, cacheIdentity, source: "library" };
+  }
+
+  async ensureTaskDocument(options = {}) {
+    const source = await this.taskDocumentSource({ ...options, createIfMissing: true });
+    return { ok: true, created: source.created };
+  }
+
+  loadTaskBoardCache(document) {
+    if (!String(document || "").trim()) return null;
+    const cached = this.stateStore.loadCache(taskBoardCacheKey(document));
+    return cached?.value || null;
+  }
+
+  saveTaskBoardCache(ledger, document, options = {}) {
+    const snapshot = {
+      ok: true,
+      configured: true,
+      stale: Boolean(options.stale),
+      syncedAt: Date.now(),
+      updatedAt: ledger.updatedAt,
+      tasks: ledger.tasks
+    };
+    this.stateStore.saveCache(taskBoardCacheKey(document), snapshot);
+    return snapshot;
+  }
+
+  async fetchTaskLedger(options = {}) {
+    const source = options.source || await this.taskDocumentSource(options);
+    if (source.backend === "local") {
+      const content = fs.readFileSync(source.document, "utf8");
+      const parsed = parseTaskLedger(content);
+      if (!parsed.found) {
+        throw new Error(parsed.error || `${LOCAL_TODO_DOCUMENT_NAME} 尚未初始化待办事项数据块。`);
+      }
+      return { ...parsed, source, content };
+    }
+    const result = await this.withFeishuReadRetry(() => this.lark([
+      "docs",
+      "+fetch",
+      "--doc",
+      source.document,
+      "--detail",
+      "with-ids"
+    ], {
+      label: `${TASK_DOCUMENT_TITLE} 待办事项读取`,
+      timeout: 90000
+    }));
+    const parsed = parseTaskLedger(result);
+    if (!parsed.found) {
+      throw new Error(parsed.error || `${TASK_DOCUMENT_TITLE} 尚未初始化待办事项数据块。请在待办事项看板点击“同步”。`);
+    }
+    if (!parsed.blockId) {
+      throw new Error(`${TASK_DOCUMENT_TITLE} 数据块缺少 block ID，无法进行安全的局部更新。`);
+    }
+    return { ...parsed, source };
+  }
+
+  async taskBoard(request = {}) {
+    const settings = this.configProvider();
+    const localMode = settings.storageBackend === "local";
+    const configured = localMode
+      ? Boolean(String(settings.localRepositoryDir || "").trim())
+      : Boolean(
+        String(settings.taskDocumentUrl || "").trim()
+        || String(settings.wikiSpaceId || "").trim()
+      );
+    const cacheIdentity = this.taskBoardCacheIdentity(settings);
+    const cached = this.loadTaskBoardCache(cacheIdentity);
+    if (!configured) {
+      return {
+        ok: false,
+        configured: false,
+        stale: false,
+        syncedAt: cached?.syncedAt || 0,
+        updatedAt: cached?.updatedAt || null,
+        tasks: [],
+        error: localMode
+          ? `本地资料库尚未配置，无法定位 ${LOCAL_TODO_DOCUMENT_NAME}。`
+          : `飞书资料库尚未配置，无法定位 ${TASK_DOCUMENT_TITLE}。`
+      };
+    }
+    if (request.cacheOnly) {
+      return cached || {
+        ok: true,
+        configured: true,
+        stale: false,
+        syncedAt: 0,
+        updatedAt: null,
+        tasks: []
+      };
+    }
+    try {
+      const source = await this.taskDocumentSource({ createIfMissing: true });
+      const { ledger } = await this.fetchTaskLedger({ source });
+      return this.saveTaskBoardCache(ledger, source.cacheIdentity);
+    } catch (error) {
+      if (cached) {
+        return {
+          ...cached,
+          ok: false,
+          stale: true,
+          error: localMode
+            ? error instanceof Error ? error.message : String(error)
+            : describeFeishuSyncError(error, { hasCache: true })
+        };
+      }
+      return {
+        ok: false,
+        configured: true,
+        stale: false,
+        syncedAt: 0,
+        updatedAt: null,
+        tasks: [],
+        error: localMode
+          ? error instanceof Error ? error.message : String(error)
+          : describeFeishuSyncError(error)
+      };
+    }
+  }
+
+  async updateTask(request = {}) {
+    const taskId = boundedTaskText(request.taskId, 120);
+    const status = String(request.status || "");
+    if (!taskId) throw new Error("缺少任务 ID。");
+    if (!["open", "in_progress", "done", "ignored"].includes(status)) {
+      throw new Error("不支持的任务状态。");
+    }
+
+    const current = await this.fetchTaskLedger();
+    const task = current.ledger.tasks.find((item) => item.id === taskId);
+    if (!task) throw new Error(`${TASK_DOCUMENT_TITLE} 中没有找到该待办事项，可能已被其他设备更新。`);
+    const now = new Date().toISOString();
+    task.status = status;
+    task.updatedAt = now;
+    if (status === "ignored") task.ignoredAt = now;
+    else delete task.ignoredAt;
+    if (status === "done") task.completedAt = now;
+    else delete task.completedAt;
+    current.ledger.updatedAt = now;
+
+    if (current.source.backend === "local") {
+      const nextContent = replaceTaskLedgerDocumentContent(current.content, current.ledger);
+      const temporaryPath = `${current.source.document}.tmp-${process.pid}-${Date.now()}`;
+      fs.writeFileSync(temporaryPath, nextContent, { encoding: "utf8", mode: 0o600 });
+      fs.renameSync(temporaryPath, current.source.document);
+      fs.chmodSync(current.source.document, 0o600);
+    } else {
+      await this.lark([
+        "docs",
+        "+update",
+        "--doc",
+        current.source.document,
+        "--command",
+        "block_replace",
+        "--block-id",
+        current.blockId,
+        "--content",
+        renderTaskLedger(current.ledger)
+      ], {
+        label: `${TASK_DOCUMENT_TITLE} 状态更新`,
+        timeout: 90000
+      });
+    }
+
+    const verified = await this.fetchTaskLedger({ source: current.source });
+    const verifiedTask = verified.ledger.tasks.find((item) => item.id === taskId);
+    if (!verifiedTask || verifiedTask.status !== status) {
+      const title = current.source.backend === "local"
+        ? LOCAL_TODO_DOCUMENT_NAME
+        : TASK_DOCUMENT_TITLE;
+      throw new Error(`${title} 状态写入后回读验证失败。`);
+    }
+    return {
+      ok: true,
+      task: verifiedTask,
+      snapshot: this.saveTaskBoardCache(verified.ledger, verified.source.cacheIdentity)
+    };
+  }
+
   normalizeProjects(records) {
     return records.items
       .map((record) => {
@@ -1134,6 +2166,9 @@ class DomiIntegration {
           notes: textValue(fields["Notes"]),
           cities: stringList(fields["城市"]),
           investors: stringList(fields["投资机构"]),
+          createdAt: normalizedEpochMs(timestampValue(fields["入库时间"]))
+            || normalizedEpochMs(timestampValue(record.created_time ?? record.createdTime))
+            || null,
           lastFollowup: timestampValue(fields["最后更新时间"] ?? fields["最近跟进时间"]),
           link: textValue(fields["链接"])
         };
@@ -1152,6 +2187,9 @@ class DomiIntegration {
           organization: textValue(fields["所属组织&身份"]),
           status: textValue(fields["进展状态"]),
           rating: textValue(fields["评级"]),
+          createdAt: normalizedEpochMs(timestampValue(fields["入库时间"]))
+            || normalizedEpochMs(timestampValue(record.created_time ?? record.createdTime))
+            || null,
           lastContact: timestampValue(fields["最后联系日期"]),
           cities: stringList(fields["城市"]),
           link: textValue(fields["链接"])
@@ -1166,7 +2204,7 @@ class DomiIntegration {
     const localMode = settings.storageBackend === "local";
     const plaudDisabled = settings.plaudConnectionMode === "disabled";
     const plaudScript = path.join(plugin.root, "skills", "plaud", "scripts", "plaud.js");
-    const [larkResult, doctorResult, queueResult] = await Promise.allSettled([
+    const [larkResult, queueResult] = await Promise.allSettled([
       localMode
         ? Promise.resolve({
             ok: true,
@@ -1179,12 +2217,6 @@ class DomiIntegration {
           })
         : this.larkStatus(),
       plaudDisabled
-        ? Promise.resolve({ ok: false, disabled: true })
-        : this.runJson(process.execPath, [plaudScript, "doctor"], {
-            queue: "plaud",
-            env: this.plaudRuntimeEnv()
-          }),
-      plaudDisabled
         ? Promise.resolve({ count: 0, items: [], disabled: true })
         : this.runJson(process.execPath, [plaudScript, "queue"], {
             queue: "plaud",
@@ -1192,7 +2224,6 @@ class DomiIntegration {
           })
     ]);
     const lark = larkResult.status === "fulfilled" ? larkResult.value : null;
-    const doctor = doctorResult.status === "fulfilled" ? doctorResult.value : null;
     const queue = queueResult.status === "fulfilled" ? queueResult.value : null;
     const queueStages = {};
     for (const item of queue?.items || []) {
@@ -1213,18 +2244,16 @@ class DomiIntegration {
         error: larkResult.status === "rejected" ? larkResult.reason.message : lark?.error || ""
       },
       plaud: {
-        ok: !plaudDisabled && doctorResult.status === "fulfilled" && Boolean(doctor?.ok),
+        ok: !plaudDisabled
+          && Boolean(this.plaudRemoteHealth?.ok),
         disabled: plaudDisabled,
         queueCount: queue?.count || 0,
         queueStages,
         error: plaudDisabled
           ? ""
-          :
-          doctorResult.status === "rejected"
-            ? doctorResult.reason.message
-            : queueResult.status === "rejected"
-              ? queueResult.reason.message
-              : ""
+          : this.plaudRemoteHealth?.error
+            || (queueResult.status === "rejected" ? queueResult.reason.message : "")
+            || ""
       }
     };
   }
@@ -1350,13 +2379,14 @@ class DomiIntegration {
     let peopleRecords;
     try {
       peopleSource = this.resolvePeopleBase();
+      await this.ensureIntakeTimeFields(plugin);
       projectRecords = await this.fetchRecords({
         ...projectSource,
-        fieldNames: ["公司名称", "Notes", "领域", "子领域", "进展状态", "项目评级", "城市", "投资机构", "最后更新时间", "链接"]
+        fieldNames: ["公司名称", "Notes", "领域", "子领域", "进展状态", "项目评级", "城市", "投资机构", "入库时间", "最后更新时间", "链接"]
       });
       peopleRecords = await this.fetchRecords({
         ...peopleSource,
-        fieldNames: ["人名", "类型", "所属组织&身份", "进展状态", "评级", "最后联系日期", "城市", "链接"]
+        fieldNames: ["人名", "类型", "所属组织&身份", "进展状态", "评级", "入库时间", "最后联系日期", "城市", "链接"]
       });
     } catch (error) {
       return {
@@ -1395,6 +2425,9 @@ module.exports = {
   DomiIntegration,
   describeFeishuSyncError,
   isRetryableFeishuReadError,
+  normalizeTaskLedger,
+  parseTaskLedger,
+  renderTaskLedger,
   resolveWeeklyNewsTimestamps,
   weeklyNewsContentSignature,
   weeklyNewsHasSubstantiveChange

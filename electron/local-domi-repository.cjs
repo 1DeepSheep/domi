@@ -3,6 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { DatabaseSync } = require("node:sqlite");
+const { ensureDocumentLibraryStructure } = require("./document-library.cjs");
 
 const LOCAL_REPOSITORY_SCHEMA = 1;
 
@@ -30,9 +31,7 @@ class LocalDomiRepository {
     this.databasePath = path.resolve(resolveHomePath(databasePath));
     this.libraryDir = path.resolve(resolveHomePath(libraryDir));
     fs.mkdirSync(path.dirname(this.databasePath), { recursive: true, mode: 0o700 });
-    for (const directory of ["1.行业研究", "2.行业动态", "3.项目库", "4.人脉库"]) {
-      fs.mkdirSync(path.join(this.libraryDir, directory), { recursive: true });
-    }
+    ensureDocumentLibraryStructure(this.libraryDir);
     this.database = new DatabaseSync(this.databasePath);
     this.database.exec("PRAGMA journal_mode = WAL");
     this.database.exec("PRAGMA synchronous = NORMAL");
@@ -154,7 +153,7 @@ class LocalDomiRepository {
   listProjects() {
     return this.database.prepare(`
       SELECT id, name, domain, subdomains_json, status, rating, notes,
-        cities_json, investors_json, last_updated_at, document_path
+        cities_json, investors_json, last_updated_at, document_path, created_at
       FROM projects
       ORDER BY updated_at DESC, name
     `).all().map((row) => ({
@@ -167,6 +166,7 @@ class LocalDomiRepository {
       notes: row.notes,
       cities: parseList(row.cities_json),
       investors: parseList(row.investors_json),
+      createdAt: row.created_at || null,
       lastFollowup: row.last_updated_at || null,
       link: localDocumentUrl(row.document_path)
     }));
@@ -175,7 +175,7 @@ class LocalDomiRepository {
   listPeople() {
     return this.database.prepare(`
       SELECT id, name, types_json, organization, status, rating,
-        last_contact_at, cities_json, document_path
+        last_contact_at, cities_json, document_path, created_at
       FROM people
       ORDER BY updated_at DESC, name
     `).all().map((row) => ({
@@ -185,6 +185,7 @@ class LocalDomiRepository {
       organization: row.organization,
       status: row.status,
       rating: row.rating,
+      createdAt: row.created_at || null,
       lastContact: row.last_contact_at || null,
       cities: parseList(row.cities_json),
       link: localDocumentUrl(row.document_path)

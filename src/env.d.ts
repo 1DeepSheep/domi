@@ -59,6 +59,15 @@ declare global {
       saveWeeklyNewsCheckpoint: (
         request: DomiWeeklyNewsCheckpointRequest
       ) => Promise<DomiWeeklyNewsCheckpointResult>;
+      listDomiTasks: (request?: DomiTaskBoardRequest) => Promise<DomiTaskBoardSnapshot>;
+      updateDomiTask: (request: DomiTaskUpdateRequest) => Promise<DomiTaskUpdateResult>;
+      loginPlaud: (request: DomiPlaudConnectionRequest) => Promise<DomiPlaudConnectionResult>;
+      checkPlaudConnection: (
+        request?: DomiPlaudConnectionRequest
+      ) => Promise<DomiPlaudConnectionResult>;
+      disconnectPlaud: (
+        request?: DomiPlaudConnectionRequest
+      ) => Promise<DomiPlaudConnectionResult>;
       listPlaud: (request?: DomiPlaudListRequest) => Promise<DomiPlaudSnapshot>;
       syncPlaud: (request?: DomiPlaudSyncRequest) => Promise<DomiPlaudSyncResult>;
       renamePlaud: (request: DomiPlaudRenameRequest) => Promise<DomiPlaudRenameResult>;
@@ -313,6 +322,7 @@ export type DomiProject = {
   notes?: string;
   cities?: string[];
   investors?: string[];
+  createdAt: number | null;
   lastFollowup: number | null;
   link: string;
 };
@@ -324,6 +334,7 @@ export type DomiPerson = {
   organization: string;
   status: string;
   rating: string;
+  createdAt: number | null;
   lastContact: number | null;
   cities: string[];
   link: string;
@@ -461,6 +472,67 @@ export type DomiWeeklyNewsSnapshot = {
   error?: string;
 };
 
+export type DomiTaskStatus = "open" | "in_progress" | "done" | "ignored";
+export type DomiTaskPriority = "P1" | "P2" | "P3";
+export type DomiTaskCategory =
+  | "key-milestone"
+  | "new-entry"
+  | "relationship-follow-up"
+  | "project-follow-up";
+
+export type DomiTask = {
+  id: string;
+  title: string;
+  summary: string;
+  reason: string;
+  priority: DomiTaskPriority;
+  category: DomiTaskCategory;
+  status: DomiTaskStatus;
+  signalKey: string;
+  source: {
+    kind: "project" | "person" | "news" | "manual";
+    recordId: string;
+    displayName: string;
+  };
+  dueAt: string | null;
+  suggestedAction: {
+    kind: "schedule" | "research" | "contact" | "review" | "custom";
+    label: string;
+    prompt: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+  ignoredAt?: string | null;
+  completedAt?: string | null;
+};
+
+export type DomiTaskBoardRequest = {
+  cacheOnly?: boolean;
+  fresh?: boolean;
+};
+
+export type DomiTaskBoardSnapshot = {
+  ok: boolean;
+  configured: boolean;
+  stale: boolean;
+  syncedAt: number;
+  updatedAt: string | null;
+  tasks: DomiTask[];
+  error?: string;
+};
+
+export type DomiTaskUpdateRequest = {
+  taskId: string;
+  status: DomiTaskStatus;
+};
+
+export type DomiTaskUpdateResult = {
+  ok: boolean;
+  task?: DomiTask;
+  snapshot?: DomiTaskBoardSnapshot;
+  error?: string;
+};
+
 export type DomiPlaudItem = {
   fileId: string;
   fileName: string;
@@ -473,6 +545,29 @@ export type DomiPlaudItem = {
   queueStage: string;
   transcriptPath: string;
   error: string;
+};
+
+export type DomiPlaudConnectionRequest = {
+  browser?: "chrome" | "tabbit";
+};
+
+export type DomiPlaudConnectionResult = {
+  ok: boolean;
+  connected?: boolean;
+  browser?: "chrome" | "tabbit";
+  browserLabel?: string;
+  accountFingerprint?: string;
+  status?:
+    | "connected"
+    | "auth_required"
+    | "profile_locked"
+    | "browser_unavailable"
+    | "runtime_unavailable"
+    | "network_error"
+    | "service_changed"
+    | "unknown";
+  checkedAt?: number;
+  error?: string;
 };
 
 export type DomiPlaudListRequest = {
@@ -585,7 +680,7 @@ export type CodexCheckResult = {
 };
 
 export type AppSettings = {
-  version: 5;
+  version: 7;
   onboardingComplete: boolean;
   authMode: "chatgpt" | "relay";
   apiBaseUrl: string;
@@ -593,6 +688,7 @@ export type AppSettings = {
   relayCredentialConfigured: boolean;
   codexPath: string;
   plaudConnectionMode: "unconfigured" | "enabled" | "disabled";
+  plaudBrowser: "chrome" | "tabbit";
   storageBackend: "feishu" | "local";
   projectBaseToken: string;
   projectTableId: string;
@@ -601,6 +697,11 @@ export type AppSettings = {
   radarBaseToken: string;
   radarTableId: string;
   wikiSpaceId: string;
+  taskDocumentUrl: string;
+  outlookCalendarEmail: string;
+  outlookCalendarEmailVerifiedAt: number;
+  outlookCalendarRecipients: string;
+  outlookCalendarTimezone: string;
   localLibraryDir: string;
   localRepositoryDir: string;
   localDatabasePath: string;
@@ -752,7 +853,8 @@ export type RendererIssueReport = {
     | "section-boundary"
     | "document-operation"
     | "markdown-editor-boundary"
-    | "markdown-editor-operation";
+    | "markdown-editor-operation"
+    | "workflow-metric";
   message: string;
   stack?: string;
   source?: string;
@@ -796,6 +898,7 @@ export type CodexRunRequest = {
   reasoningEffort?: string;
   serviceTier?: string;
   workspacePath?: string;
+  privateOutput?: boolean;
 };
 
 export type CodexRunResult = {
