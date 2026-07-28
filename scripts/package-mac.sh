@@ -7,8 +7,9 @@ OUTPUT_DIR="${DOMI_BUILD_OUTPUT:-$HOME/Library/Caches/com.domi.workbench/build}"
 BUILDER="$ROOT_DIR/node_modules/.bin/electron-builder"
 PACKAGE_VERSION="$(node -p "require('$ROOT_DIR/package.json').version")"
 RELEASE_DIR="$ROOT_DIR/release/$PACKAGE_VERSION"
+NOTARY_PROFILE="${APPLE_KEYCHAIN_PROFILE:-domi-notary}"
 
-if [[ -n "${APPLE_KEYCHAIN_PROFILE:-}" && -z "${APPLE_KEYCHAIN:-}" ]]; then
+if [[ -n "$NOTARY_PROFILE" && -z "${APPLE_KEYCHAIN:-}" ]]; then
   export APPLE_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 fi
 
@@ -34,6 +35,28 @@ verify_release_dmg() {
   node "$ROOT_DIR/scripts/privacy-check.cjs" --artifact "$dmg_path"
 }
 
+notarize_release_app() {
+  local app_path="$OUTPUT_DIR/mac-arm64/domi.app"
+  local notary_zip="$OUTPUT_DIR/domi-$PACKAGE_VERSION-notary.zip"
+  if [[ ! -d "$app_path" ]]; then
+    echo "Signed app not found: $app_path" >&2
+    exit 1
+  fi
+  if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+    echo "Apple notarization profile '$NOTARY_PROFILE' is unavailable." >&2
+    echo "Create it with xcrun notarytool store-credentials or set APPLE_KEYCHAIN_PROFILE." >&2
+    exit 1
+  fi
+  rm -f "$notary_zip"
+  ditto -c -k --keepParent "$app_path" "$notary_zip"
+  xcrun notarytool submit "$notary_zip" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait
+  rm -f "$notary_zip"
+  xcrun stapler staple -v "$app_path"
+  xcrun stapler validate "$app_path"
+}
+
 case "$MODE" in
   dir)
     rm -rf "$OUTPUT_DIR"
@@ -44,7 +67,10 @@ case "$MODE" in
   dist)
     rm -rf "$OUTPUT_DIR"
     mkdir -p "$OUTPUT_DIR"
-    "$BUILDER" --mac dmg zip --arm64 --config.directories.output="$OUTPUT_DIR"
+    "$BUILDER" --mac dir --arm64 --config.directories.output="$OUTPUT_DIR"
+    notarize_release_app
+    "$BUILDER" --mac dmg zip --arm64 --prepackaged "$OUTPUT_DIR/mac-arm64/domi.app" \
+      --config.directories.output="$OUTPUT_DIR"
     verify_release_dmg
     copy_release_artifacts
     echo "Release artifacts: $RELEASE_DIR"
