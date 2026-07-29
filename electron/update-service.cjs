@@ -3,6 +3,11 @@ const { autoUpdater } = require("electron-updater");
 
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const STARTUP_DELAY_MS = 15 * 1000;
+const PUBLIC_UPDATE_FEED = Object.freeze({
+  provider: "github",
+  owner: "1DeepSheep",
+  repo: "domi"
+});
 
 function normalizedChannel(value) {
   return value === "beta" ? "beta" : "stable";
@@ -58,6 +63,11 @@ class UpdateService {
     return this.publish({ channel });
   }
 
+  configureFeed() {
+    if (!this.app.isPackaged) return;
+    autoUpdater.setFeedURL(PUBLIC_UPDATE_FEED);
+  }
+
   start() {
     if (this.started) return;
     this.started = true;
@@ -67,6 +77,7 @@ class UpdateService {
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.autoRunAppAfterInstall = true;
+    this.configureFeed();
     this.configureChannel(this.channelProvider());
 
     autoUpdater.on("checking-for-update", () => {
@@ -132,6 +143,7 @@ class UpdateService {
     if (new Set(["checking", "downloading", "downloaded"]).has(this.status.state)) {
       return this.snapshot();
     }
+    this.configureFeed();
     this.configureChannel(this.channelProvider());
     try {
       await autoUpdater.checkForUpdates();
