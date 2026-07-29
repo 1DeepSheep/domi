@@ -898,6 +898,7 @@ test("PLAUD queue loads 50 recordings by default and orders them by creation tim
       ]
     };
   };
+  integration.loadActivePlaudWorkflowRecords = () => [];
   integration.runJson = async () => ({ ok: true, items: [] });
 
   const result = await integration.plaudQueue();
@@ -937,18 +938,17 @@ test("PLAUD health status reuses the latest queue result without reopening a bro
   integration.runPlaudWorker = async () => {
     throw new Error("status must not start the remote PLAUD list worker");
   };
-  integration.runJson = async (_binary, args) => {
-    assert.equal(args.at(-1), "queue");
-    return {
-      ok: true,
-      items: [{ fileId: "queued", stage: "transcript_ready" }]
-    };
+  integration.runJson = async () => {
+    throw new Error("status must not queue a PLAUD subprocess");
   };
+  integration.loadActivePlaudWorkflowRecords = () => [
+    { fileId: "queued", stage: "transcript_ready" }
+  ];
 
   const health = await integration.status();
 
   assert.equal(health.plaud.ok, true);
-  assert.equal(health.plaud.queueCount, 0);
+  assert.equal(health.plaud.queueCount, 1);
   assert.deepEqual(health.plaud.queueStages, { transcript_ready: 1 });
 });
 

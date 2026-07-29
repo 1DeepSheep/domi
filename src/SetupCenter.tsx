@@ -175,25 +175,31 @@ export default function SetupCenter({
     setSaving(true);
     setError("");
     setNotice("");
-    const result = await onSave({
-      ...draft,
-      storageMigration: switchingLocalToFeishu && migrateLocalDocuments
-        ? "local-to-feishu"
-        : "none",
-      onboardingComplete: complete || settings.onboardingComplete
-    });
-    setSaving(false);
-    if (!result.ok) {
-      setError(result.error || "保存设置失败。");
+    try {
+      const result = await onSave({
+        ...draft,
+        storageMigration: switchingLocalToFeishu && migrateLocalDocuments
+          ? "local-to-feishu"
+          : "none",
+        onboardingComplete: complete || settings.onboardingComplete
+      });
+      if (!result.ok) {
+        setError(result.error || "保存设置失败。");
+        return false;
+      }
+      setNotice(result.migration?.ok
+        ? `已迁移 ${result.migration.migratedProjectCount} 个项目、${result.migration.migratedPeopleCount} 位人脉、${result.migration.migratedNewsCount} 条行业动态、${result.migration.documentCount} 篇文档和 ${result.migration.assetCount} 张图片，并切换到飞书资料库。`
+        : result.codex?.ok
+          ? "连接已保存并验证。"
+          : "设置已保存，资料同步将在后台继续。");
+      if (complete) onClose();
+      return true;
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
       return false;
+    } finally {
+      setSaving(false);
     }
-    setNotice(result.migration?.ok
-      ? `已迁移 ${result.migration.migratedProjectCount} 个项目、${result.migration.migratedPeopleCount} 位人脉、${result.migration.migratedNewsCount} 条行业动态、${result.migration.documentCount} 篇文档和 ${result.migration.assetCount} 张图片，并切换到飞书资料库。`
-      : result.codex?.ok
-        ? "连接已保存并验证。"
-        : "设置已保存，请根据状态提示完成连接。");
-    if (complete) onClose();
-    return true;
   }
 
   async function saveConnection(continueToData: boolean) {
@@ -609,14 +615,19 @@ export default function SetupCenter({
     setSaving(true);
     setError("");
     setNotice("");
-    const result = await onSave({ updateChannel: draft.updateChannel });
-    setSaving(false);
-    if (!result.ok) {
-      setError(result.error || "保存更新设置失败。");
-      return;
+    try {
+      const result = await onSave({ updateChannel: draft.updateChannel });
+      if (!result.ok) {
+        setError(result.error || "保存更新设置失败。");
+        return;
+      }
+      setNotice(draft.updateChannel === "beta" ? "已切换到测试版通道。" : "已切换到稳定版通道。");
+      await checkUpdates();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setSaving(false);
     }
-    setNotice(draft.updateChannel === "beta" ? "已切换到测试版通道。" : "已切换到稳定版通道。");
-    await checkUpdates();
   }
 
   async function checkUpdates() {

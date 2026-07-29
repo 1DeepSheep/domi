@@ -142,6 +142,16 @@ assert.match(
 );
 assert.match(
   setupCenter,
+  /async function save\(complete: boolean\)[\s\S]*?try \{[\s\S]*?await onSave[\s\S]*?catch \(saveError\)[\s\S]*?finally \{[\s\S]*?setSaving\(false\)/,
+  "A rejected settings save must always release the setup-wide saving lock."
+);
+assert.match(
+  app,
+  /void refreshAfterDataConnectionSave\(result\.settings\)/,
+  "Saving a data connection must not wait for the first background synchronization."
+);
+assert.match(
+  setupCenter,
   /DOMI_OUTLOOK_PROFILE_CHECK_V1[\s\S]*?privateOutput:\s*true[\s\S]*?outlookCalendarEmailVerifiedAt/,
   "Outlook sender detection must use a private Codex result and persist the verified identity only in local settings."
 );

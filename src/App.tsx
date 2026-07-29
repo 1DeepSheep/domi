@@ -3069,23 +3069,27 @@ function App() {
         "localRepositoryDir"
       ].some((key) => Object.prototype.hasOwnProperty.call(request, key));
       if (dataConnectionChanged && result.settings.onboardingComplete) {
-        setDomiSyncing(true);
-        setDomiError("");
-        try {
-          const synced = await workbench.syncDomi();
-          if (synced.snapshot) setDomiSnapshot(synced.snapshot);
-          if (!synced.ok) setDomiError(synced.error || "资料库设置已保存，但首次同步失败。");
-          if (result.settings.storageBackend === "feishu") {
-            await refreshDomiTaskBoard({ fresh: true });
-          }
-        } catch (syncError) {
-          setDomiError(syncError instanceof Error ? syncError.message : String(syncError));
-        } finally {
-          setDomiSyncing(false);
-        }
+        void refreshAfterDataConnectionSave(result.settings);
       }
     }
     return result;
+  }
+
+  async function refreshAfterDataConnectionSave(savedSettings: AppSettings) {
+    setDomiSyncing(true);
+    setDomiError("");
+    try {
+      const synced = await workbench.syncDomi();
+      if (synced.snapshot) setDomiSnapshot(synced.snapshot);
+      if (!synced.ok) setDomiError(synced.error || "资料库设置已保存，但首次同步失败。");
+      if (savedSettings.storageBackend === "feishu") {
+        await refreshDomiTaskBoard({ fresh: true });
+      }
+    } catch (syncError) {
+      setDomiError(syncError instanceof Error ? syncError.message : String(syncError));
+    } finally {
+      setDomiSyncing(false);
+    }
   }
 
   async function startChatGPTLogin(): Promise<ChatGPTLoginResult> {
