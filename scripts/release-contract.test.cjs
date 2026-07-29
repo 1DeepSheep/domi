@@ -23,6 +23,9 @@ assert(privacyCheck > prepackaged, "release DMG must pass the artifact privacy g
 assert.match(source, /notarytool submit[\s\S]*--wait/);
 assert.match(source, /stapler staple/);
 assert.match(source, /stapler validate/);
+assert.match(source, /DOMI_ELECTRON_DIST/);
+assert.match(source, /--config\.electronDist="\$ELECTRON_DIST"/);
+assert.match(source, /does not match package version/);
 assert.match(runtimePreparationSource, /APPLE_TIMESTAMP_SERVER/);
 assert.match(runtimePreparationSource, /http:\/\/timestamp\.apple\.com\/ts01/);
 assert.match(runtimePreparationSource, /`--timestamp=\$\{timestampServer\}`/);
