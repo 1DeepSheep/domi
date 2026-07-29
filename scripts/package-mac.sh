@@ -47,6 +47,21 @@ verify_release_dmg() {
   node "$ROOT_DIR/scripts/privacy-check.cjs" --artifact "$dmg_path"
 }
 
+verify_app_update_config() {
+  local app_path="$1"
+  local update_config="$app_path/Contents/Resources/app-update.yml"
+  if [[ ! -f "$update_config" ]]; then
+    echo "Packaged app update config is missing: $update_config" >&2
+    exit 1
+  fi
+  if ! grep -q '^provider: github$' "$update_config" \
+    || ! grep -q '^owner: 1DeepSheep$' "$update_config" \
+    || ! grep -q '^repo: domi$' "$update_config"; then
+    echo "Packaged app update config is invalid: $update_config" >&2
+    exit 1
+  fi
+}
+
 notarize_release_app() {
   local app_path="$OUTPUT_DIR/mac-arm64/domi.app"
   local notary_zip="$OUTPUT_DIR/domi-$PACKAGE_VERSION-notary.zip"
@@ -76,6 +91,7 @@ case "$MODE" in
     "$BUILDER" --mac dir --arm64 \
       --config.electronDist="$ELECTRON_DIST" \
       --config.directories.output="$OUTPUT_DIR"
+    verify_app_update_config "$OUTPUT_DIR/mac-arm64/domi.app"
     echo "Signed app: $OUTPUT_DIR/mac-arm64/domi.app"
     ;;
   dist)
@@ -84,6 +100,7 @@ case "$MODE" in
     "$BUILDER" --mac dir --arm64 \
       --config.electronDist="$ELECTRON_DIST" \
       --config.directories.output="$OUTPUT_DIR"
+    verify_app_update_config "$OUTPUT_DIR/mac-arm64/domi.app"
     notarize_release_app
     "$BUILDER" --mac dmg zip --arm64 --prepackaged "$OUTPUT_DIR/mac-arm64/domi.app" \
       --config.directories.output="$OUTPUT_DIR"
@@ -97,6 +114,7 @@ case "$MODE" in
       echo "Prepackaged app not found: $APP_PATH" >&2
       exit 1
     fi
+    verify_app_update_config "$APP_PATH"
     xcrun stapler staple -v "$APP_PATH"
     xcrun stapler validate "$APP_PATH"
     find "$OUTPUT_DIR" -maxdepth 1 -type f \
