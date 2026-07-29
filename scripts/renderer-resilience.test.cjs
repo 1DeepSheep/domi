@@ -116,6 +116,11 @@ assert.match(
   "PLAUD-dependent quick starts must remain hidden until the user enables PLAUD."
 );
 assert.match(
+  app,
+  /void refreshPlaudQueue\(\);\s*\}, \[plaudEnabled, appSettings\?\.plaudBrowser\]\);/,
+  "Unrelated settings saves must not restart the managed PLAUD browser or steal foreground focus."
+);
+assert.match(
   setupCenter,
   /if \(required && !connectionVerified\) \{[\s\S]*?const verified = await testConnection\(\);[\s\S]*?if \(!verified\) return;/,
   "First-run Next must run the full Codex connection test instead of blocking on a hidden prerequisite."
