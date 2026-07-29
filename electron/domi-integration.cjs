@@ -43,6 +43,11 @@ const LEGACY_TASK_BOARD_CATEGORIES = new Map([
 const FEISHU_RECORD_PAGE_SIZE = 200;
 const FEISHU_RECORD_MAX_PAGES = 25;
 const FEISHU_READ_RETRY_DELAYS_MS = [350, 900, 1800];
+const PLAUD_FINAL_WORKFLOW_STAGES = new Set([
+  "notes_non_project",
+  "managed",
+  "discussion_complete"
+]);
 const WEEKLY_NEWS_FIELDS = [
   "新闻标题",
   "领域",
@@ -1123,6 +1128,12 @@ class DomiIntegration {
     }
   }
 
+  loadActivePlaudWorkflowRecords() {
+    return this.loadPlaudWorkflowRecords()
+      .filter((item) => !PLAUD_FINAL_WORKFLOW_STAGES.has(String(item.stage || "")))
+      .sort((left, right) => String(left.updatedAt || "").localeCompare(String(right.updatedAt || "")));
+  }
+
   async plaudQueue(limit = 50) {
     if (!this.plaudEnabled()) {
       return {
@@ -1135,15 +1146,11 @@ class DomiIntegration {
         error: ""
       };
     }
-    const { plugin, script } = this.plaudPaths();
-    const [remoteResult, queueResult] = await Promise.allSettled([
-      this.runPlaudWorker("list", [String(limit)], plugin),
-      this.runJson(process.execPath, [script, "queue"], {
-        queue: "plaud",
-        env: this.plaudRuntimeEnv()
-      })
+    const { plugin } = this.plaudPaths();
+    const [remoteResult] = await Promise.allSettled([
+      this.runPlaudWorker("list", [String(limit)], plugin)
     ]);
-    const queueItems = queueResult.status === "fulfilled" ? queueResult.value.items || [] : [];
+    const queueItems = this.loadActivePlaudWorkflowRecords();
     const workflowById = new Map(
       this.loadPlaudWorkflowRecords().map((item) => [String(item.fileId), item])
     );
@@ -1171,8 +1178,7 @@ class DomiIntegration {
     }
     items.sort(comparePlaudItems);
     const errors = [
-      remoteResult.status === "rejected" ? remoteResult.reason.message : "",
-      queueResult.status === "rejected" ? queueResult.reason.message : ""
+      remoteResult.status === "rejected" ? remoteResult.reason.message : ""
     ].filter(Boolean);
     return {
       ok: remoteResult.status === "fulfilled",
@@ -2263,8 +2269,14 @@ class DomiIntegration {
     const settings = this.configProvider();
     const localMode = settings.storageBackend === "local";
     const plaudDisabled = settings.plaudConnectionMode === "disabled";
-    const plaudScript = path.join(plugin.root, "skills", "plaud", "scripts", "plaud.js");
-    const [larkResult, queueResult] = await Promise.allSettled([
+    const activePlaudQueue = plaudDisabled ? [] : this.loadActivePlaudWorkflowRecords();
+    const queue = plaudDisabled
+      ? { count: 0, items: [], disabled: true }
+      : {
+          count: activePlaudQueue.length,
+          items: activePlaudQueue
+        };
+    const [larkResult] = await Promise.allSettled([
       localMode
         ? Promise.resolve({
             ok: true,
@@ -2275,16 +2287,9 @@ class DomiIntegration {
             tokenStatus: "",
             error: ""
           })
-        : this.larkStatus(),
-      plaudDisabled
-        ? Promise.resolve({ count: 0, items: [], disabled: true })
-        : this.runJson(process.execPath, [plaudScript, "queue"], {
-            queue: "plaud",
-            env: this.plaudRuntimeEnv()
-          })
+        : this.larkStatus()
     ]);
     const lark = larkResult.status === "fulfilled" ? larkResult.value : null;
-    const queue = queueResult.status === "fulfilled" ? queueResult.value : null;
     const queueStages = {};
     for (const item of queue?.items || []) {
       queueStages[item.stage || "unknown"] = (queueStages[item.stage || "unknown"] || 0) + 1;
@@ -2312,7 +2317,6 @@ class DomiIntegration {
         error: plaudDisabled
           ? ""
           : this.plaudRemoteHealth?.error
-            || (queueResult.status === "rejected" ? queueResult.reason.message : "")
             || ""
       }
     };
