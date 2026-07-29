@@ -515,6 +515,9 @@ function commandErrorMessage(error, binary, options = {}) {
   if (/Cannot find module ['"]playwright['"]/i.test(rawDetail)) {
     return `${label}缺少浏览器运行组件。请重启 domi；如果仍然失败，请重新安装最新版 domi。`;
   }
+  if (/(?:\/usr\/bin\/)?env:\s*node:.*No such file|\/usr\/bin\/env\b.*\bnode\b.*No such file/i.test(rawDetail)) {
+    return `${label}使用了需要系统 Node.js 的旧版启动器。请更新 domi 后重试；客户端会自动使用飞书 CLI 自带的运行时。`;
+  }
   let detail = rawDetail;
   if (rawDetail) {
     try {
@@ -573,6 +576,56 @@ function resolvePlaywrightNodeModules() {
     );
     return fs.existsSync(path.join(codexRuntime, "playwright")) ? codexRuntime : "";
   }
+}
+
+function executableFromPath(command, environmentPath = process.env.PATH) {
+  for (const directory of String(environmentPath || "").split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(directory, command);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep searching the remaining PATH entries.
+    }
+  }
+  return "";
+}
+
+function resolveLarkCliExecutable(candidate) {
+  const requested = String(candidate || "").trim();
+  if (!requested) return "";
+  const located = path.isAbsolute(requested)
+    ? requested
+    : executableFromPath(requested);
+  if (!located || !fs.existsSync(located)) return "";
+
+  let resolved = located;
+  try {
+    resolved = fs.realpathSync(located);
+  } catch {
+    // Keep the located path when the filesystem cannot canonicalize it.
+  }
+
+  // The npm launcher is a `#!/usr/bin/env node` script. Finder-launched apps
+  // do not inherit the user's terminal PATH, but the package also ships a
+  // self-contained native CLI next to that launcher. Prefer it so Feishu
+  // synchronization never depends on a separately discoverable Node binary.
+  if (path.basename(resolved) === "run.js") {
+    const nativeExecutable = path.resolve(
+      path.dirname(resolved),
+      "..",
+      "bin",
+      `lark-cli${process.platform === "win32" ? ".exe" : ""}`
+    );
+    try {
+      fs.accessSync(nativeExecutable, fs.constants.X_OK);
+      return nativeExecutable;
+    } catch {
+      // Fall back to the launcher; commandErrorMessage provides a clear
+      // recovery message if that legacy installation still needs Node.
+    }
+  }
+  return resolved;
 }
 
 class DomiIntegration {
@@ -722,9 +775,16 @@ class DomiIntegration {
   resolveLarkCli() {
     const candidates = [
       process.env.LARK_CLI_PATH,
-      path.join(os.homedir(), ".npm-global", "bin", "lark-cli")
+      path.join(os.homedir(), ".npm-global", "bin", "lark-cli"),
+      "/opt/homebrew/bin/lark-cli",
+      "/usr/local/bin/lark-cli",
+      executableFromPath("lark-cli")
     ].filter(Boolean);
-    return candidates.find((candidate) => fs.existsSync(candidate)) || "lark-cli";
+    for (const candidate of candidates) {
+      const executable = resolveLarkCliExecutable(candidate);
+      if (executable) return executable;
+    }
+    return "lark-cli";
   }
 
   findPlugin() {
@@ -2424,6 +2484,7 @@ class DomiIntegration {
 module.exports = {
   DomiIntegration,
   describeFeishuSyncError,
+  resolveLarkCliExecutable,
   isRetryableFeishuReadError,
   normalizeTaskLedger,
   parseTaskLedger,
