@@ -98,9 +98,39 @@ function signingIdentity() {
   return match[1];
 }
 
+function waitSynchronously(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function codesignWithTimestampRetry(args) {
+  const retryDelays = [0, 2_000, 5_000, 10_000];
+  let lastError;
+  for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+    if (retryDelays[attempt]) waitSynchronously(retryDelays[attempt]);
+    try {
+      execFileSync("/usr/bin/codesign", args, {
+        stdio: "inherit",
+        timeout: 2 * 60_000
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < retryDelays.length - 1) {
+        process.stderr.write(
+          `Apple timestamp attempt ${attempt + 1} failed; retrying release signature.\n`
+        );
+      }
+    }
+  }
+  throw lastError;
+}
+
 function signAuxiliaryBinaries(identity) {
   const stagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-runtime-sign-"));
   const temporaryArchive = `${outputArchive}.signed-${process.pid}`;
+  const timestampServer = String(
+    process.env.APPLE_TIMESTAMP_SERVER || "http://timestamp.apple.com/ts01"
+  ).trim();
   try {
     execFileSync("/usr/bin/tar", ["-xzf", upstreamArchive, "-C", stagingRoot], {
       stdio: "inherit",
@@ -111,18 +141,15 @@ function signAuxiliaryBinaries(identity) {
       if (!fs.existsSync(binaryPath)) {
         throw new Error(`Codex runtime is missing ${relativePath}.`);
       }
-      execFileSync("/usr/bin/codesign", [
+      codesignWithTimestampRetry([
         "--force",
         "--sign",
         identity,
         "--options",
         "runtime",
-        "--timestamp",
+        `--timestamp=${timestampServer}`,
         binaryPath
-      ], {
-        stdio: "inherit",
-        timeout: 2 * 60_000
-      });
+      ]);
       execFileSync("/usr/bin/codesign", [
         "--verify",
         "--strict",
