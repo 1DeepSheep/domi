@@ -1867,7 +1867,7 @@ function App() {
       return;
     }
     void refreshPlaudQueue();
-  }, [plaudEnabled, appSettings]);
+  }, [plaudEnabled, appSettings?.plaudBrowser]);
 
   useEffect(() => {
     if (!selectedWorkflow?.requiresPlaud || plaudEnabled) return;
