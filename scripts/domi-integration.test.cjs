@@ -8,10 +8,54 @@ const {
   describeFeishuSyncError,
   isRetryableFeishuReadError,
   parseTaskLedger,
+  resolveLarkCliExecutable,
   renderTaskLedger,
   resolveWeeklyNewsTimestamps
 } = require("../electron/domi-integration.cjs");
 const { LocalDomiRepository } = require("../electron/local-domi-repository.cjs");
+
+test("Finder-launched app resolves the npm lark-cli launcher to its native binary", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-lark-cli-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const scriptsDir = path.join(root, "lib", "node_modules", "@larksuite", "cli", "scripts");
+  const nativeDir = path.join(root, "lib", "node_modules", "@larksuite", "cli", "bin");
+  const launcherDir = path.join(root, "bin");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.mkdirSync(nativeDir, { recursive: true });
+  fs.mkdirSync(launcherDir, { recursive: true });
+
+  const launcher = path.join(scriptsDir, "run.js");
+  const native = path.join(nativeDir, "lark-cli");
+  const linkedLauncher = path.join(launcherDir, "lark-cli");
+  fs.writeFileSync(launcher, "#!/usr/bin/env node\n", { mode: 0o755 });
+  fs.writeFileSync(
+    native,
+    "#!/bin/sh\nprintf '{\"verified\":true,\"identities\":{}}\\n'\n",
+    { mode: 0o755 }
+  );
+  fs.symlinkSync(path.relative(launcherDir, launcher), linkedLauncher);
+
+  const resolvedNative = fs.realpathSync(native);
+  assert.equal(resolveLarkCliExecutable(linkedLauncher), resolvedNative);
+
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => null,
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test"
+  });
+  integration.larkCli = resolveLarkCliExecutable(linkedLauncher);
+  const originalPath = process.env.PATH;
+  process.env.PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+  try {
+    const status = await integration.larkStatus();
+    assert.equal(status.ok, true);
+    assert.equal(status.cliPath, resolvedNative);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
 
 test("1.待办事项 ledger XML round-trips without leaking document configuration", () => {
   const ledger = {
