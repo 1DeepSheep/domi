@@ -6,8 +6,20 @@ MODE="${1:-dir}"
 OUTPUT_DIR="${DOMI_BUILD_OUTPUT:-$HOME/Library/Caches/com.domi.workbench/build}"
 BUILDER="$ROOT_DIR/node_modules/.bin/electron-builder"
 PACKAGE_VERSION="$(node -p "require('$ROOT_DIR/package.json').version")"
+ELECTRON_VERSION="$(node -p "require('$ROOT_DIR/node_modules/electron/package.json').version")"
+ELECTRON_DIST="${DOMI_ELECTRON_DIST:-$ROOT_DIR/node_modules/electron/dist}"
 RELEASE_DIR="$ROOT_DIR/release/$PACKAGE_VERSION"
 NOTARY_PROFILE="${APPLE_KEYCHAIN_PROFILE:-domi-notary}"
+
+if [[ ! -d "$ELECTRON_DIST" ]]; then
+  echo "Local Electron distribution not found: $ELECTRON_DIST" >&2
+  echo "Run npm install or set DOMI_ELECTRON_DIST to a verified Electron distribution." >&2
+  exit 1
+fi
+if [[ "$(cat "$ELECTRON_DIST/version" 2>/dev/null || true)" != "$ELECTRON_VERSION" ]]; then
+  echo "Local Electron distribution does not match package version $ELECTRON_VERSION." >&2
+  exit 1
+fi
 
 if [[ -n "$NOTARY_PROFILE" && -z "${APPLE_KEYCHAIN:-}" ]]; then
   export APPLE_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
@@ -61,13 +73,17 @@ case "$MODE" in
   dir)
     rm -rf "$OUTPUT_DIR"
     mkdir -p "$OUTPUT_DIR"
-    "$BUILDER" --mac dir --arm64 --config.directories.output="$OUTPUT_DIR"
+    "$BUILDER" --mac dir --arm64 \
+      --config.electronDist="$ELECTRON_DIST" \
+      --config.directories.output="$OUTPUT_DIR"
     echo "Signed app: $OUTPUT_DIR/mac-arm64/domi.app"
     ;;
   dist)
     rm -rf "$OUTPUT_DIR"
     mkdir -p "$OUTPUT_DIR"
-    "$BUILDER" --mac dir --arm64 --config.directories.output="$OUTPUT_DIR"
+    "$BUILDER" --mac dir --arm64 \
+      --config.electronDist="$ELECTRON_DIST" \
+      --config.directories.output="$OUTPUT_DIR"
     notarize_release_app
     "$BUILDER" --mac dmg zip --arm64 --prepackaged "$OUTPUT_DIR/mac-arm64/domi.app" \
       --config.directories.output="$OUTPUT_DIR"
