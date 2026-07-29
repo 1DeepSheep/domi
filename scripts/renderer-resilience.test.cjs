@@ -156,6 +156,16 @@ assert.match(
   "Saving a data connection must not wait for the first background synchronization."
 );
 assert.match(
+  app,
+  /documentLibraryLocationChanged[\s\S]*?documentLibraryRequestRef\.current \+= 1[\s\S]*?setDocumentLibrary\(null\)[\s\S]*?void refreshDocumentLibrary\(\)/,
+  "Changing the configured repository must discard the legacy document tree and immediately load the domi workspace."
+);
+assert.match(
+  app,
+  /const requestId = \+\+documentLibraryRequestRef\.current[\s\S]*?requestId !== documentLibraryRequestRef\.current/,
+  "A slow legacy document scan must not replace the newer domi workspace snapshot."
+);
+assert.match(
   setupCenter,
   /DOMI_OUTLOOK_PROFILE_CHECK_V1[\s\S]*?privateOutput:\s*true[\s\S]*?outlookCalendarEmailVerifiedAt/,
   "Outlook sender detection must use a private Codex result and persist the verified identity only in local settings."
@@ -200,6 +210,11 @@ assert.match(
   main,
   /run\.output\.trim\(\) && !run\.privateOutput[\s\S]*?output: run\.privateOutput \? "" : run\.output/,
   "Private Codex results must not be archived or published through the global event stream."
+);
+assert.match(
+  main,
+  /const codexConnectionChanged = \[[\s\S]*?const dataConnectionChanged = \[[\s\S]*?if \(!codexConnectionChanged\) return \{ ok: true/,
+  "Saving a data repository must not restart and fully revalidate Codex."
 );
 assert.match(
   main,

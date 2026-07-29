@@ -1458,13 +1458,15 @@ async function saveRuntimeSettings(request) {
     storageMigration = "none",
     ...settingsRequest
   } = request || {};
-  const connectionChanged = [
+  const codexConnectionChanged = [
     "codexPath",
     "authMode",
     "apiBaseUrl",
     "apiModel",
-    "relayCredentialConfigured",
-    "externalAccessMode",
+    "relayCredentialConfigured"
+  ].some((key) => Object.prototype.hasOwnProperty.call(settingsRequest, key)
+    && settingsRequest[key] !== current[key]);
+  const dataConnectionChanged = [
     "storageBackend",
     "projectBaseToken",
     "projectTableId",
@@ -1478,6 +1480,7 @@ async function saveRuntimeSettings(request) {
     "localRepositoryDir"
   ].some((key) => Object.prototype.hasOwnProperty.call(settingsRequest, key)
     && settingsRequest[key] !== current[key]);
+  const connectionChanged = codexConnectionChanged || dataConnectionChanged;
   const targetStorageBackend = Object.prototype.hasOwnProperty.call(settingsRequest, "storageBackend")
     ? settingsRequest.storageBackend
     : current.storageBackend;
@@ -1542,7 +1545,7 @@ async function saveRuntimeSettings(request) {
         };
       }
     }
-    if (!connectionChanged) return { ok: true, ...result, migration, taskDocument };
+    if (!codexConnectionChanged) return { ok: true, ...result, migration, taskDocument };
     resetCodexClient();
     const codex = await runCodexCheck();
     return { ok: true, ...result, codex, migration, taskDocument };

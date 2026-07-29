@@ -1167,6 +1167,7 @@ function App() {
   const weeklyNewsAutoRefreshActionRef = useRef<(() => Promise<boolean>) | null>(null);
   const weeklyNewsAutoScanActionRef = useRef<(() => Promise<WeeklyNewsScanOutcome>) | null>(null);
   const appSettingsRef = useRef(appSettings);
+  const documentLibraryRequestRef = useRef(0);
   const markdownOpenRequestRef = useRef(0);
   const markdownSaveRequestRef = useRef(0);
   const markdownRenameRequestRef = useRef(0);
@@ -3068,6 +3069,19 @@ function App() {
         "localLibraryDir",
         "localRepositoryDir"
       ].some((key) => Object.prototype.hasOwnProperty.call(request, key));
+      const documentLibraryLocationChanged = [
+        "storageBackend",
+        "localLibraryDir",
+        "localRepositoryDir"
+      ].some((key) => Object.prototype.hasOwnProperty.call(request, key));
+      if (documentLibraryLocationChanged) {
+        documentLibraryRequestRef.current += 1;
+        setDocumentLibrary(null);
+        setDocumentLibraryError("");
+        setDocumentLibrarySelectedFolder("");
+        setDocumentLibraryExpandedPaths(new Set());
+        if (result.settings.onboardingComplete) void refreshDocumentLibrary();
+      }
       if (dataConnectionChanged && result.settings.onboardingComplete) {
         void refreshAfterDataConnectionSave(result.settings);
       }
@@ -4229,24 +4243,36 @@ function App() {
   }
 
   async function refreshDocumentLibrary(options: { silent?: boolean } = {}) {
+    const requestId = ++documentLibraryRequestRef.current;
     if (!options.silent) setDocumentLibraryLoading(true);
     setDocumentLibraryError("");
     try {
       const snapshot = await workbench.listDocumentLibrary();
+      if (requestId !== documentLibraryRequestRef.current) return null;
       if (!snapshot.ok) {
         setDocumentLibraryError(snapshot.error || "无法读取本地文档库。");
         setDocumentLibrary(snapshot);
         return null;
       }
       setDocumentLibrary(snapshot);
-      setDocumentLibrarySelectedFolder((current) => current || snapshot.rootPath);
+      setDocumentLibrarySelectedFolder((current) => {
+        const normalizedRoot = snapshot.rootPath.replace(/[\\/]+$/, "");
+        const normalizedCurrent = current.replace(/[\\/]+$/, "");
+        const insideRoot = normalizedCurrent === normalizedRoot
+          || normalizedCurrent.startsWith(`${normalizedRoot}/`)
+          || normalizedCurrent.startsWith(`${normalizedRoot}\\`);
+        return insideRoot ? current : snapshot.rootPath;
+      });
       return snapshot;
     } catch (error) {
+      if (requestId !== documentLibraryRequestRef.current) return null;
       const message = describeOperationError(error, "无法读取本地文档库。");
       setDocumentLibraryError(message);
       return null;
     } finally {
-      if (!options.silent) setDocumentLibraryLoading(false);
+      if (!options.silent && requestId === documentLibraryRequestRef.current) {
+        setDocumentLibraryLoading(false);
+      }
     }
   }
 
