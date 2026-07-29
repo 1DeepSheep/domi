@@ -10,6 +10,14 @@ const runtimePreparationSource = fs.readFileSync(
   path.resolve(__dirname, "prepare-codex-runtime.cjs"),
   "utf8"
 );
+const afterPackSource = fs.readFileSync(
+  path.resolve(__dirname, "after-pack.cjs"),
+  "utf8"
+);
+const updateServiceSource = fs.readFileSync(
+  path.resolve(__dirname, "..", "electron", "update-service.cjs"),
+  "utf8"
+);
 
 const packageStart = source.indexOf('"$BUILDER" --mac dir --arm64');
 const notarize = source.indexOf("notarize_release_app", packageStart);
@@ -26,6 +34,13 @@ assert.match(source, /stapler validate/);
 assert.match(source, /DOMI_ELECTRON_DIST/);
 assert.match(source, /--config\.electronDist="\$ELECTRON_DIST"/);
 assert.match(source, /does not match package version/);
+assert.match(source, /verify_app_update_config "\$OUTPUT_DIR\/mac-arm64\/domi\.app"/);
+assert.match(source, /verify_app_update_config "\$APP_PATH"/);
+assert.match(afterPackSource, /app-update\.yml/);
+assert.match(afterPackSource, /provider: github/);
+assert.match(afterPackSource, /owner: 1DeepSheep/);
+assert.match(afterPackSource, /repo: domi/);
+assert.match(updateServiceSource, /autoUpdater\.setFeedURL\(PUBLIC_UPDATE_FEED\)/);
 assert.match(runtimePreparationSource, /APPLE_TIMESTAMP_SERVER/);
 assert.match(runtimePreparationSource, /http:\/\/timestamp\.apple\.com\/ts01/);
 assert.match(runtimePreparationSource, /`--timestamp=\$\{timestampServer\}`/);
