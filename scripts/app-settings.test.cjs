@@ -28,7 +28,12 @@ function createStateStore(initialSettings = {}, initialUpdatedAt = null) {
   };
 }
 
-function createService(root, initialSettings = {}, initialUpdatedAt = null) {
+function createService(
+  root,
+  initialSettings = {},
+  initialUpdatedAt = null,
+  options = {}
+) {
   return new AppSettingsService({
     stateStore: createStateStore(initialSettings, initialUpdatedAt),
     safeStorage: {
@@ -36,7 +41,8 @@ function createService(root, initialSettings = {}, initialUpdatedAt = null) {
       encryptString: (value) => Buffer.from(value),
       decryptString: (value) => value.toString("utf8")
     },
-    domiConfigPath: path.join(root, "domi-plugin-config.json")
+    domiConfigPath: path.join(root, "domi-plugin-config.json"),
+    developmentFallbackConfigPath: options.developmentFallbackConfigPath || ""
   });
 }
 
@@ -60,6 +66,74 @@ test("new users default to the local repository", () => {
     const loaded = service.load();
     assert.equal(loaded.settings.onboardingComplete, false);
     assert.equal(loaded.settings.storageBackend, "local");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("development reuses the existing production workspace without copying private configuration", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-dev-"));
+  try {
+    const productionRoot = path.join(root, "production");
+    const developmentRoot = path.join(root, "development");
+    const workspaceRoot = path.join(root, "existing-domi-workspace");
+    fs.mkdirSync(productionRoot, { recursive: true });
+    fs.mkdirSync(developmentRoot, { recursive: true });
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    const productionConfigPath = path.join(productionRoot, "domi-plugin-config.json");
+    fs.writeFileSync(productionConfigPath, JSON.stringify({
+      storageBackend: "local",
+      localRepositoryDir: workspaceRoot,
+      localDatabasePath: path.join(productionRoot, "production-repository.sqlite3"),
+      plaudConnectionMode: "enabled",
+      projectBaseToken: "placeholder",
+      outlookCalendarEmail: "example@example.com"
+    }));
+
+    const service = createService(developmentRoot, {}, null, {
+      developmentFallbackConfigPath: productionConfigPath
+    });
+    const inherited = service.bootstrapDevelopmentLocalRepository();
+    const loaded = service.load().settings;
+    const developmentConfig = JSON.parse(fs.readFileSync(
+      path.join(developmentRoot, "domi-plugin-config.json"),
+      "utf8"
+    ));
+
+    assert.equal(inherited.applied, true);
+    assert.equal(loaded.onboardingComplete, true);
+    assert.equal(loaded.storageBackend, "local");
+    assert.equal(loaded.localRepositoryDir, workspaceRoot);
+    assert.equal(
+      loaded.localDatabasePath,
+      path.join(developmentRoot, "domi-repository.sqlite3")
+    );
+    assert.equal(loaded.plaudConnectionMode, "disabled");
+    assert.equal(developmentConfig.projectBaseToken, "");
+    assert.equal(developmentConfig.outlookCalendarEmail, "");
+    assert.equal(fs.readdirSync(root).includes("domi开发工作区"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("development never inherits a production Feishu repository", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-dev-feishu-"));
+  try {
+    const productionConfigPath = path.join(root, "production-config.json");
+    fs.writeFileSync(productionConfigPath, JSON.stringify({
+      storageBackend: "feishu",
+      projectBaseToken: "placeholder",
+      wikiSpaceId: "placeholder"
+    }));
+    const service = createService(path.join(root, "development"), {}, null, {
+      developmentFallbackConfigPath: productionConfigPath
+    });
+
+    const inherited = service.bootstrapDevelopmentLocalRepository();
+    assert.equal(inherited.applied, false);
+    assert.equal(inherited.reason, "no-local-production-repository");
+    assert.equal(service.load().settings.onboardingComplete, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

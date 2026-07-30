@@ -33,7 +33,9 @@ declare global {
       ) => Promise<FileSelectionResult>;
       openResource: (resource: string) => Promise<{ ok: boolean; error?: string; target?: string }>;
       showNotification: (request: DesktopNotificationRequest) => Promise<DesktopNotificationResult>;
-      listDocumentLibrary: () => Promise<DocumentLibrarySnapshot>;
+      listDocumentLibrary: (
+        request?: DocumentLibraryListRequest
+      ) => Promise<DocumentLibrarySnapshot>;
       createDocumentLibraryEntry: (
         request: DocumentLibraryCreateRequest
       ) => Promise<DocumentLibraryCreateResult>;
@@ -54,6 +56,10 @@ declare global {
       loadDomiCache: () => Promise<DomiSyncResult>;
       checkDomi: () => Promise<DomiStatusResult>;
       syncDomi: () => Promise<DomiSyncResult>;
+      listDomiDatabase: () => Promise<DomiDatabaseSnapshot>;
+      updateDomiDatabaseRecord: (
+        request: DomiDatabaseUpdateRequest
+      ) => Promise<DomiDatabaseUpdateResult>;
       previewStorageMigration: () => Promise<StorageMigrationPreview>;
       listWeeklyNews: (request?: DomiWeeklyNewsRequest) => Promise<DomiWeeklyNewsSnapshot>;
       saveWeeklyNewsCheckpoint: (
@@ -145,6 +151,10 @@ export type DocumentLibrarySnapshot = {
   structured?: boolean;
   scannedAt: number;
   error?: string;
+};
+
+export type DocumentLibraryListRequest = {
+  force?: boolean;
 };
 
 export type DocumentLibraryCreateRequest = {
@@ -322,8 +332,11 @@ export type DomiProject = {
   notes?: string;
   cities?: string[];
   investors?: string[];
+  financingHistory?: string;
+  latestValuationUsd100m?: number | null;
   createdAt: number | null;
   lastFollowup: number | null;
+  updatedAt?: number;
   link: string;
 };
 
@@ -337,6 +350,7 @@ export type DomiPerson = {
   createdAt: number | null;
   lastContact: number | null;
   cities: string[];
+  updatedAt?: number;
   link: string;
 };
 
@@ -448,6 +462,81 @@ export type DomiNewsItem = {
   confidence: number;
   evidenceStatus: string;
   action: string;
+  worthFollowing?: boolean;
+  updatedAt?: number;
+};
+
+export type DomiDatabaseSnapshot = {
+  ok: boolean;
+  backend?: "feishu" | "local";
+  editable?: boolean;
+  loadedAt?: number;
+  projects: DomiProject[];
+  people: DomiPerson[];
+  news: DomiNewsItem[];
+  error?: string;
+};
+
+export type DomiProjectDatabaseUpdate = {
+  recordId: string;
+  expectedUpdatedAt: number;
+  name: string;
+  domain: string;
+  subdomains: string[];
+  status: string;
+  rating: string;
+  notes: string;
+  cities: string[];
+  investors: string[];
+  financingHistory: string;
+  latestValuationUsd100m: number | null;
+};
+
+export type DomiPersonDatabaseUpdate = {
+  recordId: string;
+  expectedUpdatedAt: number;
+  name: string;
+  types: string[];
+  organization: string;
+  status: string;
+  rating: string;
+  lastContact: number | null;
+  cities: string[];
+};
+
+export type DomiNewsDatabaseUpdate = {
+  recordId: string;
+  expectedUpdatedAt: number;
+  title: string;
+  domains: string[];
+  subdomains: string[];
+  types: string[];
+  publishedAt: number;
+  summary: string;
+  investmentMeaning: string;
+  url: string;
+  source: string;
+  companies: string;
+  institutions: string;
+  importance: number;
+  confidence: number;
+  evidenceStatus: string;
+  action: string;
+  worthFollowing: boolean;
+};
+
+export type DomiDatabaseUpdateRequest =
+  | { entityType: "project"; record: DomiProjectDatabaseUpdate }
+  | { entityType: "person"; record: DomiPersonDatabaseUpdate }
+  | { entityType: "news"; record: DomiNewsDatabaseUpdate };
+
+export type DomiDatabaseUpdateResult = {
+  ok: boolean;
+  entityType?: "project" | "person" | "news";
+  record?: DomiProject | DomiPerson | DomiNewsItem;
+  snapshot?: DomiSnapshot;
+  updatedAt?: number;
+  error?: string;
 };
 
 export type DomiWeeklyNewsSnapshot = {
@@ -572,6 +661,8 @@ export type DomiPlaudConnectionResult = {
 
 export type DomiPlaudListRequest = {
   fresh?: boolean;
+  offset?: number;
+  limit?: number;
 };
 
 export type DomiPlaudSnapshot = {
@@ -579,6 +670,10 @@ export type DomiPlaudSnapshot = {
   syncedAt?: number;
   pendingCount?: number;
   queueCount?: number;
+  pageOffset?: number;
+  pageSize?: number;
+  hasMore?: boolean;
+  nextOffset?: number;
   items?: DomiPlaudItem[];
   error?: string;
 };

@@ -83,6 +83,12 @@ const allowedMarkdownAssetPaths = new Set();
 const CODEX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const CODEX_CHECK_CACHE_TTL_MS = 60 * 1000;
 const LARK_STATUS_CACHE_TTL_MS = 5 * 60 * 1000;
+const DOCUMENT_LIBRARY_CACHE_TTL_MS = 60 * 1000;
+let documentLibraryCache = {
+  key: "",
+  expiresAt: 0,
+  snapshot: null
+};
 const externalDomiWorkflows = new Map([
   ["domi-analyst", "使用 domi-AI分析师，并可能读取当前 domi 资料库"],
   ["domi-router", "访问 PLAUD、domi 恢复队列和当前资料库，并可能按工作流更新记录"],
@@ -224,8 +230,19 @@ function getAppSettings() {
     appSettings = new AppSettingsService({
       stateStore: getStateStore(),
       safeStorage,
-      domiConfigPath: path.join(app.getPath("userData"), "domi-plugin-config.json")
+      domiConfigPath: path.join(app.getPath("userData"), "domi-plugin-config.json"),
+      developmentFallbackConfigPath: brandPaths.development
+        && process.env.DOMI_DEV_ISOLATED !== "1"
+        ? path.join(brandPaths.productionUserDataPath, "domi-plugin-config.json")
+        : ""
     });
+    const inherited = appSettings.bootstrapDevelopmentLocalRepository();
+    if (inherited.applied) {
+      appendRuntimeLog("development-local-repository-reused", {
+        productionConfigurationCopied: false,
+        sharedDatabase: false
+      });
+    }
   }
   return appSettings;
 }
@@ -456,13 +473,36 @@ function currentDocumentLibraryLocation() {
   return location;
 }
 
-function readDocumentLibrary() {
+function invalidateDocumentLibraryCache() {
+  documentLibraryCache = {
+    key: "",
+    expiresAt: 0,
+    snapshot: null
+  };
+}
+
+function readDocumentLibrary(request = {}) {
   try {
     const location = currentDocumentLibraryLocation();
-    return {
+    const cacheKey = `${path.resolve(location.rootPath)}\0${location.initializeStructure ? "1" : "0"}`;
+    if (
+      request?.force !== true
+      && documentLibraryCache.key === cacheKey
+      && documentLibraryCache.expiresAt > Date.now()
+      && documentLibraryCache.snapshot
+    ) {
+      return documentLibraryCache.snapshot;
+    }
+    const snapshot = {
       ...listDocumentLibrary(location.rootPath),
       structured: location.initializeStructure
     };
+    documentLibraryCache = {
+      key: cacheKey,
+      expiresAt: Date.now() + DOCUMENT_LIBRARY_CACHE_TTL_MS,
+      snapshot
+    };
+    return snapshot;
   } catch (error) {
     return {
       ok: false,
@@ -482,12 +522,10 @@ function createDocumentLibraryItem(request) {
   try {
     const location = currentDocumentLibraryLocation();
     const created = createDocumentLibraryEntry(location.rootPath, request);
+    invalidateDocumentLibraryCache();
     return {
       ...created,
-      snapshot: {
-        ...listDocumentLibrary(location.rootPath),
-        structured: location.initializeStructure
-      }
+      snapshot: readDocumentLibrary({ force: true })
     };
   } catch (error) {
     return {
@@ -871,6 +909,7 @@ async function renameMarkdownDocument(request) {
       await fs.promises.rename(sourcePath, targetPath);
     }
 
+    invalidateDocumentLibraryCache();
     return readMarkdownDocument({ resource: targetPath });
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -2280,7 +2319,7 @@ ipcMain.handle("files:import-data", (_event, files, workspacePath) =>
   importLocalFileData(workspacePath, files)
 );
 ipcMain.handle("resource:open", (_event, resource) => openResource(resource));
-ipcMain.handle("document-library:list", () => readDocumentLibrary());
+ipcMain.handle("document-library:list", (_event, request) => readDocumentLibrary(request));
 ipcMain.handle("document-library:create", (_event, request) =>
   createDocumentLibraryItem(request)
 );
@@ -2333,6 +2372,41 @@ ipcMain.handle("workspace:open", async (_event, requestedWorkspacePath) => {
 });
 
 ipcMain.handle("domi:cache", () => getDomiIntegration().loadCache());
+ipcMain.handle("domi:database-list", async () => {
+  try {
+    return await serviceCoordinator.run(
+      "domi:database-list",
+      () => getDomiIntegration().databaseSnapshot(),
+      {
+        ttlMs: 5_000,
+        retries: 0,
+        allowStale: false,
+        isSuccess: (value) => value?.ok !== false
+      }
+    );
+  } catch (error) {
+    return {
+      ok: false,
+      editable: false,
+      projects: [],
+      people: [],
+      news: [],
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+});
+ipcMain.handle("domi:database-update", async (_event, request) => {
+  try {
+    const result = await getDomiIntegration().updateDatabaseRecord(request);
+    if (result.ok) {
+      serviceCoordinator.invalidate("domi:database-list");
+      serviceCoordinator.invalidate("domi:weekly-news:");
+    }
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
 ipcMain.handle("domi:status", async () => {
   try {
     const health = await serviceCoordinator.run(
@@ -2428,9 +2502,11 @@ ipcMain.handle("domi:plaud-disconnect", async (_event, request) => {
 ipcMain.handle("domi:plaud-list", async (_event, request) => {
   try {
     const fresh = request?.fresh === true;
+    const limit = Math.min(Math.max(Number(request?.limit) || 50, 1), 100);
+    const offset = Math.min(Math.max(Number(request?.offset) || 0, 0), 10_000);
     return await serviceCoordinator.run(
-      "domi:plaud-list",
-      () => getDomiIntegration().plaudQueue(),
+      `domi:plaud-list:${offset}:${limit}`,
+      () => getDomiIntegration().plaudQueue({ offset, limit }),
       {
         ttlMs: 15_000,
         retries: 1,

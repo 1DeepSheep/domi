@@ -72,6 +72,9 @@ const SKIPPED_MATERIAL_DIRECTORIES = new Set([
   "node_modules",
   "$RECYCLE.BIN"
 ]);
+const MATERIAL_INDEX_TTL_MS = 60_000;
+const MAX_ENTITY_MATERIAL_ENTRIES = 8_000;
+const MAX_ENTITY_MATERIAL_RESULTS = 48;
 
 function plaudBrowserLabel(browser) {
   return browser === "tabbit" ? "Tabbit" : "Google Chrome";
@@ -674,8 +677,9 @@ class DomiIntegration {
 
   async buildMaterialIndex(rootPath) {
     const resolvedRoot = path.resolve(rootPath);
-    if (this.materialIndexCache.has(resolvedRoot)) {
-      return this.materialIndexCache.get(resolvedRoot);
+    const cached = this.materialIndexCache.get(resolvedRoot);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.promise;
     }
 
     const pending = (async () => {
@@ -705,7 +709,10 @@ class DomiIntegration {
       return entries;
     })();
 
-    this.materialIndexCache.set(resolvedRoot, pending);
+    this.materialIndexCache.set(resolvedRoot, {
+      promise: pending,
+      expiresAt: Date.now() + MATERIAL_INDEX_TTL_MS
+    });
     try {
       return await pending;
     } catch (error) {
@@ -762,6 +769,72 @@ class DomiIntegration {
     }));
   }
 
+  async listEntityDirectoryFiles(directoryPath) {
+    const resolvedRoot = path.resolve(directoryPath);
+    if (!fs.existsSync(resolvedRoot)) return [];
+    const files = [];
+    const directories = [resolvedRoot];
+    let scanned = 0;
+    while (directories.length && scanned < MAX_ENTITY_MATERIAL_ENTRIES) {
+      const current = directories.pop();
+      let children;
+      try {
+        children = await fs.promises.readdir(current, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const child of children) {
+        if (child.name.startsWith(".") || SKIPPED_MATERIAL_DIRECTORIES.has(child.name)) continue;
+        scanned += 1;
+        const fullPath = path.join(current, child.name);
+        if (child.isDirectory()) {
+          directories.push(fullPath);
+        } else if (child.isFile()) {
+          const relativePath = path.relative(resolvedRoot, fullPath);
+          const depth = relativePath.split(path.sep).length;
+          const extension = path.extname(child.name).toLocaleLowerCase("en-US");
+          const preferred = [
+            ".md", ".markdown", ".pdf", ".doc", ".docx", ".ppt", ".pptx",
+            ".xls", ".xlsx", ".csv", ".m4a", ".mp3", ".wav", ".aac",
+            ".png", ".jpg", ".jpeg", ".webp", ".heic"
+          ].includes(extension);
+          files.push({
+            path: fullPath,
+            relativePath,
+            name: child.name,
+            score: (preferred ? 100 : 0) - depth
+          });
+        }
+        if (scanned >= MAX_ENTITY_MATERIAL_ENTRIES) break;
+      }
+    }
+    const selected = files
+      .sort((left, right) =>
+        right.score - left.score
+        || left.relativePath.localeCompare(right.relativePath, "zh-CN")
+      )
+      .slice(0, MAX_ENTITY_MATERIAL_RESULTS);
+    return Promise.all(selected.map(async (entry) => {
+      let size = 0;
+      let mtimeMs = 0;
+      try {
+        const stat = await fs.promises.stat(entry.path);
+        size = stat.size;
+        mtimeMs = stat.mtimeMs;
+      } catch {
+        // OneDrive placeholders may not expose metadata until they are hydrated.
+      }
+      return {
+        name: entry.name,
+        path: entry.path,
+        relativePath: entry.relativePath,
+        kind: materialKind(entry.path),
+        size,
+        mtimeMs
+      };
+    }));
+  }
+
   async entityMaterials(request) {
     const entityType = request?.entityType === "person" ? "person" : "project";
     const recordId = String(request?.recordId || "");
@@ -772,6 +845,22 @@ class DomiIntegration {
     if (!entity) throw new Error("没有在 domi 缓存中找到该项目或人脉。");
 
     const projectConfig = this.readProjectConfig();
+    if (projectConfig.backend === "local") {
+      const entityRoot = this.withLocalRepository(
+        projectConfig,
+        (repository) => repository.recordDirectory(entityType, recordId)
+      );
+      const files = entityRoot
+        ? await this.listEntityDirectoryFiles(entityRoot)
+        : [];
+      return {
+        entityType,
+        recordId,
+        searchRoot: entityRoot || projectConfig.localLibraryDir,
+        files,
+        generatedAt: Date.now()
+      };
+    }
     const searchRoot = entityType === "project"
       ? projectConfig.localLibraryDir
       : path.dirname(projectConfig.localLibraryDir);
@@ -1168,7 +1257,10 @@ class DomiIntegration {
       .sort((left, right) => String(left.updatedAt || "").localeCompare(String(right.updatedAt || "")));
   }
 
-  async plaudQueue(limit = 50) {
+  async plaudQueue(request = {}) {
+    const requested = typeof request === "number" ? { limit: request } : request || {};
+    const limit = Math.min(Math.max(Number(requested.limit) || 50, 1), 100);
+    const offset = Math.min(Math.max(Number(requested.offset) || 0, 0), 10_000);
     if (!this.plaudEnabled()) {
       return {
         ok: false,
@@ -1176,13 +1268,17 @@ class DomiIntegration {
         syncedAt: Date.now(),
         pendingCount: 0,
         queueCount: 0,
+        pageOffset: offset,
+        pageSize: limit,
+        hasMore: false,
+        nextOffset: offset,
         items: [],
         error: ""
       };
     }
     const { plugin } = this.plaudPaths();
     const [remoteResult] = await Promise.allSettled([
-      this.runPlaudWorker("list", [String(limit)], plugin)
+      this.runPlaudWorker("list", [String(limit), String(offset)], plugin)
     ]);
     const queueItems = this.loadActivePlaudWorkflowRecords();
     const workflowById = new Map(
@@ -1207,8 +1303,10 @@ class DomiIntegration {
         error: String(queued?.error || "")
       };
     });
-    for (const queued of activeQueueById.values()) {
-      items.push(this.normalizePlaudQueueItem(queued));
+    if (offset === 0) {
+      for (const queued of activeQueueById.values()) {
+        items.push(this.normalizePlaudQueueItem(queued));
+      }
     }
     items.sort(comparePlaudItems);
     const errors = [
@@ -1219,6 +1317,12 @@ class DomiIntegration {
       syncedAt: Date.now(),
       pendingCount: remoteResult.status === "fulfilled" ? remoteResult.value.pendingCount || 0 : 0,
       queueCount: queueItems.length,
+      pageOffset: offset,
+      pageSize: limit,
+      hasMore: remoteResult.status === "fulfilled" && Boolean(remoteResult.value.hasMore),
+      nextOffset: remoteResult.status === "fulfilled"
+        ? Number(remoteResult.value.nextOffset) || offset
+        : offset,
       items,
       error: errors.join("；")
     };
@@ -2442,6 +2546,80 @@ class DomiIntegration {
     });
   }
 
+  databaseSnapshot() {
+    const source = this.readProjectConfig();
+    if (source.backend !== "local") {
+      return {
+        ok: false,
+        backend: source.backend,
+        editable: false,
+        loadedAt: Date.now(),
+        projects: [],
+        people: [],
+        news: [],
+        error: "客户端内直接编辑数据库目前仅支持本地资料库；飞书资料库请继续通过同步工作流维护。"
+      };
+    }
+    return this.withLocalRepository(source, (repository) => ({
+      ok: true,
+      backend: "local",
+      editable: true,
+      loadedAt: Date.now(),
+      projects: repository.listProjects(),
+      people: repository.listPeople(),
+      news: repository.listAllNews()
+    }));
+  }
+
+  async updateDatabaseRecord(request = {}) {
+    const source = this.readProjectConfig();
+    if (source.backend !== "local") {
+      return {
+        ok: false,
+        error: "客户端内直接编辑数据库目前仅支持本地资料库。"
+      };
+    }
+    const entityType = String(request.entityType || "");
+    const record = this.withLocalRepository(source, (repository) => {
+      if (entityType === "project") return repository.updateProject(request.record);
+      if (entityType === "person") return repository.updatePerson(request.record);
+      if (entityType === "news") return repository.updateNews(request.record);
+      throw new Error("不支持的资料库记录类型。");
+    });
+    this.materialIndexCache.clear();
+    let snapshot;
+    if (entityType === "project" || entityType === "person") {
+      const cached = this.stateStore.loadCache(CACHE_KEY)?.value;
+      if (cached?.backend === "local") {
+        const collectionKey = entityType === "project" ? "projects" : "people";
+        const currentItems = Array.isArray(cached[collectionKey]) ? cached[collectionKey] : [];
+        const nextItems = currentItems.some((item) => item.recordId === record.recordId)
+          ? currentItems.map((item) => item.recordId === record.recordId ? record : item)
+          : [record, ...currentItems];
+        snapshot = {
+          ...cached,
+          syncedAt: Date.now(),
+          [collectionKey]: nextItems,
+          sources: {
+            ...(cached.sources || {}),
+            [collectionKey]: {
+              ...(cached.sources?.[collectionKey] || {}),
+              total: nextItems.length
+            }
+          }
+        };
+        this.stateStore.saveCache(CACHE_KEY, snapshot);
+      }
+    }
+    return {
+      ok: true,
+      entityType,
+      record,
+      snapshot,
+      updatedAt: Date.now()
+    };
+  }
+
   async sync() {
     const plugin = this.findPlugin();
     const projectSource = this.readProjectConfig();
@@ -2476,6 +2654,7 @@ class DomiIntegration {
         projects: local.projects,
         people: local.people
       };
+      this.materialIndexCache.clear();
       this.stateStore.saveCache(CACHE_KEY, snapshot);
       return { ok: true, snapshot, updatedAt: snapshot.syncedAt };
     }
