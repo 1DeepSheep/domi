@@ -1182,7 +1182,6 @@ function App() {
   const plaudMutationIdsRef = useRef(new Set<string>());
   const launchingPlaudIdsRef = useRef(new Set<string>());
   const creatingThreadRef = useRef(false);
-  const integrationBootstrapStartedRef = useRef(false);
   const codexRecoveryStartedRef = useRef(false);
   const queueStartingThreadIdsRef = useRef(new Set<string>());
   const runContextRef = useRef(
@@ -1800,11 +1799,13 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (integrationBootstrapStartedRef.current) return;
-    integrationBootstrapStartedRef.current = true;
+    let cancelled = false;
+    const pause = (delayMs: number) =>
+      new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
 
     void (async () => {
       const cached = await workbench.loadDomiCache();
+      if (cancelled) return;
       if (cached.snapshot) setDomiSnapshot(cached.snapshot);
       if (!hasNativeWorkbench) {
         setWeeklyNewsAutomationReady(true);
@@ -1841,15 +1842,21 @@ function App() {
           return;
         }
 
-        await Promise.allSettled([
-          refreshWeeklyNews(0, { silent: hasCachedNews, preserveView: true }),
-          refreshDomiTaskBoard({ silent: Boolean(cachedTasks.tasks.length) }),
-          refreshDomi()
-        ]);
+        await refreshDomi();
+        if (cancelled) return;
+        await pause(350);
+        await refreshDomiTaskBoard({ silent: Boolean(cachedTasks.tasks.length) });
+        if (cancelled) return;
+        await pause(350);
+        await refreshWeeklyNews(0, { silent: hasCachedNews, preserveView: true });
       } finally {
-        setWeeklyNewsAutomationReady(true);
+        if (!cancelled) setWeeklyNewsAutomationReady(true);
       }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1867,8 +1874,12 @@ function App() {
       setPlaudSyncing(false);
       return;
     }
-    void refreshPlaudQueue();
-  }, [plaudEnabled, appSettings?.plaudBrowser]);
+    if (!weeklyNewsAutomationReady) return;
+    const timer = window.setTimeout(() => {
+      void refreshPlaudQueue();
+    }, 1_200);
+    return () => window.clearTimeout(timer);
+  }, [plaudEnabled, appSettings?.plaudBrowser, weeklyNewsAutomationReady]);
 
   useEffect(() => {
     if (!selectedWorkflow?.requiresPlaud || plaudEnabled) return;
@@ -3346,7 +3357,7 @@ function App() {
           background: true,
           workflowId: todoWorkflow.id,
           model,
-          reasoningEffort: "medium",
+          reasoningEffort,
           serviceTier,
           workspacePath: activeThread.workspacePath
         });
