@@ -1167,6 +1167,8 @@ function App() {
   const weeklyNewsAutoRefreshActionRef = useRef<(() => Promise<boolean>) | null>(null);
   const weeklyNewsAutoScanActionRef = useRef<(() => Promise<WeeklyNewsScanOutcome>) | null>(null);
   const appSettingsRef = useRef(appSettings);
+  const localSearchRefreshAtRef = useRef(0);
+  const documentSearchRefreshAtRef = useRef(0);
   const documentLibraryRequestRef = useRef(0);
   const markdownOpenRequestRef = useRef(0);
   const markdownSaveRequestRef = useRef(0);
@@ -2374,6 +2376,14 @@ function App() {
     } finally {
       setDomiSyncing(false);
     }
+  }
+
+  function refreshLocalIndexForSearch() {
+    if (appSettingsRef.current?.storageBackend !== "local" || domiSyncing) return;
+    const now = Date.now();
+    if (now - localSearchRefreshAtRef.current < 15_000) return;
+    localSearchRefreshAtRef.current = now;
+    void refreshDomi();
   }
 
   async function refreshDomiTaskBoard(options: { silent?: boolean; fresh?: boolean } = {}) {
@@ -4294,9 +4304,17 @@ function App() {
     setWorkspaceView("documents");
     setThreadMenuId(null);
     setRightPanelOpen(false);
-    if (!documentLibrary && !documentLibraryLoading) {
-      void refreshDocumentLibrary();
+    if (!documentLibraryLoading) {
+      void refreshDocumentLibrary({ silent: Boolean(documentLibrary) });
     }
+  }
+
+  function refreshDocumentIndexForSearch() {
+    if (documentLibraryLoading) return;
+    const now = Date.now();
+    if (now - documentSearchRefreshAtRef.current < 15_000) return;
+    documentSearchRefreshAtRef.current = now;
+    void refreshDocumentLibrary({ silent: Boolean(documentLibrary) });
   }
 
   function toggleDocumentLibraryFolder(path: string) {
@@ -4977,6 +4995,7 @@ function App() {
           <input
             value={documentLibraryQuery}
             onChange={(event) => setDocumentLibraryQuery(event.target.value)}
+            onFocus={refreshDocumentIndexForSearch}
             placeholder="搜索文档和文件夹"
             aria-label="搜索本地文档库"
           />
@@ -6664,6 +6683,7 @@ function App() {
               <input
                 value={domiQuery}
                 onChange={(event) => setDomiQuery(event.target.value)}
+                onFocus={refreshLocalIndexForSearch}
                 placeholder="搜索项目或人脉"
                 aria-label="搜索 domi 项目或人脉"
               />

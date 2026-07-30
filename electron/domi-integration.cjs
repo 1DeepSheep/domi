@@ -2447,11 +2447,15 @@ class DomiIntegration {
     const projectSource = this.readProjectConfig();
     const health = await this.status(plugin);
     if (projectSource.backend === "local") {
-      const local = this.withLocalRepository(projectSource, (repository) => ({
-        repositoryHealth: repository.health(),
-        projects: repository.listProjects(),
-        people: repository.listPeople()
-      }));
+      const local = this.withLocalRepository(projectSource, (repository) => {
+        const workspaceIndex = repository.reindexWorkspace();
+        return {
+          repositoryHealth: repository.health(),
+          workspaceIndex,
+          projects: repository.listProjects(),
+          people: repository.listPeople()
+        };
+      });
       const snapshot = {
         version: 1,
         backend: "local",

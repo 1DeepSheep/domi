@@ -1,3 +1,4 @@
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -5,7 +6,11 @@ const { pathToFileURL } = require("node:url");
 const { DatabaseSync } = require("node:sqlite");
 const { ensureDocumentLibraryStructure } = require("./document-library.cjs");
 
-const LOCAL_REPOSITORY_SCHEMA = 1;
+const LOCAL_REPOSITORY_SCHEMA = 2;
+const PROJECTS_DIRECTORY = "3.项目库";
+const PEOPLE_DIRECTORY = "4.人脉库";
+const PROJECT_PAGE_NAME = "项目主页.md";
+const PERSON_PAGE_NAME = "人物主页.md";
 
 function resolveHomePath(value) {
   const raw = String(value || "").trim();
@@ -19,6 +24,186 @@ function parseList(value) {
   } catch {
     return [];
   }
+}
+
+function stringList(value) {
+  if (Array.isArray(value)) {
+    return [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))];
+  }
+  if (value === null || value === undefined || value === "") return [];
+  return [...new Set(
+    String(value)
+      .split(/[，,、]/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )];
+}
+
+function normalizedName(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("zh-CN")
+    .replace(/[\s·•._\-—–（）()【】[\]{}，,。.!！?？/&／]+/g, "");
+}
+
+function stableId(prefix, value) {
+  return `${prefix}_${crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 16)}`;
+}
+
+function toEpochMs(value, fallback = null) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function listDirectories(directoryPath) {
+  try {
+    return fs.readdirSync(directoryPath, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+  } catch {
+    return [];
+  }
+}
+
+function fileCreatedAt(targetPath) {
+  try {
+    const stat = fs.statSync(targetPath);
+    return Math.round(
+      Number(stat.birthtimeMs) > 0
+        ? stat.birthtimeMs
+        : Number(stat.ctimeMs) > 0
+          ? stat.ctimeMs
+          : stat.mtimeMs
+    );
+  } catch {
+    return Date.now();
+  }
+}
+
+function parseFrontmatterValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    return JSON.parse(raw);
+  } catch {
+    if (raw === "null") return null;
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    const numeric = Number(raw);
+    return Number.isFinite(numeric) ? numeric : raw.replace(/^['"]|['"]$/g, "");
+  }
+}
+
+function readManagedFrontmatter(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  try {
+    const content = fs.readFileSync(filePath, "utf8");
+    const match = content.match(/(?:^|\r?\n)---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+    if (!match) return {};
+    const result = {};
+    for (const line of match[1].split(/\r?\n/)) {
+      const separator = line.indexOf(":");
+      if (separator <= 0) continue;
+      const key = line.slice(0, separator).trim();
+      if (!/^[a-zA-Z0-9_]+$/.test(key)) continue;
+      result[key] = parseFrontmatterValue(line.slice(separator + 1));
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function firstMarkdownFile(directoryPath) {
+  try {
+    const entry = fs.readdirSync(directoryPath, { withFileTypes: true })
+      .filter((item) =>
+        item.isFile()
+        && !item.name.startsWith(".")
+        && /\.(?:md|markdown)$/i.test(item.name)
+      )
+      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"))[0];
+    return entry ? path.join(directoryPath, entry.name) : "";
+  } catch {
+    return "";
+  }
+}
+
+function looksLikeProjectDirectory(name, hasCanonicalPage) {
+  if (hasCanonicalPage) return true;
+  const value = String(name || "").trim();
+  if (!value) return false;
+  return !/(?:行业|产业|赛道|专题|市场)研究/.test(value);
+}
+
+function scanWorkspaceEntities(libraryDir) {
+  const projects = [];
+  const people = [];
+  const projectRoot = path.join(libraryDir, PROJECTS_DIRECTORY);
+  const peopleRoot = path.join(libraryDir, PEOPLE_DIRECTORY);
+
+  for (const domainEntry of listDirectories(projectRoot)) {
+    const domainPath = path.join(projectRoot, domainEntry.name);
+    for (const subdomainEntry of listDirectories(domainPath)) {
+      const subdomainPath = path.join(domainPath, subdomainEntry.name);
+      for (const projectEntry of listDirectories(subdomainPath)) {
+        const projectPath = path.join(subdomainPath, projectEntry.name);
+        const canonicalPath = path.join(projectPath, PROJECT_PAGE_NAME);
+        const hasCanonicalPage = fs.existsSync(canonicalPath);
+        if (!looksLikeProjectDirectory(projectEntry.name, hasCanonicalPage)) continue;
+        const metadata = readManagedFrontmatter(canonicalPath);
+        if (metadata.entity_type && metadata.entity_type !== "project") continue;
+        const name = String(metadata.company_name || projectEntry.name || "").trim();
+        const normalized = normalizedName(name);
+        if (!normalized) continue;
+        const metadataSubdomains = stringList(metadata.subdomains);
+        const documentPath = hasCanonicalPage
+          ? canonicalPath
+          : firstMarkdownFile(projectPath);
+        const createdAt = fileCreatedAt(projectPath);
+        projects.push({
+          id: String(metadata.project_id || stableId("prj", normalized)),
+          name,
+          normalizedName: normalized,
+          domain: String(metadata.domain || domainEntry.name || "").trim(),
+          subdomains: metadataSubdomains.length ? metadataSubdomains : [subdomainEntry.name],
+          status: String(metadata.status || "待交流").trim(),
+          rating: String(metadata.rating || "").trim(),
+          lastUpdatedAt: toEpochMs(metadata.last_updated_at, null),
+          documentPath,
+          createdAt
+        });
+      }
+    }
+  }
+
+  for (const personEntry of listDirectories(peopleRoot)) {
+    const personPath = path.join(peopleRoot, personEntry.name);
+    const canonicalPath = path.join(personPath, PERSON_PAGE_NAME);
+    const metadata = readManagedFrontmatter(canonicalPath);
+    if (metadata.entity_type && metadata.entity_type !== "person") continue;
+    const name = String(metadata.name || personEntry.name || "").trim();
+    const normalized = normalizedName(name);
+    if (!normalized) continue;
+    people.push({
+      id: String(metadata.person_id || stableId("per", normalized)),
+      name,
+      normalizedName: normalized,
+      types: stringList(metadata.types),
+      organization: String(metadata.organization || "").trim(),
+      status: String(metadata.status || "").trim(),
+      rating: String(metadata.rating || "").trim(),
+      documentPath: fs.existsSync(canonicalPath)
+        ? canonicalPath
+        : firstMarkdownFile(personPath),
+      createdAt: fileCreatedAt(personPath)
+    });
+  }
+
+  return { projects, people };
 }
 
 function localDocumentUrl(value) {
@@ -54,6 +239,8 @@ class LocalDomiRepository {
         notes TEXT NOT NULL DEFAULT '',
         cities_json TEXT NOT NULL DEFAULT '[]',
         investors_json TEXT NOT NULL DEFAULT '[]',
+        financing_history TEXT NOT NULL DEFAULT '',
+        latest_valuation_usd_100m REAL,
         last_updated_at INTEGER,
         document_path TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
@@ -131,6 +318,15 @@ class LocalDomiRepository {
           value = excluded.value,
           updated_at = excluded.updated_at;
     `);
+    const projectColumns = new Set(
+      this.database.prepare("PRAGMA table_info(projects)").all().map((column) => column.name)
+    );
+    if (!projectColumns.has("financing_history")) {
+      this.database.exec("ALTER TABLE projects ADD COLUMN financing_history TEXT NOT NULL DEFAULT ''");
+    }
+    if (!projectColumns.has("latest_valuation_usd_100m")) {
+      this.database.exec("ALTER TABLE projects ADD COLUMN latest_valuation_usd_100m REAL");
+    }
   }
 
   close() {
@@ -148,6 +344,131 @@ class LocalDomiRepository {
       localLibraryDir: this.libraryDir,
       schemaVersion: Number(schema?.value || 0)
     };
+  }
+
+  reindexWorkspace() {
+    const discovered = scanWorkspaceEntities(this.libraryDir);
+    const result = {
+      projects: { discovered: discovered.projects.length, created: 0, linked: 0 },
+      people: { discovered: discovered.people.length, created: 0, linked: 0 }
+    };
+    const findProject = this.database.prepare(
+      `SELECT id, domain, subdomains_json, status, rating, last_updated_at, document_path
+       FROM projects WHERE normalized_name = ?`
+    );
+    const insertProject = this.database.prepare(`
+      INSERT INTO projects (
+        id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+        cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+        last_updated_at, document_path, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, '', '[]', '[]', '', NULL, ?, ?, ?, ?)
+    `);
+    const enrichProject = this.database.prepare(`
+      UPDATE projects SET
+        domain = CASE WHEN domain = '' THEN ? ELSE domain END,
+        subdomains_json = CASE WHEN subdomains_json = '[]' THEN ? ELSE subdomains_json END,
+        status = CASE WHEN status = '' THEN ? ELSE status END,
+        rating = CASE WHEN rating = '' THEN ? ELSE rating END,
+        last_updated_at = COALESCE(last_updated_at, ?),
+        document_path = CASE WHEN document_path = '' THEN ? ELSE document_path END
+      WHERE normalized_name = ?
+    `);
+    const findPerson = this.database.prepare(
+      `SELECT id, types_json, organization, status, rating, document_path
+       FROM people WHERE normalized_name = ?`
+    );
+    const insertPerson = this.database.prepare(`
+      INSERT INTO people (
+        id, name, normalized_name, types_json, organization, status, rating,
+        last_contact_at, cities_json, document_path, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '[]', ?, ?, ?)
+    `);
+    const enrichPerson = this.database.prepare(`
+      UPDATE people SET
+        types_json = CASE WHEN types_json = '[]' THEN ? ELSE types_json END,
+        organization = CASE WHEN organization = '' THEN ? ELSE organization END,
+        status = CASE WHEN status = '' THEN ? ELSE status END,
+        rating = CASE WHEN rating = '' THEN ? ELSE rating END,
+        document_path = CASE WHEN document_path = '' THEN ? ELSE document_path END
+      WHERE normalized_name = ?
+    `);
+    const now = Date.now();
+
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const project of discovered.projects) {
+        const existing = findProject.get(project.normalizedName);
+        if (existing) {
+          const shouldLink = !existing.document_path && project.documentPath;
+          enrichProject.run(
+            project.domain,
+            JSON.stringify(project.subdomains),
+            project.status,
+            project.rating,
+            project.lastUpdatedAt,
+            project.documentPath,
+            project.normalizedName
+          );
+          if (shouldLink) result.projects.linked += 1;
+          continue;
+        }
+        insertProject.run(
+          project.id,
+          project.name,
+          project.normalizedName,
+          project.domain,
+          JSON.stringify(project.subdomains),
+          project.status,
+          project.rating,
+          project.lastUpdatedAt,
+          project.documentPath,
+          project.createdAt,
+          now
+        );
+        result.projects.created += 1;
+      }
+
+      for (const person of discovered.people) {
+        const existing = findPerson.get(person.normalizedName);
+        if (existing) {
+          const shouldLink = !existing.document_path && person.documentPath;
+          enrichPerson.run(
+            JSON.stringify(person.types),
+            person.organization,
+            person.status,
+            person.rating,
+            person.documentPath,
+            person.normalizedName
+          );
+          if (shouldLink) result.people.linked += 1;
+          continue;
+        }
+        insertPerson.run(
+          person.id,
+          person.name,
+          person.normalizedName,
+          JSON.stringify(person.types),
+          person.organization,
+          person.status,
+          person.rating,
+          person.documentPath,
+          person.createdAt,
+          now
+        );
+        result.people.created += 1;
+      }
+
+      this.database.prepare(`
+        INSERT INTO repository_meta (key, value, updated_at)
+        VALUES ('workspace_index', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+      `).run(JSON.stringify(result), now);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return result;
   }
 
   listProjects() {
@@ -356,5 +677,7 @@ class LocalDomiRepository {
 module.exports = {
   LOCAL_REPOSITORY_SCHEMA,
   LocalDomiRepository,
+  normalizedName,
+  scanWorkspaceEntities,
   resolveHomePath
 };
