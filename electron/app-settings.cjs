@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const {
   documentLibraryLocation,
@@ -224,10 +225,16 @@ function validateDomiConfig(settings) {
 }
 
 class AppSettingsService {
-  constructor({ stateStore, safeStorage, domiConfigPath }) {
+  constructor({
+    stateStore,
+    safeStorage,
+    domiConfigPath,
+    developmentFallbackConfigPath = ""
+  }) {
     this.stateStore = stateStore;
     this.safeStorage = safeStorage;
     this.domiConfigPath = domiConfigPath;
+    this.developmentFallbackConfigPath = developmentFallbackConfigPath;
     this.localDatabasePath = domiConfigPath
       ? path.join(path.dirname(domiConfigPath), "domi-repository.sqlite3")
       : "";
@@ -248,10 +255,10 @@ class AppSettingsService {
     fs.chmodSync(this.domiConfigPath, 0o600);
   }
 
-  readDomiConfig() {
-    if (!this.domiConfigPath || !fs.existsSync(this.domiConfigPath)) return {};
+  readDomiConfigFile(configPath) {
+    if (!configPath || !fs.existsSync(configPath)) return {};
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.domiConfigPath, "utf8"));
+      const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
       const config = {};
       for (const key of domiConfigKeys) {
         if (typeof parsed[key] === "string") config[key] = parsed[key].trim();
@@ -263,6 +270,72 @@ class AppSettingsService {
     } catch {
       return {};
     }
+  }
+
+  readDomiConfig() {
+    return this.readDomiConfigFile(this.domiConfigPath);
+  }
+
+  bootstrapDevelopmentLocalRepository() {
+    if (!this.developmentFallbackConfigPath) {
+      return { applied: false, reason: "disabled" };
+    }
+    const stored = this.stateStore.loadAppSettings(SETTINGS_KEY, defaultSettings);
+    const localConfig = this.readDomiConfig();
+    const currentRepository = String(
+      stored.value?.localRepositoryDir || localConfig.localRepositoryDir || ""
+    ).trim();
+    if (stored.value?.onboardingComplete || currentRepository) {
+      return { applied: false, reason: "already-configured" };
+    }
+
+    const productionConfig = this.readDomiConfigFile(
+      this.developmentFallbackConfigPath
+    );
+    const repositoryDir = String(productionConfig.localRepositoryDir || "").trim();
+    const resolvedRepositoryDir = repositoryDir.startsWith("~/")
+      ? path.join(os.homedir(), repositoryDir.slice(2))
+      : repositoryDir;
+    if (
+      productionConfig.storageBackend !== "local"
+      || !repositoryDir
+      || !path.isAbsolute(resolvedRepositoryDir)
+      || !fs.existsSync(resolvedRepositoryDir)
+    ) {
+      return { applied: false, reason: "no-local-production-repository" };
+    }
+
+    const settings = normalizeSettings({
+      ...defaultSettings,
+      ...(stored.updatedAt ? stored.value : {}),
+      onboardingComplete: true,
+      storageBackend: "local",
+      localRepositoryDir: repositoryDir,
+      // Development keeps its own SQLite index. Only Markdown and material
+      // directories are shared, so production and development never contend
+      // over the same database file.
+      localDatabasePath: this.localDatabasePath,
+      plaudConnectionMode: "disabled",
+      projectBaseToken: "",
+      projectTableId: "",
+      peopleBaseToken: "",
+      peopleTableId: "",
+      radarBaseToken: "",
+      radarTableId: "",
+      wikiSpaceId: "",
+      taskDocumentUrl: "",
+      outlookCalendarEmail: "",
+      outlookCalendarEmailVerifiedAt: 0,
+      outlookCalendarRecipients: ""
+    });
+    validateDomiConfig(settings);
+    const saved = this.stateStore.saveAppSettings(SETTINGS_KEY, settings);
+    this.writeDomiConfig(settings);
+    return {
+      applied: true,
+      settings,
+      updatedAt: saved.updatedAt
+    };
   }
 
   load() {

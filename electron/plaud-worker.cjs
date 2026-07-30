@@ -41,18 +41,6 @@ function safeRemoteFile(file) {
   };
 }
 
-function timestampMs(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
-  return numeric < 1e12 ? numeric * 1000 : numeric;
-}
-
-function compareRemoteFiles(left, right) {
-  const leftTime = timestampMs(left.createdAt) || timestampMs(left.editedAt);
-  const rightTime = timestampMs(right.createdAt) || timestampMs(right.editedAt);
-  return rightTime - leftTime || left.fileName.localeCompare(right.fileName, "zh-CN");
-}
-
 function isTransientNavigationError(error) {
   return /page\.goto|connectOverCDP|WebSocket error|ECONNREFUSED|ERR_CONNECTION_(?:CLOSED|RESET|REFUSED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|socket hang up/i
     .test(error instanceof Error ? error.message : String(error));
@@ -86,17 +74,30 @@ async function withClient(pluginRoot, callback) {
   }
 }
 
-async function list(pluginRoot, requestedLimit) {
+async function list(pluginRoot, requestedLimit, requestedOffset) {
   const visibleLimit = Math.min(Math.max(Number(requestedLimit) || 50, 1), 100);
+  const offset = Math.min(Math.max(Number(requestedOffset) || 0, 0), 10_000);
   return withClient(pluginRoot, async (client) => {
-    const files = await client.listFiles({ limit: 100 });
+    // The first page keeps the old 100-record pending-count coverage while
+    // exposing only one 50-record screen. Later pages fetch one look-ahead
+    // record so the renderer can stop precisely at the end of the account.
+    const fetchLimit = offset === 0
+      ? Math.max(100, visibleLimit + 1)
+      : visibleLimit + 1;
+    const files = await client.listFiles({ limit: fetchLimit, skip: offset });
+    // Preserve the server's edit_time ordering. Re-sorting the first 100-item
+    // pending-count window before slicing made items from server page two leak
+    // into page one, which then produced duplicates on the next request.
     const normalized = files
       .map(safeRemoteFile)
-      .filter((item) => item.fileId)
-      .sort(compareRemoteFiles);
+      .filter((item) => item.fileId);
     return {
       ok: true,
       pendingCount: normalized.filter((item) => !item.hasTranscript && !item.hasSummary).length,
+      offset,
+      limit: visibleLimit,
+      hasMore: normalized.length > visibleLimit,
+      nextOffset: offset + Math.min(normalized.length, visibleLimit),
       items: normalized.slice(0, visibleLimit)
     };
   });
@@ -153,7 +154,7 @@ async function moveToTrash(pluginRoot, fileId) {
 
 async function main() {
   const [, , command, pluginRoot, ...args] = process.argv;
-  if (command === "list") return list(pluginRoot, args[0]);
+  if (command === "list") return list(pluginRoot, args[0], args[1]);
   if (command === "rename") return rename(pluginRoot, args[0], args[1]);
   if (command === "trash") return moveToTrash(pluginRoot, args[0]);
   throw new Error(`未知的 PLAUD worker 命令：${command || "(空)"}`);
@@ -169,5 +170,6 @@ if (require.main === module) {
 
 module.exports = {
   isTransientNavigationError,
+  list,
   safeError
 };

@@ -56,6 +56,7 @@ import {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
   ReactNode,
+  SyntheticEvent,
   Suspense,
   lazy,
   useDeferredValue,
@@ -79,6 +80,8 @@ import {
   CodexEventItem,
   CodexUsage,
   DomiPerson,
+  DomiDatabaseSnapshot,
+  DomiDatabaseUpdateRequest,
   DomiNewsItem,
   DomiPlaudItem,
   DomiPlaudSnapshot,
@@ -116,7 +119,284 @@ const SetupCenter = lazy(() => import("./SetupCenter"));
 const MessageContent = lazy(() => import("./MessageContent"));
 
 type Role = "user" | "assistant" | "system";
-type WorkspaceView = "conversation" | "tasks" | "news" | "documents";
+type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents";
+type DatabaseEntityType = "project" | "person" | "news";
+type DatabaseSortKey = "updated" | "name" | "created";
+type DatabaseSortDirection = "asc" | "desc";
+
+type DatabaseDraft = {
+  entityType: DatabaseEntityType;
+  recordId: string;
+  expectedUpdatedAt: number;
+  name: string;
+  title: string;
+  domain: string;
+  subdomains: string;
+  status: string;
+  rating: string;
+  notes: string;
+  cities: string;
+  investors: string;
+  financingHistory: string;
+  latestValuationUsd100m: string;
+  types: string;
+  organization: string;
+  lastContact: string;
+  domains: string;
+  newsTypes: string;
+  publishedAt: string;
+  summary: string;
+  investmentMeaning: string;
+  url: string;
+  source: string;
+  companies: string;
+  institutions: string;
+  importance: string;
+  confidence: string;
+  evidenceStatus: string;
+  action: string;
+  worthFollowing: boolean;
+};
+
+type DatabaseExpandedCell = {
+  entityType: DatabaseEntityType;
+  recordId: string;
+  field: keyof DatabaseDraft;
+  label: string;
+  left: number;
+  top: number;
+  width: number;
+};
+
+const DATABASE_FIELD_LABELS: Partial<Record<keyof DatabaseDraft, string>> = {
+  name: "名称",
+  title: "标题",
+  domain: "领域",
+  domains: "领域",
+  subdomains: "子领域",
+  status: "进展状态",
+  rating: "评级",
+  notes: "Notes",
+  cities: "城市",
+  investors: "投资机构",
+  financingHistory: "历史融资",
+  latestValuationUsd100m: "最新估值",
+  types: "类型",
+  organization: "所属组织与身份",
+  lastContact: "最后联系",
+  newsTypes: "信息类型",
+  publishedAt: "发布时间",
+  summary: "核心事实",
+  source: "来源",
+  importance: "重要性",
+  confidence: "置信度",
+  evidenceStatus: "证据状态",
+  action: "建议动作"
+};
+
+const DATABASE_EXPANDED_TEXT_FIELDS = new Set<keyof DatabaseDraft>([
+  "name",
+  "title",
+  "notes",
+  "organization",
+  "financingHistory",
+  "summary",
+  "action"
+]);
+
+function splitDatabaseList(value: string) {
+  return [...new Set(
+    String(value || "")
+      .split(/[,，、;\n]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )];
+}
+
+function localDateInput(value: number | null | undefined, includeTime = false) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  const date = new Date(timestamp);
+  const offset = date.getTimezoneOffset() * 60_000;
+  const local = new Date(date.getTime() - offset).toISOString();
+  return includeTime ? local.slice(0, 16) : local.slice(0, 10);
+}
+
+function databaseDraftForRecord(
+  entityType: DatabaseEntityType,
+  record: DomiProject | DomiPerson | DomiNewsItem
+): DatabaseDraft {
+  const blank: DatabaseDraft = {
+    entityType,
+    recordId: record.recordId,
+    expectedUpdatedAt: Number(record.updatedAt) || 0,
+    name: "",
+    title: "",
+    domain: "",
+    subdomains: "",
+    status: "",
+    rating: "",
+    notes: "",
+    cities: "",
+    investors: "",
+    financingHistory: "",
+    latestValuationUsd100m: "",
+    types: "",
+    organization: "",
+    lastContact: "",
+    domains: "",
+    newsTypes: "",
+    publishedAt: "",
+    summary: "",
+    investmentMeaning: "",
+    url: "",
+    source: "",
+    companies: "",
+    institutions: "",
+    importance: "",
+    confidence: "",
+    evidenceStatus: "",
+    action: "",
+    worthFollowing: true
+  };
+  if (entityType === "project") {
+    const project = record as DomiProject;
+    return {
+      ...blank,
+      name: project.name,
+      domain: project.domain,
+      subdomains: project.subdomains.join("、"),
+      status: project.status,
+      rating: project.rating,
+      notes: project.notes || "",
+      cities: (project.cities || []).join("、"),
+      investors: (project.investors || []).join("、"),
+      financingHistory: project.financingHistory || "",
+      latestValuationUsd100m: project.latestValuationUsd100m === null
+        || project.latestValuationUsd100m === undefined
+        ? ""
+        : String(project.latestValuationUsd100m)
+    };
+  }
+  if (entityType === "person") {
+    const person = record as DomiPerson;
+    return {
+      ...blank,
+      name: person.name,
+      types: person.types.join("、"),
+      organization: person.organization,
+      status: person.status,
+      rating: person.rating,
+      lastContact: localDateInput(person.lastContact),
+      cities: person.cities.join("、")
+    };
+  }
+  const item = record as DomiNewsItem;
+  return {
+    ...blank,
+    title: item.title,
+    domains: item.domains.join("、"),
+    subdomains: item.subdomains.join("、"),
+    newsTypes: item.types.join("、"),
+    publishedAt: localDateInput(item.publishedAt, true),
+    summary: item.summary,
+    investmentMeaning: item.investmentMeaning,
+    url: item.url,
+    source: item.source,
+    companies: item.companies,
+    institutions: item.institutions,
+    importance: String(item.importance),
+    confidence: String(item.confidence),
+    evidenceStatus: item.evidenceStatus,
+    action: item.action,
+    worthFollowing: item.worthFollowing !== false
+  };
+}
+
+function databaseRecords(
+  snapshot: DomiDatabaseSnapshot | null,
+  entityType: DatabaseEntityType
+): Array<DomiProject | DomiPerson | DomiNewsItem> {
+  if (!snapshot) return [];
+  if (entityType === "project") return snapshot.projects || [];
+  if (entityType === "person") return snapshot.people || [];
+  return snapshot.news || [];
+}
+
+function replaceDatabaseSnapshotRecord(
+  snapshot: DomiDatabaseSnapshot | null,
+  entityType: DatabaseEntityType,
+  record: DomiProject | DomiPerson | DomiNewsItem
+) {
+  if (!snapshot) return snapshot;
+  const collectionKey = entityType === "project"
+    ? "projects"
+    : entityType === "person"
+      ? "people"
+      : "news";
+  const current = snapshot[collectionKey] as Array<DomiProject | DomiPerson | DomiNewsItem>;
+  const next = current.some((item) => item.recordId === record.recordId)
+    ? current.map((item) => item.recordId === record.recordId ? record : item)
+    : [record, ...current];
+  return {
+    ...snapshot,
+    loadedAt: Date.now(),
+    [collectionKey]: next
+  } as DomiDatabaseSnapshot;
+}
+
+function databaseRecordTitle(
+  entityType: DatabaseEntityType,
+  record: DomiProject | DomiPerson | DomiNewsItem
+) {
+  return entityType === "news"
+    ? (record as DomiNewsItem).title
+    : (record as DomiProject | DomiPerson).name;
+}
+
+function databaseDate(value: number | null | undefined, includeTime = false) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "—";
+  const date = new Date(timestamp);
+  return includeTime
+    ? date.toLocaleString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      })
+    : date.toLocaleDateString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      });
+}
+
+function databasePillTone(value: string) {
+  const text = String(value || "");
+  if (["S", "A"].includes(text)) return "blue";
+  if (["深度跟踪", "已联系", "已投", "官方确认"].includes(text)) return "green";
+  if (["Miss", "放弃", "未联系"].includes(text)) return "red";
+  if (["待交流", "待联系", "待核验"].includes(text)) return "indigo";
+  const tones = ["sand", "purple", "cyan", "pink", "blue"];
+  let checksum = 0;
+  for (const character of text) checksum += character.codePointAt(0) || 0;
+  return tones[checksum % tones.length];
+}
+
+function databasePills(values: string[], empty = "—") {
+  const items = [...new Set(values.map(String).map((item) => item.trim()).filter(Boolean))];
+  if (!items.length) return <span className="database-grid-empty-value">{empty}</span>;
+  return (
+    <span className="database-pill-list">
+      {items.map((item) => (
+        <span className={`database-pill ${databasePillTone(item)}`} key={item}>{item}</span>
+      ))}
+    </span>
+  );
+}
 
 type CalendarRecipientOption = {
   name: string;
@@ -157,6 +437,28 @@ function filterDocumentLibraryNodes(nodes: DocumentLibraryNode[], rawQuery: stri
     return null;
   };
   return nodes.map(filter).filter((node): node is DocumentLibraryNode => Boolean(node));
+}
+
+function documentLibrarySearchMatches(
+  nodes: DocumentLibraryNode[],
+  rawQuery: string,
+  rootPath: string
+) {
+  const query = rawQuery.trim().toLocaleLowerCase("zh-CN");
+  if (!query) return [];
+  const matches: Array<{ node: DocumentLibraryNode; parentPath: string }> = [];
+  const visit = (items: DocumentLibraryNode[], parentPath: string) => {
+    for (const node of items) {
+      if (node.name.toLocaleLowerCase("zh-CN").includes(query)) {
+        matches.push({ node, parentPath });
+      }
+      if (node.kind === "folder" && node.children?.length) {
+        visit(node.children, node.path);
+      }
+    }
+  };
+  visit(nodes, rootPath);
+  return matches;
 }
 
 type Message = {
@@ -1039,6 +1341,21 @@ function App() {
   const [domiSyncing, setDomiSyncing] = useState(false);
   const [domiError, setDomiError] = useState("");
   const [domiQuery, setDomiQuery] = useState("");
+  const [databaseSnapshot, setDatabaseSnapshot] = useState<DomiDatabaseSnapshot | null>(null);
+  const [databaseEntityType, setDatabaseEntityType] = useState<DatabaseEntityType>("project");
+  const [databaseSelectedId, setDatabaseSelectedId] = useState("");
+  const [databaseEditingId, setDatabaseEditingId] = useState("");
+  const [databaseDraft, setDatabaseDraft] = useState<DatabaseDraft | null>(null);
+  const [databaseExpandedCell, setDatabaseExpandedCell] = useState<DatabaseExpandedCell | null>(null);
+  const [databaseQuery, setDatabaseQuery] = useState("");
+  const [databaseStatusFilter, setDatabaseStatusFilter] = useState("全部");
+  const [databaseSortKey, setDatabaseSortKey] = useState<DatabaseSortKey>("updated");
+  const [databaseSortDirection, setDatabaseSortDirection] = useState<DatabaseSortDirection>("desc");
+  const [databaseVisibleLimit, setDatabaseVisibleLimit] = useState(100);
+  const [databaseLoading, setDatabaseLoading] = useState(false);
+  const [databaseSaving, setDatabaseSaving] = useState(false);
+  const [databaseError, setDatabaseError] = useState("");
+  const [databaseNotice, setDatabaseNotice] = useState("");
   const [weeklyNews, setWeeklyNews] = useState<DomiWeeklyNewsSnapshot | null>(null);
   const [weeklyNewsLoading, setWeeklyNewsLoading] = useState(false);
   const [weeklyNewsScanning, setWeeklyNewsScanning] = useState(false);
@@ -1069,6 +1386,7 @@ function App() {
   const [documentLibraryLoading, setDocumentLibraryLoading] = useState(false);
   const [documentLibraryError, setDocumentLibraryError] = useState("");
   const [documentLibraryQuery, setDocumentLibraryQuery] = useState("");
+  const [documentLibrarySearchActivePath, setDocumentLibrarySearchActivePath] = useState("");
   const [documentLibraryExpandedPaths, setDocumentLibraryExpandedPaths] = useState<Set<string>>(
     () => new Set()
   );
@@ -1081,6 +1399,7 @@ function App() {
   const [documentLibraryCreateError, setDocumentLibraryCreateError] = useState("");
   const [plaudSnapshot, setPlaudSnapshot] = useState<DomiPlaudSnapshot | null>(null);
   const [plaudLoading, setPlaudLoading] = useState(false);
+  const [plaudLoadingMore, setPlaudLoadingMore] = useState(false);
   const [plaudSyncing, setPlaudSyncing] = useState(false);
   const [plaudError, setPlaudError] = useState("");
   const [plaudNotice, setPlaudNotice] = useState("");
@@ -1170,6 +1489,7 @@ function App() {
   const localSearchRefreshAtRef = useRef(0);
   const documentSearchRefreshAtRef = useRef(0);
   const documentLibraryRequestRef = useRef(0);
+  const documentLibraryTreeRef = useRef<HTMLDivElement>(null);
   const markdownOpenRequestRef = useRef(0);
   const markdownSaveRequestRef = useRef(0);
   const markdownRenameRequestRef = useRef(0);
@@ -1178,6 +1498,10 @@ function App() {
   const pdfOpenRequestRef = useRef(0);
   const markdownDraftRef = useRef(markdownDraft);
   const markdownDocumentRef = useRef(markdownDocument);
+  const databaseDraftRef = useRef(databaseDraft);
+  const databaseAutoSaveTimerRef = useRef<number | null>(null);
+  const databaseAutoSaveQueuedRef = useRef<DatabaseDraft | null>(null);
+  const databaseAutoSaveInFlightRef = useRef(false);
   const plaudListPromiseRef = useRef<Promise<DomiPlaudSnapshot | null> | null>(null);
   const plaudSyncPromiseRef = useRef<Promise<DomiPlaudSyncResult | null> | null>(null);
   const plaudSnapshotRevisionRef = useRef(0);
@@ -1204,6 +1528,7 @@ function App() {
   threadsRef.current = threads;
   markdownDraftRef.current = markdownDraft;
   markdownDocumentRef.current = markdownDocument;
+  databaseDraftRef.current = databaseDraft;
   weeklyNewsSnapshotRef.current = weeklyNews;
   weeklyNewsPageRef.current = weeklyNewsPage;
   weeklyNewsLoadingRef.current = weeklyNewsLoading;
@@ -1376,6 +1701,14 @@ function App() {
   const activeRightPanelWidth = documentPanelActive ? documentPanelWidth : contextPanelWidth;
   const filteredDocumentLibraryNodes = useMemo(
     () => filterDocumentLibraryNodes(documentLibrary?.nodes || [], documentLibraryQuery),
+    [documentLibrary, documentLibraryQuery]
+  );
+  const searchableDocumentLibraryNodes = useMemo(
+    () => documentLibrarySearchMatches(
+      documentLibrary?.nodes || [],
+      documentLibraryQuery,
+      documentLibrary?.rootPath || ""
+    ),
     [documentLibrary, documentLibraryQuery]
   );
   const selectedDocumentLibraryPath = markdownDocument?.path || pdfDocument?.path || "";
@@ -1733,6 +2066,7 @@ function App() {
   );
 
   const deferredDomiQuery = useDeferredValue(domiQuery);
+  const deferredDatabaseQuery = useDeferredValue(databaseQuery);
   const domiSearchResults = useMemo(() => {
     const query = deferredDomiQuery.trim().toLocaleLowerCase("zh-CN");
     if (!query || !domiSnapshot) return { projects: [], people: [] };
@@ -1802,8 +2136,6 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const pause = (delayMs: number) =>
-      new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
 
     void (async () => {
       const cached = await workbench.loadDomiCache();
@@ -1844,13 +2176,11 @@ function App() {
           return;
         }
 
-        await refreshDomi();
-        if (cancelled) return;
-        await pause(350);
-        await refreshDomiTaskBoard({ silent: Boolean(cachedTasks.tasks.length) });
-        if (cancelled) return;
-        await pause(350);
-        await refreshWeeklyNews(0, { silent: hasCachedNews, preserveView: true });
+        await Promise.allSettled([
+          refreshDomi(),
+          refreshDomiTaskBoard({ silent: Boolean(cachedTasks.tasks.length) }),
+          refreshWeeklyNews(0, { silent: hasCachedNews, preserveView: true })
+        ]);
       } finally {
         if (!cancelled) setWeeklyNewsAutomationReady(true);
       }
@@ -1873,6 +2203,7 @@ function App() {
       setPlaudError("");
       setPlaudNotice("");
       setPlaudLoading(false);
+      setPlaudLoadingMore(false);
       setPlaudSyncing(false);
       return;
     }
@@ -2378,6 +2709,337 @@ function App() {
     }
   }
 
+  function selectDatabaseRecord(
+    entityType: DatabaseEntityType,
+    recordId: string,
+    snapshot = databaseSnapshot
+  ) {
+    const record = databaseRecords(snapshot, entityType)
+      .find((item) => item.recordId === recordId);
+    setDatabaseEntityType(entityType);
+    setDatabaseSelectedId(record?.recordId || "");
+    setDatabaseDraft(record ? databaseDraftForRecord(entityType, record) : null);
+    setDatabaseExpandedCell(null);
+    setDatabaseError("");
+    setDatabaseNotice("");
+  }
+
+  function beginDatabaseRecordEdit(
+    entityType: DatabaseEntityType,
+    recordId: string,
+    snapshot = databaseSnapshot
+  ) {
+    selectDatabaseRecord(entityType, recordId, snapshot);
+    setDatabaseEditingId(recordId);
+  }
+
+  function beginDatabaseCellEdit(
+    entityType: DatabaseEntityType,
+    recordId: string,
+    cell: HTMLTableCellElement
+  ) {
+    const field = cell.dataset.databaseField as keyof DatabaseDraft | undefined;
+    const content = cell.querySelector<HTMLElement>(
+      ".database-grid-clamp, strong, .database-pill-list"
+    );
+    const truncated = Boolean(content) && (
+      (content?.scrollWidth || 0) > (content?.clientWidth || 0) + 1
+      || (content?.scrollHeight || 0) > (content?.clientHeight || 0) + 1
+    );
+    const shouldExpand = Boolean(field) && (
+      DATABASE_EXPANDED_TEXT_FIELDS.has(field as keyof DatabaseDraft)
+      || truncated
+    );
+    const alreadyEditing = databaseEditingId === recordId
+      && databaseDraft?.entityType === entityType;
+    if (!alreadyEditing) beginDatabaseRecordEdit(entityType, recordId);
+    if (field && shouldExpand) {
+      const rect = cell.getBoundingClientRect();
+      const width = Math.min(480, Math.max(340, rect.width * 1.8));
+      const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+      const estimatedHeight = 210;
+      const top = rect.top + estimatedHeight > window.innerHeight - 12
+        ? Math.max(12, rect.bottom - estimatedHeight)
+        : rect.top;
+      setDatabaseExpandedCell({
+        entityType,
+        recordId,
+        field,
+        label: DATABASE_FIELD_LABELS[field] || "完整内容",
+        left,
+        top,
+        width
+      });
+      return;
+    }
+    setDatabaseExpandedCell(null);
+    window.setTimeout(() => {
+      const editor = cell.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+        "input, select, textarea"
+      );
+      if (!editor) return;
+      editor.focus({ preventScroll: true });
+      if (editor instanceof HTMLTextAreaElement || (editor instanceof HTMLInputElement && editor.type === "text")) {
+        editor.select();
+      }
+    }, 0);
+  }
+
+  function reopenExpandedDatabaseCell(
+    event: SyntheticEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) {
+    event.stopPropagation();
+    const field = event.currentTarget
+      .closest<HTMLTableCellElement>("td[data-database-field]")
+      ?.dataset.databaseField as keyof DatabaseDraft | undefined;
+    if (!field || !DATABASE_EXPANDED_TEXT_FIELDS.has(field)) return;
+    const cell = event.currentTarget.closest<HTMLTableCellElement>("td");
+    const draft = databaseDraftRef.current;
+    if (!cell || !draft) return;
+    beginDatabaseCellEdit(draft.entityType, draft.recordId, cell);
+  }
+
+  function handleDatabaseRowClick(
+    event: SyntheticEvent<HTMLTableRowElement>,
+    entityType: DatabaseEntityType,
+    recordId: string
+  ) {
+    const target = event.target as HTMLElement;
+    if (target.closest("button, input, select, textarea, a")) return;
+    const editableCell = target.closest<HTMLTableCellElement>("td[data-database-editable]");
+    if (editableCell) {
+      beginDatabaseCellEdit(entityType, recordId, editableCell);
+      return;
+    }
+    selectDatabaseRecord(entityType, recordId);
+  }
+
+  function handleDatabaseRowKeyDown(
+    event: ReactKeyboardEvent<HTMLTableRowElement>,
+    entityType: DatabaseEntityType,
+    recordId: string
+  ) {
+    if (databaseEditingId !== recordId || databaseDraft?.entityType !== entityType) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      finishDatabaseRecordEdit(entityType, recordId);
+      return;
+    }
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      void flushDatabaseAutoSave();
+    }
+  }
+
+  function finishDatabaseRecordEdit(
+    _entityType: DatabaseEntityType,
+    _recordId: string
+  ) {
+    void flushDatabaseAutoSave();
+    setDatabaseEditingId("");
+    setDatabaseExpandedCell(null);
+  }
+
+  async function refreshDatabase(options: { preserveSelection?: boolean } = {}) {
+    if (databaseLoading) return null;
+    setDatabaseLoading(true);
+    setDatabaseError("");
+    try {
+      const result = await workbench.listDomiDatabase();
+      setDatabaseSnapshot(result);
+      if (!result.ok) {
+        setDatabaseError(result.error || "资料库读取失败。");
+        return result;
+      }
+      const records = databaseRecords(result, databaseEntityType);
+      const preferredId = options.preserveSelection ? databaseSelectedId : "";
+      const selected = records.find((item) => item.recordId === preferredId) || records[0];
+      setDatabaseSelectedId(selected?.recordId || "");
+      setDatabaseEditingId("");
+      setDatabaseExpandedCell(null);
+      setDatabaseVisibleLimit(100);
+      setDatabaseDraft(
+        selected ? databaseDraftForRecord(databaseEntityType, selected) : null
+      );
+      return result;
+    } catch (error) {
+      setDatabaseError(error instanceof Error ? error.message : String(error));
+      return null;
+    } finally {
+      setDatabaseLoading(false);
+    }
+  }
+
+  function switchDatabaseEntity(entityType: DatabaseEntityType) {
+    const records = databaseRecords(databaseSnapshot, entityType);
+    const selected = records[0];
+    setDatabaseEntityType(entityType);
+    setDatabaseQuery("");
+    setDatabaseStatusFilter("全部");
+    setDatabaseSortKey("updated");
+    setDatabaseSortDirection("desc");
+    setDatabaseVisibleLimit(100);
+    setDatabaseSelectedId(selected?.recordId || "");
+    setDatabaseEditingId("");
+    setDatabaseExpandedCell(null);
+    setDatabaseDraft(selected ? databaseDraftForRecord(entityType, selected) : null);
+    setDatabaseError("");
+    setDatabaseNotice("");
+  }
+
+  function updateDatabaseDraft<K extends keyof DatabaseDraft>(
+    key: K,
+    value: DatabaseDraft[K]
+  ) {
+    const current = databaseDraftRef.current;
+    if (!current) return;
+    const next = { ...current, [key]: value };
+    databaseDraftRef.current = next;
+    setDatabaseDraft(next);
+    scheduleDatabaseAutoSave(next);
+    setDatabaseError("");
+    setDatabaseNotice("");
+  }
+
+  function scheduleDatabaseAutoSave(draft: DatabaseDraft, delay = 650) {
+    databaseAutoSaveQueuedRef.current = draft;
+    if (databaseAutoSaveTimerRef.current !== null) {
+      window.clearTimeout(databaseAutoSaveTimerRef.current);
+    }
+    databaseAutoSaveTimerRef.current = window.setTimeout(() => {
+      databaseAutoSaveTimerRef.current = null;
+      void flushDatabaseAutoSave();
+    }, delay);
+  }
+
+  async function flushDatabaseAutoSave() {
+    if (databaseAutoSaveTimerRef.current !== null) {
+      window.clearTimeout(databaseAutoSaveTimerRef.current);
+      databaseAutoSaveTimerRef.current = null;
+    }
+    if (databaseAutoSaveInFlightRef.current) return;
+    const draft = databaseAutoSaveQueuedRef.current;
+    if (!draft) return;
+    databaseAutoSaveQueuedRef.current = null;
+    databaseAutoSaveInFlightRef.current = true;
+    let request: DomiDatabaseUpdateRequest;
+    if (draft.entityType === "project") {
+      const valuation = draft.latestValuationUsd100m.trim();
+      request = {
+        entityType: "project",
+        record: {
+          recordId: draft.recordId,
+          expectedUpdatedAt: draft.expectedUpdatedAt,
+          name: draft.name.trim(),
+          domain: draft.domain.trim(),
+          subdomains: splitDatabaseList(draft.subdomains),
+          status: draft.status,
+          rating: draft.rating,
+          notes: draft.notes,
+          cities: splitDatabaseList(draft.cities),
+          investors: splitDatabaseList(draft.investors),
+          financingHistory: draft.financingHistory,
+          latestValuationUsd100m: valuation ? Number(valuation) : null
+        }
+      };
+    } else if (draft.entityType === "person") {
+      request = {
+        entityType: "person",
+        record: {
+          recordId: draft.recordId,
+          expectedUpdatedAt: draft.expectedUpdatedAt,
+          name: draft.name.trim(),
+          types: splitDatabaseList(draft.types),
+          organization: draft.organization,
+          status: draft.status,
+          rating: draft.rating,
+          lastContact: draft.lastContact
+            ? new Date(`${draft.lastContact}T00:00:00`).getTime()
+            : null,
+          cities: splitDatabaseList(draft.cities)
+        }
+      };
+    } else {
+      request = {
+        entityType: "news",
+        record: {
+          recordId: draft.recordId,
+          expectedUpdatedAt: draft.expectedUpdatedAt,
+          title: draft.title.trim(),
+          domains: splitDatabaseList(draft.domains),
+          subdomains: splitDatabaseList(draft.subdomains),
+          types: splitDatabaseList(draft.newsTypes),
+          publishedAt: new Date(draft.publishedAt).getTime(),
+          summary: draft.summary,
+          investmentMeaning: draft.investmentMeaning,
+          url: draft.url.trim(),
+          source: draft.source,
+          companies: draft.companies,
+          institutions: draft.institutions,
+          importance: Number(draft.importance),
+          confidence: Number(draft.confidence),
+          evidenceStatus: draft.evidenceStatus,
+          action: draft.action,
+          worthFollowing: draft.worthFollowing
+        }
+      };
+    }
+    setDatabaseSaving(true);
+    setDatabaseError("");
+    setDatabaseNotice("");
+    try {
+      const result = await workbench.updateDomiDatabaseRecord(request);
+      if (!result.ok) {
+        setDatabaseError(result.error || "资料库记录保存失败。");
+        return;
+      }
+      if (result.snapshot) setDomiSnapshot(result.snapshot);
+      const record = result.record;
+      if (record) {
+        setDatabaseSnapshot((current) =>
+          replaceDatabaseSnapshotRecord(current, draft.entityType, record)
+        );
+        const savedDraft = databaseDraftForRecord(draft.entityType, record);
+        const queuedAfterSave = databaseAutoSaveQueuedRef.current as DatabaseDraft | null;
+        if (
+          queuedAfterSave?.entityType === draft.entityType
+          && queuedAfterSave.recordId === record.recordId
+        ) {
+          databaseAutoSaveQueuedRef.current = {
+            ...queuedAfterSave,
+            expectedUpdatedAt: savedDraft.expectedUpdatedAt
+          };
+        }
+        if (
+          databaseDraftRef.current?.entityType === draft.entityType
+          && databaseDraftRef.current.recordId === record.recordId
+        ) {
+          setDatabaseSelectedId(record.recordId);
+        }
+        setDatabaseDraft((current) => {
+          if (current?.entityType !== draft.entityType || current.recordId !== record.recordId) {
+            return current;
+          }
+          const next = { ...current, expectedUpdatedAt: savedDraft.expectedUpdatedAt };
+          databaseDraftRef.current = next;
+          return next;
+        });
+      }
+      setDatabaseNotice("已自动保存，并同步更新数据库、Markdown 和资料目录。");
+      if (draft.entityType === "news") {
+        void refreshWeeklyNews(weeklyNewsPage, { silent: true });
+      }
+    } catch (error) {
+      setDatabaseError(error instanceof Error ? error.message : String(error));
+    } finally {
+      databaseAutoSaveInFlightRef.current = false;
+      setDatabaseSaving(false);
+      if (databaseAutoSaveQueuedRef.current) {
+        scheduleDatabaseAutoSave(databaseAutoSaveQueuedRef.current, 180);
+      }
+    }
+  }
+
   function refreshLocalIndexForSearch() {
     if (appSettingsRef.current?.storageBackend !== "local" || domiSyncing) return;
     const now = Date.now();
@@ -2813,7 +3475,7 @@ function App() {
     setPlaudError("");
     const request = (async (): Promise<DomiPlaudSnapshot | null> => {
       try {
-        const result = await workbench.listPlaud({ fresh });
+        const result = await workbench.listPlaud({ fresh, offset: 0, limit: 50 });
         if (revision === plaudSnapshotRevisionRef.current) {
           setPlaudSnapshot(result);
           if (!result.ok) setPlaudError(result.error || "PLAUD 队列同步失败。 ");
@@ -2833,9 +3495,69 @@ function App() {
     return request;
   }
 
+  async function loadMorePlaudQueue(): Promise<DomiPlaudSnapshot | null> {
+    if (appSettings?.plaudConnectionMode !== "enabled") return null;
+    if (!plaudSnapshot?.ok || !plaudSnapshot.hasMore) return null;
+    if (plaudListPromiseRef.current) return plaudListPromiseRef.current;
+    if (plaudSyncPromiseRef.current || plaudMutationIdsRef.current.size > 0) return null;
+    const revision = plaudSnapshotRevisionRef.current;
+    const offset = Number(plaudSnapshot.nextOffset)
+      || Number(plaudSnapshot.pageOffset || 0) + Number(plaudSnapshot.pageSize || 50);
+    setPlaudLoadingMore(true);
+    setPlaudError("");
+    const request = (async (): Promise<DomiPlaudSnapshot | null> => {
+      try {
+        const result = await workbench.listPlaud({ offset, limit: 50 });
+        if (revision !== plaudSnapshotRevisionRef.current) return result;
+        if (!result.ok) {
+          setPlaudError(result.error || "更早的 PLAUD 录音读取失败。 ");
+          return result;
+        }
+        setPlaudSnapshot((current) => {
+          if (!current) return result;
+          const itemsById = new Map(
+            (current.items || []).map((item) => [item.fileId, item])
+          );
+          for (const item of result.items || []) {
+            itemsById.set(item.fileId, {
+              ...itemsById.get(item.fileId),
+              ...item
+            });
+          }
+          const items = [...itemsById.values()].sort((left, right) => {
+            const leftTime = Number(left.createdAt || left.editedAt) || 0;
+            const rightTime = Number(right.createdAt || right.editedAt) || 0;
+            return rightTime - leftTime || left.fileName.localeCompare(right.fileName, "zh-CN");
+          });
+          return {
+            ...current,
+            syncedAt: result.syncedAt || current.syncedAt,
+            pageOffset: 0,
+            pageSize: result.pageSize || current.pageSize,
+            hasMore: Boolean(result.hasMore),
+            nextOffset: result.nextOffset,
+            items
+          };
+        });
+        return result;
+      } catch (error) {
+        if (revision === plaudSnapshotRevisionRef.current) {
+          setPlaudError(error instanceof Error ? error.message : String(error));
+        }
+        return null;
+      } finally {
+        plaudListPromiseRef.current = null;
+        setPlaudLoadingMore(false);
+      }
+    })();
+    plaudListPromiseRef.current = request;
+    return request;
+  }
+
   async function syncPlaudQueue(confirmed = false): Promise<DomiPlaudSyncResult | null> {
     if (appSettings?.plaudConnectionMode !== "enabled") return null;
     if (plaudSyncPromiseRef.current) return plaudSyncPromiseRef.current;
+    if (plaudListPromiseRef.current) return null;
     if (plaudMutationIdsRef.current.size > 0) return null;
     plaudSnapshotRevisionRef.current += 1;
     setPlaudSyncing(true);
@@ -4263,12 +4985,12 @@ function App() {
     setOpenSections((current) => ({ ...current, [section]: !current[section] }));
   }
 
-  async function refreshDocumentLibrary(options: { silent?: boolean } = {}) {
+  async function refreshDocumentLibrary(options: { silent?: boolean; force?: boolean } = {}) {
     const requestId = ++documentLibraryRequestRef.current;
     if (!options.silent) setDocumentLibraryLoading(true);
     setDocumentLibraryError("");
     try {
-      const snapshot = await workbench.listDocumentLibrary();
+      const snapshot = await workbench.listDocumentLibrary({ force: options.force === true });
       if (requestId !== documentLibraryRequestRef.current) return null;
       if (!snapshot.ok) {
         setDocumentLibraryError(snapshot.error || "无法读取本地文档库。");
@@ -4312,9 +5034,46 @@ function App() {
   function refreshDocumentIndexForSearch() {
     if (documentLibraryLoading) return;
     const now = Date.now();
-    if (now - documentSearchRefreshAtRef.current < 15_000) return;
+    if (now - documentSearchRefreshAtRef.current < 60_000) return;
     documentSearchRefreshAtRef.current = now;
-    void refreshDocumentLibrary({ silent: Boolean(documentLibrary) });
+    void refreshDocumentLibrary({ silent: Boolean(documentLibrary), force: true });
+  }
+
+  function scrollDocumentLibrarySearchSelectionIntoView(path: string) {
+    window.requestAnimationFrame(() => {
+      const rows = documentLibraryTreeRef.current
+        ?.querySelectorAll<HTMLButtonElement>("[data-document-library-path]");
+      const selected = rows
+        ? [...rows].find((row) => row.dataset.documentLibraryPath === path)
+        : null;
+      selected?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function moveDocumentLibrarySearchSelection(direction: -1 | 1) {
+    if (!searchableDocumentLibraryNodes.length) return;
+    const currentIndex = searchableDocumentLibraryNodes.findIndex(
+      ({ node }) => node.path === documentLibrarySearchActivePath
+    );
+    const nextIndex = currentIndex < 0
+      ? direction > 0 ? 0 : searchableDocumentLibraryNodes.length - 1
+      : Math.max(
+          0,
+          Math.min(searchableDocumentLibraryNodes.length - 1, currentIndex + direction)
+        );
+    const nextPath = searchableDocumentLibraryNodes[nextIndex].node.path;
+    setDocumentLibrarySearchActivePath(nextPath);
+    scrollDocumentLibrarySearchSelectionIntoView(nextPath);
+  }
+
+  function openActiveDocumentLibrarySearchResult() {
+    const active = searchableDocumentLibraryNodes.find(
+      ({ node }) => node.path === documentLibrarySearchActivePath
+    ) || searchableDocumentLibraryNodes[0];
+    if (!active) return;
+    setDocumentLibrarySearchActivePath(active.node.path);
+    openDocumentLibraryNode(active.node, active.parentPath);
+    scrollDocumentLibrarySearchSelectionIntoView(active.node.path);
   }
 
   function toggleDocumentLibraryFolder(path: string) {
@@ -4624,7 +5383,7 @@ function App() {
       setMarkdownTitleEditing(false);
       setMarkdownTitleDraft("");
       if (workspaceView === "documents") {
-        void refreshDocumentLibrary({ silent: true });
+        void refreshDocumentLibrary({ silent: true, force: true });
       }
     } catch (error) {
       if (requestId !== markdownRenameRequestRef.current) return;
@@ -4903,17 +5662,24 @@ function App() {
     const selected = isFolder
       ? documentLibrarySelectedFolder === node.path
       : selectedDocumentLibraryPath === node.path;
+    const keyboardActive = Boolean(documentLibraryQuery.trim())
+      && documentLibrarySearchActivePath === node.path;
     return (
       <div className="document-library-node" key={node.path}>
         <button
-          className={`document-library-node-row ${selected ? "selected" : ""}`}
+          className={[
+            "document-library-node-row",
+            selected ? "selected" : "",
+            keyboardActive ? "keyboard-active" : ""
+          ].filter(Boolean).join(" ")}
           type="button"
           style={{ "--tree-indent": `${depth * 14}px` } as CSSProperties}
           onClick={() => openDocumentLibraryNode(node, parentPath)}
           title={node.path}
           role="treeitem"
           aria-expanded={isFolder ? expanded : undefined}
-          aria-selected={selected}
+          aria-selected={selected || keyboardActive}
+          data-document-library-path={node.path}
         >
           <span className="document-library-disclosure" aria-hidden="true">
             {isFolder ? <ChevronRight className={expanded ? "open" : ""} size={13} /> : null}
@@ -4994,15 +5760,38 @@ function App() {
           <Search size={13} />
           <input
             value={documentLibraryQuery}
-            onChange={(event) => setDocumentLibraryQuery(event.target.value)}
+            onChange={(event) => {
+              setDocumentLibraryQuery(event.target.value);
+              setDocumentLibrarySearchActivePath("");
+            }}
             onFocus={refreshDocumentIndexForSearch}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                moveDocumentLibrarySearchSelection(event.key === "ArrowDown" ? 1 : -1);
+                return;
+              }
+              if (event.key === "Enter" && documentLibraryQuery.trim()) {
+                event.preventDefault();
+                openActiveDocumentLibrarySearchResult();
+                return;
+              }
+              if (event.key === "Escape" && documentLibraryQuery) {
+                event.preventDefault();
+                setDocumentLibraryQuery("");
+                setDocumentLibrarySearchActivePath("");
+              }
+            }}
             placeholder="搜索文档和文件夹"
             aria-label="搜索本地文档库"
           />
           {documentLibraryQuery && (
             <button
               type="button"
-              onClick={() => setDocumentLibraryQuery("")}
+              onClick={() => {
+                setDocumentLibraryQuery("");
+                setDocumentLibrarySearchActivePath("");
+              }}
               title="清除搜索"
               aria-label="清除文档搜索"
             >
@@ -5053,7 +5842,7 @@ function App() {
           <span>全部文档</span>
         </button>
 
-        <div className="document-library-tree" role="tree">
+        <div className="document-library-tree" role="tree" ref={documentLibraryTreeRef}>
           {documentLibraryLoading && !documentLibrary && (
             <div className="document-library-state">
               <RefreshCw className="spinning" size={15} />
@@ -5064,7 +5853,7 @@ function App() {
             <div className="document-library-state error">
               <AlertCircle size={15} />
               <span>{documentLibraryError}</span>
-              <button type="button" onClick={() => void refreshDocumentLibrary()}>重试</button>
+              <button type="button" onClick={() => void refreshDocumentLibrary({ force: true })}>重试</button>
             </div>
           )}
           {documentLibrary?.ok && filteredDocumentLibraryNodes.map((node) =>
@@ -5825,6 +6614,601 @@ function App() {
     );
   }
 
+  function renderDatabaseWorkspace() {
+    const records = databaseRecords(databaseSnapshot, databaseEntityType);
+    const query = deferredDatabaseQuery.trim().toLocaleLowerCase("zh-CN");
+    const statusForRecord = (record: DomiProject | DomiPerson | DomiNewsItem) =>
+      databaseEntityType === "project"
+        ? (record as DomiProject).status || "未填写"
+        : databaseEntityType === "person"
+          ? (record as DomiPerson).status || "未填写"
+          : (record as DomiNewsItem).evidenceStatus || "未填写";
+    const statusOptions = [
+      "全部",
+      ...new Set(records.map(statusForRecord).filter(Boolean))
+    ];
+    const filtered = records.filter((record) => {
+      const searchText = databaseEntityType === "project"
+        ? [
+            (record as DomiProject).name,
+            (record as DomiProject).domain,
+            ...(record as DomiProject).subdomains,
+            (record as DomiProject).status,
+            (record as DomiProject).notes || ""
+          ].join(" ")
+        : databaseEntityType === "person"
+          ? [
+              (record as DomiPerson).name,
+              (record as DomiPerson).organization,
+              ...(record as DomiPerson).types,
+              (record as DomiPerson).status
+            ].join(" ")
+          : [
+              (record as DomiNewsItem).title,
+              ...(record as DomiNewsItem).domains,
+              ...(record as DomiNewsItem).subdomains,
+              (record as DomiNewsItem).source,
+              (record as DomiNewsItem).summary
+            ].join(" ");
+      const matchesQuery = !query || searchText.toLocaleLowerCase("zh-CN").includes(query);
+      const matchesStatus = databaseStatusFilter === "全部"
+        || statusForRecord(record) === databaseStatusFilter;
+      return matchesQuery && matchesStatus;
+    }).sort((left, right) => {
+      const name = (record: DomiProject | DomiPerson | DomiNewsItem) =>
+        databaseRecordTitle(databaseEntityType, record);
+      const updated = (record: DomiProject | DomiPerson | DomiNewsItem) =>
+        databaseEntityType === "project"
+          ? Number((record as DomiProject).lastFollowup || record.updatedAt || 0)
+          : databaseEntityType === "news"
+            ? Number(record.updatedAt || (record as DomiNewsItem).publishedAt || 0)
+            : Number(record.updatedAt || 0);
+      const created = (record: DomiProject | DomiPerson | DomiNewsItem) =>
+        databaseEntityType === "news"
+          ? Number((record as DomiNewsItem).publishedAt || 0)
+          : Number((record as DomiProject | DomiPerson).createdAt || 0);
+      const direction = databaseSortDirection === "asc" ? 1 : -1;
+      if (databaseSortKey === "name") {
+        return direction * name(left).localeCompare(name(right), "zh-CN");
+      }
+      const leftValue = databaseSortKey === "created" ? created(left) : updated(left);
+      const rightValue = databaseSortKey === "created" ? created(right) : updated(right);
+      return direction * (leftValue - rightValue)
+        || name(left).localeCompare(name(right), "zh-CN");
+    });
+    const visibleRecords = filtered.slice(0, databaseVisibleLimit);
+    const stopGridEvent = (event: SyntheticEvent) => event.stopPropagation();
+    const editActions = (
+      entityType: DatabaseEntityType,
+      record: DomiProject | DomiPerson | DomiNewsItem,
+      isEditing: boolean
+    ) => isEditing ? (
+      <div className="database-grid-row-actions" onClick={stopGridEvent}>
+        <span className="database-grid-autosave-status" aria-live="polite">
+          {databaseSaving
+            ? <><RefreshCw className="spinning" size={12} />自动保存中</>
+            : <><Check size={12} />自动保存</>}
+        </span>
+        <button
+          type="button"
+          className="done"
+          onClick={() => finishDatabaseRecordEdit(entityType, record.recordId)}
+        >
+          完成
+        </button>
+      </div>
+    ) : null;
+    const resourceLink = (record: DomiProject | DomiPerson | DomiNewsItem) => {
+      const resource = "link" in record ? record.link : (record as DomiNewsItem).url;
+      if (!resource) return <span className="database-grid-empty-value">—</span>;
+      return (
+        <button
+          type="button"
+          className="database-grid-link"
+          title={resource}
+          onClick={(event) => {
+            event.stopPropagation();
+            void workbench.openResource(resource);
+          }}
+        >
+          <FileText size={14} />
+          <span>打开</span>
+        </button>
+      );
+    };
+
+    return (
+      <div className="database-stage">
+        <div className="database-toolbar">
+          <div className="database-tabs" role="tablist" aria-label="资料库类型">
+            {([
+              ["project", "项目库", databaseSnapshot?.projects?.length || 0],
+              ["person", "人脉库", databaseSnapshot?.people?.length || 0],
+              ["news", "行业信息库", databaseSnapshot?.news?.length || 0]
+            ] as Array<[DatabaseEntityType, string, number]>).map(([type, label, count]) => (
+              <button
+                key={type}
+                type="button"
+                className={databaseEntityType === type ? "active" : ""}
+                onClick={() => switchDatabaseEntity(type)}
+                role="tab"
+                aria-selected={databaseEntityType === type}
+              >
+                {label}<span>{count}</span>
+              </button>
+            ))}
+          </div>
+          <div className="database-backend-badge">
+            <Database size={15} />
+            {databaseSnapshot?.backend === "local" ? "本地 SQLite · 自动保存到 Markdown" : "资料库"}
+          </div>
+        </div>
+
+        {databaseError && (
+          <div className="database-message error"><AlertCircle size={15} />{databaseError}</div>
+        )}
+        {databaseNotice && (
+          <div className="database-message success"><CheckCircle2 size={15} />{databaseNotice}</div>
+        )}
+        {databaseLoading && !databaseSnapshot && (
+          <div className="database-empty"><RefreshCw className="spinning" size={18} />正在读取资料库</div>
+        )}
+        {databaseSnapshot && !databaseSnapshot.editable && (
+          <div className="database-empty">
+            <AlertCircle size={18} />
+            {databaseSnapshot.error || "当前资料库暂不支持在客户端内直接编辑。"}
+          </div>
+        )}
+
+        {databaseSnapshot?.editable && (
+          <div className="database-grid-layout">
+            <div className="database-grid-controls">
+              <label className="database-search database-grid-search">
+                <Search size={16} />
+                <input
+                  value={databaseQuery}
+                  onChange={(event) => {
+                    setDatabaseQuery(event.target.value);
+                    setDatabaseVisibleLimit(100);
+                  }}
+                  placeholder={databaseEntityType === "project"
+                    ? "搜索项目"
+                    : databaseEntityType === "person"
+                      ? "搜索人脉"
+                      : "搜索行业信息"}
+                />
+                {databaseQuery && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDatabaseQuery("");
+                      setDatabaseVisibleLimit(100);
+                    }}
+                    aria-label="清空搜索"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </label>
+              <label className="database-grid-filter">
+                <span>筛选</span>
+                <select
+                  value={databaseStatusFilter}
+                  onChange={(event) => {
+                    setDatabaseStatusFilter(event.target.value);
+                    setDatabaseVisibleLimit(100);
+                  }}
+                >
+                  {statusOptions.map((item) => <option key={item}>{item}</option>)}
+                </select>
+              </label>
+              <label className="database-grid-filter">
+                <span>排序</span>
+                <select
+                  value={databaseSortKey}
+                  onChange={(event) => {
+                    setDatabaseSortKey(event.target.value as DatabaseSortKey);
+                    setDatabaseVisibleLimit(100);
+                  }}
+                >
+                  <option value="updated">最后更新</option>
+                  <option value="created">{databaseEntityType === "news" ? "发布时间" : "入库时间"}</option>
+                  <option value="name">{databaseEntityType === "news" ? "标题" : "名称"}</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="database-sort-direction"
+                onClick={() => {
+                  setDatabaseSortDirection((current) => current === "asc" ? "desc" : "asc");
+                  setDatabaseVisibleLimit(100);
+                }}
+              >
+                {databaseSortDirection === "asc" ? "升序" : "降序"}
+                <ChevronDown size={14} className={databaseSortDirection === "asc" ? "ascending" : ""} />
+              </button>
+              <span className="database-grid-count">
+                {filtered.length}{filtered.length !== records.length ? ` / ${records.length}` : ""} 条记录
+              </span>
+            </div>
+
+            <div
+              className="database-grid-shell"
+              onScroll={() => {
+                if (databaseExpandedCell) setDatabaseExpandedCell(null);
+              }}
+            >
+              {filtered.length === 0 ? (
+                <div className="database-list-empty">没有匹配的记录</div>
+              ) : databaseEntityType === "project" ? (
+                <table className="database-grid-table project">
+                  <thead>
+                    <tr>
+                      <th className="row-number">#</th>
+                      <th className="primary-column">公司名称</th>
+                      <th className="notes-column">Notes</th>
+                      <th>链接</th>
+                      <th>最后更新</th>
+                      <th>领域</th>
+                      <th className="tags-column">子领域</th>
+                      <th>进展状态</th>
+                      <th>项目评级</th>
+                      <th>最新估值</th>
+                      <th className="tags-column">投资机构</th>
+                      <th>城市</th>
+                      <th>入库时间</th>
+                      <th className="notes-column">历史融资</th>
+                      <th className="actions-column">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(visibleRecords as DomiProject[]).map((project, index) => {
+                      const isEditing = databaseEditingId === project.recordId
+                        && databaseDraft?.entityType === "project";
+                      return (
+                        <tr
+                          key={project.recordId}
+                          className={[
+                            databaseSelectedId === project.recordId ? "selected" : "",
+                            isEditing ? "editing" : ""
+                          ].filter(Boolean).join(" ")}
+                          onClick={(event) => handleDatabaseRowClick(event, "project", project.recordId)}
+                          onKeyDown={(event) => handleDatabaseRowKeyDown(event, "project", project.recordId)}
+                        >
+                          <td className="row-number">{index + 1}</td>
+                          <td className="primary-column" data-database-editable data-database-field="name">
+                            {isEditing
+                              ? <input value={databaseDraft.name} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("name", event.target.value)} />
+                              : <strong title={project.name}>{project.name}</strong>}
+                          </td>
+                          <td className="notes-column" data-database-editable data-database-field="notes">
+                            {isEditing
+                              ? <textarea value={databaseDraft.notes} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("notes", event.target.value)} rows={2} />
+                              : <span className="database-grid-clamp" title={project.notes}>{project.notes || "—"}</span>}
+                          </td>
+                          <td>{resourceLink(project)}</td>
+                          <td>{databaseDate(project.lastFollowup || project.updatedAt)}</td>
+                          <td data-database-editable data-database-field="domain">
+                            {isEditing
+                              ? <input value={databaseDraft.domain} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("domain", event.target.value)} />
+                              : databasePills([project.domain])}
+                          </td>
+                          <td className="tags-column" data-database-editable data-database-field="subdomains">
+                            {isEditing
+                              ? <input value={databaseDraft.subdomains} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("subdomains", event.target.value)} />
+                              : databasePills(project.subdomains)}
+                          </td>
+                          <td data-database-editable data-database-field="status">
+                            {isEditing ? (
+                              <select value={databaseDraft.status} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("status", event.target.value)}>
+                                {["待交流", "已交流", "深度跟踪", "已投", "Miss", "放弃"].map((item) => <option key={item}>{item}</option>)}
+                              </select>
+                            ) : databasePills([project.status])}
+                          </td>
+                          <td data-database-editable data-database-field="rating">
+                            {isEditing ? (
+                              <select value={databaseDraft.rating} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("rating", event.target.value)}>
+                                <option value="">未评级</option>
+                                {["S", "A", "B", "C"].map((item) => <option key={item}>{item}</option>)}
+                              </select>
+                            ) : databasePills(project.rating ? [project.rating] : [], "未评级")}
+                          </td>
+                          <td data-database-editable data-database-field="latestValuationUsd100m">
+                            {isEditing
+                              ? <input type="number" min="0" step="0.001" value={databaseDraft.latestValuationUsd100m} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("latestValuationUsd100m", event.target.value)} />
+                              : project.latestValuationUsd100m === null || project.latestValuationUsd100m === undefined
+                                ? "—"
+                                : `${project.latestValuationUsd100m} 亿美元`}
+                          </td>
+                          <td className="tags-column" data-database-editable data-database-field="investors">
+                            {isEditing
+                              ? <input value={databaseDraft.investors} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("investors", event.target.value)} />
+                              : databasePills(project.investors || [])}
+                          </td>
+                          <td data-database-editable data-database-field="cities">
+                            {isEditing
+                              ? <input value={databaseDraft.cities} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("cities", event.target.value)} />
+                              : databasePills(project.cities || [])}
+                          </td>
+                          <td>{databaseDate(project.createdAt)}</td>
+                          <td className="notes-column" data-database-editable data-database-field="financingHistory">
+                            {isEditing
+                              ? <textarea value={databaseDraft.financingHistory} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("financingHistory", event.target.value)} rows={2} />
+                              : <span className="database-grid-clamp" title={project.financingHistory}>{project.financingHistory || "—"}</span>}
+                          </td>
+                          <td className="actions-column">{editActions("project", project, isEditing)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              ) : databaseEntityType === "person" ? (
+                <table className="database-grid-table person">
+                  <thead>
+                    <tr>
+                      <th className="row-number">#</th>
+                      <th className="primary-column">姓名</th>
+                      <th className="notes-column">所属组织与身份</th>
+                      <th className="tags-column">类型</th>
+                      <th>进展状态</th>
+                      <th>评级</th>
+                      <th>最后联系</th>
+                      <th className="tags-column">城市</th>
+                      <th>入库时间</th>
+                      <th>人物主页</th>
+                      <th className="actions-column">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(visibleRecords as DomiPerson[]).map((person, index) => {
+                      const isEditing = databaseEditingId === person.recordId
+                        && databaseDraft?.entityType === "person";
+                      return (
+                        <tr
+                          key={person.recordId}
+                          className={[
+                            databaseSelectedId === person.recordId ? "selected" : "",
+                            isEditing ? "editing" : ""
+                          ].filter(Boolean).join(" ")}
+                          onClick={(event) => handleDatabaseRowClick(event, "person", person.recordId)}
+                          onKeyDown={(event) => handleDatabaseRowKeyDown(event, "person", person.recordId)}
+                        >
+                          <td className="row-number">{index + 1}</td>
+                          <td className="primary-column" data-database-editable data-database-field="name">
+                            {isEditing
+                              ? <input value={databaseDraft.name} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("name", event.target.value)} />
+                              : <strong>{person.name}</strong>}
+                          </td>
+                          <td className="notes-column" data-database-editable data-database-field="organization">
+                            {isEditing
+                              ? <input value={databaseDraft.organization} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("organization", event.target.value)} />
+                              : <span className="database-grid-clamp" title={person.organization}>{person.organization || "—"}</span>}
+                          </td>
+                          <td className="tags-column" data-database-editable data-database-field="types">
+                            {isEditing
+                              ? <input value={databaseDraft.types} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("types", event.target.value)} />
+                              : databasePills(person.types)}
+                          </td>
+                          <td data-database-editable data-database-field="status">
+                            {isEditing
+                              ? <input value={databaseDraft.status} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("status", event.target.value)} />
+                              : databasePills(person.status ? [person.status] : [])}
+                          </td>
+                          <td data-database-editable data-database-field="rating">
+                            {isEditing ? (
+                              <select value={databaseDraft.rating} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("rating", event.target.value)}>
+                                <option value="">未评级</option>
+                                {["S", "A", "B", "C"].map((item) => <option key={item}>{item}</option>)}
+                              </select>
+                            ) : databasePills(person.rating ? [person.rating] : [], "未评级")}
+                          </td>
+                          <td data-database-editable data-database-field="lastContact">
+                            {isEditing
+                              ? <input type="date" value={databaseDraft.lastContact} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("lastContact", event.target.value)} />
+                              : databaseDate(person.lastContact)}
+                          </td>
+                          <td className="tags-column" data-database-editable data-database-field="cities">
+                            {isEditing
+                              ? <input value={databaseDraft.cities} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("cities", event.target.value)} />
+                              : databasePills(person.cities)}
+                          </td>
+                          <td>{databaseDate(person.createdAt)}</td>
+                          <td>{resourceLink(person)}</td>
+                          <td className="actions-column">{editActions("person", person, isEditing)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              ) : (
+                <table className="database-grid-table news">
+                  <thead>
+                    <tr>
+                      <th className="row-number">#</th>
+                      <th className="primary-column">新闻标题</th>
+                      <th className="notes-column">核心事实</th>
+                      <th>发布时间</th>
+                      <th className="tags-column">领域</th>
+                      <th className="tags-column">子领域</th>
+                      <th className="tags-column">信息类型</th>
+                      <th>来源</th>
+                      <th>重要性</th>
+                      <th>置信度</th>
+                      <th>证据状态</th>
+                      <th className="notes-column">建议动作</th>
+                      <th>继续展示</th>
+                      <th>原文</th>
+                      <th className="actions-column">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(visibleRecords as DomiNewsItem[]).map((item, index) => {
+                      const isEditing = databaseEditingId === item.recordId
+                        && databaseDraft?.entityType === "news";
+                      return (
+                        <tr
+                          key={item.recordId}
+                          className={[
+                            databaseSelectedId === item.recordId ? "selected" : "",
+                            isEditing ? "editing" : ""
+                          ].filter(Boolean).join(" ")}
+                          onClick={(event) => handleDatabaseRowClick(event, "news", item.recordId)}
+                          onKeyDown={(event) => handleDatabaseRowKeyDown(event, "news", item.recordId)}
+                        >
+                          <td className="row-number">{index + 1}</td>
+                          <td className="primary-column" data-database-editable data-database-field="title">
+                            {isEditing
+                              ? <input value={databaseDraft.title} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("title", event.target.value)} />
+                              : <strong title={item.title}>{item.title}</strong>}
+                          </td>
+                          <td className="notes-column" data-database-editable data-database-field="summary">
+                            {isEditing
+                              ? <textarea value={databaseDraft.summary} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("summary", event.target.value)} rows={2} />
+                              : <span className="database-grid-clamp" title={item.summary}>{item.summary || "—"}</span>}
+                          </td>
+                          <td data-database-editable data-database-field="publishedAt">
+                            {isEditing
+                              ? <input type="datetime-local" value={databaseDraft.publishedAt} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("publishedAt", event.target.value)} />
+                              : databaseDate(item.publishedAt)}
+                          </td>
+                          <td className="tags-column" data-database-editable data-database-field="domains">
+                            {isEditing
+                              ? <input value={databaseDraft.domains} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("domains", event.target.value)} />
+                              : databasePills(item.domains)}
+                          </td>
+                          <td className="tags-column" data-database-editable data-database-field="subdomains">
+                            {isEditing
+                              ? <input value={databaseDraft.subdomains} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("subdomains", event.target.value)} />
+                              : databasePills(item.subdomains)}
+                          </td>
+                          <td className="tags-column" data-database-editable data-database-field="newsTypes">
+                            {isEditing
+                              ? <input value={databaseDraft.newsTypes} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("newsTypes", event.target.value)} />
+                              : databasePills(item.types)}
+                          </td>
+                          <td data-database-editable data-database-field="source">
+                            {isEditing
+                              ? <input value={databaseDraft.source} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("source", event.target.value)} />
+                              : item.source || "—"}
+                          </td>
+                          <td data-database-editable data-database-field="importance">
+                            {isEditing
+                              ? <input type="number" min="0" max="10" value={databaseDraft.importance} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("importance", event.target.value)} />
+                              : item.importance}
+                          </td>
+                          <td data-database-editable data-database-field="confidence">
+                            {isEditing
+                              ? <input type="number" min="0" max="10" value={databaseDraft.confidence} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("confidence", event.target.value)} />
+                              : item.confidence}
+                          </td>
+                          <td data-database-editable data-database-field="evidenceStatus">
+                            {isEditing
+                              ? <input value={databaseDraft.evidenceStatus} onClick={stopGridEvent} onChange={(event) => updateDatabaseDraft("evidenceStatus", event.target.value)} />
+                              : databasePills(item.evidenceStatus ? [item.evidenceStatus] : [])}
+                          </td>
+                          <td className="notes-column" data-database-editable data-database-field="action">
+                            {isEditing
+                              ? <textarea value={databaseDraft.action} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("action", event.target.value)} rows={2} />
+                              : <span className="database-grid-clamp" title={item.action}>{item.action || "—"}</span>}
+                          </td>
+                          <td data-database-editable data-database-field="worthFollowing">
+                            {isEditing ? (
+                              <input
+                                className="database-grid-checkbox"
+                                type="checkbox"
+                                checked={databaseDraft.worthFollowing}
+                                onClick={stopGridEvent}
+                                onChange={(event) => updateDatabaseDraft("worthFollowing", event.target.checked)}
+                              />
+                            ) : databasePills([item.worthFollowing === false ? "否" : "是"])}
+                          </td>
+                          <td>{resourceLink(item)}</td>
+                          <td className="actions-column">{editActions("news", item, isEditing)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            {visibleRecords.length < filtered.length && (
+              <div className="database-grid-more">
+                <button
+                  type="button"
+                  onClick={() => setDatabaseVisibleLimit((current) => current + 100)}
+                >
+                  加载更多
+                  <span>已显示 {visibleRecords.length} / {filtered.length}</span>
+                </button>
+              </div>
+            )}
+            <div className="database-grid-hint">
+              单击任意可编辑单元格即可修改；长文本会自动展开，修改后自动保存并同步更新 SQLite、Markdown 与资料目录。
+            </div>
+          </div>
+        )}
+        {databaseExpandedCell
+          && databaseDraft
+          && databaseDraft.entityType === databaseExpandedCell.entityType
+          && databaseDraft.recordId === databaseExpandedCell.recordId
+          && typeof databaseDraft[databaseExpandedCell.field] !== "boolean"
+          && (
+            <div
+              className="database-cell-expanded-editor"
+              role="dialog"
+              aria-label={`${databaseExpandedCell.label}完整内容`}
+              style={{
+                left: databaseExpandedCell.left,
+                top: databaseExpandedCell.top,
+                width: databaseExpandedCell.width
+              }}
+              onClick={stopGridEvent}
+            >
+              <header>
+                <strong>{databaseExpandedCell.label}</strong>
+                <span>完整内容</span>
+                <button
+                  type="button"
+                  onClick={() => setDatabaseExpandedCell(null)}
+                  title="收起"
+                  aria-label="收起完整内容"
+                >
+                  <X size={13} />
+                </button>
+              </header>
+              <textarea
+                autoFocus
+                value={String(databaseDraft[databaseExpandedCell.field] ?? "")}
+                onChange={(event) => {
+                  updateDatabaseDraft(databaseExpandedCell.field, event.target.value);
+                }}
+                onKeyDown={(event) => {
+                  event.stopPropagation();
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setDatabaseExpandedCell(null);
+                    return;
+                  }
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    void flushDatabaseAutoSave();
+                  }
+                }}
+              />
+              <footer>
+                <span>输入后自动保存 · Esc 收起</span>
+                <span className="database-cell-autosave-status" aria-live="polite">
+                  {databaseSaving
+                    ? <><RefreshCw className="spinning" size={12} />自动保存中</>
+                    : <><Check size={12} />修改自动保存</>}
+                </span>
+              </footer>
+            </div>
+          )}
+      </div>
+    );
+  }
+
   function renderComposer(variant: "home" | "dock") {
     return (
       <>
@@ -6171,6 +7555,21 @@ function App() {
             <strong>行业动态</strong>
             <span className="sidebar-nav-meta" />
           </button>
+          <button
+            className={`sidebar-nav-item ${workspaceView === "data" ? "active" : ""}`}
+            type="button"
+            onClick={() => {
+              setWorkspaceView("data");
+              setDocumentLibrarySidebarExpanded(false);
+              setRightPanelOpen(false);
+              setThreadMenuId(null);
+              if (!databaseSnapshot && !databaseLoading) void refreshDatabase();
+            }}
+          >
+            <Database className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
+            <strong>资料库</strong>
+            <span className="sidebar-nav-meta" />
+          </button>
           <div className={`sidebar-document-section ${documentLibrarySidebarExpanded ? "open" : ""}`}>
             <button
               className={`sidebar-nav-item ${workspaceView === "documents" ? "active" : ""}`}
@@ -6421,6 +7820,8 @@ function App() {
               ? "待办事项"
               : workspaceView === "news"
                 ? "行业动态"
+                : workspaceView === "data"
+                  ? "资料库"
                 : workspaceView === "documents"
                   ? "文档库"
                 : activeThread.title}</strong>
@@ -6428,6 +7829,8 @@ function App() {
               ? `${taskNavigationCount} 个待办事项`
               : workspaceView === "news"
                 ? "domi 行业雷达"
+                : workspaceView === "data"
+                  ? `${databaseSnapshot?.projects?.length || 0} 项目 / ${databaseSnapshot?.people?.length || 0} 人脉 / ${databaseSnapshot?.news?.length || 0} 行业信息`
                 : workspaceView === "documents"
                   ? documentLibrary?.rootName
                     ? `本地资料库 · ${documentLibrary.rootName}`
@@ -6445,11 +7848,15 @@ function App() {
                   ])
                 : workspaceView === "news"
                   ? scanWeeklyNews()
+                  : workspaceView === "data"
+                    ? refreshDatabase({ preserveSelection: true })
                   : workspaceView === "documents"
-                    ? refreshDocumentLibrary()
+                    ? refreshDocumentLibrary({ force: true })
                   : refreshDomi())}
               disabled={workspaceView === "news"
                 ? weeklyNewsLoading || weeklyNewsScanning
+                : workspaceView === "data"
+                  ? databaseLoading || databaseSaving
                 : workspaceView === "documents"
                   ? documentLibraryLoading
                 : domiSyncing || (workspaceView === "tasks" && plaudEnabled && (plaudLoading || plaudSyncing))}
@@ -6457,6 +7864,8 @@ function App() {
                 ? "刷新待办事项来源"
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
+                  : workspaceView === "data"
+                    ? "刷新资料库"
                   : workspaceView === "documents"
                     ? "刷新本地文档库"
                   : domiError ? `重新同步 domi：${domiError}` : "同步 domi 项目与人脉"}
@@ -6464,6 +7873,8 @@ function App() {
                 ? "刷新任务来源"
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
+                  : workspaceView === "data"
+                    ? "刷新资料库"
                   : workspaceView === "documents"
                     ? "刷新本地文档库"
                   : "同步 domi 项目与人脉"}
@@ -6471,6 +7882,8 @@ function App() {
               <RefreshCw
                 className={workspaceView === "news"
                   ? weeklyNewsLoading || weeklyNewsScanning ? "spinning" : ""
+                  : workspaceView === "data"
+                    ? databaseLoading || databaseSaving ? "spinning" : ""
                   : workspaceView === "documents"
                     ? documentLibraryLoading ? "spinning" : ""
                   : domiSyncing || (workspaceView === "tasks" && plaudEnabled && (plaudLoading || plaudSyncing)) ? "spinning" : ""}
@@ -6492,10 +7905,10 @@ function App() {
         </header>
 
         <div
-          className={`main-grid ${rightPanelOpen ? "right-open" : "right-closed"} ${documentPanelActive ? "document-open" : ""} ${workspaceView === "tasks" ? "task-view" : workspaceView === "news" ? "news-view" : workspaceView === "documents" ? "document-library-view" : ""}`}
+          className={`main-grid ${rightPanelOpen ? "right-open" : "right-closed"} ${documentPanelActive ? "document-open" : ""} ${workspaceView === "tasks" ? "task-view" : workspaceView === "news" ? "news-view" : workspaceView === "data" ? "data-view" : workspaceView === "documents" ? "document-library-view" : ""}`}
           style={{ "--right-panel-width": `${activeRightPanelWidth}px` } as CSSProperties}
         >
-          <section className={`chat-pane ${workspaceView === "tasks" ? "task-mode" : workspaceView === "news" ? "news-mode" : workspaceView === "documents" ? "document-library-mode" : hasConversation ? "has-conversation" : "is-home"}`}>
+          <section className={`chat-pane ${workspaceView === "tasks" ? "task-mode" : workspaceView === "news" ? "news-mode" : workspaceView === "data" ? "data-mode" : workspaceView === "documents" ? "document-library-mode" : hasConversation ? "has-conversation" : "is-home"}`}>
             <SectionErrorBoundary
               resetKey={`${workspaceView}:${activeThread.id}:${visibleMessages.length}:${visibleMessages[visibleMessages.length - 1]?.content.length || 0}:${weeklyNews?.syncedAt || 0}`}
               title="工作区暂时无法显示"
@@ -6506,6 +7919,8 @@ function App() {
                 ? renderTaskBoard()
                 : workspaceView === "news"
                   ? renderNewsWorkspace()
+                  : workspaceView === "data"
+                    ? renderDatabaseWorkspace()
                   : workspaceView === "documents"
                     ? renderDocumentLibrary()
                     : hasConversation ? (
@@ -6757,7 +8172,19 @@ function App() {
                             : "等待同步"}
                       </small>
                     </div>
-                    <div className="plaud-queue-list">
+                    <div
+                      className="plaud-queue-list"
+                      onScroll={(event) => {
+                        const list = event.currentTarget;
+                        if (
+                          list.scrollHeight - list.scrollTop - list.clientHeight < 72
+                          && plaudSnapshot?.hasMore
+                          && !plaudLoadingMore
+                        ) {
+                          void loadMorePlaudQueue();
+                        }
+                      }}
+                    >
                       {plaudLoading && !plaudSnapshot && (
                         <div className="empty-state">正在读取 PLAUD 最近录音</div>
                       )}
@@ -6873,14 +8300,23 @@ function App() {
                       </div>
                     );
                       })}
+                      {plaudSnapshot?.ok && (plaudSnapshot.items || []).length > 0 && (
+                        <div className="plaud-pagination-status" role="status">
+                          {plaudLoadingMore
+                            ? <><RefreshCw className="spinning" size={12} />正在加载更早录音</>
+                            : plaudSnapshot.hasMore
+                              ? "继续下滑加载更早录音"
+                              : "已加载全部录音"}
+                        </div>
+                      )}
                     </div>
                     <button
                       className="domi-run-button"
                       type="button"
                       onClick={() => void syncPlaudQueue()}
-                      disabled={plaudSyncing || plaudLoading || Boolean(renamingPlaudId) || Boolean(deletingPlaudId)}
+                      disabled={plaudSyncing || plaudLoading || plaudLoadingMore || Boolean(renamingPlaudId) || Boolean(deletingPlaudId)}
                     >
-                      <RefreshCw className={plaudSyncing || plaudLoading ? "spinning" : ""} size={14} />
+                      <RefreshCw className={plaudSyncing || plaudLoading || plaudLoadingMore ? "spinning" : ""} size={14} />
                       {plaudSyncing ? "正在同步并生成文字稿" : "同步 PLAUD 并生成文字稿"}
                     </button>
                   </>

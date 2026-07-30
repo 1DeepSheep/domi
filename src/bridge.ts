@@ -250,7 +250,7 @@ const browserFallback: Window["workbench"] = {
     new Notification(title, { body, silent });
     return { ok: true };
   },
-  listDocumentLibrary: async () => ({
+  listDocumentLibrary: async (_request) => ({
     ok: false,
     rootPath: "",
     rootName: "本地文档库",
@@ -389,6 +389,101 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "浏览器预览模式不能同步 domi 数据。"
   }),
+  listDomiDatabase: async () => ({
+    ok: true,
+    backend: "local",
+    editable: true,
+    loadedAt: Date.now(),
+    projects: [{
+      recordId: "preview_project",
+      name: "示例项目",
+      domain: "AI",
+      subdomains: ["Agent"],
+      status: "深度跟踪",
+      rating: "A",
+      notes: "浏览器预览使用的非真实示例记录。",
+      cities: ["上海"],
+      investors: ["IDG"],
+      financingHistory: "",
+      latestValuationUsd100m: 1.2,
+      createdAt: Date.now(),
+      lastFollowup: Date.now(),
+      updatedAt: 1,
+      link: ""
+    }],
+    people: [{
+      recordId: "preview_person",
+      name: "示例人物",
+      types: ["创业者"],
+      organization: "示例公司 · CEO",
+      status: "已联系",
+      rating: "A",
+      createdAt: Date.now(),
+      lastContact: Date.now(),
+      cities: ["北京"],
+      updatedAt: 1,
+      link: ""
+    }],
+    news: [{
+      recordId: "preview_news",
+      title: "示例行业信息",
+      domains: ["AI"],
+      subdomains: ["Agent"],
+      types: ["公司动态"],
+      publishedAt: Date.now(),
+      summary: "浏览器预览使用的示例行业信息。",
+      investmentMeaning: "用于验证资料库编辑界面的布局。",
+      url: "https://example.com",
+      source: "示例来源",
+      companies: "示例项目",
+      institutions: "",
+      importance: 8,
+      confidence: 9,
+      evidenceStatus: "官方确认",
+      action: "继续跟踪",
+      worthFollowing: true,
+      updatedAt: 1
+    }]
+  }),
+  updateDomiDatabaseRecord: async (request) => {
+    const updatedAt = Date.now();
+    if (request.entityType === "project") {
+      return {
+        ok: true,
+        entityType: "project",
+        updatedAt,
+        record: {
+          ...request.record,
+          createdAt: updatedAt,
+          lastFollowup: updatedAt,
+          updatedAt,
+          link: ""
+        }
+      };
+    }
+    if (request.entityType === "person") {
+      return {
+        ok: true,
+        entityType: "person",
+        updatedAt,
+        record: {
+          ...request.record,
+          createdAt: updatedAt,
+          updatedAt,
+          link: ""
+        }
+      };
+    }
+    return {
+      ok: true,
+      entityType: "news",
+      updatedAt,
+      record: {
+        ...request.record,
+        updatedAt
+      }
+    };
+  },
   previewStorageMigration: async () => ({
     ok: true,
     projectCount: 0,

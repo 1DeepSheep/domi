@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "0.6.7",
+  "version": "0.6.8",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -11,6 +11,7 @@
   "scripts": {
     "predev": "npm run plugin:prepare",
     "dev": "DOMI_INSTALL_BUNDLED_PLUGIN=1 concurrently -k -n VITE,ELECTRON -c cyan,magenta \"vite --host 127.0.0.1 --port 5173\" \"wait-on tcp:127.0.0.1:5173 && electron .\"",
+    "dev:isolated": "DOMI_DEV_ISOLATED=1 npm run dev",
     "build": "tsc --noEmit && vite build",
     "privacy:check": "node scripts/privacy-check.cjs",
     "privacy:history": "node scripts/privacy-check.cjs --history",

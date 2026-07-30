@@ -107,6 +107,51 @@ assert.match(
 );
 assert.match(
   app,
+  /function renderDatabaseWorkspace\(\)[\s\S]*?database-grid-table project[\s\S]*?database-grid-table person[\s\S]*?database-grid-table news/,
+  "Projects, people, and industry information must render as spreadsheet-style database grids."
+);
+assert.match(
+  app,
+  /documentLibrarySearchMatches[\s\S]*?moveDocumentLibrarySearchSelection[\s\S]*?event\.key === "ArrowDown" \|\| event\.key === "ArrowUp"[\s\S]*?openActiveDocumentLibrarySearchResult/,
+  "Document-library search must support keyboard selection and opening."
+);
+assert.match(
+  app,
+  /databaseStatusFilter[\s\S]*?databaseSortKey[\s\S]*?databaseSortDirection[\s\S]*?filtered\.length/,
+  "Database grids must expose filtering, sorting, and a visible result count."
+);
+assert.match(
+  app,
+  /filtered\.slice\(0, databaseVisibleLimit\)[\s\S]*?setDatabaseVisibleLimit\(\(current\) => current \+ 100\)/,
+  "Large database grids must render progressively instead of mounting every record at once."
+);
+assert.match(
+  app,
+  /data-database-editable[\s\S]*?handleDatabaseRowClick\(event,/,
+  "Database cells must enter editing with a single click from the grid."
+);
+assert.match(
+  app,
+  /DATABASE_EXPANDED_TEXT_FIELDS[\s\S]*?scrollWidth[\s\S]*?setDatabaseExpandedCell[\s\S]*?database-cell-expanded-editor[\s\S]*?完整内容/,
+  "Long or truncated database cells must reliably open a readable expanded editor."
+);
+assert.match(
+  app,
+  /updateDatabaseDraft[\s\S]*?scheduleDatabaseAutoSave\(next\)[\s\S]*?async function flushDatabaseAutoSave[\s\S]*?已自动保存/,
+  "Database edits must debounce and automatically persist without a save button."
+);
+assert.match(
+  app,
+  /database-cell-expanded-editor[\s\S]*?输入后自动保存[\s\S]*?修改自动保存/,
+  "Expanded database cells must clearly expose automatic persistence."
+);
+assert.match(
+  styles,
+  /\.database-grid-shell[\s\S]*?overflow:\s*auto[\s\S]*?\.database-grid-table \.primary-column[\s\S]*?position:\s*sticky/,
+  "Wide database grids must scroll while keeping their primary column visible."
+);
+assert.match(
+  app,
   /function renderNewTaskHome\(\)[\s\S]*?NEW_TASK_QUOTE[\s\S]*?visibleQuickStartWorkflows/,
   "The empty task view must retain the quote and workflow suggestion cards."
 );
@@ -318,8 +363,8 @@ assert.match(
 );
 assert.match(
   app,
-  /const status = await workbench\.checkCodex\(\)[\s\S]*?if \(!status\.pluginSetup\?\.ok\)[\s\S]*?await refreshDomi\(\)[\s\S]*?await pause\(350\)[\s\S]*?await refreshDomiTaskBoard[\s\S]*?await pause\(350\)[\s\S]*?await refreshWeeklyNews/,
-  "Initial integration sync must wait for the bundled plugin check, then stagger core data, todo and news refreshes."
+  /const status = await workbench\.checkCodex\(\)[\s\S]*?if \(!status\.pluginSetup\?\.ok\)[\s\S]*?await Promise\.allSettled\(\[[\s\S]*?refreshDomi\(\)[\s\S]*?refreshDomiTaskBoard[\s\S]*?refreshWeeklyNews/,
+  "Initial integration sync must wait for the bundled plugin check, then refresh independent data, todo and news sources concurrently."
 );
 assert.match(
   app,
