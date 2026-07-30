@@ -73,13 +73,15 @@ async function main() {
         domain: "AI",
         rating: "A",
         status: "待交流",
-        createdAt: now - 27 * 24 * 60 * 60 * 1000
+        createdAt: now - 27 * 24 * 60 * 60 * 1000,
+        lastFollowup: now - 50 * 24 * 60 * 60 * 1000
       },
       {
         recordId: "project-old",
         name: "四周外项目",
         rating: "S",
-        createdAt: now - 29 * 24 * 60 * 60 * 1000
+        createdAt: now - 29 * 24 * 60 * 60 * 1000,
+        lastFollowup: now - 70 * 24 * 60 * 60 * 1000
       }
     ],
     [{
@@ -88,14 +90,17 @@ async function main() {
       organization: "示例机构",
       rating: "S",
       status: "待 Pitch",
-      createdAt: now - 2 * 24 * 60 * 60 * 1000
+      createdAt: now - 2 * 24 * 60 * 60 * 1000,
+      lastContact: now - 80 * 24 * 60 * 60 * 1000
     }],
     now
   );
+  assert.match(todoContext, /DOMI_TODO_CLIENT_SNAPSHOT_V1/);
   assert.match(todoContext, /共 1 个项目、1 个人/);
   assert.match(todoContext, /project｜project-new｜四周内项目/);
   assert.match(todoContext, /person｜person-new｜四周内人物/);
-  assert.doesNotMatch(todoContext, /四周外项目/);
+  assert.doesNotMatch(todoContext.split("A/S 长期跟进候选索引")[0], /四周外项目/);
+  assert.match(todoContext, /project｜project-old｜四周外项目｜S/);
   assert.match(todoContext, /其他分类已有同一对象，不得作为压制 new-entry 的理由/);
 
   const radarWorkflow = workflows.find((workflow) => workflow.id === "investment-radar");
@@ -114,6 +119,18 @@ async function main() {
   assert.match(prompt, /不得逐人发起搜索/);
   assert.match(prompt, /\"discovery_from\"/);
   assert.match(prompt, /\"rejected\"/);
+
+  const todoWorkflow = workflows.find((workflow) => workflow.id === "task");
+  assert.ok(todoWorkflow);
+  const todoPrompt = workflowPrompt(
+    todoWorkflow,
+    "同步待办事项",
+    todoContext,
+    true
+  );
+  assert.match(todoPrompt, /客户端快速同步路径/);
+  assert.match(todoPrompt, /不得为这些分类再次全量读取项目表或人脉表/);
+  assert.match(todoPrompt, /不得用减少判断维度换取速度/);
 }
 
 main()

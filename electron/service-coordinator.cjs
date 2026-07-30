@@ -56,8 +56,11 @@ class ServiceCoordinator {
           if (options.isSuccess && !options.isSuccess(value)) {
             throw new Error(value?.error || "服务返回失败结果。");
           }
+          const valueTtlMs = typeof options.ttlForValue === "function"
+            ? Math.max(0, Number(options.ttlForValue(value)) || 0)
+            : ttlMs;
           entry.value = value;
-          entry.expiresAt = this.now() + ttlMs;
+          entry.expiresAt = this.now() + valueTtlMs;
           entry.failures = 0;
           entry.circuitUntil = 0;
           entry.lastError = "";

@@ -150,29 +150,29 @@ function listDocumentLibrary(rootPath, options = {}) {
       }
       if (!entry.name || entry.name.startsWith(".")) continue;
       const entryPath = assertInsideRoot(resolvedRoot, path.join(directoryPath, entry.name), false);
-      let stat;
-      try {
-        stat = fs.lstatSync(entryPath);
-      } catch {
-        continue;
-      }
-      if (stat.isSymbolicLink()) continue;
-      if (stat.isDirectory()) {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
         nodeCount += 1;
         folderCount += 1;
         nodes.push(documentNode(
           resolvedRoot,
           entryPath,
           entry.name,
-          stat,
+          { size: 0, mtimeMs: 0 },
           "folder",
           scan(entryPath, depth + 1)
         ));
         continue;
       }
-      if (!stat.isFile()) continue;
+      if (!entry.isFile()) continue;
       const kind = DOCUMENT_EXTENSIONS.get(path.extname(entry.name).toLowerCase());
       if (!kind) continue;
+      let stat;
+      try {
+        stat = fs.statSync(entryPath);
+      } catch {
+        continue;
+      }
       nodeCount += 1;
       documentCount += 1;
       nodes.push(documentNode(resolvedRoot, entryPath, entry.name, stat, kind));
