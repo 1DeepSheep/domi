@@ -650,6 +650,14 @@ class DomiIntegration {
     this.larkCli = this.resolveLarkCli();
     this.materialIndexCache = new Map();
     this.larkCommandQueue = new TaskQueue(2);
+    this.larkStatusCache = {
+      value: null,
+      expiresAt: 0,
+      inFlight: null
+    };
+    this.intakeFieldsReadyKey = "";
+    this.intakeFieldsPromise = null;
+    this.intakeFieldsPromiseKey = "";
     this.plaudCommandQueue = new TaskQueue(1);
     this.plaudRemoteHealth = null;
     this.taskDocumentSources = new Map();
@@ -987,6 +995,20 @@ class DomiIntegration {
 
   async ensureIntakeTimeFields(pluginInput) {
     const plugin = pluginInput || this.findPlugin();
+    const settings = this.configProvider();
+    const readinessKey = [
+      plugin.version || plugin.manifest?.version || "",
+      settings.projectBaseToken || "",
+      settings.projectTableId || "",
+      settings.peopleBaseToken || "",
+      settings.peopleTableId || ""
+    ].join("\u0000");
+    if (this.intakeFieldsReadyKey === readinessKey) {
+      return { ok: true, cached: true };
+    }
+    if (this.intakeFieldsPromise && this.intakeFieldsPromiseKey === readinessKey) {
+      return this.intakeFieldsPromise;
+    }
     const script = path.join(
       plugin.root,
       "skills",
@@ -997,16 +1019,28 @@ class DomiIntegration {
     if (!fs.existsSync(script)) {
       throw new Error("当前 domi 插件缺少入库时间迁移组件，请先更新插件。");
     }
-    return this.runJson(process.execPath, [script, "ensure"], {
-      label: "项目与人脉入库时间字段初始化",
-      queue: "lark",
-      timeout: 180000,
-      env: {
-        ELECTRON_RUN_AS_NODE: "1",
-        LARK_CLI_PATH: this.larkCli,
-        ...(this.domiConfigPath ? { DOMI_CONFIG_PATH: this.domiConfigPath } : {})
-      }
-    });
+    this.intakeFieldsPromiseKey = readinessKey;
+    this.intakeFieldsPromise = this.runJson(process.execPath, [script, "ensure"], {
+        label: "项目与人脉入库时间字段初始化",
+        queue: "lark",
+        timeout: 180000,
+        env: {
+          ELECTRON_RUN_AS_NODE: "1",
+          LARK_CLI_PATH: this.larkCli,
+          ...(this.domiConfigPath ? { DOMI_CONFIG_PATH: this.domiConfigPath } : {})
+        }
+      })
+      .then((result) => {
+        this.intakeFieldsReadyKey = readinessKey;
+        return result;
+      })
+      .finally(() => {
+        if (this.intakeFieldsPromiseKey === readinessKey) {
+          this.intakeFieldsPromise = null;
+          this.intakeFieldsPromiseKey = "";
+        }
+      });
+    return this.intakeFieldsPromise;
   }
 
   normalizePlaudBrowser(value) {
@@ -1354,33 +1388,49 @@ class DomiIntegration {
     throw lastError;
   }
 
-  async larkStatus() {
-    try {
-      const auth = await this.withFeishuReadRetry(() =>
-        this.runJson(
-          this.larkCli,
-          ["auth", "status", "--json", "--verify"],
-          { label: "飞书登录检查", queue: "lark" }
-        )
-      );
-      return {
-        ok: Boolean(auth?.verified),
-        cliPath: this.larkCli,
-        userName: auth?.identities?.user?.userName || "",
-        appName: auth?.identities?.bot?.appName || "",
-        tokenStatus: auth?.identities?.user?.tokenStatus || "",
-        error: ""
-      };
-    } catch (error) {
-      return {
-        ok: false,
-        cliPath: this.larkCli,
-        userName: "",
-        appName: "",
-        tokenStatus: "",
-        error: error instanceof Error ? error.message : String(error)
-      };
+  async larkStatus({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && this.larkStatusCache.value && this.larkStatusCache.expiresAt > now) {
+      return this.larkStatusCache.value;
     }
+    if (this.larkStatusCache.inFlight) return this.larkStatusCache.inFlight;
+
+    this.larkStatusCache.inFlight = (async () => {
+      let result;
+      try {
+        const auth = await this.withFeishuReadRetry(() =>
+          this.runJson(
+            this.larkCli,
+            ["auth", "status", "--json", "--verify"],
+            { label: "飞书登录检查", queue: "lark" }
+          )
+        );
+        result = {
+          ok: Boolean(auth?.verified),
+          cliPath: this.larkCli,
+          userName: auth?.identities?.user?.userName || "",
+          appName: auth?.identities?.bot?.appName || "",
+          tokenStatus: auth?.identities?.user?.tokenStatus || "",
+          error: ""
+        };
+      } catch (error) {
+        result = {
+          ok: false,
+          cliPath: this.larkCli,
+          userName: "",
+          appName: "",
+          tokenStatus: "",
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+      this.larkStatusCache.value = result;
+      this.larkStatusCache.expiresAt = Date.now() + (result.ok ? 60_000 : 10_000);
+      return result;
+    })().finally(() => {
+      this.larkStatusCache.inFlight = null;
+    });
+
+    return this.larkStatusCache.inFlight;
   }
 
   resolvePeopleBase() {

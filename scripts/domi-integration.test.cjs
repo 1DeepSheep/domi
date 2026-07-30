@@ -57,6 +57,39 @@ test("Finder-launched app resolves the npm lark-cli launcher to its native binar
   }
 });
 
+test("repeated lark identity checks share a short-lived verification result", async () => {
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => null,
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-lark-status-cache"
+  });
+  let checks = 0;
+  integration.runJson = async () => {
+    checks += 1;
+    return {
+      verified: true,
+      identities: {
+        user: { userName: "示例用户", tokenStatus: "valid" }
+      }
+    };
+  };
+
+  const [first, concurrent] = await Promise.all([
+    integration.larkStatus(),
+    integration.larkStatus()
+  ]);
+  const cached = await integration.larkStatus();
+  assert.equal(first.ok, true);
+  assert.equal(concurrent.ok, true);
+  assert.equal(cached.ok, true);
+  assert.equal(checks, 1);
+
+  await integration.larkStatus({ force: true });
+  assert.equal(checks, 2);
+});
+
 test("1.待办事项 ledger XML round-trips without leaking document configuration", () => {
   const ledger = {
     schemaVersion: 1,
@@ -680,19 +713,24 @@ test("client sync delegates intake field setup to the bundled plugin migration",
     plaudOutputDir: "/tmp/domi-test",
     domiConfigPath: "/tmp/domi-runtime/domi-plugin-config.json"
   });
-  let received;
+  const received = [];
   integration.runJson = async (binary, args, options) => {
-    received = { binary, args, options };
+    received.push({ binary, args, options });
     return { ok: true };
   };
 
-  await integration.ensureIntakeTimeFields({ root: pluginRoot });
+  await Promise.all([
+    integration.ensureIntakeTimeFields({ root: pluginRoot, version: "test" }),
+    integration.ensureIntakeTimeFields({ root: pluginRoot, version: "test" })
+  ]);
+  await integration.ensureIntakeTimeFields({ root: pluginRoot, version: "test" });
 
-  assert.equal(received.binary, process.execPath);
-  assert.deepEqual(received.args, [script, "ensure"]);
-  assert.equal(received.options.queue, "lark");
-  assert.equal(received.options.env.DOMI_CONFIG_PATH, "/tmp/domi-runtime/domi-plugin-config.json");
-  assert.equal(received.options.env.LARK_CLI_PATH, integration.larkCli);
+  assert.equal(received.length, 1);
+  assert.equal(received[0].binary, process.execPath);
+  assert.deepEqual(received[0].args, [script, "ensure"]);
+  assert.equal(received[0].options.queue, "lark");
+  assert.equal(received[0].options.env.DOMI_CONFIG_PATH, "/tmp/domi-runtime/domi-plugin-config.json");
+  assert.equal(received[0].options.env.LARK_CLI_PATH, integration.larkCli);
 });
 
 test("Feishu sync preserves cached data and hides API URLs after repeated network failure", async () => {

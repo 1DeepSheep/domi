@@ -117,8 +117,18 @@ assert.match(
 );
 assert.match(
   app,
-  /void refreshPlaudQueue\(\);\s*\}, \[plaudEnabled, appSettings\?\.plaudBrowser\]\);/,
-  "Unrelated settings saves must not restart the managed PLAUD browser or steal foreground focus."
+  /if \(!weeklyNewsAutomationReady\) return;[\s\S]*?window\.setTimeout\(\(\) => \{[\s\S]*?void refreshPlaudQueue\(\);[\s\S]*?\}, 1_200\)[\s\S]*?\[plaudEnabled, appSettings\?\.plaudBrowser, weeklyNewsAutomationReady\]/,
+  "PLAUD startup must wait for core integrations and remain isolated from unrelated settings saves."
+);
+assert.doesNotMatch(
+  app,
+  /integrationBootstrapStartedRef/,
+  "StrictMode cleanup must not permanently suppress the second integration bootstrap."
+);
+assert.match(
+  app,
+  /const NEW_THREAD_MODEL = "default";[\s\S]*?const NEW_THREAD_REASONING_EFFORT = "max";[\s\S]*?const NEW_THREAD_SERVICE_TIER = "priority";/,
+  "New tasks must keep Max reasoning on the Fast service tier by default."
 );
 assert.match(
   setupCenter,
@@ -218,6 +228,21 @@ assert.match(
 );
 assert.match(
   main,
+  /liveCodexThreads\.get\(payload\.threadId\) === runtimeKey[\s\S]*?return payload\.threadId/,
+  "A persistent App Server session must reuse its live thread without repeating thread/resume."
+);
+assert.match(
+  main,
+  /runCodexCheckCached[\s\S]*?CODEX_CHECK_CACHE_TTL_MS[\s\S]*?ipcMain\.handle\("codex:check", runCodexCheckCached\)/,
+  "Repeated renderer status checks must share the cached Codex health result."
+);
+assert.match(
+  main,
+  /runtimeContextPromise = Promise\.all[\s\S]*?threadPromise = client\.start\(\)\.then[\s\S]*?Promise\.all\(\[[\s\S]*?threadPromise,[\s\S]*?runtimeContextPromise/,
+  "Codex startup and external-connection preflight must run concurrently."
+);
+assert.match(
+  main,
   /markdown:image-preview[\s\S]*?markdown:image-save[\s\S]*?markdown:copy/,
   "The main process must expose Markdown image preview, save and rich-copy IPC."
 );
@@ -278,8 +303,8 @@ assert.match(
 );
 assert.match(
   app,
-  /async function syncManagedTasks\(\)[\s\S]*?workbench\.syncDomi\(\)[\s\S]*?todoRecentEntriesContext\([\s\S]*?workbench\.runCodex\(\{[\s\S]*?ephemeral:\s*true,[\s\S]*?background:\s*true,[\s\S]*?workflowId:\s*todoWorkflow\.id,[\s\S]*?reasoningEffort:\s*"medium"[\s\S]*?await refreshDomiTaskBoard\(\{ fresh: true \}\)/,
-  "Todo-board sync must refresh the data snapshot, pass recent intake candidates to a temporary background Todo Skill run, and then reread the active backend document."
+  /async function syncManagedTasks\(\)[\s\S]*?workbench\.syncDomi\(\)[\s\S]*?todoRecentEntriesContext\([\s\S]*?workbench\.runCodex\(\{[\s\S]*?ephemeral:\s*true,[\s\S]*?background:\s*true,[\s\S]*?workflowId:\s*todoWorkflow\.id,[\s\S]*?reasoningEffort,[\s\S]*?serviceTier,[\s\S]*?await refreshDomiTaskBoard\(\{ fresh: true \}\)/,
+  "Todo-board sync must refresh the data snapshot, keep the selected Max/Fast defaults, pass candidates to a temporary background Todo Skill run, and then reread the active backend document."
 );
 assert.doesNotMatch(
   app.match(/async function syncManagedTasks\(\)[\s\S]*?\n  async function refreshDomiEntityOverview/)?.[0] || "",
@@ -293,8 +318,8 @@ assert.match(
 );
 assert.match(
   app,
-  /const status = await workbench\.checkCodex\(\)[\s\S]*?if \(!status\.pluginSetup\?\.ok\)[\s\S]*?await Promise\.allSettled/,
-  "Initial integration sync must wait for the bundled plugin check and update to finish."
+  /const status = await workbench\.checkCodex\(\)[\s\S]*?if \(!status\.pluginSetup\?\.ok\)[\s\S]*?await refreshDomi\(\)[\s\S]*?await pause\(350\)[\s\S]*?await refreshDomiTaskBoard[\s\S]*?await pause\(350\)[\s\S]*?await refreshWeeklyNews/,
+  "Initial integration sync must wait for the bundled plugin check, then stagger core data, todo and news refreshes."
 );
 assert.match(
   app,
