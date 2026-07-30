@@ -828,6 +828,99 @@ test("weekly news falls back to retained local history when Feishu is offline", 
   assert.deepEqual(result.items.map((item) => item.recordId), ["retained-news"]);
 });
 
+test("local repository safely and idempotently indexes existing workspace entities", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-index-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectPath = path.join(libraryDir, "3.项目库", "AI", "AI基础设施", "驭驯网络");
+  const legacyProjectPath = path.join(
+    libraryDir,
+    "3.项目库",
+    "具身智能&机器人",
+    "工业机器人",
+    "20220407-示例机器人"
+  );
+  const misplacedResearchPath = path.join(
+    libraryDir,
+    "3.项目库",
+    "具身智能&机器人",
+    "工业机器人",
+    "20210806-工业机器人行业研究"
+  );
+  const personPath = path.join(libraryDir, "4.人脉库", "张三");
+  fs.mkdirSync(path.join(projectPath, "研究", "不是项目"), { recursive: true });
+  fs.mkdirSync(legacyProjectPath, { recursive: true });
+  fs.mkdirSync(misplacedResearchPath, { recursive: true });
+  fs.mkdirSync(personPath, { recursive: true });
+  fs.writeFileSync(path.join(projectPath, "项目主页.md"), `<!-- domi:managed:start -->
+---
+domi_schema: 2
+entity_type: "project"
+project_id: "prj_existing_workspace"
+company_name: "驭驯网络"
+domain: "AI"
+subdomains: ["AI基础设施"]
+status: "已交流"
+rating: "A"
+last_updated_at: "2026-07-30T00:00:00.000Z"
+---
+
+# 驭驯网络
+`);
+  fs.writeFileSync(path.join(personPath, "人物主页.md"), `<!-- domi:managed:start -->
+---
+domi_schema: 2
+entity_type: "person"
+person_id: "per_existing_workspace"
+name: "张三"
+organization: "示例科技 · CEO"
+types: ["创业者"]
+status: "已联系"
+rating: "A"
+---
+
+# 张三
+`);
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const first = repository.reindexWorkspace();
+  assert.deepEqual(first.projects, { discovered: 2, created: 2, linked: 0 });
+  assert.deepEqual(first.people, { discovered: 1, created: 1, linked: 0 });
+  assert.equal(repository.listProjects().length, 2);
+  assert.equal(repository.listPeople().length, 1);
+  const indexedProject = repository.listProjects().find((project) => project.name === "驭驯网络");
+  assert.equal(indexedProject.domain, "AI");
+  assert.deepEqual(indexedProject.subdomains, ["AI基础设施"]);
+  assert.equal(indexedProject.status, "已交流");
+  assert.equal(indexedProject.rating, "A");
+  assert.match(decodeURIComponent(indexedProject.link), /项目主页\.md$/);
+  assert.equal(
+    repository.listProjects().some((project) => project.name === "不是项目"),
+    false
+  );
+  assert.equal(repository.listPeople()[0].organization, "示例科技 · CEO");
+
+  repository.database.prepare(`
+    UPDATE projects SET status = '深度跟踪', rating = 'S', notes = '保留人工维护信息'
+    WHERE normalized_name = '驭驯网络'
+  `).run();
+  const second = repository.reindexWorkspace();
+  assert.deepEqual(second.projects, { discovered: 2, created: 0, linked: 0 });
+  assert.deepEqual(second.people, { discovered: 1, created: 0, linked: 0 });
+  const preservedProject = repository.listProjects().find((project) => project.name === "驭驯网络");
+  assert.equal(preservedProject.status, "深度跟踪");
+  assert.equal(preservedProject.rating, "S");
+  assert.equal(preservedProject.notes, "保留人工维护信息");
+  const projectColumns = repository.database
+    .prepare("PRAGMA table_info(projects)")
+    .all()
+    .map((column) => column.name);
+  assert.ok(projectColumns.includes("financing_history"));
+  assert.ok(projectColumns.includes("latest_valuation_usd_100m"));
+});
+
 test("local repository mode syncs projects, people and news without Feishu", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-integration-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
