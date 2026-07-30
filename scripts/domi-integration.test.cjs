@@ -848,11 +848,26 @@ test("local repository safely and idempotently indexes existing workspace entiti
     "工业机器人",
     "20210806-工业机器人行业研究"
   );
+  const directProjectPath = path.join(
+    libraryDir,
+    "3.项目库",
+    "企业软件",
+    "20260716-示例流程软件-桌面研究-B"
+  );
+  const compactUnclassifiedProjectPath = path.join(
+    libraryDir,
+    "3.项目库",
+    "_未分类",
+    "历史项目"
+  );
   const personPath = path.join(libraryDir, "4.人脉库", "张三");
   fs.mkdirSync(path.join(projectPath, "研究", "不是项目"), { recursive: true });
   fs.mkdirSync(legacyProjectPath, { recursive: true });
   fs.mkdirSync(misplacedResearchPath, { recursive: true });
+  fs.mkdirSync(directProjectPath, { recursive: true });
+  fs.mkdirSync(path.join(compactUnclassifiedProjectPath, "原始材料"), { recursive: true });
   fs.mkdirSync(personPath, { recursive: true });
+  fs.writeFileSync(path.join(directProjectPath, "示例流程软件-桌面研究.md"), "# 示例流程软件\n");
   fs.writeFileSync(path.join(projectPath, "项目主页.md"), `<!-- domi:managed:start -->
 ---
 domi_schema: 2
@@ -886,9 +901,9 @@ rating: "A"
   const repository = new LocalDomiRepository({ databasePath, libraryDir });
   t.after(() => repository.close());
   const first = repository.reindexWorkspace();
-  assert.deepEqual(first.projects, { discovered: 2, created: 2, linked: 0 });
+  assert.deepEqual(first.projects, { discovered: 4, created: 4, linked: 0 });
   assert.deepEqual(first.people, { discovered: 1, created: 1, linked: 0 });
-  assert.equal(repository.listProjects().length, 2);
+  assert.equal(repository.listProjects().length, 4);
   assert.equal(repository.listPeople().length, 1);
   const indexedProject = repository.listProjects().find((project) => project.name === "驭驯网络");
   assert.equal(indexedProject.domain, "AI");
@@ -900,6 +915,14 @@ rating: "A"
     repository.listProjects().some((project) => project.name === "不是项目"),
     false
   );
+  assert.equal(
+    repository.listProjects().some((project) => project.name.includes("示例流程软件")),
+    true
+  );
+  assert.equal(
+    repository.listProjects().some((project) => project.name === "历史项目"),
+    true
+  );
   assert.equal(repository.listPeople()[0].organization, "示例科技 · CEO");
 
   repository.database.prepare(`
@@ -907,8 +930,10 @@ rating: "A"
     WHERE normalized_name = '驭驯网络'
   `).run();
   const second = repository.reindexWorkspace();
-  assert.deepEqual(second.projects, { discovered: 2, created: 0, linked: 0 });
+  assert.deepEqual(second.projects, { discovered: 4, created: 0, linked: 0 });
   assert.deepEqual(second.people, { discovered: 1, created: 0, linked: 0 });
+  assert.equal(second.unchanged, true);
+  assert.ok(second.indexedAt > 0);
   const preservedProject = repository.listProjects().find((project) => project.name === "驭驯网络");
   assert.equal(preservedProject.status, "深度跟踪");
   assert.equal(preservedProject.rating, "S");
@@ -919,6 +944,173 @@ rating: "A"
     .map((column) => column.name);
   assert.ok(projectColumns.includes("financing_history"));
   assert.ok(projectColumns.includes("latest_valuation_usd_100m"));
+  assert.equal(
+    repository.recordDirectory("project", indexedProject.recordId),
+    projectPath
+  );
+
+  const newProjectPath = path.join(
+    libraryDir,
+    "3.项目库",
+    "AI",
+    "Agent",
+    "增量发现项目"
+  );
+  fs.mkdirSync(newProjectPath, { recursive: true });
+  fs.writeFileSync(path.join(newProjectPath, "项目主页.md"), `<!-- domi:managed:start -->
+---
+entity_type: "project"
+project_id: "prj_incremental"
+company_name: "增量发现项目"
+domain: "AI"
+subdomains: ["Agent"]
+---
+# 增量发现项目
+`);
+  const third = repository.reindexWorkspace();
+  assert.equal(third.unchanged, false);
+  assert.equal(third.projects.discovered, 5);
+  assert.equal(third.projects.created, 1);
+  assert.ok(repository.listProjects().some((project) => project.recordId === "prj_incremental"));
+});
+
+test("local database editor updates records, managed Markdown and safe directory locations", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-editor-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const version = 1_700_000_000_000;
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "旧项目名");
+  const personDirectory = path.join(libraryDir, "4.人脉库", "旧姓名");
+  const newsPath = path.join(libraryDir, "2.行业动态", "2026", "06", "evt_edit.md");
+  fs.mkdirSync(projectDirectory, { recursive: true });
+  fs.mkdirSync(personDirectory, { recursive: true });
+  fs.mkdirSync(path.dirname(newsPath), { recursive: true });
+  fs.writeFileSync(
+    path.join(projectDirectory, "项目主页.md"),
+    "<!-- domi:managed:start -->\n旧项目块\n<!-- domi:managed:end -->\n\n# 用户附注\n保留项目正文\n"
+  );
+  fs.writeFileSync(
+    path.join(personDirectory, "人物主页.md"),
+    "<!-- domi:managed:start -->\n旧人物块\n<!-- domi:managed:end -->\n\n# 用户附注\n保留人物正文\n"
+  );
+  fs.writeFileSync(
+    newsPath,
+    "<!-- domi:managed:start -->\n旧行业信息块\n<!-- domi:managed:end -->\n\n# 用户附注\n保留行业正文\n"
+  );
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_edit", "旧项目名", "旧项目名", "AI", '["Agent"]', "待交流", "", "",
+    "[]", "[]", "", null, version, path.join(projectDirectory, "项目主页.md"),
+    version, version
+  );
+  repository.database.prepare(`
+    INSERT INTO people (
+      id, name, normalized_name, types_json, organization, status, rating,
+      last_contact_at, cities_json, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "per_edit", "旧姓名", "旧姓名", '["创业者"]', "旧组织", "待联系", "",
+    null, "[]", path.join(personDirectory, "人物主页.md"), version, version
+  );
+  repository.database.prepare(`
+    INSERT INTO news_events (
+      event_id, title, domains_json, subdomains_json, types_json, published_at,
+      summary, investment_meaning, url, source, companies, institutions,
+      importance, confidence, evidence_status, action, worth_following,
+      document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "evt_edit", "旧标题", '["AI"]', '["Agent"]', '["公司动态"]',
+    Date.parse("2026-06-20T08:00:00+08:00"), "旧摘要", "", "https://example.com/old",
+    "旧来源", "", "", 5, 6, "待核验", "继续观察", 1, newsPath, version, version
+  );
+
+  const updatedProject = repository.updateProject({
+    recordId: "prj_edit",
+    expectedUpdatedAt: version,
+    name: "新项目名",
+    domain: "企业软件",
+    subdomains: ["Agent"],
+    status: "深度跟踪",
+    rating: "A",
+    notes: "新的结构化摘要",
+    cities: ["上海"],
+    investors: ["IDG"],
+    financingHistory: "| 融资时间 | 融资轮次 |\n|---|---|\n| 2026 | A轮 |",
+    latestValuationUsd100m: 1.5
+  });
+  assert.equal(updatedProject.name, "新项目名");
+  assert.equal(updatedProject.latestValuationUsd100m, 1.5);
+  const movedProjectPath = path.join(
+    libraryDir,
+    "3.项目库",
+    "企业软件",
+    "Agent",
+    "新项目名",
+    "项目主页.md"
+  );
+  assert.equal(fs.existsSync(path.join(projectDirectory, "项目主页.md")), false);
+  assert.match(fs.readFileSync(movedProjectPath, "utf8"), /保留项目正文/);
+  assert.match(fs.readFileSync(movedProjectPath, "utf8"), /新的结构化摘要/);
+  assert.throws(
+    () => repository.updateProject({
+      ...updatedProject,
+      expectedUpdatedAt: version,
+      financingHistory: updatedProject.financingHistory,
+      latestValuationUsd100m: updatedProject.latestValuationUsd100m
+    }),
+    /已被其他流程更新/
+  );
+
+  const updatedPerson = repository.updatePerson({
+    recordId: "per_edit",
+    expectedUpdatedAt: version,
+    name: "新姓名",
+    types: ["创业者", "专家"],
+    organization: "新组织",
+    status: "已联系",
+    rating: "B",
+    lastContact: "2026-07-30",
+    cities: ["北京"]
+  });
+  assert.equal(updatedPerson.name, "新姓名");
+  const movedPersonPath = path.join(libraryDir, "4.人脉库", "新姓名", "人物主页.md");
+  assert.match(fs.readFileSync(movedPersonPath, "utf8"), /保留人物正文/);
+  assert.match(fs.readFileSync(movedPersonPath, "utf8"), /新组织/);
+
+  const updatedNews = repository.updateNews({
+    recordId: "evt_edit",
+    expectedUpdatedAt: version,
+    title: "新标题",
+    domains: ["前沿科技"],
+    subdomains: ["量子计算"],
+    types: ["技术进展"],
+    publishedAt: Date.parse("2026-07-30T09:30:00+08:00"),
+    summary: "新摘要",
+    investmentMeaning: "新投资含义",
+    url: "https://example.com/new",
+    source: "新来源",
+    companies: "示例公司",
+    institutions: "",
+    importance: 8,
+    confidence: 9,
+    evidenceStatus: "官方确认",
+    action: "继续跟踪",
+    worthFollowing: true
+  });
+  assert.equal(updatedNews.title, "新标题");
+  const movedNewsPath = path.join(libraryDir, "2.行业动态", "2026", "07", "evt_edit.md");
+  assert.equal(fs.existsSync(newsPath), false);
+  assert.match(fs.readFileSync(movedNewsPath, "utf8"), /保留行业正文/);
+  assert.match(fs.readFileSync(movedNewsPath, "utf8"), /新投资含义/);
 });
 
 test("local repository mode syncs projects, people and news without Feishu", async (t) => {
@@ -1008,6 +1200,98 @@ test("local repository mode syncs projects, people and news without Feishu", asy
   assert.deepEqual(newsResult.items.map((item) => item.recordId), ["evt_demo"]);
 });
 
+test("local materials use the exact entity directory and database edits avoid a full sync", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-fast-path-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "精确项目");
+  const canonicalPath = path.join(projectDirectory, "项目主页.md");
+  const materialPath = path.join(projectDirectory, "原始材料", "BP.pdf");
+  const unrelatedPath = path.join(libraryDir, "3.项目库", "AI", "Agent", "无关项目", "精确项目误匹配.pdf");
+  fs.mkdirSync(path.dirname(materialPath), { recursive: true });
+  fs.mkdirSync(path.dirname(unrelatedPath), { recursive: true });
+  fs.writeFileSync(canonicalPath, "<!-- domi:managed:start -->\n旧内容\n<!-- domi:managed:end -->\n");
+  fs.writeFileSync(materialPath, "%PDF-1.4\n");
+  fs.writeFileSync(unrelatedPath, "%PDF-1.4\n");
+
+  const version = 1_700_000_000_000;
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_fast", "精确项目", "精确项目", "AI", '["Agent"]', "待交流", "", "",
+    "[]", "[]", "", null, version, canonicalPath, version, version
+  );
+  const project = repository.listProjects()[0];
+  repository.close();
+
+  const cache = new Map([
+    ["snapshot-v1", {
+      value: {
+        version: 1,
+        backend: "local",
+        syncedAt: version,
+        sources: { projects: { total: 1 }, people: { total: 0 } },
+        projects: [project],
+        people: []
+      },
+      updatedAt: version
+    }]
+  ]);
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: (key) => cache.get(key) || null,
+      saveCache: (key, value) => cache.set(key, { value, updatedAt: Date.now() })
+    },
+    configProvider: () => ({
+      storageBackend: "local",
+      localRepositoryDir: libraryDir,
+      localDatabasePath: databasePath
+    }),
+    plaudOutputDir: path.join(root, "plaud")
+  });
+  integration.buildMaterialIndex = async () => {
+    throw new Error("local material lookup must not build a workspace-wide index");
+  };
+  const materials = await integration.entityMaterials({
+    entityType: "project",
+    recordId: "prj_fast"
+  });
+  assert.equal(materials.searchRoot, projectDirectory);
+  assert.ok(materials.files.some((item) => item.path === materialPath));
+  assert.equal(materials.files.some((item) => item.path === unrelatedPath), false);
+
+  integration.sync = async () => {
+    throw new Error("database edit must not run a full sync");
+  };
+  const updated = await integration.updateDatabaseRecord({
+    entityType: "project",
+    record: {
+      recordId: "prj_fast",
+      expectedUpdatedAt: version,
+      name: "精确项目",
+      domain: "AI",
+      subdomains: ["Agent"],
+      status: "深度跟踪",
+      rating: "A",
+      notes: "快速保存",
+      cities: [],
+      investors: ["IDG"],
+      financingHistory: "",
+      latestValuationUsd100m: null
+    }
+  });
+  assert.equal(updated.ok, true);
+  assert.equal(updated.record.notes, "快速保存");
+  assert.equal(updated.snapshot.projects[0].notes, "快速保存");
+  assert.equal(cache.get("snapshot-v1").value.projects[0].notes, "快速保存");
+});
+
 test("PLAUD queue loads 50 recordings by default and orders them by creation time", async () => {
   const stateStore = {
     loadCache: () => null,
@@ -1017,12 +1301,16 @@ test("PLAUD queue loads 50 recordings by default and orders them by creation tim
   integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
 
   let requestedLimit = "";
+  let requestedOffset = "";
   integration.runPlaudWorker = async (command, args) => {
     assert.equal(command, "list");
     requestedLimit = args[0];
+    requestedOffset = args[1];
     return {
       ok: true,
       pendingCount: 0,
+      hasMore: true,
+      nextOffset: 50,
       items: [
         { fileId: "older-recording", fileName: "较早录音", createdAt: 1_720_000_000 },
         { fileId: "newer-recording", fileName: "较新录音", createdAt: 1_730_000_000_000 }
@@ -1035,9 +1323,43 @@ test("PLAUD queue loads 50 recordings by default and orders them by creation tim
   const result = await integration.plaudQueue();
 
   assert.equal(requestedLimit, "50");
+  assert.equal(requestedOffset, "0");
+  assert.equal(result.hasMore, true);
+  assert.equal(result.nextOffset, 50);
   assert.deepEqual(result.items.map((item) => item.fileId), ["newer-recording", "older-recording"]);
   assert.equal(integration.plaudRemoteHealth.ok, true);
   assert.equal(integration.plaudRemoteHealth.error, "");
+});
+
+test("PLAUD queue requests later pages without duplicating local workflow-only records", async () => {
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => null,
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test"
+  });
+  integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
+  integration.runPlaudWorker = async (_command, args) => ({
+    ok: true,
+    pendingCount: 0,
+    hasMore: false,
+    nextOffset: Number(args[1]) + Number(args[0]),
+    items: [{ fileId: "older-recording", fileName: "更早录音", createdAt: 1 }]
+  });
+  integration.loadPlaudWorkflowRecords = () => [{
+    fileId: "workflow-only",
+    fileName: "本地恢复项",
+    stage: "transcript_ready"
+  }];
+  integration.loadActivePlaudWorkflowRecords = () => integration.loadPlaudWorkflowRecords();
+
+  const result = await integration.plaudQueue({ offset: 50, limit: 50 });
+
+  assert.equal(result.pageOffset, 50);
+  assert.equal(result.pageSize, 50);
+  assert.equal(result.nextOffset, 100);
+  assert.deepEqual(result.items.map((item) => item.fileId), ["older-recording"]);
 });
 
 test("PLAUD health status reuses the latest queue result without reopening a browser", async () => {

@@ -80,14 +80,46 @@ test("development uses isolated user data without copying production state", (t)
 
   assert.equal(result.development, true);
   assert.equal(result.userDataPath, path.join(appData, "domi-dev"));
+  assert.equal(result.productionUserDataPath, path.join(appData, "domi"));
   assert.equal(result.pluginRuntimePath, path.join(appData, "domi"));
-  assert.equal(result.workspacePath, path.join(documents, "domi开发工作区"));
+  assert.equal(
+    result.workspacePath,
+    path.join(appData, "domi-dev", "runtime-workspace")
+  );
   assert.equal(fs.existsSync(path.join(result.userDataPath, "domi.sqlite3")), false);
+  assert.equal(fs.existsSync(path.join(documents, "domi开发工作区")), false);
   assert.equal(fs.readFileSync(path.join(productionUserData, "domi.sqlite3"), "utf8"), "production");
   assert.deepEqual(calls, [
     ["name", "domi"],
     ["userData", path.join(appData, "domi-dev")]
   ]);
+});
+
+test("development moves its visible runtime workspace into Application Support", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-brand-dev-workspace-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const appData = path.join(root, "Application Support");
+  const documents = path.join(root, "Documents");
+  const visibleWorkspace = path.join(documents, "domi开发工作区");
+  fs.mkdirSync(visibleWorkspace, { recursive: true });
+  fs.writeFileSync(path.join(visibleWorkspace, "existing-output.md"), "keep");
+
+  const fakeApp = {
+    isPackaged: false,
+    getPath: (name) => name === "appData" ? appData : documents,
+    setName: () => {},
+    setPath: () => {}
+  };
+  const result = prepareApplicationBrandPaths(fakeApp);
+  const hiddenWorkspace = path.join(appData, "domi-dev", "runtime-workspace");
+
+  assert.equal(result.workspacePath, hiddenWorkspace);
+  assert.equal(result.workspaceMigration.migrated, true);
+  assert.equal(fs.existsSync(visibleWorkspace), false);
+  assert.equal(
+    fs.readFileSync(path.join(hiddenWorkspace, "existing-output.md"), "utf8"),
+    "keep"
+  );
 });
 
 test("brand migration merges missing files without overwriting current data", (t) => {
