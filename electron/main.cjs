@@ -78,8 +78,11 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 const activeRuns = new Map();
+const liveCodexThreads = new Map();
 const allowedMarkdownAssetPaths = new Set();
 const CODEX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const CODEX_CHECK_CACHE_TTL_MS = 60 * 1000;
+const LARK_STATUS_CACHE_TTL_MS = 5 * 60 * 1000;
 const externalDomiWorkflows = new Map([
   ["domi-analyst", "使用 domi-AI分析师，并可能读取当前 domi 资料库"],
   ["domi-router", "访问 PLAUD、domi 恢复队列和当前资料库，并可能按工作流更新记录"],
@@ -1134,6 +1137,18 @@ function finishRun(run, type, details = {}) {
     outputPath,
     eventCount: run.eventCount
   };
+  const finishedAt = Date.now();
+  appendRuntimeLog("codex-run-performance", {
+    runId: run.runId,
+    executionMode: run.executionMode,
+    outcome: type,
+    preflightMs: Math.max(0, (run.threadReadyAt || finishedAt) - run.acceptedAt),
+    turnStartMs: run.turnAcceptedAt
+      ? Math.max(0, run.turnAcceptedAt - (run.threadReadyAt || run.acceptedAt))
+      : undefined,
+    totalMs: Math.max(0, finishedAt - run.acceptedAt),
+    eventCount: run.eventCount
+  });
 
   publishCodexEvent(run.sender, run.runId, {
     type,
@@ -1276,6 +1291,7 @@ function getCodexClient() {
         }
       },
       onExit: ({ error, intentional }) => {
+        liveCodexThreads.clear();
         if (!intentional) {
           failAllRuns(error);
         }
@@ -1288,6 +1304,8 @@ function getCodexClient() {
 function resetCodexClient() {
   codexClient?.close();
   codexClient = null;
+  liveCodexThreads.clear();
+  serviceCoordinator.invalidate("codex:check");
 }
 
 async function runCodexCheck() {
@@ -1409,6 +1427,23 @@ async function runCodexCheck() {
   }
 }
 
+function runCodexCheckCached() {
+  return serviceCoordinator.run(
+    "codex:check",
+    runCodexCheck,
+    {
+      ttlMs: CODEX_CHECK_CACHE_TTL_MS,
+      ttlForValue: (value) => value?.ok ? CODEX_CHECK_CACHE_TTL_MS : 5_000,
+      retries: 0,
+      allowStale: true
+    }
+  );
+}
+
+function codexThreadRuntimeKey(workspacePath, sandbox) {
+  return `${path.resolve(workspacePath)}\u0000${sandbox}`;
+}
+
 async function resolveThread(client, payload, workspacePath, sandbox) {
   const model = payload.model && payload.model !== "default" ? payload.model : undefined;
   const effort = payload.reasoningEffort && payload.reasoningEffort !== "default"
@@ -1420,6 +1455,10 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
       ? payload.serviceTier
       : undefined;
   if (payload.threadId && payload.ephemeral !== true) {
+    const runtimeKey = codexThreadRuntimeKey(workspacePath, sandbox);
+    if (liveCodexThreads.get(payload.threadId) === runtimeKey) {
+      return payload.threadId;
+    }
     try {
       const resumed = await client.request("thread/resume", {
         threadId: payload.threadId,
@@ -1430,6 +1469,7 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
         approvalPolicy: "never",
         sandbox
       });
+      liveCodexThreads.set(resumed.thread.id, runtimeKey);
       return resumed.thread.id;
     } catch {
       // Switching identity/provider can make an old Codex thread unavailable.
@@ -1449,6 +1489,12 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
       ...(effort ? { model_reasoning_effort: effort } : {})
     }
   });
+  if (payload.ephemeral !== true) {
+    liveCodexThreads.set(
+      started.thread.id,
+      codexThreadRuntimeKey(workspacePath, sandbox)
+    );
+  }
   return started.thread.id;
 }
 
@@ -1531,6 +1577,9 @@ async function saveRuntimeSettings(request) {
       }
     }
     const result = getAppSettings().save(settingsRequest);
+    if (dataConnectionChanged) {
+      serviceCoordinator.invalidate("domi:lark-status");
+    }
     getUpdateService().configureChannel(result.settings.updateChannel);
     let taskDocument;
     if (shouldInitializeTaskDocument) {
@@ -1826,7 +1875,15 @@ function repositoryRuntimeContext(payload) {
 
 async function larkRuntimeContext(required) {
   if (!required) return "";
-  const status = await getDomiIntegration().larkStatus();
+  const status = await serviceCoordinator.run(
+    "domi:lark-status",
+    () => getDomiIntegration().larkStatus(),
+    {
+      ttlMs: LARK_STATUS_CACHE_TTL_MS,
+      retries: 0,
+      allowStale: true
+    }
+  );
   const identity = status.userName ? `，当前用户：${status.userName}` : "";
   if (status.ok) {
     return [
@@ -1879,6 +1936,7 @@ async function runCodex(sender, payload) {
   const workspacePath = validProjectWorkspace(payload?.workspacePath) || demoWorkspace;
 
   const runId = payload?.runId || `run-${Date.now()}`;
+  const acceptedAt = Date.now();
   const prompt = String(payload?.prompt || "").trim();
   if (!prompt) {
     return {
@@ -1913,12 +1971,18 @@ async function runCodex(sender, payload) {
       };
     }
     const client = getCodexClient();
-    await client.start();
-    const threadId = await resolveThread(client, payload, workspacePath, execution.sandbox);
-    const runtimeContext = [
-      repositoryRuntimeContext(payload),
-      await larkRuntimeContext(larkRequired)
-    ].filter(Boolean).join("\n\n");
+    const runtimeContextPromise = Promise.all([
+      Promise.resolve(repositoryRuntimeContext(payload)),
+      larkRuntimeContext(larkRequired)
+    ]).then((parts) => parts.filter(Boolean).join("\n\n"));
+    const threadPromise = client.start().then(() =>
+      resolveThread(client, payload, workspacePath, execution.sandbox)
+    );
+    const [threadId, runtimeContext] = await Promise.all([
+      threadPromise,
+      runtimeContextPromise
+    ]);
+    const threadReadyAt = Date.now();
 
     const completion = new Promise((resolve) => {
       const run = {
@@ -1932,6 +1996,9 @@ async function runCodex(sender, payload) {
         workspacePath,
         privateOutput: payload?.privateOutput === true,
         finished: false,
+        acceptedAt,
+        threadReadyAt,
+        turnAcceptedAt: null,
         resolve
       };
       activeRuns.set(runId, run);
@@ -1978,6 +2045,7 @@ async function runCodex(sender, payload) {
       const run = activeRuns.get(runId);
       if (run) {
         run.turnId = response.turn.id;
+        run.turnAcceptedAt = Date.now();
       }
     } catch (error) {
       const run = activeRuns.get(runId);
@@ -2178,7 +2246,7 @@ ipcMain.handle("app:notify", (_event, request = {}) => {
   return { ok: true };
 });
 
-ipcMain.handle("codex:check", runCodexCheck);
+ipcMain.handle("codex:check", runCodexCheckCached);
 ipcMain.handle("codex:run", (event, payload) => runCodex(event.sender, payload));
 ipcMain.handle("codex:stop", (_event, runId) => stopCodex(runId));
 ipcMain.handle("codex:recover-thread", (_event, threadId) => recoverCodexThread(threadId));

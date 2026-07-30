@@ -87,6 +87,7 @@ type TodoRecentProject = {
   status?: string;
   rating?: string;
   createdAt?: number | null;
+  lastFollowup?: number | null;
 };
 
 type TodoRecentPerson = {
@@ -96,6 +97,7 @@ type TodoRecentPerson = {
   status?: string;
   rating?: string;
   createdAt?: number | null;
+  lastContact?: number | null;
 };
 
 function todoRecentEntryLine(
@@ -114,6 +116,17 @@ function todoRecentEntryLine(
     singleLine(item.status) || "进展未填写",
     detail || (kind === "project" ? "领域未填写" : "组织未填写")
   ].join("｜");
+}
+
+function todoPriorityRating(value: unknown) {
+  return /^(?:S|A\+?)$/i.test(singleLine(value));
+}
+
+function todoFollowupDate(value: unknown) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0
+    ? new Date(timestamp).toISOString()
+    : "未填写";
 }
 
 export function todoRecentEntriesContext(
@@ -139,24 +152,78 @@ export function todoRecentEntriesContext(
     )
     .sort((left, right) => Number(right.createdAt) - Number(left.createdAt));
 
-  if (!recentProjects.length && !recentPeople.length) return "";
+  const priorityProjects = projects
+    .filter((item) =>
+      singleLine(item.recordId)
+      && singleLine(item.name)
+      && todoPriorityRating(item.rating)
+    )
+    .sort((left, right) =>
+      (Number(left.lastFollowup) || 0) - (Number(right.lastFollowup) || 0)
+    );
+  const priorityPeople = people
+    .filter((item) =>
+      singleLine(item.recordId)
+      && singleLine(item.name)
+      && todoPriorityRating(item.rating)
+    )
+    .sort((left, right) =>
+      (Number(left.lastContact) || 0) - (Number(right.lastContact) || 0)
+    );
 
-  const limit = 120;
+  if (
+    !recentProjects.length
+    && !recentPeople.length
+    && !priorityProjects.length
+    && !priorityPeople.length
+  ) return "";
+
+  const recentLimit = 120;
+  const followupLimit = 160;
   const candidates = [
     ...recentProjects.map((item) => ({ kind: "project" as const, item })),
     ...recentPeople.map((item) => ({ kind: "person" as const, item }))
   ]
     .sort((left, right) => Number(right.item.createdAt) - Number(left.item.createdAt))
-    .slice(0, limit);
+    .slice(0, recentLimit);
+  const followupCandidates = [
+    ...priorityProjects.map((item) => ({
+      kind: "project" as const,
+      item,
+      timestamp: Number(item.lastFollowup) || 0
+    })),
+    ...priorityPeople.map((item) => ({
+      kind: "person" as const,
+      item,
+      timestamp: Number(item.lastContact) || 0
+    }))
+  ]
+    .sort((left, right) => left.timestamp - right.timestamp)
+    .slice(0, followupLimit);
 
   return [
+    "DOMI_TODO_CLIENT_SNAPSHOT_V1",
     `最近 4 周新入库候选索引（刚由客户端刷新，共 ${recentProjects.length} 个项目、${recentPeople.length} 个人；格式：类型｜recordId｜名称｜系统入库时间｜评级｜进展｜领域或组织）：`,
     ...candidates.map(({ kind, item }) => `- ${todoRecentEntryLine(kind, item)}`),
-    recentProjects.length + recentPeople.length > limit
-      ? `- 另有 ${recentProjects.length + recentPeople.length - limit} 个较早候选未随上下文传入；需要时从实时资料库继续读取。`
+    recentProjects.length + recentPeople.length > recentLimit
+      ? `- 另有 ${recentProjects.length + recentPeople.length - recentLimit} 个较早候选未随上下文传入；需要时按 recordId 定向读取。`
       : "",
     "该索引是本轮已刷新资料的 new-entry 权威候选集；不要再次全量读取项目表或人脉表。其他分类已有同一对象，不得作为压制 new-entry 的理由；但同一对象最终都要求联系或约见时，应合并理由并只保留一个开放事项。",
-    "若存在符合规则且未受 done/ignored 冷却约束的候选，本轮 new-entry 不得为 0；若全部排除，必须在执行结果中给出逐类排除数量。"
+    "若存在符合规则且未受 done/ignored 冷却约束的候选，本轮 new-entry 不得为 0；若全部排除，必须在执行结果中给出逐类排除数量。",
+    `A/S 长期跟进候选索引（共 ${priorityProjects.length} 个项目、${priorityPeople.length} 个人；格式：类型｜recordId｜名称｜评级｜进展｜最后跟进或联系｜领域或组织）：`,
+    ...followupCandidates.map(({ kind, item }) => {
+      const detail = kind === "project"
+        ? singleLine((item as TodoRecentProject).domain) || "领域未填写"
+        : singleLine((item as TodoRecentPerson).organization) || "组织未填写";
+      const lastActivity = kind === "project"
+        ? todoFollowupDate((item as TodoRecentProject).lastFollowup)
+        : todoFollowupDate((item as TodoRecentPerson).lastContact);
+      return `- ${kind}｜${singleLine(item.recordId)}｜${singleLine(item.name)}｜${singleLine(item.rating)}｜${singleLine(item.status) || "进展未填写"}｜${lastActivity}｜${detail}`;
+    }),
+    priorityProjects.length + priorityPeople.length > followupLimit
+      ? `- 另有 ${priorityProjects.length + priorityPeople.length - followupLimit} 个候选未随上下文传入；需要时按 recordId 定向读取。`
+      : "",
+    "以上候选已由客户端从本轮项目／人脉快照按 Todo 规则筛出。生成 new-entry、relationship-follow-up 和 project-follow-up 时不得再次全量读取两张表；只允许为字段歧义或账本消歧按 recordId 点读。关键节点日期和已核验新动态仍按 Skill 做最小范围读取。"
   ].filter(Boolean).join("\n");
 }
 
@@ -402,6 +469,19 @@ export function workflowPrompt(
       "写入后进行一次批量回读；执行结束必须输出一行机器可读结果：RADAR_RESULT {\"added\":0,\"updated\":0,\"unchanged\":0,\"failed\":0,\"checked_through\":\"ISO-8601\",\"discovery_from\":\"ISO-8601\",\"candidates\":0,\"rejected\":{\"duplicate\":0,\"not_event\":0,\"unverified\":0,\"unavailable\":0,\"out_of_scope\":0}}。没有新增不是失败。",
       "不得编造新闻、融资或公司事实；不得修改 domi 应用源码。",
       domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
+      "",
+      "用户输入：",
+      trimmed || workflow.defaultPrompt
+    ].filter(Boolean).join("\n");
+  }
+  if (workflow.id === "task") {
+    return [
+      "你正在 domi 投资工作台后台运行待办事项同步，底层是本地 Codex。",
+      "采用 domi 插件中的 $domi:todo，并执行该 Skill 的客户端快速同步路径。完整读取 Todo Skill、suggestion-rules 和 todo-ledger-schema；不要先加载 domi Router，也不要加载与当前后端无关的通用技能。",
+      "客户端已先刷新项目与人脉。若上下文包含 DOMI_TODO_CLIENT_SNAPSHOT_V1，直接使用其中的新入库和 A/S 长期跟进候选；不得为这些分类再次全量读取项目表或人脉表。仅对关键节点日期、已核验关联动态、字段歧义或账本消歧做最小范围读取。",
+      "当前待办账本只读取一次，完成去重与排序后单次写入，再单次回读验证。保持完整规则、证据门槛和 12 项配额，不得用减少判断维度换取速度。",
+      "不得输出私人链接、邮箱、Base 标识或本机路径；不得修改 domi 应用源码。",
+      domiContext ? `\ndomi 客户端候选上下文：\n${domiContext}` : "",
       "",
       "用户输入：",
       trimmed || workflow.defaultPrompt

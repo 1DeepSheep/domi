@@ -34,6 +34,22 @@ test("service coordinator merges requests, retries and serves stale data", async
   }, { force: true, allowStale: true });
   assert.equal(stale.stale, true);
   assert.match(stale.coordinatorError, /offline/);
+
+  let dynamicCalls = 0;
+  const dynamicOperation = async () => {
+    dynamicCalls += 1;
+    return { ok: dynamicCalls > 1 };
+  };
+  await coordinator.run("dynamic", dynamicOperation, {
+    ttlMs: 100,
+    ttlForValue: (value) => value.ok ? 100 : 5
+  });
+  now += 6;
+  await coordinator.run("dynamic", dynamicOperation, {
+    ttlMs: 100,
+    ttlForValue: (value) => value.ok ? 100 : 5
+  });
+  assert.equal(dynamicCalls, 2);
 });
 
 test("task queue enforces its concurrency limit", async () => {

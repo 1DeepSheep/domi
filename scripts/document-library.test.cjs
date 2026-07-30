@@ -47,9 +47,25 @@ test("document library reflects the canonical local repository structure", () =>
     fs.writeFileSync(path.join(projectDirectory, "融资材料.pdf"), "%PDF-1.4\n");
     fs.writeFileSync(path.join(projectDirectory, "内部数据.txt"), "hidden");
 
-    const snapshot = listDocumentLibrary(rootPath);
+    const originalLstatSync = fs.lstatSync;
+    let lstatCalls = 0;
+    fs.lstatSync = (...args) => {
+      lstatCalls += 1;
+      return originalLstatSync(...args);
+    };
+    let snapshot;
+    try {
+      snapshot = listDocumentLibrary(rootPath);
+    } finally {
+      fs.lstatSync = originalLstatSync;
+    }
     assert.equal(snapshot.ok, true);
     assert.equal(snapshot.documentCount, 3);
+    assert.equal(
+      lstatCalls,
+      0,
+      "directory entries and unsupported files must not trigger per-item lstat calls"
+    );
     assert.deepEqual(
       snapshot.nodes.slice(0, 4).map((node) => node.name),
       DOCUMENT_LIBRARY_DIRECTORIES
