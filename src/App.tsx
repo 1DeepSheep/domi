@@ -38,7 +38,6 @@ import {
   RefreshCw,
   Scale,
   Search,
-  Save,
   Settings,
   Sparkles,
   Square,
@@ -612,6 +611,8 @@ const WEEKLY_NEWS_FOCUS_SYNC_STALE_MS = 60 * 1000;
 const WEEKLY_NEWS_RADAR_INTERVAL_MS = 60 * 60 * 1000;
 const WEEKLY_NEWS_AUTOMATION_TICK_MS = 60 * 1000;
 const WEEKLY_NEWS_RADAR_RETRY_DELAYS_MS = [5, 15, 60].map((minutes) => minutes * 60 * 1000);
+const MARKDOWN_AUTO_SAVE_DELAY_MS = 420;
+const MARKDOWN_AUTO_SAVE_RETRY_DELAYS_MS = [1_000, 3_000, 10_000];
 const WEEKLY_NEWS_AUTOMATION_STORAGE_KEY = "domi.weeklyNews.automation.v1";
 const WEEKLY_NEWS_NOTIFIED_STORAGE_KEY = "domi.weeklyNews.notified.v1";
 
@@ -1525,6 +1526,9 @@ function App() {
   const documentLibraryTreeRef = useRef<HTMLDivElement>(null);
   const markdownOpenRequestRef = useRef(0);
   const markdownSaveRequestRef = useRef(0);
+  const markdownAutoSaveTimerRef = useRef<number | null>(null);
+  const markdownSaveInFlightRef = useRef<Promise<boolean> | null>(null);
+  const markdownAutoSaveRetryRef = useRef(0);
   const markdownRenameRequestRef = useRef(0);
   const markdownRenameInFlightRef = useRef(false);
   const markdownTitleCancelRef = useRef(false);
@@ -2598,7 +2602,7 @@ function App() {
   }, [activeThreadId]);
 
   useEffect(() => {
-    if (!markdownDocument || !rightPanelOpen) return;
+    if (!markdownDocument) return;
     const handleSaveShortcut = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
@@ -2607,7 +2611,26 @@ function App() {
     };
     window.addEventListener("keydown", handleSaveShortcut);
     return () => window.removeEventListener("keydown", handleSaveShortcut);
-  }, [markdownDocument, markdownDraft, markdownSaving, rightPanelOpen]);
+  }, [markdownDocument, markdownDraft]);
+
+  useEffect(() => {
+    if (
+      !markdownDocument
+      || markdownDraft === markdownDocument.content
+      || markdownRenaming
+    ) {
+      return;
+    }
+    scheduleMarkdownAutoSave();
+    return clearMarkdownAutoSaveTimer;
+  }, [
+    markdownDocument?.path,
+    markdownDocument?.content,
+    markdownDraft,
+    markdownRenaming
+  ]);
+
+  useEffect(() => () => clearMarkdownAutoSaveTimer(), []);
 
   useEffect(() => {
     try {
@@ -5287,9 +5310,10 @@ function App() {
   }
 
   async function openMarkdown(resource: string, basePath?: string) {
-    if (markdownDirty) {
-      const confirmed = window.confirm("当前 Markdown 文件尚未保存，仍要打开其他文件吗？");
-      if (!confirmed) return;
+    const currentDocument = markdownDocumentRef.current;
+    if (currentDocument && markdownDraftRef.current !== currentDocument.content) {
+      const saved = await saveOpenMarkdown();
+      if (!saved) return;
     }
 
     const requestId = ++markdownOpenRequestRef.current;
@@ -5335,9 +5359,14 @@ function App() {
   }
 
   async function openPdf(resource: string, basePath?: string, ignoreDirty = false) {
-    if (markdownDirty && !ignoreDirty) {
-      const confirmed = window.confirm("当前 Markdown 文件尚未保存，仍要打开 PDF 文件吗？");
-      if (!confirmed) return;
+    const currentDocument = markdownDocumentRef.current;
+    if (
+      !ignoreDirty
+      && currentDocument
+      && markdownDraftRef.current !== currentDocument.content
+    ) {
+      const saved = await saveOpenMarkdown();
+      if (!saved) return;
     }
 
     const requestId = ++pdfOpenRequestRef.current;
@@ -5388,47 +5417,114 @@ function App() {
     void openMarkdown(resource);
   }
 
-  async function saveOpenMarkdown() {
+  function clearMarkdownAutoSaveTimer() {
+    if (markdownAutoSaveTimerRef.current === null) return;
+    window.clearTimeout(markdownAutoSaveTimerRef.current);
+    markdownAutoSaveTimerRef.current = null;
+  }
+
+  function scheduleMarkdownAutoSave(delayMs = MARKDOWN_AUTO_SAVE_DELAY_MS) {
+    clearMarkdownAutoSaveTimer();
+    const document = markdownDocumentRef.current;
     if (
-      !markdownDocument
-      || !markdownDirty
-      || markdownSaving
-      || markdownRenaming
-      || markdownTitleEditing
+      !document
+      || markdownDraftRef.current === document.content
       || markdownRenameInFlightRef.current
     ) return;
-    const document = markdownDocument;
-    const content = markdownDraft;
-    const requestId = ++markdownSaveRequestRef.current;
-    setMarkdownSaving(true);
-    setMarkdownError("");
-    try {
-      const result = await workbench.saveMarkdown({
-        path: document.path,
-        content,
-        expectedMtimeMs: document.mtimeMs
-      });
-      if (
-        requestId !== markdownSaveRequestRef.current
-        || markdownDocumentRef.current?.path !== document.path
-      ) return;
-      if (!result.ok || !result.document) {
-        setMarkdownError(result.error || "保存 Markdown 文件失败。");
-        return;
+    const contentLength = markdownDraftRef.current.length;
+    const adaptiveDelayMs = contentLength >= 2 * 1024 * 1024
+      ? 1_000
+      : contentLength >= 512 * 1024
+        ? 650
+        : MARKDOWN_AUTO_SAVE_DELAY_MS;
+    markdownAutoSaveTimerRef.current = window.setTimeout(() => {
+      markdownAutoSaveTimerRef.current = null;
+      void saveOpenMarkdown();
+    }, Math.max(delayMs, adaptiveDelayMs));
+  }
+
+  function scheduleMarkdownAutoSaveRetry() {
+    const retryIndex = markdownAutoSaveRetryRef.current;
+    if (retryIndex >= MARKDOWN_AUTO_SAVE_RETRY_DELAYS_MS.length) return;
+    markdownAutoSaveRetryRef.current += 1;
+    scheduleMarkdownAutoSave(MARKDOWN_AUTO_SAVE_RETRY_DELAYS_MS[retryIndex]);
+  }
+
+  async function saveOpenMarkdown(): Promise<boolean> {
+    clearMarkdownAutoSaveTimer();
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const activeSave = markdownSaveInFlightRef.current;
+      if (activeSave) {
+        if (!await activeSave) return false;
+        continue;
       }
-      markdownDocumentRef.current = result.document;
-      setMarkdownDocument(result.document);
-      if (markdownDraftRef.current === content) {
-        markdownDraftRef.current = result.document.content;
-        setMarkdownDraft(result.document.content);
+
+      const document = markdownDocumentRef.current;
+      const content = markdownDraftRef.current;
+      if (!document || content === document.content) return true;
+      if (markdownRenameInFlightRef.current) {
+        scheduleMarkdownAutoSave(180);
+        return false;
       }
-    } catch (error) {
-      if (requestId !== markdownSaveRequestRef.current) return;
-      reportDocumentOperation("保存 Markdown", error);
-      setMarkdownError(describeOperationError(error, "保存 Markdown 文件失败。"));
-    } finally {
-      if (requestId === markdownSaveRequestRef.current) setMarkdownSaving(false);
+
+      const requestId = ++markdownSaveRequestRef.current;
+      setMarkdownSaving(true);
+      setMarkdownError("");
+      const pendingSave = (async () => {
+        try {
+          const result = await workbench.saveMarkdown({
+            path: document.path,
+            content,
+            expectedMtimeMs: document.mtimeMs
+          });
+          if (
+            requestId !== markdownSaveRequestRef.current
+            || markdownDocumentRef.current?.path !== document.path
+          ) return false;
+          if (!result.ok || !result.document) {
+            const message = result.error || "自动保存 Markdown 文件失败。";
+            setMarkdownError(result.conflict
+              ? message
+              : `${message} domi 将在后台重试。`);
+            if (!result.conflict) scheduleMarkdownAutoSaveRetry();
+            return false;
+          }
+          markdownAutoSaveRetryRef.current = 0;
+          markdownDocumentRef.current = result.document;
+          setMarkdownDocument(result.document);
+          if (markdownDraftRef.current === content) {
+            markdownDraftRef.current = result.document.content;
+            setMarkdownDraft(result.document.content);
+          }
+          return true;
+        } catch (error) {
+          if (requestId !== markdownSaveRequestRef.current) return false;
+          reportDocumentOperation("自动保存 Markdown", error);
+          setMarkdownError(
+            `${describeOperationError(error, "自动保存 Markdown 文件失败。")} domi 将在后台重试。`
+          );
+          scheduleMarkdownAutoSaveRetry();
+          return false;
+        }
+      })();
+
+      markdownSaveInFlightRef.current = pendingSave;
+      let saved = false;
+      try {
+        saved = await pendingSave;
+      } finally {
+        if (markdownSaveInFlightRef.current === pendingSave) {
+          markdownSaveInFlightRef.current = null;
+        }
+        if (requestId === markdownSaveRequestRef.current) setMarkdownSaving(false);
+      }
+      if (!saved) return false;
     }
+
+    setMarkdownError("内容仍在快速变化，domi 会继续自动保存。");
+    scheduleMarkdownAutoSave(180);
+    return false;
   }
 
   async function copyOpenMarkdown() {
@@ -5479,14 +5575,11 @@ function App() {
       markdownTitleCancelRef.current = false;
       return;
     }
-    if (
-      !markdownDocument
-      || markdownRenameInFlightRef.current
-      || markdownSaving
-      || markdownRenaming
-    ) return;
-
-    const document = markdownDocument;
+    if (!markdownDocument || markdownRenameInFlightRef.current || markdownRenaming) return;
+    const contentSaved = await saveOpenMarkdown();
+    if (!contentSaved) return;
+    const document = markdownDocumentRef.current;
+    if (!document) return;
     const requestedName = markdownTitleDraft.trim();
     if (!requestedName || requestedName === document.name) {
       setMarkdownTitleEditing(false);
@@ -5532,11 +5625,13 @@ function App() {
     }
   }
 
-  function closeMarkdown() {
-    if (markdownDirty) {
-      const confirmed = window.confirm("当前 Markdown 文件尚未保存，仍要关闭吗？");
-      if (!confirmed) return;
+  async function closeMarkdown() {
+    const currentDocument = markdownDocumentRef.current;
+    if (currentDocument && markdownDraftRef.current !== currentDocument.content) {
+      const saved = await saveOpenMarkdown();
+      if (!saved) return;
     }
+    clearMarkdownAutoSaveTimer();
     markdownOpenRequestRef.current += 1;
     markdownSaveRequestRef.current += 1;
     markdownRenameRequestRef.current += 1;
@@ -5629,30 +5724,18 @@ function App() {
             {markdownDocument && (
               <>
                 <div className="markdown-save-control">
-                  <span className={`markdown-save-state ${markdownDirty ? "dirty" : ""}`}>
+                  <span
+                    className={`markdown-save-state ${markdownDirty ? "dirty" : ""}`}
+                    aria-live="polite"
+                  >
                     {markdownSaving
-                      ? "正在保存"
+                      ? "自动保存中"
                       : markdownRenaming
                         ? "正在重命名"
                         : markdownDirty
-                          ? "未保存"
-                          : "已保存"}
+                          ? "等待自动保存"
+                          : "已自动保存"}
                   </span>
-                  <button
-                    className="markdown-save-button"
-                    type="button"
-                    onClick={saveOpenMarkdown}
-                    disabled={
-                      !markdownDirty
-                      || markdownSaving
-                      || markdownRenaming
-                      || markdownTitleEditing
-                    }
-                    title="保存 (⌘S)"
-                    aria-label="保存 Markdown"
-                  >
-                    <Save size={16} />
-                  </button>
                 </div>
                 <button
                   type="button"
@@ -5665,7 +5748,11 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => workbench.openResource(markdownDocument.path)}
+                  onClick={async () => {
+                    if (!await saveOpenMarkdown()) return;
+                    const document = markdownDocumentRef.current;
+                    if (document) await workbench.openResource(document.path);
+                  }}
                   disabled={markdownRenaming || markdownTitleEditing}
                   title="用其他应用打开"
                   aria-label="用其他应用打开"
@@ -5674,7 +5761,12 @@ function App() {
                 </button>
               </>
             )}
-            <button type="button" onClick={closeMarkdown} title="关闭文档" aria-label="关闭文档">
+            <button
+              type="button"
+              onClick={() => void closeMarkdown()}
+              title="关闭文档"
+              aria-label="关闭文档"
+            >
               <X size={17} />
             </button>
           </div>
@@ -5687,15 +5779,17 @@ function App() {
             <div className="markdown-panel-state error"><AlertCircle size={18} />{markdownError}</div>
           ) : (
             <MarkdownEditorErrorBoundary
-              documentKey={`${markdownDocument.path}:${markdownDocument.mtimeMs}`}
+              documentKey={`${markdownDocument.path}:${markdownOpenRequestRef.current}`}
             >
               <Suspense fallback={<div className="markdown-panel-state"><RefreshCw className="spinning" size={18} />正在加载编辑器</div>}>
                 <RichMarkdownEditor
-                  key={`${markdownDocument.path}:${markdownDocument.mtimeMs}`}
+                  key={`${markdownDocument.path}:${markdownOpenRequestRef.current}`}
                   documentPath={markdownDocument.path}
                   markdown={markdownDraft}
                   onCopyDocument={() => void copyOpenMarkdown()}
+                  onBlur={() => void saveOpenMarkdown()}
                   onChange={(content) => {
+                    markdownAutoSaveRetryRef.current = 0;
                     markdownDraftRef.current = content;
                     setMarkdownDraft(content);
                   }}
