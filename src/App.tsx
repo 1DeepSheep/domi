@@ -3658,7 +3658,15 @@ function App() {
         const result = await workbench.listPlaud({ fresh, offset: 0, limit: 50 });
         if (revision === plaudSnapshotRevisionRef.current) {
           setPlaudSnapshot(result);
-          if (!result.ok) setPlaudError(result.error || "PLAUD 队列同步失败。 ");
+          if (!result.ok) {
+            setPlaudError(result.error || "PLAUD 队列同步失败。 ");
+          } else if (result.stale) {
+            setPlaudNotice(result.warning || "PLAUD 暂时无法刷新，已显示上次成功读取的录音。");
+          } else {
+            setPlaudNotice((current) =>
+              current.startsWith("PLAUD 暂时无法刷新") ? "" : current
+            );
+          }
         }
         return result;
       } catch (error) {

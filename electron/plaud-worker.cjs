@@ -1,5 +1,7 @@
 const path = require("node:path");
 const os = require("node:os");
+let activeClient = null;
+let signalShutdown = null;
 
 function print(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -54,15 +56,17 @@ async function withClient(pluginRoot, callback) {
   const PlaudClient = resolveClient(pluginRoot);
   let client;
   let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const candidate = new PlaudClient();
+    activeClient = candidate;
     try {
       client = await candidate.init();
       break;
     } catch (error) {
       lastError = error;
       await candidate.close().catch(() => {});
-      if (!isTransientNavigationError(error) || attempt === 2) throw error;
+      if (activeClient === candidate) activeClient = null;
+      if (!isTransientNavigationError(error) || attempt === 1) throw error;
       await wait(500 * (attempt + 1));
     }
   }
@@ -70,8 +74,33 @@ async function withClient(pluginRoot, callback) {
   try {
     return await callback(client);
   } finally {
-    await client.close();
+    if (signalShutdown) {
+      await signalShutdown;
+    } else {
+      await client.close();
+    }
+    if (activeClient === client) activeClient = null;
   }
+}
+
+function installSignalCleanup() {
+  const stop = (signal) => {
+    if (signalShutdown) return;
+    const exitCode = signal === "SIGINT" ? 130 : 143;
+    signalShutdown = (async () => {
+      const timer = setTimeout(() => process.exit(exitCode), 4000);
+      try {
+        await activeClient?.close();
+      } catch {
+        // A later exact-profile launch also cleans any process that survives.
+      } finally {
+        clearTimeout(timer);
+        process.exit(exitCode);
+      }
+    })();
+  };
+  process.once("SIGTERM", () => stop("SIGTERM"));
+  process.once("SIGINT", () => stop("SIGINT"));
 }
 
 async function list(pluginRoot, requestedLimit, requestedOffset) {
@@ -161,6 +190,7 @@ async function main() {
 }
 
 if (require.main === module) {
+  installSignalCleanup();
   main()
     .then(print)
     .catch((error) => {

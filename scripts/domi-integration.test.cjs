@@ -1500,6 +1500,72 @@ test("PLAUD queue loads 50 recordings by default and orders them by creation tim
   assert.equal(integration.plaudRemoteHealth.error, "");
 });
 
+test("PLAUD queue preserves the last successful remote list when a later refresh fails", async () => {
+  const cache = new Map();
+  const stateStore = {
+    loadCache: (key) => cache.get(key) || null,
+    saveCache: (key, value) => {
+      const record = { value, updatedAt: Date.now() };
+      cache.set(key, record);
+      return record;
+    }
+  };
+  const integration = new DomiIntegration({ stateStore, plaudOutputDir: "/tmp/domi-test" });
+  integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
+  integration.loadActivePlaudWorkflowRecords = () => [];
+  integration.loadPlaudWorkflowRecords = () => [];
+  integration.runPlaudWorker = async () => ({
+    ok: true,
+    pendingCount: 2,
+    hasMore: true,
+    nextOffset: 50,
+    items: [{ fileId: "cached-recording", fileName: "上次录音", createdAt: 10 }]
+  });
+
+  const fresh = await integration.plaudQueue();
+  assert.equal(fresh.ok, true);
+  assert.equal(fresh.stale, false);
+
+  integration.runPlaudWorker = async () => {
+    throw new Error("PLAUD 接口读取超时（15 秒）。");
+  };
+  const stale = await integration.plaudQueue();
+
+  assert.equal(stale.ok, true);
+  assert.equal(stale.stale, true);
+  assert.equal(stale.pendingCount, 2);
+  assert.equal(stale.hasMore, false);
+  assert.deepEqual(stale.items.map((item) => item.fileId), ["cached-recording"]);
+  assert.match(stale.warning, /上次成功读取/);
+  assert.equal(stale.error, "");
+  assert.equal(integration.plaudRemoteHealth.ok, false);
+});
+
+test("PLAUD sync never submits generation from a stale cached list", async () => {
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => null,
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test"
+  });
+  integration.plaudQueue = async () => ({
+    ok: true,
+    stale: true,
+    pendingCount: 1,
+    items: [{ fileId: "cached", fileName: "缓存录音" }]
+  });
+  integration.runJson = async () => {
+    throw new Error("stale PLAUD data must not trigger mutations");
+  };
+
+  const result = await integration.syncPlaud({ confirmed: true });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.snapshot.stale, true);
+  assert.match(result.error, /远端读取/);
+});
+
 test("PLAUD queue requests later pages without duplicating local workflow-only records", async () => {
   const integration = new DomiIntegration({
     stateStore: {

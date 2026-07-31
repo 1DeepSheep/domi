@@ -704,7 +704,9 @@ export type DomiPlaudListRequest = {
 
 export type DomiPlaudSnapshot = {
   ok: boolean;
+  stale?: boolean;
   syncedAt?: number;
+  lastSuccessfulAt?: number;
   pendingCount?: number;
   queueCount?: number;
   pageOffset?: number;
@@ -712,6 +714,7 @@ export type DomiPlaudSnapshot = {
   hasMore?: boolean;
   nextOffset?: number;
   items?: DomiPlaudItem[];
+  warning?: string;
   error?: string;
 };
 
