@@ -1113,6 +1113,66 @@ test("local database editor updates records, managed Markdown and safe directory
   assert.match(fs.readFileSync(movedNewsPath, "utf8"), /新投资含义/);
 });
 
+test("local database preview selects the richest document and row deletion preserves files", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-delete-preview-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "预览项目");
+  const canonicalPath = path.join(projectDirectory, "项目主页.md");
+  const researchPath = path.join(projectDirectory, "研究", "预览项目-深度研究.md");
+  const memoPath = path.join(projectDirectory, "研究", "预览项目-IC Memo.md");
+  fs.mkdirSync(path.dirname(researchPath), { recursive: true });
+  fs.writeFileSync(canonicalPath, "# 预览项目\n");
+  fs.writeFileSync(researchPath, "# 深度研究\n");
+  fs.writeFileSync(memoPath, "# IC Memo\n");
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const version = 1_700_000_000_000;
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_preview", "预览项目", "预览项目", "AI", '["Agent"]', "深度跟踪", "A", "",
+    "[]", "[]", "", null, version, canonicalPath, version, version
+  );
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, '', '[]', '待交流', '', '', '[]', '[]', '', NULL, NULL, '', ?, ?)
+  `).run("prj_structure_ghost", "原始材料", "原始材料", version, version);
+
+  const preview = repository.resolvePreviewDocument("project", "prj_preview");
+  assert.equal(preview.ok, true);
+  assert.equal(path.basename(decodeURIComponent(new URL(preview.resource).pathname)), "预览项目-IC Memo.md");
+
+  const deleted = repository.deleteDatabaseRecord({
+    entityType: "project",
+    recordId: "prj_preview",
+    expectedUpdatedAt: version
+  });
+  assert.equal(deleted.filesPreserved, true);
+  assert.equal(fs.existsSync(memoPath), true);
+  assert.equal(repository.listProjects().some((project) => project.recordId === "prj_preview"), false);
+
+  const reindexed = repository.reindexWorkspace();
+  assert.equal(reindexed.projects.removedStructuralGhosts, 1);
+  assert.equal(repository.listProjects().some((project) => project.name === "原始材料"), false);
+  assert.equal(repository.listProjects().some((project) => project.recordId === "prj_preview"), false);
+  assert.equal(
+    repository.database.prepare(
+      "SELECT COUNT(*) AS count FROM repository_tombstones WHERE record_id = ?"
+    ).get("prj_preview").count,
+    1
+  );
+});
+
 test("local repository mode syncs projects, people and news without Feishu", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-integration-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -1290,6 +1350,24 @@ test("local materials use the exact entity directory and database edits avoid a 
   assert.equal(updated.record.notes, "快速保存");
   assert.equal(updated.snapshot.projects[0].notes, "快速保存");
   assert.equal(cache.get("snapshot-v1").value.projects[0].notes, "快速保存");
+
+  const preview = integration.previewDatabaseRecord({
+    entityType: "project",
+    recordId: "prj_fast"
+  });
+  assert.equal(preview.ok, true);
+  assert.match(decodeURIComponent(preview.resource), /BP\.pdf$/);
+
+  const deleted = integration.deleteDatabaseRecord({
+    entityType: "project",
+    recordId: "prj_fast",
+    expectedUpdatedAt: updated.record.updatedAt
+  });
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.filesPreserved, true);
+  assert.equal(deleted.snapshot.projects.length, 0);
+  assert.equal(cache.get("snapshot-v1").value.projects.length, 0);
+  assert.equal(fs.existsSync(materialPath), true);
 });
 
 test("PLAUD queue loads 50 recordings by default and orders them by creation time", async () => {

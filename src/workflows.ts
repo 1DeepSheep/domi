@@ -245,7 +245,7 @@ export const workflows: Workflow[] = [
     shortTitle: "行业雷达",
     skill: "$domi:investment-radar",
     description: "联网检索关注领域的最新行业事件，完成原文核验、事件去重与评分，并更新行业信息追踪。",
-    output: "已核验的行业事件、评分、原文链接和行业信息追踪写入回执",
+    output: "已核验的行业事件、评分、原文链接和简洁归档结果",
     defaultPrompt:
       "请以 quick_scan 增量模式更新 domi 首页行业动态：使用 48 小时重叠回看发现迟发、迟索引内容，整体最长最近 72 小时；上次成功水位只用于标记增量，不得直接截断发现窗口。只覆盖 AI、半导体、智能出行、前沿科技、具身智能&机器人；不要扫描或返回消费、消费科技、互联网科技。直接使用本机重点项目快照、调用方提供的 A/S 重点人物别名索引和缓存分类，不重新读取完整项目库、人脉库或完整 schema；先一次性读取时间窗内既有事件建立去重索引，再并发检索五个一级领域。每轮必须完成一次中文专业科技媒体定向扫源，覆盖 DeepTech 深科技，并为对话、访谈、专访、公开观点等投资论点信号预留候选位。仅对宽搜已出现明确信号的重点对象做定向补查，不逐一扫描全部重点名单。完成原文核验、实体归一、事件级去重与评分后写入当前资料库的行业事件库，最后一次性回读验证并输出带候选/拒绝统计的 RADAR_RESULT。目标在 6 分钟内完成；没有合格增量也必须正常完成并返回 added=0。",
     hidden: true,
@@ -257,7 +257,7 @@ export const workflows: Workflow[] = [
     shortTitle: "待办事项",
     skill: "$domi:todo",
     description: "扫描项目、人脉、关键节点与最新动态，维护当前资料库的待办事项文档。",
-    output: "按优先级去重的待办事项、下一动作和待办事项文档写入回执",
+    output: "按优先级去重的待办事项、下一动作和同步结果",
     defaultPrompt:
       "扫描当前项目库、人脉库、行业动态和关键日期，按关键节点、最近 4 周新入库约见、人脉跟进、项目跟踪四类更新当前资料库的待办事项文档：飞书模式使用 1.待办事项，本地模式使用工作区根目录的 0.待办事项.md。保留待办事项的内部状态，客户端只展示仍需行动的事项；写后回读验证，不要输出任何私人链接、邮箱、Base 标识或本机路径。",
     hidden: true
@@ -292,7 +292,7 @@ export const workflows: Workflow[] = [
     shortTitle: "找人入库",
     skill: "$domi:domi-router",
     description: "发现或核验目标人物，读取 People 人脉表实时结构并查重，将确认后的合格人选写入人脉库。",
-    output: "候选人地图、人物画像、查重与字段变更计划、People 人脉表写入回执",
+    output: "候选人地图、人物画像、查重、字段变更计划和入库结果",
     defaultPrompt:
       "运行 domi 人物研究入库（people intake）工作流。优先使用用户输入的人物姓名、赛道、人才画像或关系线索；目标不明确时，先询问范围、用途、人数和排除条件。目标明确后完整读取 people-intake-workflow，依次执行 sourcing 发现与画像，并按当前资料库后端完成 schema 检查和多键查重；用户点名且身份唯一的单人可按规则直接 upsert，开放式发现或批量候选必须先展示精确变更计划并等待确认，再写入当前人脉库，最后按记录 ID 回读验证。",
     quickStart: true,
@@ -317,7 +317,7 @@ export const workflows: Workflow[] = [
     shortTitle: "研究入库",
     skill: "$domi:domi-router",
     description: "串联项目研究、投资快评，并按当前资料库后端完成文档、材料与项目记录入库。",
-    output: "研究报告、投资快评、项目档案和三系统写入回执",
+    output: "研究报告、投资快评、项目档案和简洁入库结果",
     defaultPrompt:
       "运行 domi 投资项目研究并入库工作流。优先使用当前绑定项目或用户输入的项目目标；如果目标仍不明确，先询问项目名称、官网或材料。目标明确后严格按 desk-research → investment-review → investment-mgmt 执行，并由 storage-backends 契约选择飞书或本地资料库链路；写入前完成去重和字段校验，写入后验证结构化记录、文档与资料目录。",
     quickStart: true,
