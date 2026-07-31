@@ -761,9 +761,12 @@ const NEW_THREAD_GREETING = "新对话已创建。选择一个 workflow，或直
 const NEW_THREAD_MODEL = "default";
 const NEW_THREAD_REASONING_EFFORT = "max";
 const NEW_THREAD_SERVICE_TIER = "priority";
-const TODO_SYNC_TIMEOUT_MS = 4 * 60 * 1000;
+const TODO_SYNC_TIMEOUT_MS = 8 * 60 * 1000;
+const TODO_SYNC_LEDGER_POLL_MS = 10 * 1000;
+const TODO_SYNC_POST_WRITE_GRACE_MS = 20 * 1000;
 type TodoSyncPhase =
   | "idle"
+  | "waiting"
   | "refreshing"
   | "preparing"
   | "generating"
@@ -1416,6 +1419,7 @@ function App() {
     IDLE_TODO_SYNC_STATE
   );
   const [domiTaskSyncElapsed, setDomiTaskSyncElapsed] = useState(0);
+  const [domiTaskSyncQueued, setDomiTaskSyncQueued] = useState(false);
   const [documentLibrary, setDocumentLibrary] = useState<DocumentLibrarySnapshot | null>(null);
   const [documentLibraryLoading, setDocumentLibraryLoading] = useState(false);
   const [documentLibraryError, setDocumentLibraryError] = useState("");
@@ -2302,6 +2306,22 @@ function App() {
     const timer = window.setInterval(updateElapsed, 1000);
     return () => window.clearInterval(timer);
   }, [domiTaskSyncState.startedAt, domiTaskSyncState.completedAt]);
+
+  useEffect(() => {
+    if (
+      !domiTaskSyncQueued
+      || runningTaskThreads.length > 0
+      || executingSuggestionId
+      || !domiTaskBoard?.configured
+    ) return;
+    setDomiTaskSyncQueued(false);
+    void syncManagedTasks({ bypassQueue: true });
+  }, [
+    domiTaskSyncQueued,
+    runningTaskThreads.length,
+    executingSuggestionId,
+    domiTaskBoard?.configured
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4196,8 +4216,21 @@ function App() {
     }
   }
 
-  async function syncManagedTasks() {
+  async function syncManagedTasks(options: { bypassQueue?: boolean } = {}) {
     if (executingSuggestionId) return;
+    const foregroundRunCount = Object.keys(activeRunsByThread).length;
+    if (!options.bypassQueue && foregroundRunCount > 0) {
+      setDomiTaskSyncQueued(true);
+      setDomiTaskError("");
+      setDomiTaskSyncState({
+        phase: "waiting",
+        label: `等待 ${foregroundRunCount} 个前台任务完成后自动同步`,
+        startedAt: null,
+        completedAt: null,
+        candidateCount: 0
+      });
+      return;
+    }
     const todoWorkflow = workflows.find((workflow) => workflow.id === "task");
     if (!todoWorkflow) {
       setDomiTaskError("未找到 domi 待办事项工作流。");
@@ -4206,7 +4239,11 @@ function App() {
     const requestText = todoWorkflow.defaultPrompt || `更新 ${todoDocumentLabel}。`;
     const runId = createId("todo-sync");
     let timeoutHandle: number | undefined;
+    let ledgerPollHandle: number | undefined;
+    let postWriteGraceHandle: number | undefined;
+    let ledgerPollingActive = true;
     const startedAt = Date.now();
+    const baselineUpdatedAt = domiTaskBoard?.updatedAt || null;
     let candidateCount = 0;
     let outcome = "failed";
     let boardRefreshedAfterFailure = false;
@@ -4219,6 +4256,7 @@ function App() {
         candidateCount
       });
     };
+    setDomiTaskSyncQueued(false);
     setExecutingSuggestionId("managed-refresh");
     setDomiTaskError("");
     updateSyncPhase("refreshing", "正在刷新项目与人脉资料");
@@ -4253,23 +4291,85 @@ function App() {
           serviceTier,
           workspacePath: activeThread.workspacePath
         });
+      const isFreshLedger = (snapshot: DomiTaskBoardSnapshot | null) => {
+        if (!snapshot?.ok || !snapshot.updatedAt) return false;
+        const updatedTimestamp = Date.parse(snapshot.updatedAt);
+        return snapshot.updatedAt !== baselineUpdatedAt
+          && Number.isFinite(updatedTimestamp)
+          && updatedTimestamp >= startedAt - 10_000;
+      };
+      const ledgerWritePromise = new Promise<{
+        kind: "ledger";
+        snapshot: DomiTaskBoardSnapshot;
+      }>((resolve) => {
+        const poll = async () => {
+          try {
+            const snapshot = await workbench.listDomiTasks({ fresh: true });
+            if (isFreshLedger(snapshot)) {
+              ledgerPollingActive = false;
+              resolve({ kind: "ledger", snapshot });
+              return;
+            }
+          } catch {
+            // The final read or hard timeout will surface a persistent backend error.
+          }
+          if (ledgerPollingActive) {
+            ledgerPollHandle = window.setTimeout(poll, TODO_SYNC_LEDGER_POLL_MS);
+          }
+        };
+        ledgerPollHandle = window.setTimeout(poll, TODO_SYNC_LEDGER_POLL_MS);
+      });
       const resultOrTimeout = await Promise.race([
-        runPromise.then((result) => ({ timedOut: false as const, result })),
-        new Promise<{ timedOut: true }>((resolve) => {
+        runPromise.then((result) => ({ kind: "run" as const, result })),
+        ledgerWritePromise,
+        new Promise<{ kind: "timeout" }>((resolve) => {
           timeoutHandle = window.setTimeout(() => {
-            resolve({ timedOut: true });
+            resolve({ kind: "timeout" });
           }, TODO_SYNC_TIMEOUT_MS);
         })
       ]);
-      if (resultOrTimeout.timedOut) {
-        updateSyncPhase("stopping", "运行超过 4 分钟，正在安全停止并保留已写入内容");
+      ledgerPollingActive = false;
+      if (resultOrTimeout.kind === "ledger") {
+        if (timeoutHandle !== undefined) window.clearTimeout(timeoutHandle);
+        if (ledgerPollHandle !== undefined) window.clearTimeout(ledgerPollHandle);
+        setDomiTaskBoard(resultOrTimeout.snapshot);
+        updateSyncPhase("reading", "文档已写入，正在完成最后验证");
+        const completionAfterWrite = await Promise.race([
+          runPromise.then((result) => ({ completed: true as const, result })),
+          new Promise<{ completed: false }>((resolve) => {
+            postWriteGraceHandle = window.setTimeout(
+              () => resolve({ completed: false }),
+              TODO_SYNC_POST_WRITE_GRACE_MS
+            );
+          })
+        ]);
+        if (postWriteGraceHandle !== undefined) window.clearTimeout(postWriteGraceHandle);
+        if (!completionAfterWrite.completed) {
+          await workbench.stopCodex(runId);
+        }
+        const verified = await refreshDomiTaskBoard({ fresh: true });
+        if (!isFreshLedger(verified)) {
+          throw new Error("待办事项文档已写入，但最终回读验证失败。");
+        }
+        outcome = "completed";
+        updateSyncPhase("completed", `同步完成，已核验 ${candidateCount} 个新入库候选`);
+        return;
+      }
+      if (resultOrTimeout.kind === "timeout") {
+        updateSyncPhase("stopping", "运行超过 8 分钟，正在安全停止并保留已写入内容");
         const stopResult = await workbench.stopCodex(runId);
         updateSyncPhase("reading", "正在回读待办事项文档");
-        await refreshDomiTaskBoard({ silent: true, fresh: true });
+        const recovered = await refreshDomiTaskBoard({ silent: true, fresh: true });
         boardRefreshedAfterFailure = true;
+        if (isFreshLedger(recovered)) {
+          outcome = "completed";
+          setDomiTaskError("");
+          updateSyncPhase("completed", `同步完成，已核验 ${candidateCount} 个新入库候选`);
+          return;
+        }
         throw new Error(stopResult.ok
-          ? "后台待办事项同步超过 4 分钟，已安全停止；看板已回读最新文档内容。"
-          : `后台待办事项同步超过 4 分钟，但停止确认失败：${stopResult.error || "未知错误"}`);
+          ? "后台待办事项同步超过 8 分钟，已安全停止；看板已回读最新文档内容。"
+          : `后台待办事项同步超过 8 分钟，但停止确认失败：${stopResult.error || "未知错误"}`);
       }
       const result = resultOrTimeout.result;
       if (result.stopped) {
@@ -4289,7 +4389,10 @@ function App() {
       setDomiTaskError(error instanceof Error ? error.message : String(error));
       updateSyncPhase("failed", "本轮同步未完整完成，当前看板保留最近一次有效内容");
     } finally {
+      ledgerPollingActive = false;
       if (timeoutHandle !== undefined) window.clearTimeout(timeoutHandle);
+      if (ledgerPollHandle !== undefined) window.clearTimeout(ledgerPollHandle);
+      if (postWriteGraceHandle !== undefined) window.clearTimeout(postWriteGraceHandle);
       setExecutingSuggestionId(null);
       workbench.reportRendererIssue({
         kind: "workflow-metric",
@@ -6231,7 +6334,7 @@ function App() {
               className="task-board-generate"
               type="button"
               onClick={() => void syncManagedTasks()}
-              disabled={Boolean(executingSuggestionId)
+              disabled={Boolean(executingSuggestionId || domiTaskSyncQueued)
                 || !domiTaskBoard?.configured}
               title={`运行 Todo Skill，更新 ${todoDocumentLabel} 后刷新看板`}
             >
@@ -6241,7 +6344,11 @@ function App() {
                   : ""}
                 size={14}
               />
-              {executingSuggestionId === "managed-refresh" ? "同步中" : "同步"}
+              {executingSuggestionId === "managed-refresh"
+                ? "同步中"
+                : domiTaskSyncQueued
+                  ? "等待中"
+                  : "同步"}
             </button>
           </div>
         </div>
