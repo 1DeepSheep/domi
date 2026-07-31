@@ -974,6 +974,97 @@ subdomains: ["Agent"]
   assert.ok(repository.listProjects().some((project) => project.recordId === "prj_incremental"));
 });
 
+test("local repository excludes bulk workspace baselines from recent-intake timestamps", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-bulk-baseline-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+
+  for (let index = 0; index < 20; index += 1) {
+    const projectDirectory = path.join(
+      libraryDir,
+      "3.项目库",
+      "AI",
+      "Agent",
+      `历史项目 ${index}`
+    );
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "项目主页.md"),
+      `---\nentity_type: "project"\ncompany_name: "历史项目 ${index}"\n---\n`
+    );
+  }
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const baseline = repository.reindexWorkspace();
+  assert.equal(baseline.projects.created, 20);
+  assert.equal(
+    repository.listProjects().every((project) => project.createdAt === null),
+    true,
+    "an initial bulk workspace scan is not evidence that every project was newly researched"
+  );
+
+  const incrementalDirectory = path.join(
+    libraryDir,
+    "3.项目库",
+    "AI",
+    "Agent",
+    "真实新增项目"
+  );
+  fs.mkdirSync(incrementalDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(incrementalDirectory, "项目主页.md"),
+    '---\nentity_type: "project"\ncompany_name: "真实新增项目"\n---\n'
+  );
+  const incremental = repository.reindexWorkspace();
+  assert.equal(incremental.projects.created, 1);
+  assert.ok(
+    repository.listProjects().find((project) => project.name === "真实新增项目").createdAt > 0
+  );
+});
+
+test("local repository repairs legacy bulk-import timestamps once", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-bulk-migration-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  let repository = new LocalDomiRepository({ databasePath, libraryDir });
+  const importedAt = Date.now() - 24 * 60 * 60 * 1000;
+  const insert = repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, '', '[]', '待交流', '', '', '[]', '[]', '', NULL, NULL, '', ?, ?)
+  `);
+  for (let index = 0; index < 20; index += 1) {
+    insert.run(
+      `legacy-${index}`,
+      `迁移项目 ${index}`,
+      `迁移项目${index}`,
+      importedAt,
+      importedAt
+    );
+  }
+  repository.database.prepare(
+    "DELETE FROM repository_meta WHERE key = 'legacy_bulk_intake_v1'"
+  ).run();
+  repository.close();
+
+  repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  assert.equal(
+    repository.listProjects().every((project) => project.createdAt === null),
+    true
+  );
+  assert.ok(
+    repository.database.prepare(
+      "SELECT 1 FROM repository_meta WHERE key = 'legacy_bulk_intake_v1'"
+    ).get()
+  );
+});
+
 test("local database editor updates records, managed Markdown and safe directory locations", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-editor-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
