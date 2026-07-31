@@ -26,8 +26,11 @@ type RichMarkdownEditorProps = {
   documentPath: string;
   markdown: string;
   onChange: (markdown: string) => void;
+  onBlur?: () => void;
   onCopyDocument?: () => void;
 };
+
+const MARKDOWN_CHANGE_PUBLISH_DELAY_MS = 120;
 
 const EMPTY_TOOLBAR_STATE = {
   bold: false,
@@ -302,6 +305,7 @@ export default function RichMarkdownEditor({
   documentPath,
   markdown,
   onChange,
+  onBlur,
   onCopyDocument
 }: RichMarkdownEditorProps) {
   const { frontmatter, body } = useMemo(() => splitFrontmatter(markdown), [markdown]);
@@ -310,11 +314,42 @@ export default function RichMarkdownEditor({
   const hydratingRef = useRef(true);
   const editorRef = useRef<Editor | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
+  const changePublishTimerRef = useRef<number | null>(null);
+  const onChangeRef = useRef(onChange);
   const [imageNotice, setImageNotice] = useState<{ tone: "busy" | "success" | "error"; text: string } | null>(null);
+  onChangeRef.current = onChange;
 
   useEffect(() => () => {
     if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
+    if (changePublishTimerRef.current !== null) {
+      window.clearTimeout(changePublishTimerRef.current);
+    }
   }, []);
+
+  function publishEditorMarkdown(current = editorRef.current) {
+    if (!current || current.isDestroyed || !current.isInitialized) return;
+    if (changePublishTimerRef.current !== null) {
+      window.clearTimeout(changePublishTimerRef.current);
+      changePublishTimerRef.current = null;
+    }
+    try {
+      onChangeRef.current(
+        `${frontmatter}${restoreMarkdownFromEditor(current.getMarkdown())}`
+      );
+    } catch (error) {
+      reportEditorOperation("序列化 Markdown", error);
+    }
+  }
+
+  function scheduleEditorMarkdownPublish() {
+    if (changePublishTimerRef.current !== null) {
+      window.clearTimeout(changePublishTimerRef.current);
+    }
+    changePublishTimerRef.current = window.setTimeout(() => {
+      changePublishTimerRef.current = null;
+      publishEditorMarkdown();
+    }, MARKDOWN_CHANGE_PUBLISH_DELAY_MS);
+  }
 
   function showImageNotice(
     tone: "busy" | "success" | "error",
@@ -436,6 +471,7 @@ export default function RichMarkdownEditor({
           });
           if (!coversDocument || !containsImage) return false;
           event.preventDefault();
+          publishEditorMarkdown();
           onCopyDocument();
           return true;
         }
@@ -453,16 +489,20 @@ export default function RichMarkdownEditor({
     },
     onUpdate: ({ editor: current }) => {
       if (hydratingRef.current || current.isDestroyed) return;
-      try {
-        onChange(`${frontmatter}${restoreMarkdownFromEditor(current.getMarkdown())}`);
-      } catch (error) {
-        reportEditorOperation("序列化 Markdown", error);
-      }
+      scheduleEditorMarkdownPublish();
     }
   });
 
   return (
-    <div className="rich-markdown-editor">
+    <div
+      className="rich-markdown-editor"
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget;
+        if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+        publishEditorMarkdown();
+        onBlur?.();
+      }}
+    >
       <RichMarkdownToolbar editor={editor} />
       <div className="rich-markdown-scroll">
         <EditorContent editor={editor} />

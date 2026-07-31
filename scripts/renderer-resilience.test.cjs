@@ -67,6 +67,46 @@ assert.match(
 );
 assert.match(
   app,
+  /MARKDOWN_AUTO_SAVE_DELAY_MS[\s\S]*?markdownSaveInFlightRef[\s\S]*?scheduleMarkdownAutoSave[\s\S]*?async function saveOpenMarkdown\(\): Promise<boolean>/,
+  "Markdown edits must debounce and serialize automatic saves."
+);
+assert.match(
+  app,
+  /openMarkdown[\s\S]*?await saveOpenMarkdown\(\)[\s\S]*?openPdf[\s\S]*?await saveOpenMarkdown\(\)[\s\S]*?async function closeMarkdown[\s\S]*?await saveOpenMarkdown\(\)/,
+  "Switching or closing documents must flush pending Markdown edits."
+);
+assert.doesNotMatch(
+  app,
+  /当前 Markdown 文件尚未保存/,
+  "Normal Markdown navigation must not show a discard prompt now that edits auto-save."
+);
+assert.match(
+  app,
+  /key=\{`\$\{markdownDocument\.path\}:\$\{markdownOpenRequestRef\.current\}`\}/,
+  "Successful automatic saves must not remount the editor or lose its cursor."
+);
+assert.match(
+  editor,
+  /onBlur[\s\S]*?relatedTarget[\s\S]*?event\.currentTarget\.contains\(nextTarget\)[\s\S]*?onBlur\?\.\(\)/,
+  "Leaving the Markdown editor must immediately flush its automatic save."
+);
+assert.match(
+  editor,
+  /MARKDOWN_CHANGE_PUBLISH_DELAY_MS[\s\S]*?scheduleEditorMarkdownPublish[\s\S]*?onUpdate[\s\S]*?scheduleEditorMarkdownPublish\(\)/,
+  "Typing must coalesce full-document Markdown serialization before updating the workbench."
+);
+assert.match(
+  app,
+  /MARKDOWN_AUTO_SAVE_RETRY_DELAYS_MS[\s\S]*?adaptiveDelayMs[\s\S]*?scheduleMarkdownAutoSaveRetry[\s\S]*?result\.conflict/,
+  "Markdown automatic saves must adapt for large files and retry transient failures without retrying conflicts."
+);
+assert.match(
+  main,
+  /domi-\$\{process\.pid\}-\$\{Date\.now\(\)\}\.tmp[\s\S]*?latestStat[\s\S]*?fs\.promises\.rename\(temporaryPath, resolved\)[\s\S]*?fs\.promises\.rm\(temporaryPath/,
+  "Markdown writes must use a same-directory atomic replacement and clean up temporary files."
+);
+assert.match(
+  app,
   /<RichMarkdownEditor[\s\S]*?markdown=\{markdownDraft\}/,
   "Editor remounts must retain text entered while a save was in flight."
 );

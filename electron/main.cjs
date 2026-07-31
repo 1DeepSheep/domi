@@ -769,7 +769,27 @@ async function saveMarkdownDocument(request) {
       };
     }
 
-    await fs.promises.writeFile(resolved, request.content, "utf8");
+    const temporaryPath = path.join(
+      path.dirname(resolved),
+      `.${path.basename(resolved)}.domi-${process.pid}-${Date.now()}.tmp`
+    );
+    try {
+      await fs.promises.writeFile(temporaryPath, request.content, {
+        encoding: "utf8",
+        mode: currentStat.mode
+      });
+      const latestStat = await fs.promises.stat(resolved);
+      if (Math.abs(latestStat.mtimeMs - currentStat.mtimeMs) > 1) {
+        return {
+          ok: false,
+          conflict: true,
+          error: "文件在保存期间被 OneDrive 或其他应用修改，请重新载入后再编辑。"
+        };
+      }
+      await fs.promises.rename(temporaryPath, resolved);
+    } finally {
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
     const nextStat = await fs.promises.stat(resolved);
     return {
       ok: true,
