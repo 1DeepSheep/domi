@@ -388,18 +388,28 @@ assert.match(
 );
 assert.match(
   app,
-  /async function syncManagedTasks\(\)[\s\S]*?workbench\.syncDomi\(\)[\s\S]*?todoRecentEntriesContext\([\s\S]*?workbench\.runCodex\(\{[\s\S]*?ephemeral:\s*true,[\s\S]*?background:\s*true,[\s\S]*?workflowId:\s*todoWorkflow\.id,[\s\S]*?reasoningEffort,[\s\S]*?serviceTier,[\s\S]*?await refreshDomiTaskBoard\(\{ fresh: true \}\)/,
+  /async function syncManagedTasks\([^)]*\)[\s\S]*?workbench\.syncDomi\(\)[\s\S]*?todoRecentEntriesContext\([\s\S]*?workbench\.runCodex\(\{[\s\S]*?ephemeral:\s*true,[\s\S]*?background:\s*true,[\s\S]*?workflowId:\s*todoWorkflow\.id,[\s\S]*?reasoningEffort,[\s\S]*?serviceTier,[\s\S]*?await refreshDomiTaskBoard\(\{ fresh: true \}\)/,
   "Todo-board sync must refresh the data snapshot, keep the selected Max/Fast defaults, pass candidates to a temporary background Todo Skill run, and then reread the active backend document."
 );
 assert.doesNotMatch(
-  app.match(/async function syncManagedTasks\(\)[\s\S]*?\n  async function refreshDomiEntityOverview/)?.[0] || "",
+  app.match(/async function syncManagedTasks\([^)]*\)[\s\S]*?\n  async function refreshDomiEntityOverview/)?.[0] || "",
   /createProjectWorkspace|setThreads|executeSuggestion/,
   "Todo-board sync must not create a project workspace or a visible conversation task."
 );
 assert.match(
-  app.match(/async function syncManagedTasks\(\)[\s\S]*?\n  async function refreshDomiEntityOverview/)?.[0] || "",
-  /Promise\.race\([\s\S]*?resultOrTimeout\.timedOut[\s\S]*?await workbench\.stopCodex\(runId\)[\s\S]*?await refreshDomiTaskBoard\(\{ silent: true, fresh: true \}\)[\s\S]*?超过 4 分钟/,
+  app.match(/async function syncManagedTasks\([^)]*\)[\s\S]*?\n  async function refreshDomiEntityOverview/)?.[0] || "",
+  /Promise\.race\([\s\S]*?resultOrTimeout\.kind === "timeout"[\s\S]*?await workbench\.stopCodex\(runId\)[\s\S]*?await refreshDomiTaskBoard\(\{ silent: true, fresh: true \}\)[\s\S]*?超过 8 分钟/,
   "Todo-board sync must await safe interruption of an overlong background run before rereading the ledger."
+);
+assert.match(
+  app.match(/async function syncManagedTasks\([^)]*\)[\s\S]*?\n  async function refreshDomiEntityOverview/)?.[0] || "",
+  /workbench\.listDomiTasks\(\{ fresh: true \}\)[\s\S]*?resultOrTimeout\.kind === "ledger"[\s\S]*?setDomiTaskBoard\(resultOrTimeout\.snapshot\)[\s\S]*?await refreshDomiTaskBoard\(\{ fresh: true \}\)[\s\S]*?updateSyncPhase\("completed"/,
+  "Todo-board sync must detect a freshly written ledger and refresh the board without waiting for the background report to finish."
+);
+assert.match(
+  app,
+  /domiTaskSyncQueued[\s\S]*?runningTaskThreads\.length > 0[\s\S]*?syncManagedTasks\(\{ bypassQueue: true \}\)/,
+  "Todo-board sync must wait for foreground Codex runs to finish instead of competing for model capacity."
 );
 assert.match(
   app,
@@ -421,7 +431,7 @@ assert.match(
 );
 assert.match(
   managedTaskBoardSource,
-  /onClick=\{\(\) => void syncManagedTasks\(\)\}[\s\S]*?\? "同步中" : "同步"/,
+  /onClick=\{\(\) => void syncManagedTasks\(\)\}[\s\S]*?\? "同步中"[\s\S]*?\? "等待中"[\s\S]*?: "同步"/,
   "The managed task board must expose sync as the single generation entry point."
 );
 assert.doesNotMatch(

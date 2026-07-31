@@ -27,6 +27,8 @@ const TRACKED_INVESTORS = new Set([
   "蓝驰",
   "经纬"
 ]);
+const LEGACY_BULK_IMPORT_MIN = 20;
+const LEGACY_BULK_INTAKE_MIGRATION_KEY = "legacy_bulk_intake_v1";
 
 function resolveHomePath(value) {
   const raw = String(value || "").trim();
@@ -692,6 +694,7 @@ class LocalDomiRepository {
     if (!projectColumns.has("latest_valuation_usd_100m")) {
       this.database.exec("ALTER TABLE projects ADD COLUMN latest_valuation_usd_100m REAL");
     }
+    this.reconcileLegacyBulkIntakeTimestamps();
   }
 
   close() {
@@ -739,6 +742,59 @@ class LocalDomiRepository {
       }
       this.database.exec("COMMIT");
       return rows.length;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  reconcileLegacyBulkIntakeTimestamps() {
+    const migrated = this.database.prepare(
+      "SELECT 1 FROM repository_meta WHERE key = ?"
+    ).get(LEGACY_BULK_INTAKE_MIGRATION_KEY);
+    if (migrated) return { projects: 0, people: 0, unchanged: true };
+
+    const now = Date.now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const projects = this.database.prepare(`
+        UPDATE projects
+        SET created_at = 0
+        WHERE created_at > 0
+          AND updated_at IN (
+            SELECT updated_at
+            FROM projects
+            WHERE created_at > 0
+            GROUP BY updated_at
+            HAVING COUNT(*) >= ?
+          )
+      `).run(LEGACY_BULK_IMPORT_MIN);
+      const people = this.database.prepare(`
+        UPDATE people
+        SET created_at = 0
+        WHERE created_at > 0
+          AND updated_at IN (
+            SELECT updated_at
+            FROM people
+            WHERE created_at > 0
+            GROUP BY updated_at
+            HAVING COUNT(*) >= ?
+          )
+      `).run(LEGACY_BULK_IMPORT_MIN);
+      const result = {
+        projects: Number(projects.changes) || 0,
+        people: Number(people.changes) || 0
+      };
+      this.database.prepare(`
+        INSERT INTO repository_meta (key, value, updated_at)
+        VALUES (?, ?, ?)
+      `).run(
+        LEGACY_BULK_INTAKE_MIGRATION_KEY,
+        JSON.stringify(result),
+        now
+      );
+      this.database.exec("COMMIT");
+      return result;
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;
@@ -838,6 +894,8 @@ class LocalDomiRepository {
       LIMIT 1
     `);
     const now = Date.now();
+    const bulkBaseline = !previousSignature
+      && discovered.projects.length + discovered.people.length >= LEGACY_BULK_IMPORT_MIN;
 
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -882,7 +940,7 @@ class LocalDomiRepository {
           project.rating,
           project.lastUpdatedAt,
           project.documentPath,
-          project.createdAt,
+          bulkBaseline ? 0 : project.createdAt,
           now
         );
         result.projects.created += 1;
@@ -926,7 +984,7 @@ class LocalDomiRepository {
           person.status,
           person.rating,
           person.documentPath,
-          person.createdAt,
+          bulkBaseline ? 0 : person.createdAt,
           now
         );
         result.people.created += 1;

@@ -84,8 +84,10 @@ type TodoRecentProject = {
   recordId?: string;
   name?: string;
   domain?: string;
+  subdomains?: string[];
   status?: string;
   rating?: string;
+  notes?: string;
   createdAt?: number | null;
   lastFollowup?: number | null;
 };
@@ -93,6 +95,7 @@ type TodoRecentProject = {
 type TodoRecentPerson = {
   recordId?: string;
   name?: string;
+  types?: string[];
   organization?: string;
   status?: string;
   rating?: string;
@@ -100,13 +103,29 @@ type TodoRecentPerson = {
   lastContact?: number | null;
 };
 
+function todoEvidenceSummary(
+  kind: "project" | "person",
+  item: TodoRecentProject | TodoRecentPerson
+) {
+  const parts = kind === "project"
+    ? [
+        singleLine((item as TodoRecentProject).domain),
+        ((item as TodoRecentProject).subdomains || []).map(singleLine).filter(Boolean).join("、"),
+        singleLine((item as TodoRecentProject).notes)
+      ]
+    : [
+        singleLine((item as TodoRecentPerson).organization),
+        ((item as TodoRecentPerson).types || []).map(singleLine).filter(Boolean).join("、")
+      ];
+  const summary = parts.filter(Boolean).join("；");
+  return summary.length > 160 ? `${summary.slice(0, 159)}…` : summary;
+}
+
 function todoRecentEntryLine(
   kind: "project" | "person",
   item: TodoRecentProject | TodoRecentPerson
 ) {
-  const detail = kind === "project"
-    ? singleLine((item as TodoRecentProject).domain)
-    : singleLine((item as TodoRecentPerson).organization);
+  const detail = todoEvidenceSummary(kind, item);
   return [
     kind,
     singleLine(item.recordId),
@@ -178,8 +197,8 @@ export function todoRecentEntriesContext(
     && !priorityPeople.length
   ) return "";
 
-  const recentLimit = 120;
-  const followupLimit = 160;
+  const recentLimit = 48;
+  const followupLimit = 48;
   const candidates = [
     ...recentProjects.map((item) => ({ kind: "project" as const, item })),
     ...recentPeople.map((item) => ({ kind: "person" as const, item }))
@@ -203,18 +222,17 @@ export function todoRecentEntriesContext(
 
   return [
     "DOMI_TODO_CLIENT_SNAPSHOT_V1",
-    `最近 4 周新入库候选索引（刚由客户端刷新，共 ${recentProjects.length} 个项目、${recentPeople.length} 个人；格式：类型｜recordId｜名称｜系统入库时间｜评级｜进展｜领域或组织）：`,
+    `最近 4 周新入库候选索引（刚由客户端刷新，共 ${recentProjects.length} 个项目、${recentPeople.length} 个人；格式：类型｜recordId｜名称｜系统入库时间｜评级｜进展｜价值证据摘要）：`,
     ...candidates.map(({ kind, item }) => `- ${todoRecentEntryLine(kind, item)}`),
     recentProjects.length + recentPeople.length > recentLimit
       ? `- 另有 ${recentProjects.length + recentPeople.length - recentLimit} 个较早候选未随上下文传入；需要时按 recordId 定向读取。`
       : "",
     "该索引是本轮已刷新资料的 new-entry 权威候选集；不要再次全量读取项目表或人脉表。其他分类已有同一对象，不得作为压制 new-entry 的理由；但同一对象最终都要求联系或约见时，应合并理由并只保留一个开放事项。",
     "若存在符合规则且未受 done/ignored 冷却约束的候选，本轮 new-entry 不得为 0；若全部排除，必须在执行结果中给出逐类排除数量。",
-    `A/S 长期跟进候选索引（共 ${priorityProjects.length} 个项目、${priorityPeople.length} 个人；格式：类型｜recordId｜名称｜评级｜进展｜最后跟进或联系｜领域或组织）：`,
+    `A/S 长期跟进候选索引（共 ${priorityProjects.length} 个项目、${priorityPeople.length} 个人；格式：类型｜recordId｜名称｜评级｜进展｜最后跟进或联系｜价值证据摘要）：`,
     ...followupCandidates.map(({ kind, item }) => {
-      const detail = kind === "project"
-        ? singleLine((item as TodoRecentProject).domain) || "领域未填写"
-        : singleLine((item as TodoRecentPerson).organization) || "组织未填写";
+      const detail = todoEvidenceSummary(kind, item)
+        || (kind === "project" ? "领域未填写" : "组织未填写");
       const lastActivity = kind === "project"
         ? todoFollowupDate((item as TodoRecentProject).lastFollowup)
         : todoFollowupDate((item as TodoRecentPerson).lastContact);
@@ -479,7 +497,9 @@ export function workflowPrompt(
       "你正在 domi 投资工作台后台运行待办事项同步，底层是本地 Codex。",
       "采用 domi 插件中的 $domi:todo，并执行该 Skill 的客户端快速同步路径。完整读取 Todo Skill、suggestion-rules 和 todo-ledger-schema；不要先加载 domi Router，也不要加载与当前后端无关的通用技能。",
       "客户端已先刷新项目与人脉。若上下文包含 DOMI_TODO_CLIENT_SNAPSHOT_V1，直接使用其中的新入库和 A/S 长期跟进候选；不得为这些分类再次全量读取项目表或人脉表。仅对关键节点日期、已核验关联动态、字段歧义或账本消歧做最小范围读取。",
+      "客户端候选最后一列已经提供价值证据摘要；摘要足以解释下一步动作时，禁止再点读项目或人物记录。",
       "当前待办账本只读取一次，完成去重与排序后单次写入，再单次回读验证。保持完整规则、证据门槛和 12 项配额，不得用减少判断维度换取速度。",
+      "本轮以待办文档成功写入并回读为完成条件；不要撰写长篇过程报告，写后只输出各分类计数和排除计数摘要。",
       "不得输出私人链接、邮箱、Base 标识或本机路径；不得修改 domi 应用源码。",
       domiContext ? `\ndomi 客户端候选上下文：\n${domiContext}` : "",
       "",

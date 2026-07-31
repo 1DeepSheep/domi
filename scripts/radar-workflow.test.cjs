@@ -71,6 +71,8 @@ async function main() {
         recordId: "project-new",
         name: "四周内项目",
         domain: "AI",
+        subdomains: ["Agent"],
+        notes: "企业级智能体产品，已有明确客户验证",
         rating: "A",
         status: "待交流",
         createdAt: now - 27 * 24 * 60 * 60 * 1000,
@@ -82,12 +84,19 @@ async function main() {
         rating: "S",
         createdAt: now - 29 * 24 * 60 * 60 * 1000,
         lastFollowup: now - 70 * 24 * 60 * 60 * 1000
+      },
+      {
+        recordId: "project-legacy",
+        name: "历史批量迁移项目",
+        rating: "",
+        createdAt: null
       }
     ],
     [{
       recordId: "person-new",
       name: "四周内人物",
       organization: "示例机构",
+      types: ["创始人"],
       rating: "S",
       status: "待 Pitch",
       createdAt: now - 2 * 24 * 60 * 60 * 1000,
@@ -99,9 +108,30 @@ async function main() {
   assert.match(todoContext, /共 1 个项目、1 个人/);
   assert.match(todoContext, /project｜project-new｜四周内项目/);
   assert.match(todoContext, /person｜person-new｜四周内人物/);
+  assert.match(todoContext, /价值证据摘要/);
+  assert.match(todoContext, /AI；Agent；企业级智能体产品/);
+  assert.match(todoContext, /示例机构；创始人/);
   assert.doesNotMatch(todoContext.split("A/S 长期跟进候选索引")[0], /四周外项目/);
+  assert.doesNotMatch(todoContext, /历史批量迁移项目/);
   assert.match(todoContext, /project｜project-old｜四周外项目｜S/);
   assert.match(todoContext, /其他分类已有同一对象，不得作为压制 new-entry 的理由/);
+
+  const boundedTodoContext = todoRecentEntriesContext(
+    Array.from({ length: 80 }, (_, index) => ({
+      recordId: `bounded-${index}`,
+      name: `候选项目 ${index}`,
+      createdAt: now - index * 60_000
+    })),
+    [],
+    now
+  );
+  assert.match(boundedTodoContext, /共 80 个项目、0 个人/);
+  assert.equal(
+    (boundedTodoContext.match(/^- project｜bounded-/gm) || []).length,
+    48,
+    "todo context must stay bounded even when a large import is present"
+  );
+  assert.match(boundedTodoContext, /另有 32 个较早候选未随上下文传入/);
 
   const radarWorkflow = workflows.find((workflow) => workflow.id === "investment-radar");
   assert.ok(radarWorkflow);
