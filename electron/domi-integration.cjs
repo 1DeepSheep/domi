@@ -48,6 +48,7 @@ const PLAUD_FINAL_WORKFLOW_STAGES = new Set([
   "managed",
   "discussion_complete"
 ]);
+const PLAUD_LIST_CACHE_KEY = "plaud:list:v1";
 const WEEKLY_NEWS_FIELDS = [
   "新闻标题",
   "领域",
@@ -1075,7 +1076,7 @@ class DomiIntegration {
     }
     const { plugin } = this.plaudPaths(pluginInput);
     return this.runJson(process.execPath, [this.plaudWorker, command, plugin.root, ...args], {
-      timeout: command === "list" ? 180000 : 120000,
+      timeout: 120000,
       label: command === "list" ? "PLAUD 最近录音读取" : "PLAUD 操作",
       queue: "plaud",
       env: this.plaudRuntimeEnv()
@@ -1280,17 +1281,38 @@ class DomiIntegration {
     const [remoteResult] = await Promise.allSettled([
       this.runPlaudWorker("list", [String(limit), String(offset)], plugin)
     ]);
+    const checkedAt = Date.now();
+    let remoteSnapshot = remoteResult.status === "fulfilled"
+      ? {
+          syncedAt: checkedAt,
+          pendingCount: Number(remoteResult.value.pendingCount) || 0,
+          pageSize: limit,
+          hasMore: Boolean(remoteResult.value.hasMore),
+          nextOffset: Number(remoteResult.value.nextOffset) || offset,
+          items: remoteResult.value.items || []
+        }
+      : null;
+    let stale = false;
+    if (remoteSnapshot && offset === 0) {
+      this.stateStore.saveCache(PLAUD_LIST_CACHE_KEY, remoteSnapshot);
+    } else if (!remoteSnapshot && offset === 0) {
+      const cached = this.stateStore.loadCache(PLAUD_LIST_CACHE_KEY)?.value;
+      if (cached && Array.isArray(cached.items)) {
+        remoteSnapshot = cached;
+        stale = true;
+      }
+    }
     const queueItems = this.loadActivePlaudWorkflowRecords();
     const workflowById = new Map(
       this.loadPlaudWorkflowRecords().map((item) => [String(item.fileId), item])
     );
     for (const item of queueItems) workflowById.set(String(item.fileId), item);
     const activeQueueById = new Map(queueItems.map((item) => [String(item.fileId), item]));
-    const remoteItems = remoteResult.status === "fulfilled" ? remoteResult.value.items || [] : [];
+    const remoteItems = remoteSnapshot?.items || [];
     this.plaudRemoteHealth = {
       ok: remoteResult.status === "fulfilled",
       error: remoteResult.status === "rejected" ? remoteResult.reason.message : "",
-      checkedAt: Date.now()
+      checkedAt
     };
     const items = remoteItems.map((item) => {
       const fileId = String(item.fileId);
@@ -1309,28 +1331,39 @@ class DomiIntegration {
       }
     }
     items.sort(comparePlaudItems);
-    const errors = [
-      remoteResult.status === "rejected" ? remoteResult.reason.message : ""
-    ].filter(Boolean);
+    const remoteError = remoteResult.status === "rejected" ? remoteResult.reason.message : "";
+    const warning = stale
+      ? "PLAUD 暂时无法刷新，已保留上次成功读取的录音列表；专用浏览器已自动清理，可稍后重试。"
+      : "";
     return {
-      ok: remoteResult.status === "fulfilled",
-      syncedAt: Date.now(),
-      pendingCount: remoteResult.status === "fulfilled" ? remoteResult.value.pendingCount || 0 : 0,
+      ok: remoteResult.status === "fulfilled" || stale,
+      stale,
+      syncedAt: Number(remoteSnapshot?.syncedAt) || checkedAt,
+      lastSuccessfulAt: Number(remoteSnapshot?.syncedAt) || undefined,
+      pendingCount: Number(remoteSnapshot?.pendingCount) || 0,
       queueCount: queueItems.length,
       pageOffset: offset,
       pageSize: limit,
-      hasMore: remoteResult.status === "fulfilled" && Boolean(remoteResult.value.hasMore),
-      nextOffset: remoteResult.status === "fulfilled"
-        ? Number(remoteResult.value.nextOffset) || offset
+      hasMore: !stale && remoteResult.status === "fulfilled" && Boolean(remoteSnapshot?.hasMore),
+      nextOffset: !stale && remoteResult.status === "fulfilled"
+        ? Number(remoteSnapshot?.nextOffset) || offset
         : offset,
       items,
-      error: errors.join("；")
+      warning,
+      error: stale ? "" : remoteError
     };
   }
 
   async syncPlaud(request = {}) {
     const current = await this.plaudQueue();
     if (!current.ok) return current;
+    if (current.stale) {
+      return {
+        ok: false,
+        snapshot: current,
+        error: "PLAUD 当前未能完成远端读取，已显示上次成功列表；请重试连接后再生成文字稿。"
+      };
+    }
     if (current.pendingCount > 10 && !request.confirmed) {
       return { ok: false, requiresConfirmation: true, pendingCount: current.pendingCount, snapshot: current };
     }
