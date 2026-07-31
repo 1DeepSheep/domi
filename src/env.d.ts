@@ -60,6 +60,12 @@ declare global {
       updateDomiDatabaseRecord: (
         request: DomiDatabaseUpdateRequest
       ) => Promise<DomiDatabaseUpdateResult>;
+      previewDomiDatabaseRecord: (
+        request: DomiDatabasePreviewRequest
+      ) => Promise<DomiDatabasePreviewResult>;
+      deleteDomiDatabaseRecord: (
+        request: DomiDatabaseDeleteRequest
+      ) => Promise<DomiDatabaseDeleteResult>;
       previewStorageMigration: () => Promise<StorageMigrationPreview>;
       listWeeklyNews: (request?: DomiWeeklyNewsRequest) => Promise<DomiWeeklyNewsSnapshot>;
       saveWeeklyNewsCheckpoint: (
@@ -534,6 +540,37 @@ export type DomiDatabaseUpdateResult = {
   ok: boolean;
   entityType?: "project" | "person" | "news";
   record?: DomiProject | DomiPerson | DomiNewsItem;
+  snapshot?: DomiSnapshot;
+  updatedAt?: number;
+  error?: string;
+};
+
+export type DomiDatabasePreviewRequest = {
+  entityType: "project" | "person";
+  recordId: string;
+};
+
+export type DomiDatabasePreviewResult = {
+  ok: boolean;
+  entityType?: "project" | "person";
+  recordId?: string;
+  title?: string;
+  resource?: string;
+  error?: string;
+};
+
+export type DomiDatabaseDeleteRequest = {
+  entityType: "project" | "person" | "news";
+  recordId: string;
+  expectedUpdatedAt: number;
+};
+
+export type DomiDatabaseDeleteResult = {
+  ok: boolean;
+  entityType?: "project" | "person" | "news";
+  recordId?: string;
+  title?: string;
+  filesPreserved?: boolean;
   snapshot?: DomiSnapshot;
   updatedAt?: number;
   error?: string;

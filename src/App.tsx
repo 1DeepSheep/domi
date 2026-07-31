@@ -54,6 +54,7 @@ import {
   DragEvent as ReactDragEvent,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   ReactNode,
   SyntheticEvent,
@@ -80,6 +81,7 @@ import {
   CodexEventItem,
   CodexUsage,
   DomiPerson,
+  DomiDatabaseDeleteRequest,
   DomiDatabaseSnapshot,
   DomiDatabaseUpdateRequest,
   DomiNewsItem,
@@ -166,6 +168,15 @@ type DatabaseExpandedCell = {
   left: number;
   top: number;
   width: number;
+};
+
+type DatabaseDeleteTarget = DomiDatabaseDeleteRequest & {
+  title: string;
+};
+
+type DatabaseRowContextMenu = DatabaseDeleteTarget & {
+  left: number;
+  top: number;
 };
 
 const DATABASE_FIELD_LABELS: Partial<Record<keyof DatabaseDraft, string>> = {
@@ -342,6 +353,25 @@ function replaceDatabaseSnapshotRecord(
     ...snapshot,
     loadedAt: Date.now(),
     [collectionKey]: next
+  } as DomiDatabaseSnapshot;
+}
+
+function removeDatabaseSnapshotRecord(
+  snapshot: DomiDatabaseSnapshot | null,
+  entityType: DatabaseEntityType,
+  recordId: string
+) {
+  if (!snapshot) return snapshot;
+  const collectionKey = entityType === "project"
+    ? "projects"
+    : entityType === "person"
+      ? "people"
+      : "news";
+  const current = snapshot[collectionKey] as Array<DomiProject | DomiPerson | DomiNewsItem>;
+  return {
+    ...snapshot,
+    loadedAt: Date.now(),
+    [collectionKey]: current.filter((item) => item.recordId !== recordId)
   } as DomiDatabaseSnapshot;
 }
 
@@ -1356,6 +1386,9 @@ function App() {
   const [databaseSaving, setDatabaseSaving] = useState(false);
   const [databaseError, setDatabaseError] = useState("");
   const [databaseNotice, setDatabaseNotice] = useState("");
+  const [databaseDeleteTarget, setDatabaseDeleteTarget] = useState<DatabaseDeleteTarget | null>(null);
+  const [databaseRowContextMenu, setDatabaseRowContextMenu] = useState<DatabaseRowContextMenu | null>(null);
+  const [databaseDeleting, setDatabaseDeleting] = useState(false);
   const [weeklyNews, setWeeklyNews] = useState<DomiWeeklyNewsSnapshot | null>(null);
   const [weeklyNewsLoading, setWeeklyNewsLoading] = useState(false);
   const [weeklyNewsScanning, setWeeklyNewsScanning] = useState(false);
@@ -3037,6 +3070,110 @@ function App() {
       if (databaseAutoSaveQueuedRef.current) {
         scheduleDatabaseAutoSave(databaseAutoSaveQueuedRef.current, 180);
       }
+    }
+  }
+
+  async function previewDatabaseRecord(
+    entityType: DatabaseEntityType,
+    record: DomiProject | DomiPerson | DomiNewsItem
+  ) {
+    setDatabaseError("");
+    if (entityType === "news") {
+      const url = (record as DomiNewsItem).url;
+      if (!url) {
+        setDatabaseError("这条行业信息没有可打开的原文链接。");
+        return;
+      }
+      void workbench.openResource(url);
+      return;
+    }
+    try {
+      const result = await workbench.previewDomiDatabaseRecord({
+        entityType,
+        recordId: record.recordId
+      });
+      if (!result.ok || !result.resource) {
+        setDatabaseError(result.error || "没有找到可在 domi 内预览的项目文档。");
+        return;
+      }
+      openDocument(result.resource);
+    } catch (error) {
+      setDatabaseError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function openDatabaseRowContextMenu(
+    event: ReactMouseEvent<HTMLTableRowElement>,
+    entityType: DatabaseEntityType,
+    record: DomiProject | DomiPerson | DomiNewsItem
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const menuWidth = 188;
+    const menuHeight = 74;
+    setDatabaseSelectedId(record.recordId);
+    setDatabaseExpandedCell(null);
+    setDatabaseRowContextMenu({
+      entityType,
+      recordId: record.recordId,
+      expectedUpdatedAt: Number(record.updatedAt) || 0,
+      title: databaseRecordTitle(entityType, record),
+      left: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+      top: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8))
+    });
+  }
+
+  function requestContextMenuDatabaseDelete() {
+    if (!databaseRowContextMenu) return;
+    const { entityType, recordId, expectedUpdatedAt, title } = databaseRowContextMenu;
+    setDatabaseRowContextMenu(null);
+    setDatabaseDeleteTarget({ entityType, recordId, expectedUpdatedAt, title });
+    setDatabaseError("");
+  }
+
+  async function confirmDatabaseDelete() {
+    const target = databaseDeleteTarget;
+    if (!target || databaseDeleting || databaseSaving) return;
+    setDatabaseDeleting(true);
+    setDatabaseError("");
+    setDatabaseNotice("");
+    try {
+      const result = await workbench.deleteDomiDatabaseRecord({
+        entityType: target.entityType,
+        recordId: target.recordId,
+        expectedUpdatedAt: target.expectedUpdatedAt
+      });
+      if (!result.ok) {
+        setDatabaseError(result.error || "资料库记录删除失败。");
+        return;
+      }
+      if (result.snapshot) setDomiSnapshot(result.snapshot);
+      const nextSnapshot = removeDatabaseSnapshotRecord(
+        databaseSnapshot,
+        target.entityType,
+        target.recordId
+      );
+      setDatabaseSnapshot(nextSnapshot);
+      const remaining = databaseRecords(nextSnapshot, target.entityType);
+      const selected = remaining[0];
+      setDatabaseSelectedId(selected?.recordId || "");
+      setDatabaseEditingId("");
+      setDatabaseExpandedCell(null);
+      databaseAutoSaveQueuedRef.current = null;
+      setDatabaseDraft(selected ? databaseDraftForRecord(target.entityType, selected) : null);
+      setDatabaseNotice(
+        result.filesPreserved
+          ? `已从资料库移除“${target.title}”；本地原始文件仍保留。`
+          : `已删除“${target.title}”。`
+      );
+      if (target.entityType === "news") {
+        void refreshWeeklyNews(weeklyNewsPage, { silent: true });
+      }
+      setDatabaseDeleteTarget(null);
+    } catch (error) {
+      setDatabaseError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDatabaseDeleting(false);
     }
   }
 
@@ -6678,41 +6815,26 @@ function App() {
     });
     const visibleRecords = filtered.slice(0, databaseVisibleLimit);
     const stopGridEvent = (event: SyntheticEvent) => event.stopPropagation();
-    const editActions = (
+    const resourceLink = (
       entityType: DatabaseEntityType,
-      record: DomiProject | DomiPerson | DomiNewsItem,
-      isEditing: boolean
-    ) => isEditing ? (
-      <div className="database-grid-row-actions" onClick={stopGridEvent}>
-        <span className="database-grid-autosave-status" aria-live="polite">
-          {databaseSaving
-            ? <><RefreshCw className="spinning" size={12} />自动保存中</>
-            : <><Check size={12} />自动保存</>}
-        </span>
-        <button
-          type="button"
-          className="done"
-          onClick={() => finishDatabaseRecordEdit(entityType, record.recordId)}
-        >
-          完成
-        </button>
-      </div>
-    ) : null;
-    const resourceLink = (record: DomiProject | DomiPerson | DomiNewsItem) => {
-      const resource = "link" in record ? record.link : (record as DomiNewsItem).url;
+      record: DomiProject | DomiPerson | DomiNewsItem
+    ) => {
+      const resource = entityType === "news" ? (record as DomiNewsItem).url : "internal-preview";
       if (!resource) return <span className="database-grid-empty-value">—</span>;
       return (
         <button
           type="button"
           className="database-grid-link"
-          title={resource}
+          title={entityType === "news"
+            ? "打开原文"
+            : "在右侧预览项目中最有信息量的文档"}
           onClick={(event) => {
             event.stopPropagation();
-            void workbench.openResource(resource);
+            void previewDatabaseRecord(entityType, record);
           }}
         >
           <FileText size={14} />
-          <span>打开</span>
+          <span>{entityType === "news" ? "原文" : "预览"}</span>
         </button>
       );
     };
@@ -6858,7 +6980,6 @@ function App() {
                       <th>城市</th>
                       <th>入库时间</th>
                       <th className="notes-column">历史融资</th>
-                      <th className="actions-column">操作</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -6874,6 +6995,7 @@ function App() {
                           ].filter(Boolean).join(" ")}
                           onClick={(event) => handleDatabaseRowClick(event, "project", project.recordId)}
                           onKeyDown={(event) => handleDatabaseRowKeyDown(event, "project", project.recordId)}
+                          onContextMenu={(event) => openDatabaseRowContextMenu(event, "project", project)}
                         >
                           <td className="row-number">{index + 1}</td>
                           <td className="primary-column" data-database-editable data-database-field="name">
@@ -6886,7 +7008,7 @@ function App() {
                               ? <textarea value={databaseDraft.notes} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("notes", event.target.value)} rows={2} />
                               : <span className="database-grid-clamp" title={project.notes}>{project.notes || "—"}</span>}
                           </td>
-                          <td>{resourceLink(project)}</td>
+                          <td>{resourceLink("project", project)}</td>
                           <td>{databaseDate(project.lastFollowup || project.updatedAt)}</td>
                           <td data-database-editable data-database-field="domain">
                             {isEditing
@@ -6936,7 +7058,6 @@ function App() {
                               ? <textarea value={databaseDraft.financingHistory} onClick={reopenExpandedDatabaseCell} onChange={(event) => updateDatabaseDraft("financingHistory", event.target.value)} rows={2} />
                               : <span className="database-grid-clamp" title={project.financingHistory}>{project.financingHistory || "—"}</span>}
                           </td>
-                          <td className="actions-column">{editActions("project", project, isEditing)}</td>
                         </tr>
                       );
                     })}
@@ -6956,7 +7077,6 @@ function App() {
                       <th className="tags-column">城市</th>
                       <th>入库时间</th>
                       <th>人物主页</th>
-                      <th className="actions-column">操作</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -6972,6 +7092,7 @@ function App() {
                           ].filter(Boolean).join(" ")}
                           onClick={(event) => handleDatabaseRowClick(event, "person", person.recordId)}
                           onKeyDown={(event) => handleDatabaseRowKeyDown(event, "person", person.recordId)}
+                          onContextMenu={(event) => openDatabaseRowContextMenu(event, "person", person)}
                         >
                           <td className="row-number">{index + 1}</td>
                           <td className="primary-column" data-database-editable data-database-field="name">
@@ -7013,8 +7134,7 @@ function App() {
                               : databasePills(person.cities)}
                           </td>
                           <td>{databaseDate(person.createdAt)}</td>
-                          <td>{resourceLink(person)}</td>
-                          <td className="actions-column">{editActions("person", person, isEditing)}</td>
+                          <td>{resourceLink("person", person)}</td>
                         </tr>
                       );
                     })}
@@ -7038,7 +7158,6 @@ function App() {
                       <th className="notes-column">建议动作</th>
                       <th>继续展示</th>
                       <th>原文</th>
-                      <th className="actions-column">操作</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -7054,6 +7173,7 @@ function App() {
                           ].filter(Boolean).join(" ")}
                           onClick={(event) => handleDatabaseRowClick(event, "news", item.recordId)}
                           onKeyDown={(event) => handleDatabaseRowKeyDown(event, "news", item.recordId)}
+                          onContextMenu={(event) => openDatabaseRowContextMenu(event, "news", item)}
                         >
                           <td className="row-number">{index + 1}</td>
                           <td className="primary-column" data-database-editable data-database-field="title">
@@ -7122,8 +7242,7 @@ function App() {
                               />
                             ) : databasePills([item.worthFollowing === false ? "否" : "是"])}
                           </td>
-                          <td>{resourceLink(item)}</td>
-                          <td className="actions-column">{editActions("news", item, isEditing)}</td>
+                          <td>{resourceLink("news", item)}</td>
                         </tr>
                       );
                     })}
@@ -7143,7 +7262,7 @@ function App() {
               </div>
             )}
             <div className="database-grid-hint">
-              单击任意可编辑单元格即可修改；长文本会自动展开，修改后自动保存并同步更新 SQLite、Markdown 与资料目录。
+              单击任意可编辑单元格即可修改；右键点击行可删除。长文本会自动展开，修改后自动保存并同步更新 SQLite、Markdown 与资料目录。
             </div>
           </div>
         )}
@@ -7205,6 +7324,87 @@ function App() {
               </footer>
             </div>
           )}
+        {databaseRowContextMenu && (
+          <div
+            className="database-row-context-backdrop"
+            role="presentation"
+            onMouseDown={() => setDatabaseRowContextMenu(null)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setDatabaseRowContextMenu(null);
+            }}
+          >
+            <div
+              className="database-row-context-menu"
+              role="menu"
+              aria-label={`${databaseRowContextMenu.title}的行操作`}
+              style={{
+                left: databaseRowContextMenu.left,
+                top: databaseRowContextMenu.top
+              }}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                className="danger"
+                onClick={requestContextMenuDatabaseDelete}
+              >
+                <Trash2 size={14} />
+                <span>
+                  <strong>删除此行</strong>
+                  <small>本地文件仍会保留</small>
+                </span>
+              </button>
+            </div>
+          </div>
+        )}
+        {databaseDeleteTarget && (
+          <div
+            className="database-delete-backdrop"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.currentTarget === event.target && !databaseDeleting) {
+                setDatabaseDeleteTarget(null);
+              }
+            }}
+          >
+            <div
+              className="database-delete-dialog"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="database-delete-title"
+              aria-describedby="database-delete-description"
+            >
+              <div className="database-delete-icon"><Trash2 size={18} /></div>
+              <div>
+                <h3 id="database-delete-title">从资料库移除这条记录？</h3>
+                <p id="database-delete-description">
+                  “{databaseDeleteTarget.title}”会从资料库列表和后续索引中移除；本地项目目录、文档和附件会完整保留。
+                </p>
+              </div>
+              <div className="database-delete-actions">
+                <button
+                  type="button"
+                  onClick={() => setDatabaseDeleteTarget(null)}
+                  disabled={databaseDeleting}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => void confirmDatabaseDelete()}
+                  disabled={databaseDeleting || databaseSaving}
+                >
+                  {databaseDeleting
+                    ? <><RefreshCw className="spinning" size={14} />正在移除</>
+                    : <><Trash2 size={14} />移出资料库</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

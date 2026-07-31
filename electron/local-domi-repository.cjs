@@ -6,12 +6,14 @@ const { pathToFileURL } = require("node:url");
 const { DatabaseSync } = require("node:sqlite");
 const { ensureDocumentLibraryStructure } = require("./document-library.cjs");
 
-const LOCAL_REPOSITORY_SCHEMA = 2;
+const LOCAL_REPOSITORY_SCHEMA = 3;
 const PROJECTS_DIRECTORY = "3.项目库";
 const PEOPLE_DIRECTORY = "4.人脉库";
 const NEWS_DIRECTORY = "2.行业动态";
 const PROJECT_PAGE_NAME = "项目主页.md";
 const PERSON_PAGE_NAME = "人物主页.md";
+const PROJECT_STRUCTURE_DIRECTORIES = new Set(["原始材料", "研究", "纪要", "导出"]);
+const PREVIEW_DOCUMENT_EXTENSIONS = new Set([".md", ".markdown", ".pdf"]);
 const MANAGED_BLOCK_PATTERN = /<!-- domi:managed:start -->[\s\S]*?<!-- domi:managed:end -->/;
 const PROJECT_STATUSES = new Set(["待交流", "已交流", "深度跟踪", "已投", "Miss", "放弃"]);
 const PROJECT_RATINGS = new Set(["", "S", "A", "B", "C"]);
@@ -147,10 +149,70 @@ function firstMarkdownFile(directoryPath) {
 }
 
 function looksLikeProjectDirectory(name, hasCanonicalPage) {
-  if (hasCanonicalPage) return true;
   const value = String(name || "").trim();
   if (!value) return false;
+  if (PROJECT_STRUCTURE_DIRECTORIES.has(value)) return false;
+  if (hasCanonicalPage) return true;
   return !/(?:行业|产业|赛道|专题|市场)研究/.test(value);
+}
+
+function previewDocumentScore(filePath, canonicalPath) {
+  const normalizedPath = String(filePath || "").normalize("NFKC").toLocaleLowerCase("zh-CN");
+  const fileName = path.basename(normalizedPath);
+  let score = 100;
+  if (/(?:投委会|ic[\s_-]*memo|investment[\s_-]*memo)/i.test(normalizedPath)) score += 1_000;
+  else if (/(?:深度研究|研究报告|桌面研究|投资分析)/.test(normalizedPath)) score += 900;
+  else if (/(?:交流纪要|会议纪要|访谈纪要|纪要)/.test(normalizedPath)) score += 800;
+  else if (/(?:商业计划|pitch[\s_-]*deck|(^|[/_-])bp(?:[._/-]|$))/i.test(normalizedPath)) score += 700;
+  else if (path.resolve(filePath) === path.resolve(canonicalPath || "")) score += 500;
+  else if (/\.(?:md|markdown)$/i.test(fileName)) score += 300;
+  else if (/\.pdf$/i.test(fileName)) score += 250;
+  try {
+    const stat = fs.statSync(filePath);
+    score += Math.min(Math.log2(Math.max(stat.size, 1)) * 4, 80);
+    score += Math.min(Math.max(stat.mtimeMs, 0) / 1e12, 4);
+  } catch {
+    // Cloud placeholders can still be selected by their file name.
+  }
+  return score;
+}
+
+function bestPreviewDocument(directoryPath, canonicalPath = "") {
+  const root = path.resolve(String(directoryPath || ""));
+  if (!root || !fs.existsSync(root)) {
+    return canonicalPath && fs.existsSync(canonicalPath) ? canonicalPath : "";
+  }
+  const candidates = [];
+  const pending = [{ directory: root, depth: 0 }];
+  while (pending.length && candidates.length < 400) {
+    const current = pending.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current.directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const targetPath = path.join(current.directory, entry.name);
+      if (entry.isDirectory() && current.depth < 4) {
+        pending.push({ directory: targetPath, depth: current.depth + 1 });
+        continue;
+      }
+      if (!entry.isFile() || !PREVIEW_DOCUMENT_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+        continue;
+      }
+      candidates.push(targetPath);
+      if (candidates.length >= 400) break;
+    }
+  }
+  if (!candidates.length) {
+    return canonicalPath && fs.existsSync(canonicalPath) ? canonicalPath : "";
+  }
+  return candidates.sort((left, right) =>
+    previewDocumentScore(right, canonicalPath) - previewDocumentScore(left, canonicalPath)
+      || left.localeCompare(right, "zh-CN")
+  )[0];
 }
 
 function scanWorkspaceEntities(libraryDir) {
@@ -165,10 +227,10 @@ function scanWorkspaceEntities(libraryDir) {
     if (indexedProjectPaths.has(resolvedProjectPath)) return;
     const canonicalPath = path.join(resolvedProjectPath, PROJECT_PAGE_NAME);
     const hasCanonicalPage = fs.existsSync(canonicalPath);
-    if (!looksLikeProjectDirectory(fallbackName, hasCanonicalPage)) return;
     const metadata = readManagedFrontmatter(canonicalPath);
     if (metadata.entity_type && metadata.entity_type !== "project") return;
     const name = String(metadata.company_name || fallbackName || "").trim();
+    if (!looksLikeProjectDirectory(name, hasCanonicalPage)) return;
     const normalized = normalizedName(name);
     if (!normalized) return;
     const metadataSubdomains = stringList(metadata.subdomains);
@@ -592,6 +654,16 @@ class LocalDomiRepository {
       );
       CREATE INDEX IF NOT EXISTS idx_documents_owner
         ON documents(owner_type, owner_id, kind);
+      CREATE TABLE IF NOT EXISTS repository_tombstones (
+        entity_type TEXT NOT NULL,
+        entity_key TEXT NOT NULL,
+        record_id TEXT NOT NULL DEFAULT '',
+        source_path TEXT NOT NULL DEFAULT '',
+        deleted_at INTEGER NOT NULL,
+        PRIMARY KEY (entity_type, entity_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_repository_tombstones_source
+        ON repository_tombstones(entity_type, source_path);
       CREATE TABLE IF NOT EXISTS document_migrations (
         source_path TEXT NOT NULL,
         target_space_id TEXT NOT NULL,
@@ -639,7 +711,42 @@ class LocalDomiRepository {
     };
   }
 
+  cleanupStructuralGhostProjects() {
+    const normalizedNames = [...PROJECT_STRUCTURE_DIRECTORIES].map(normalizedName);
+    const placeholders = normalizedNames.map(() => "?").join(", ");
+    if (!placeholders) return 0;
+    const rows = this.database.prepare(`
+      SELECT id, name, normalized_name, document_path
+      FROM projects
+      WHERE normalized_name IN (${placeholders})
+        AND TRIM(notes) = ''
+        AND TRIM(document_path) = ''
+        AND TRIM(financing_history) = ''
+        AND latest_valuation_usd_100m IS NULL
+        AND cities_json = '[]'
+        AND investors_json = '[]'
+    `).all(...normalizedNames);
+    if (!rows.length) return 0;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const deleteDocuments = this.database.prepare(
+        "DELETE FROM documents WHERE owner_type = 'project' AND owner_id = ?"
+      );
+      const deleteProject = this.database.prepare("DELETE FROM projects WHERE id = ?");
+      for (const row of rows) {
+        deleteDocuments.run(row.id);
+        deleteProject.run(row.id);
+      }
+      this.database.exec("COMMIT");
+      return rows.length;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   reindexWorkspace() {
+    const removedStructuralGhosts = this.cleanupStructuralGhostProjects();
     const discovered = scanWorkspaceEntities(this.libraryDir);
     const signature = workspaceEntitiesSignature(discovered);
     const previousSignature = this.database.prepare(
@@ -660,7 +767,8 @@ class LocalDomiRepository {
           ...(result.projects || {}),
           discovered: discovered.projects.length,
           created: 0,
-          linked: 0
+          linked: 0,
+          ...(removedStructuralGhosts ? { removedStructuralGhosts } : {})
         },
         people: {
           ...(result.people || {}),
@@ -673,7 +781,12 @@ class LocalDomiRepository {
       };
     }
     const result = {
-      projects: { discovered: discovered.projects.length, created: 0, linked: 0 },
+      projects: {
+        discovered: discovered.projects.length,
+        created: 0,
+        linked: 0,
+        ...(removedStructuralGhosts ? { removedStructuralGhosts } : {})
+      },
       people: { discovered: discovered.people.length, created: 0, linked: 0 },
       unchanged: false
     };
@@ -717,11 +830,23 @@ class LocalDomiRepository {
         document_path = CASE WHEN document_path = '' THEN ? ELSE document_path END
       WHERE normalized_name = ?
     `);
+    const findTombstone = this.database.prepare(`
+      SELECT 1
+      FROM repository_tombstones
+      WHERE entity_type = ?
+        AND (entity_key = ? OR (source_path <> '' AND source_path = ?))
+      LIMIT 1
+    `);
     const now = Date.now();
 
     this.database.exec("BEGIN IMMEDIATE");
     try {
       for (const project of discovered.projects) {
+        if (findTombstone.get(
+          "project",
+          project.normalizedName,
+          String(project.documentPath || "")
+        )) continue;
         const existing = findProject.get(project.normalizedName);
         if (existing) {
           const shouldLink = !existing.document_path && project.documentPath;
@@ -764,6 +889,11 @@ class LocalDomiRepository {
       }
 
       for (const person of discovered.people) {
+        if (findTombstone.get(
+          "person",
+          person.normalizedName,
+          String(person.documentPath || "")
+        )) continue;
         const existing = findPerson.get(person.normalizedName);
         if (existing) {
           const shouldLink = !existing.document_path && person.documentPath;
@@ -897,6 +1027,106 @@ class LocalDomiRepository {
       : this.projectDirectory(project);
     assertWithin(projectRoot, directory);
     return fs.existsSync(directory) ? directory : "";
+  }
+
+  resolvePreviewDocument(entityType, recordId) {
+    const type = String(entityType || "").trim();
+    const id = String(recordId || "").trim();
+    if (!id || !["project", "person"].includes(type)) {
+      throw new Error("无法识别要预览的资料库记录。");
+    }
+    const table = type === "project" ? "projects" : "people";
+    const row = this.database.prepare(
+      `SELECT id, name, document_path FROM ${table} WHERE id = ?`
+    ).get(id);
+    if (!row) throw new Error("找不到要预览的资料库记录。");
+    const canonicalPath = String(row.document_path || "").trim();
+    const directory = this.recordDirectory(type, id)
+      || (canonicalPath ? path.dirname(canonicalPath) : "");
+    if (!directory) throw new Error("该记录尚未关联本地资料目录。");
+    const root = path.join(
+      this.libraryDir,
+      type === "project" ? PROJECTS_DIRECTORY : PEOPLE_DIRECTORY
+    );
+    assertWithin(root, directory);
+    const previewPath = bestPreviewDocument(directory, canonicalPath);
+    if (!previewPath) {
+      throw new Error("该资料目录中还没有可在 domi 内预览的 Markdown 或 PDF 文档。");
+    }
+    assertWithin(directory, previewPath);
+    return {
+      ok: true,
+      entityType: type,
+      recordId: id,
+      title: path.basename(previewPath),
+      resource: localDocumentUrl(previewPath)
+    };
+  }
+
+  deleteDatabaseRecord(request = {}) {
+    const entityType = String(request.entityType || "").trim();
+    const recordId = String(request.recordId || "").trim();
+    if (!recordId || !["project", "person", "news"].includes(entityType)) {
+      throw new Error("无法识别要移出的资料库记录。");
+    }
+    const definition = entityType === "project"
+      ? { table: "projects", idColumn: "id", nameColumn: "name", keyColumn: "normalized_name" }
+      : entityType === "person"
+        ? { table: "people", idColumn: "id", nameColumn: "name", keyColumn: "normalized_name" }
+        : { table: "news_events", idColumn: "event_id", nameColumn: "title", keyColumn: "event_id" };
+    const row = this.database.prepare(
+      `SELECT ${definition.idColumn} AS id, ${definition.nameColumn} AS title,
+        ${definition.keyColumn} AS entity_key, document_path, updated_at
+       FROM ${definition.table}
+       WHERE ${definition.idColumn} = ?`
+    ).get(recordId);
+    if (!row) throw new Error("找不到要移出的资料库记录。");
+    const expectedUpdatedAt = Number(request.expectedUpdatedAt);
+    if (!Number.isFinite(expectedUpdatedAt) || expectedUpdatedAt !== Number(row.updated_at)) {
+      throw new Error("记录已被其他流程更新，请刷新后再删除。");
+    }
+    const now = Date.now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        INSERT INTO repository_tombstones (
+          entity_type, entity_key, record_id, source_path, deleted_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+          record_id = excluded.record_id,
+          source_path = excluded.source_path,
+          deleted_at = excluded.deleted_at
+      `).run(
+        entityType,
+        String(row.entity_key || recordId),
+        recordId,
+        String(row.document_path || ""),
+        now
+      );
+      this.database.prepare(
+        "DELETE FROM documents WHERE owner_id = ? AND owner_type IN (?, ?)"
+      ).run(recordId, entityType, entityType === "news" ? "news_event" : entityType);
+      const deleted = this.database.prepare(
+        `DELETE FROM ${definition.table}
+         WHERE ${definition.idColumn} = ? AND updated_at = ?`
+      ).run(recordId, expectedUpdatedAt);
+      if (Number(deleted.changes) !== 1) {
+        throw new Error("记录已被其他流程更新，请刷新后再删除。");
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return {
+      ok: true,
+      entityType,
+      recordId,
+      title: String(row.title || ""),
+      filesPreserved: true,
+      sourcePath: String(row.document_path || ""),
+      deletedAt: now
+    };
   }
 
   projectDirectory(project) {
