@@ -2560,15 +2560,72 @@ class DomiIntegration {
         error: "客户端内直接编辑数据库目前仅支持本地资料库；飞书资料库请继续通过同步工作流维护。"
       };
     }
-    return this.withLocalRepository(source, (repository) => ({
-      ok: true,
-      backend: "local",
-      editable: true,
-      loadedAt: Date.now(),
-      projects: repository.listProjects(),
-      people: repository.listPeople(),
-      news: repository.listAllNews()
-    }));
+    return this.withLocalRepository(source, (repository) => {
+      repository.cleanupStructuralGhostProjects();
+      return {
+        ok: true,
+        backend: "local",
+        editable: true,
+        loadedAt: Date.now(),
+        projects: repository.listProjects(),
+        people: repository.listPeople(),
+        news: repository.listAllNews()
+      };
+    });
+  }
+
+  previewDatabaseRecord(request = {}) {
+    const source = this.readProjectConfig();
+    if (source.backend !== "local") {
+      return {
+        ok: false,
+        error: "客户端内文档预览目前仅支持本地资料库。"
+      };
+    }
+    return this.withLocalRepository(source, (repository) =>
+      repository.resolvePreviewDocument(request.entityType, request.recordId)
+    );
+  }
+
+  deleteDatabaseRecord(request = {}) {
+    const source = this.readProjectConfig();
+    if (source.backend !== "local") {
+      return {
+        ok: false,
+        error: "客户端内删除目前仅支持本地资料库。"
+      };
+    }
+    const result = this.withLocalRepository(source, (repository) =>
+      repository.deleteDatabaseRecord(request)
+    );
+    this.materialIndexCache.clear();
+    let snapshot;
+    if (result.entityType === "project" || result.entityType === "person") {
+      const cached = this.stateStore.loadCache(CACHE_KEY)?.value;
+      if (cached?.backend === "local") {
+        const collectionKey = result.entityType === "project" ? "projects" : "people";
+        const currentItems = Array.isArray(cached[collectionKey]) ? cached[collectionKey] : [];
+        const nextItems = currentItems.filter((item) => item.recordId !== result.recordId);
+        snapshot = {
+          ...cached,
+          syncedAt: Date.now(),
+          [collectionKey]: nextItems,
+          sources: {
+            ...(cached.sources || {}),
+            [collectionKey]: {
+              ...(cached.sources?.[collectionKey] || {}),
+              total: nextItems.length
+            }
+          }
+        };
+        this.stateStore.saveCache(CACHE_KEY, snapshot);
+      }
+    }
+    return {
+      ...result,
+      snapshot,
+      updatedAt: Date.now()
+    };
   }
 
   async updateDatabaseRecord(request = {}) {

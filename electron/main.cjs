@@ -2407,6 +2407,25 @@ ipcMain.handle("domi:database-update", async (_event, request) => {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
+ipcMain.handle("domi:database-preview", async (_event, request) => {
+  try {
+    return await getDomiIntegration().previewDatabaseRecord(request);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:database-delete", async (_event, request) => {
+  try {
+    const result = await getDomiIntegration().deleteDatabaseRecord(request);
+    if (result.ok) {
+      serviceCoordinator.invalidate("domi:database-list");
+      serviceCoordinator.invalidate("domi:weekly-news:");
+    }
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
 ipcMain.handle("domi:status", async () => {
   try {
     const health = await serviceCoordinator.run(

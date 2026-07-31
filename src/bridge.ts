@@ -484,6 +484,19 @@ const browserFallback: Window["workbench"] = {
       }
     };
   },
+  previewDomiDatabaseRecord: async (request) => ({
+    ok: false,
+    entityType: request.entityType,
+    recordId: request.recordId,
+    error: "浏览器预览没有关联本地项目文档。"
+  }),
+  deleteDomiDatabaseRecord: async (request) => ({
+    ok: true,
+    entityType: request.entityType,
+    recordId: request.recordId,
+    filesPreserved: true,
+    updatedAt: Date.now()
+  }),
   previewStorageMigration: async () => ({
     ok: true,
     projectCount: 0,
