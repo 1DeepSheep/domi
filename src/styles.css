@@ -4311,8 +4311,7 @@ body.panel-resizing .main-grid {
   border-right: 1px solid var(--line);
 }
 
-.markdown-header-actions button,
-.markdown-save-button {
+.markdown-header-actions button {
   display: grid;
   width: 30px;
   height: 30px;
@@ -4324,14 +4323,12 @@ body.panel-resizing .main-grid {
   transition: color 140ms ease, background 140ms ease, transform 140ms ease;
 }
 
-.markdown-header-actions button:hover,
-.markdown-save-button:hover:not(:disabled) {
+.markdown-header-actions button:hover {
   color: var(--text);
   background: var(--hover);
 }
 
-.markdown-header-actions button:active,
-.markdown-save-button:active:not(:disabled) {
+.markdown-header-actions button:active {
   transform: scale(0.94);
 }
 
@@ -4344,10 +4341,6 @@ body.panel-resizing .main-grid {
 
 .markdown-save-state.dirty {
   color: var(--accent-strong);
-}
-
-.markdown-save-button:disabled {
-  color: #c6c6c0;
 }
 
 .markdown-panel-body {
