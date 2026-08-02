@@ -243,6 +243,11 @@ const browserFallback: Window["workbench"] = {
     }
     return { ok: false, error: "请在 Electron 窗口中打开本地文件。", target: resource };
   },
+  openMarkdownExternal: async (resource) => ({
+    ok: false,
+    error: "请在 Electron 窗口中使用外部编辑器打开本地 Markdown 文件。",
+    target: resource
+  }),
   showNotification: async ({ title, body, silent }) => {
     if (typeof Notification === "undefined" || Notification.permission !== "granted") {
       return { ok: false, error: "当前浏览器未授权桌面通知。" };
@@ -422,7 +427,9 @@ const browserFallback: Window["workbench"] = {
       lastContact: Date.now(),
       cities: ["北京"],
       updatedAt: 1,
-      link: ""
+      link: "",
+      documents: [],
+      interactionDocuments: []
     }],
     news: [{
       recordId: "preview_news",
@@ -470,7 +477,9 @@ const browserFallback: Window["workbench"] = {
           ...request.record,
           createdAt: updatedAt,
           updatedAt,
-          link: ""
+          link: "",
+          documents: [],
+          interactionDocuments: []
         }
       };
     }

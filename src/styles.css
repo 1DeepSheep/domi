@@ -4455,6 +4455,84 @@ body.panel-resizing .main-grid {
   background: var(--line);
 }
 
+.rich-markdown-search {
+  position: absolute;
+  z-index: 8;
+  top: 45px;
+  right: 14px;
+  display: flex;
+  width: min(360px, calc(100% - 28px));
+  min-width: 0;
+  height: 38px;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 5px 4px 10px;
+  border: 1px solid #d5d5d0;
+  border-radius: 8px;
+  background: rgba(255, 255, 253, 0.98);
+  box-shadow: 0 8px 28px rgba(28, 28, 25, 0.14);
+}
+
+.rich-markdown-search > svg {
+  flex: 0 0 auto;
+  color: #898983;
+}
+
+.rich-markdown-search input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font-family: var(--font-cn);
+  font-size: var(--text-caption);
+  outline: 0;
+}
+
+.rich-markdown-search-count {
+  min-width: 38px;
+  color: #92928c;
+  font-family: var(--font-en);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.rich-markdown-search button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  color: #777772;
+  background: transparent;
+}
+
+.rich-markdown-search button:hover:not(:disabled) {
+  color: var(--text);
+  background: #eeeeea;
+}
+
+.rich-markdown-search button:disabled {
+  color: #c8c8c2;
+}
+
+::highlight(domi-markdown-search-result) {
+  color: inherit;
+  background: #ffe89a;
+}
+
+::highlight(domi-markdown-search-current) {
+  color: inherit;
+  background: #ffbd57;
+  text-decoration: underline;
+  text-decoration-color: #b56b00;
+  text-underline-offset: 2px;
+}
+
 .rich-markdown-scroll {
   min-width: 0;
   min-height: 0;
@@ -8591,6 +8669,26 @@ body.panel-resizing .main-grid {
 }
 
 .database-grid-link:hover {
+  background: #edf2ff;
+}
+
+.database-grid-document-select {
+  width: 100%;
+  min-width: 112px;
+  max-width: 190px;
+  height: 28px;
+  padding: 0 26px 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: #3d68dd;
+  background: #fff;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.database-grid-document-select:hover {
+  border-color: #8ca8ec;
   background: #edf2ff;
 }
 

@@ -1478,6 +1478,7 @@ function App() {
   const [markdownDraft, setMarkdownDraft] = useState("");
   const [markdownLoading, setMarkdownLoading] = useState(false);
   const [markdownSaving, setMarkdownSaving] = useState(false);
+  const [markdownExternalOpening, setMarkdownExternalOpening] = useState(false);
   const [markdownCopying, setMarkdownCopying] = useState(false);
   const [markdownCopied, setMarkdownCopied] = useState(false);
   const [markdownRenaming, setMarkdownRenaming] = useState(false);
@@ -1535,6 +1536,7 @@ function App() {
   const markdownAutoSaveRetryRef = useRef(0);
   const markdownRenameRequestRef = useRef(0);
   const markdownRenameInFlightRef = useRef(false);
+  const markdownExternalOpenInFlightRef = useRef(false);
   const markdownTitleCancelRef = useRef(false);
   const pdfOpenRequestRef = useRef(0);
   const markdownDraftRef = useRef(markdownDraft);
@@ -5761,6 +5763,40 @@ function App() {
     setMarkdownLoading(false);
   }
 
+  async function openMarkdownInExternalEditor() {
+    if (markdownExternalOpenInFlightRef.current) return;
+    const initialDocument = markdownDocumentRef.current;
+    if (!initialDocument) return;
+
+    markdownExternalOpenInFlightRef.current = true;
+    setMarkdownExternalOpening(true);
+    setMarkdownError("");
+    let releasedDocumentPath = "";
+    try {
+      if (!await saveOpenMarkdown()) return;
+      const document = markdownDocumentRef.current;
+      if (!document) return;
+      releasedDocumentPath = document.path;
+
+      // Release the internal editor before another application receives the
+      // file. This prevents two editors and their file watchers from owning the
+      // same Markdown save lifecycle at the same time.
+      await closeMarkdown();
+      const result = await workbench.openMarkdownExternal(releasedDocumentPath);
+      if (!result.ok) {
+        await openMarkdown(releasedDocumentPath);
+        setMarkdownError(result.error || "无法用系统文本编辑器打开 Markdown 文件。");
+      }
+    } catch (error) {
+      reportDocumentOperation("外部打开 Markdown", error);
+      if (releasedDocumentPath) await openMarkdown(releasedDocumentPath);
+      setMarkdownError(describeOperationError(error, "无法用系统文本编辑器打开 Markdown 文件。"));
+    } finally {
+      markdownExternalOpenInFlightRef.current = false;
+      setMarkdownExternalOpening(false);
+    }
+  }
+
   async function reloadOpenPdf() {
     if (!pdfDocument) return;
     await openPdf(pdfDocument.path, undefined, true);
@@ -5859,16 +5895,14 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={async () => {
-                    if (!await saveOpenMarkdown()) return;
-                    const document = markdownDocumentRef.current;
-                    if (document) await workbench.openResource(document.path);
-                  }}
-                  disabled={markdownRenaming || markdownTitleEditing}
-                  title="用其他应用打开"
-                  aria-label="用其他应用打开"
+                  onClick={() => void openMarkdownInExternalEditor()}
+                  disabled={markdownExternalOpening || markdownRenaming || markdownTitleEditing}
+                  title="用系统文本编辑器打开"
+                  aria-label="用系统文本编辑器打开"
                 >
-                  <ExternalLink size={16} />
+                  {markdownExternalOpening
+                    ? <RefreshCw className="spinning" size={16} />
+                    : <ExternalLink size={16} />}
                 </button>
               </>
             )}
@@ -6987,7 +7021,10 @@ function App() {
               (record as DomiPerson).name,
               (record as DomiPerson).organization,
               ...(record as DomiPerson).types,
-              (record as DomiPerson).status
+              (record as DomiPerson).status,
+              ...((record as DomiPerson).documents
+                || (record as DomiPerson).interactionDocuments
+                || []).flatMap((document) => [document.kind, document.title])
             ].join(" ")
           : [
               (record as DomiNewsItem).title,
@@ -7028,7 +7065,11 @@ function App() {
       entityType: DatabaseEntityType,
       record: DomiProject | DomiPerson | DomiNewsItem
     ) => {
-      const resource = entityType === "news" ? (record as DomiNewsItem).url : "internal-preview";
+      const resource = entityType === "news"
+        ? (record as DomiNewsItem).url
+        : entityType === "person"
+          ? (record as DomiPerson).link
+          : "internal-preview";
       if (!resource) return <span className="database-grid-empty-value">—</span>;
       return (
         <button
@@ -7036,14 +7077,58 @@ function App() {
           className="database-grid-link"
           title={entityType === "news"
             ? "打开原文"
-            : "在右侧预览项目中最有信息量的文档"}
+            : entityType === "person"
+              ? "在右侧打开人物主页"
+              : "在右侧预览项目中最有信息量的文档"}
           onClick={(event) => {
             event.stopPropagation();
-            void previewDatabaseRecord(entityType, record);
+            if (entityType === "person") openDocument(resource);
+            else void previewDatabaseRecord(entityType, record);
           }}
         >
           <FileText size={14} />
-          <span>{entityType === "news" ? "原文" : "预览"}</span>
+          <span>{entityType === "news" ? "原文" : entityType === "person" ? "主页" : "预览"}</span>
+        </button>
+      );
+    };
+    const personDocumentLink = (person: DomiPerson) => {
+      const documents = person.documents || person.interactionDocuments || [];
+      const latest = documents[0];
+      if (!latest?.link) return <span className="database-grid-empty-value">—</span>;
+      if (documents.length > 1) {
+        return (
+          <select
+            className="database-grid-document-select"
+            value=""
+            title={`查看 ${documents.length} 篇人物相关文档`}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              event.stopPropagation();
+              const resource = event.target.value;
+              if (resource) openDocument(resource);
+            }}
+          >
+            <option value="" disabled>查看 {documents.length} 篇</option>
+            {documents.map((document) => (
+              <option key={document.link} value={document.link}>
+                {document.kind ? `${document.kind} · ` : ""}{document.title}
+              </option>
+            ))}
+          </select>
+        );
+      }
+      return (
+        <button
+          type="button"
+          className="database-grid-link"
+          title={`在右侧查看：${latest.title}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            openDocument(latest.link);
+          }}
+        >
+          <FileText size={14} />
+          <span>{latest.kind ? `${latest.kind} · ` : ""}{latest.title}</span>
         </button>
       );
     };
@@ -7285,6 +7370,7 @@ function App() {
                       <th>最后联系</th>
                       <th className="tags-column">城市</th>
                       <th>入库时间</th>
+                      <th className="notes-column">相关文档</th>
                       <th>人物主页</th>
                     </tr>
                   </thead>
@@ -7343,6 +7429,7 @@ function App() {
                               : databasePills(person.cities)}
                           </td>
                           <td>{databaseDate(person.createdAt)}</td>
+                          <td className="notes-column">{personDocumentLink(person)}</td>
                           <td>{resourceLink("person", person)}</td>
                         </tr>
                       );
