@@ -92,7 +92,10 @@ function classifyPlaudConnectionFailure(error, browser) {
   } else if (/singleton|profile.*(?:lock|use)|already in use|ebusy|process.*running/.test(normalized)) {
     status = "profile_locked";
     guidance = "PLAUD 专用浏览器 Profile 正被另一个 domi 实例占用，请关闭重复实例后重试。";
-  } else if (/401|403|unauthori|login|登录|not completed|未完成/.test(normalized)) {
+  } else if (/plaud_session_probe_incomplete|authorization request was not observed|会话验证未完成/.test(normalized)) {
+    status = "verification_pending";
+    guidance = "PLAUD 登录数据仍在，但本轮未及时完成会话验证；domi 会自动恢复并重试，无需重新登录。";
+  } else if (/plaud_auth_required|(?:http|status)\s*(?:401|403)|unauthori|需要重新登录|需要登录|not completed/.test(normalized)) {
     status = "auth_required";
     guidance = `请点击“登录并验证”，在 domi 专用 ${plaudBrowserLabel(browser)} 窗口中登录自己的 PLAUD 账号。`;
   } else if (/econnrefused|devtools|browser.*(?:closed|launch)|executable|找不到.*浏览器/.test(normalized)) {
@@ -2810,6 +2813,7 @@ class DomiIntegration {
 
 module.exports = {
   DomiIntegration,
+  classifyPlaudConnectionFailure,
   describeFeishuSyncError,
   resolveLarkCliExecutable,
   isRetryableFeishuReadError,

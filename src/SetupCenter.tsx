@@ -84,6 +84,7 @@ function outlookVerificationTime(timestamp: number) {
 function plaudStatusLabel(status: string) {
   return {
     auth_required: "需要重新登录",
+    verification_pending: "正在自动恢复登录",
     profile_locked: "专用浏览器被占用",
     browser_unavailable: "浏览器连接不可用",
     runtime_unavailable: "内置音频组件不完整",
@@ -408,7 +409,7 @@ export default function SetupCenter({
           "必须采用已安装 domi 插件中的 $plaud skill，并遵守其隐私与授权规则：",
           `1. 先运行 doctor ${browser}，检查 domi 内置 ffmpeg/ffprobe、Playwright 和所选浏览器。`,
           "2. 可以执行安全、可逆且仅作用于 domi 本地配置或 domi 专用 PLAUD Profile 的修复。",
-          `3. 如果环境正常但尚未登录，可以运行 login ${browser}，打开 domi 专用浏览器窗口，等待用户亲自登录自己的 PLAUD 账号。`,
+          `3. 先运行 connection ${browser} 自动恢复并复检；只有明确返回 PLAUD_AUTH_REQUIRED、HTTP 401/403 或确认页面处于登录界面时，才可运行 login ${browser}。页面加载、网络超时或未及时捕获授权请求不得解释为需要重新登录。`,
           `4. 完成后运行 connection ${browser} 做只读验证。`,
           "5. 不得读取、复制或改动用户日常 Chrome/Tabbit Profile；不得输出 Cookie、鉴权头、账号标识或预签名 URL。",
           "6. 不得提交或推送 Git，不得把本地配置写入仓库；安装第三方浏览器等系统级操作必须先让用户明确确认。",
