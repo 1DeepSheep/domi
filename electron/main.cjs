@@ -575,6 +575,41 @@ async function openResource(resource) {
   return { ok: !error, error: error || undefined, target: resolved };
 }
 
+async function openMarkdownExternally(resource) {
+  try {
+    const resolved = resolveMarkdownPath(resource);
+    const stat = await fs.promises.stat(resolved);
+    if (!stat.isFile()) {
+      return { ok: false, error: "所选路径不是文件。", target: resolved };
+    }
+
+    if (process.platform === "darwin") {
+      // Do not use the user's default Markdown association here. Some Markdown
+      // applications keep their own file watcher and can crash when the file was
+      // just atomically saved by domi. TextEdit is a stable, system-provided
+      // external editor and does not share domi's editor or save lifecycle.
+      await execFileAsync("/usr/bin/open", ["-a", "TextEdit", resolved], {
+        timeout: 8_000,
+        windowsHide: true
+      });
+      return { ok: true, target: resolved, application: "TextEdit" };
+    }
+
+    const error = await shell.openPath(resolved);
+    return {
+      ok: !error,
+      error: error || undefined,
+      target: resolved,
+      application: "default"
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 function resolveMarkdownPath(resource, basePath) {
   if (typeof resource !== "string" || !resource.trim()) {
     throw new Error("Markdown 文件地址为空。");
@@ -2339,6 +2374,9 @@ ipcMain.handle("files:import-data", (_event, files, workspacePath) =>
   importLocalFileData(workspacePath, files)
 );
 ipcMain.handle("resource:open", (_event, resource) => openResource(resource));
+ipcMain.handle("markdown:open-external", (_event, resource) =>
+  openMarkdownExternally(resource)
+);
 ipcMain.handle("document-library:list", (_event, request) => readDocumentLibrary(request));
 ipcMain.handle("document-library:create", (_event, request) =>
   createDocumentLibraryItem(request)

@@ -6,7 +6,7 @@ const { pathToFileURL } = require("node:url");
 const { DatabaseSync } = require("node:sqlite");
 const { ensureDocumentLibraryStructure } = require("./document-library.cjs");
 
-const LOCAL_REPOSITORY_SCHEMA = 3;
+const LOCAL_REPOSITORY_SCHEMA = 4;
 const PROJECTS_DIRECTORY = "3.项目库";
 const PEOPLE_DIRECTORY = "4.人脉库";
 const NEWS_DIRECTORY = "2.行业动态";
@@ -14,6 +14,9 @@ const PROJECT_PAGE_NAME = "项目主页.md";
 const PERSON_PAGE_NAME = "人物主页.md";
 const PROJECT_STRUCTURE_DIRECTORIES = new Set(["原始材料", "研究", "纪要", "导出"]);
 const PREVIEW_DOCUMENT_EXTENSIONS = new Set([".md", ".markdown", ".pdf"]);
+const PERSON_INTERACTION_NAME_PATTERN = /(?:交流|纪要|会议|访谈|沟通|会面|电话|路演|聊天)/i;
+const PERSON_PROFILE_NAME_PATTERN = /(?:人物主页|人物资料|人物画像|公开资料|背景研究|背景调查|背调)/i;
+const PERSON_RESEARCH_NAME_PATTERN = /(?:研究|调研|人物画像|背景|背调|资料|分析|profile)/i;
 const MANAGED_BLOCK_PATTERN = /<!-- domi:managed:start -->[\s\S]*?<!-- domi:managed:end -->/;
 const PROJECT_STATUSES = new Set(["待交流", "已交流", "深度跟踪", "已投", "Miss", "放弃"]);
 const PROJECT_RATINGS = new Set(["", "S", "A", "B", "C"]);
@@ -39,6 +42,15 @@ function parseList(value) {
   try {
     const parsed = JSON.parse(value || "[]");
     return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseJsonArray(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
@@ -148,6 +160,62 @@ function firstMarkdownFile(directoryPath) {
   } catch {
     return "";
   }
+}
+
+function scanPersonDocuments(personPath) {
+  const root = path.resolve(String(personPath || ""));
+  if (!root || !fs.existsSync(root)) return [];
+  const candidates = [];
+  const pending = [{ directory: root, depth: 0 }];
+  while (pending.length && candidates.length < 80) {
+    const current = pending.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current.directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const targetPath = path.join(current.directory, entry.name);
+      if (entry.isDirectory() && current.depth < 2) {
+        pending.push({ directory: targetPath, depth: current.depth + 1 });
+        continue;
+      }
+      if (!entry.isFile() || !PREVIEW_DOCUMENT_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+        continue;
+      }
+      const relativePath = path.relative(root, targetPath);
+      if (entry.name === PERSON_PAGE_NAME) continue;
+      const parentSegments = relativePath.split(path.sep).slice(0, -1);
+      const inMinutesDirectory = parentSegments.includes("纪要");
+      const inResearchDirectory = parentSegments.includes("研究");
+      const kind = inMinutesDirectory || PERSON_INTERACTION_NAME_PATTERN.test(entry.name)
+        ? "交流纪要"
+        : inResearchDirectory
+          || PERSON_PROFILE_NAME_PATTERN.test(entry.name)
+          || PERSON_RESEARCH_NAME_PATTERN.test(entry.name)
+          ? "人物研究"
+          : "相关资料";
+      let updatedAt = 0;
+      try {
+        updatedAt = Math.round(fs.statSync(targetPath).mtimeMs);
+      } catch {
+        // Keep cloud placeholders visible even when stat is temporarily unavailable.
+      }
+      candidates.push({
+        title: path.basename(entry.name, path.extname(entry.name)),
+        relativePath,
+        kind,
+        updatedAt
+      });
+      if (candidates.length >= 80) break;
+    }
+  }
+  return candidates
+    .sort((left, right) => right.updatedAt - left.updatedAt
+      || left.relativePath.localeCompare(right.relativePath, "zh-CN"))
+    .slice(0, 50);
 }
 
 function looksLikeProjectDirectory(name, hasCanonicalPage) {
@@ -299,6 +367,7 @@ function scanWorkspaceEntities(libraryDir) {
       documentPath: fs.existsSync(canonicalPath)
         ? canonicalPath
         : firstMarkdownFile(personPath),
+      interactionDocuments: scanPersonDocuments(personPath),
       createdAt: fileCreatedAt(personPath)
     });
   }
@@ -329,7 +398,11 @@ function workspaceEntitiesSignature(discovered) {
       person.organization,
       person.status,
       person.rating,
-      person.documentPath
+      person.documentPath,
+      ...(person.interactionDocuments || []).flatMap((document) => [
+        document.relativePath,
+        document.updatedAt
+      ])
     ]);
   return crypto
     .createHash("sha256")
@@ -528,7 +601,50 @@ function projectRow(row) {
   };
 }
 
-function personRow(row) {
+function personRow(row, persistedDocuments = []) {
+  const personDirectory = row.document_path ? path.dirname(row.document_path) : "";
+  const indexedDocuments = parseJsonArray(row.interaction_documents_json)
+    .map((document) => {
+      const relativePath = String(document?.relativePath || "").trim();
+      if (!relativePath || !personDirectory) return null;
+      const targetPath = path.resolve(personDirectory, relativePath);
+      if (targetPath !== personDirectory && !targetPath.startsWith(`${personDirectory}${path.sep}`)) {
+        return null;
+      }
+      return {
+        title: String(document?.title || path.basename(relativePath, path.extname(relativePath))),
+        link: localDocumentUrl(targetPath),
+        kind: String(document?.kind || "相关资料"),
+        updatedAt: Number(document?.updatedAt) || 0
+      };
+    })
+    .filter(Boolean);
+  const documents = [
+    ...persistedDocuments.map((document) => {
+      const targetPath = personDirectory && document?.path ? path.resolve(document.path) : "";
+      if (
+        !targetPath
+        || (targetPath !== personDirectory && !targetPath.startsWith(`${personDirectory}${path.sep}`))
+      ) return null;
+      return {
+        title: String(document?.title || path.basename(targetPath, path.extname(targetPath))),
+        link: localDocumentUrl(targetPath),
+        kind: String(document?.kind || "相关资料"),
+        updatedAt: Number(document?.updated_at) || 0
+      };
+    }).filter(Boolean),
+    ...indexedDocuments
+  ]
+    .filter((document) => document.link)
+    .filter((document, index, all) =>
+      all.findIndex((candidate) => candidate.link === document.link) === index
+    )
+    .sort((left, right) => right.updatedAt - left.updatedAt
+      || left.link.localeCompare(right.link, "zh-CN"))
+    .slice(0, 50);
+  const interactionDocuments = documents.filter((document) =>
+    PERSON_INTERACTION_NAME_PATTERN.test(`${document.kind} ${document.title}`)
+  );
   return {
     recordId: row.id,
     name: row.name,
@@ -540,7 +656,9 @@ function personRow(row) {
     lastContact: row.last_contact_at || null,
     cities: parseList(row.cities_json),
     updatedAt: row.updated_at || 0,
-    link: localDocumentUrl(row.document_path)
+    link: localDocumentUrl(row.document_path),
+    documents,
+    interactionDocuments
   };
 }
 
@@ -614,6 +732,7 @@ class LocalDomiRepository {
         rating TEXT NOT NULL DEFAULT '',
         last_contact_at INTEGER,
         cities_json TEXT NOT NULL DEFAULT '[]',
+        interaction_documents_json TEXT NOT NULL DEFAULT '[]',
         document_path TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -693,6 +812,14 @@ class LocalDomiRepository {
     }
     if (!projectColumns.has("latest_valuation_usd_100m")) {
       this.database.exec("ALTER TABLE projects ADD COLUMN latest_valuation_usd_100m REAL");
+    }
+    const peopleColumns = new Set(
+      this.database.prepare("PRAGMA table_info(people)").all().map((column) => column.name)
+    );
+    if (!peopleColumns.has("interaction_documents_json")) {
+      this.database.exec(
+        "ALTER TABLE people ADD COLUMN interaction_documents_json TEXT NOT NULL DEFAULT '[]'"
+      );
     }
     this.reconcileLegacyBulkIntakeTimestamps();
   }
@@ -868,14 +995,14 @@ class LocalDomiRepository {
       WHERE normalized_name = ?
     `);
     const findPerson = this.database.prepare(
-      `SELECT id, types_json, organization, status, rating, document_path
+      `SELECT id, types_json, organization, status, rating, interaction_documents_json, document_path
        FROM people WHERE normalized_name = ?`
     );
     const insertPerson = this.database.prepare(`
       INSERT INTO people (
         id, name, normalized_name, types_json, organization, status, rating,
-        last_contact_at, cities_json, document_path, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '[]', ?, ?, ?)
+        last_contact_at, cities_json, interaction_documents_json, document_path, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '[]', ?, ?, ?, ?)
     `);
     const enrichPerson = this.database.prepare(`
       UPDATE people SET
@@ -883,6 +1010,7 @@ class LocalDomiRepository {
         organization = CASE WHEN organization = '' THEN ? ELSE organization END,
         status = CASE WHEN status = '' THEN ? ELSE status END,
         rating = CASE WHEN rating = '' THEN ? ELSE rating END,
+        interaction_documents_json = ?,
         document_path = CASE WHEN document_path = '' THEN ? ELSE document_path END
       WHERE normalized_name = ?
     `);
@@ -955,11 +1083,13 @@ class LocalDomiRepository {
         const existing = findPerson.get(person.normalizedName);
         if (existing) {
           const shouldLink = !existing.document_path && person.documentPath;
+          const interactionDocumentsJson = JSON.stringify(person.interactionDocuments || []);
           const shouldEnrich = (
             (existing.types_json === "[]" && person.types.length > 0)
             || (!existing.organization && person.organization)
             || (!existing.status && person.status)
             || (!existing.rating && person.rating)
+            || existing.interaction_documents_json !== interactionDocumentsJson
             || shouldLink
           );
           if (shouldEnrich) {
@@ -968,6 +1098,7 @@ class LocalDomiRepository {
               person.organization,
               person.status,
               person.rating,
+              interactionDocumentsJson,
               person.documentPath,
               person.normalizedName
             );
@@ -983,6 +1114,7 @@ class LocalDomiRepository {
           person.organization,
           person.status,
           person.rating,
+          JSON.stringify(person.interactionDocuments || []),
           person.documentPath,
           bulkBaseline ? 0 : person.createdAt,
           now
@@ -1019,12 +1151,23 @@ class LocalDomiRepository {
   }
 
   listPeople() {
+    const documentsByOwner = new Map();
+    for (const document of this.database.prepare(`
+      SELECT owner_id, kind, title, path, updated_at
+      FROM documents
+      WHERE owner_type = 'person'
+      ORDER BY updated_at DESC, path ASC
+    `).all()) {
+      const documents = documentsByOwner.get(document.owner_id) || [];
+      documents.push(document);
+      documentsByOwner.set(document.owner_id, documents);
+    }
     return this.database.prepare(`
       SELECT id, name, types_json, organization, status, rating,
-        last_contact_at, cities_json, document_path, created_at, updated_at
+        last_contact_at, cities_json, interaction_documents_json, document_path, created_at, updated_at
       FROM people
       ORDER BY updated_at DESC, name
-    `).all().map(personRow);
+    `).all().map((row) => personRow(row, documentsByOwner.get(row.id) || []));
   }
 
   listNews({ rangeStart, rangeEnd, limit = 500 }) {
@@ -1059,7 +1202,7 @@ class LocalDomiRepository {
     if (entityType === "person") {
       const row = this.database.prepare(
         `SELECT id, name, types_json, organization, status, rating,
-          last_contact_at, cities_json, document_path, created_at, updated_at
+          last_contact_at, cities_json, interaction_documents_json, document_path, created_at, updated_at
          FROM people WHERE id = ?`
       ).get(id);
       if (!row) return "";
@@ -1419,11 +1562,14 @@ class LocalDomiRepository {
         canonicalPath,
         replaceManagedBlock(previousPageContent, renderPersonManagedBlock(person))
       );
+      const interactionDocumentsJson = JSON.stringify(
+        scanPersonDocuments(targetDirectory)
+      );
       const updateResult = this.database.prepare(`
         UPDATE people SET
           name = ?, normalized_name = ?, types_json = ?, organization = ?,
           status = ?, rating = ?, last_contact_at = ?, cities_json = ?,
-          document_path = ?, updated_at = ?
+          interaction_documents_json = ?, document_path = ?, updated_at = ?
         WHERE id = ? AND updated_at = ?
       `).run(
         person.name,
@@ -1434,6 +1580,7 @@ class LocalDomiRepository {
         person.rating,
         person.lastContact,
         JSON.stringify(person.cities),
+        interactionDocumentsJson,
         canonicalPath,
         now,
         id,
@@ -1457,11 +1604,18 @@ class LocalDomiRepository {
       } catch {}
       throw error;
     }
-    return personRow(this.database.prepare(`
+    const updatedRow = this.database.prepare(`
       SELECT id, name, types_json, organization, status, rating,
-        last_contact_at, cities_json, document_path, created_at, updated_at
+        last_contact_at, cities_json, interaction_documents_json, document_path, created_at, updated_at
       FROM people WHERE id = ?
-    `).get(id));
+    `).get(id);
+    const documents = this.database.prepare(`
+      SELECT kind, title, path, updated_at
+      FROM documents
+      WHERE owner_type = 'person' AND owner_id = ?
+      ORDER BY updated_at DESC, path ASC
+    `).all(id);
+    return personRow(updatedRow, documents);
   }
 
   updateNews(request = {}) {
@@ -1621,7 +1775,7 @@ class LocalDomiRepository {
   listMigrationPeople() {
     return this.database.prepare(`
       SELECT id, name, types_json, organization, status, rating,
-        last_contact_at, cities_json, document_path, created_at, updated_at
+        last_contact_at, cities_json, interaction_documents_json, document_path, created_at, updated_at
       FROM people
       ORDER BY updated_at ASC, name ASC
     `).all().map((row) => ({
