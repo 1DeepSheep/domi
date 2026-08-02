@@ -913,6 +913,12 @@ rating: "A"
 
 # 张三
 `);
+  fs.writeFileSync(path.join(personPath, "张三-人物资料.md"), "# 张三人物资料\n");
+  fs.mkdirSync(path.join(personPath, "纪要"), { recursive: true });
+  fs.writeFileSync(
+    path.join(personPath, "纪要", "20260801-张三交流纪要.md"),
+    "# 张三交流纪要\n"
+  );
 
   const repository = new LocalDomiRepository({ databasePath, libraryDir });
   t.after(() => repository.close());
@@ -940,6 +946,18 @@ rating: "A"
     true
   );
   assert.equal(repository.listPeople()[0].organization, "示例科技 · CEO");
+  assert.deepEqual(
+    repository.listPeople()[0].interactionDocuments.map((document) => document.title),
+    ["20260801-张三交流纪要"]
+  );
+  assert.match(
+    decodeURIComponent(repository.listPeople()[0].interactionDocuments[0].link),
+    /纪要\/20260801-张三交流纪要\.md$/
+  );
+  assert.deepEqual(
+    repository.listPeople()[0].documents.map((document) => document.kind).sort(),
+    ["交流纪要", "人物研究"]
+  );
 
   repository.database.prepare(`
     UPDATE projects SET status = '深度跟踪', rating = 'S', notes = '保留人工维护信息'
@@ -983,11 +1001,53 @@ subdomains: ["Agent"]
 ---
 # 增量发现项目
 `);
+  fs.writeFileSync(path.join(personPath, "20260803-张三电话沟通.md"), "# 电话沟通\n");
   const third = repository.reindexWorkspace();
   assert.equal(third.unchanged, false);
   assert.equal(third.projects.discovered, 5);
   assert.equal(third.projects.created, 1);
   assert.ok(repository.listProjects().some((project) => project.recordId === "prj_incremental"));
+  assert.deepEqual(
+    new Set(repository.listPeople()[0].interactionDocuments.map((document) => document.title)),
+    new Set(["20260801-张三交流纪要", "20260803-张三电话沟通"])
+  );
+  assert.equal(
+    repository.listPeople()[0].documents.some((document) => /人物资料/.test(document.title)),
+    true
+  );
+});
+
+test("local people list exposes persisted research documents without a full workspace reindex", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-person-documents-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const personDirectory = path.join(libraryDir, "4.人脉库", "叶锐");
+  const researchDirectory = path.join(personDirectory, "研究");
+  const homepage = path.join(personDirectory, "人物主页.md");
+  const researchPath = path.join(researchDirectory, "20260803-叶锐-人物研究.md");
+  fs.mkdirSync(researchDirectory, { recursive: true });
+  fs.writeFileSync(homepage, "# 叶锐\n");
+  fs.writeFileSync(researchPath, "# 叶锐人物研究\n");
+  const now = Date.now();
+  repository.database.prepare(`
+    INSERT INTO people (
+      id, name, normalized_name, types_json, organization, status, rating,
+      last_contact_at, cities_json, interaction_documents_json, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, '[]', '', '已研究', '', NULL, '[]', '[]', ?, ?, ?)
+  `).run("per_research", "叶锐", "叶锐", homepage, now, now);
+  repository.database.prepare(`
+    INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, 'person', ?, '研究', ?, ?, ?, ?)
+  `).run("doc_research", "per_research", "20260803-叶锐-人物研究", researchPath, now, now);
+
+  const person = repository.listPeople().find((item) => item.recordId === "per_research");
+  assert.deepEqual(person.documents.map((document) => [document.kind, document.title]), [
+    ["研究", "20260803-叶锐-人物研究"]
+  ]);
+  assert.deepEqual(person.interactionDocuments, []);
 });
 
 test("local repository excludes bulk workspace baselines from recent-intake timestamps", (t) => {

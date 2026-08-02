@@ -10,6 +10,8 @@ import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bold,
+  ChevronDown,
+  ChevronUp,
   Code2,
   Heading2,
   Italic,
@@ -17,7 +19,9 @@ import {
   ListOrdered,
   Quote,
   Redo2,
-  Undo2
+  Search,
+  Undo2,
+  X
 } from "lucide-react";
 import { workbench } from "./bridge";
 import { prepareMarkdownForEditor, restoreMarkdownFromEditor } from "./markdownDialect";
@@ -31,6 +35,108 @@ type RichMarkdownEditorProps = {
 };
 
 const MARKDOWN_CHANGE_PUBLISH_DELAY_MS = 120;
+const SEARCH_RESULT_HIGHLIGHT = "domi-markdown-search-result";
+const SEARCH_CURRENT_HIGHLIGHT = "domi-markdown-search-current";
+
+type EditorTextMatch = { from: number; to: number };
+type HighlightRegistry = {
+  set: (name: string, highlight: unknown) => void;
+  delete: (name: string) => boolean;
+};
+
+function findEditorTextMatches(editor: Editor | null, query: string): EditorTextMatch[] {
+  const needle = query.trim().toLocaleLowerCase("zh-CN");
+  if (!editor || editor.isDestroyed || !editor.isInitialized || !needle) return [];
+  let text = "";
+  const positions: number[] = [];
+  let previousEnd = -1;
+  editor.state.doc.descendants((node, position) => {
+    if (!node.isText || !node.text) return;
+    if (previousEnd >= 0 && position > previousEnd) {
+      text += "\n";
+      positions.push(-1);
+    }
+    text += node.text;
+    for (let index = 0; index < node.text.length; index += 1) {
+      positions.push(position + index);
+    }
+    previousEnd = position + node.text.length;
+  });
+
+  const haystack = text.toLocaleLowerCase("zh-CN");
+  const matches: EditorTextMatch[] = [];
+  let offset = 0;
+  while (offset <= haystack.length - needle.length && matches.length < 5_000) {
+    const found = haystack.indexOf(needle, offset);
+    if (found < 0) break;
+    const mapped = positions.slice(found, found + needle.length);
+    if (
+      mapped.length === needle.length
+      && mapped.every((position) => position >= 0)
+      && mapped.every((position, index) => index === 0 || position === mapped[index - 1] + 1)
+    ) {
+      matches.push({ from: mapped[0], to: mapped[mapped.length - 1] + 1 });
+    }
+    offset = found + Math.max(needle.length, 1);
+  }
+  return matches;
+}
+
+function searchHighlightRegistry() {
+  const css = globalThis.CSS as typeof CSS & { highlights?: HighlightRegistry };
+  const HighlightConstructor = (globalThis as typeof globalThis & {
+    Highlight?: new (...ranges: Range[]) => unknown;
+  }).Highlight;
+  return css?.highlights && HighlightConstructor
+    ? { registry: css.highlights, HighlightConstructor }
+    : null;
+}
+
+function clearEditorSearchHighlights() {
+  const api = searchHighlightRegistry();
+  api?.registry.delete(SEARCH_RESULT_HIGHLIGHT);
+  api?.registry.delete(SEARCH_CURRENT_HIGHLIGHT);
+}
+
+function editorDomRange(editor: Editor, match: EditorTextMatch) {
+  try {
+    const start = editor.view.domAtPos(match.from);
+    const end = editor.view.domAtPos(match.to);
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    return range;
+  } catch {
+    return null;
+  }
+}
+
+function applyEditorSearchHighlights(
+  editor: Editor | null,
+  matches: EditorTextMatch[],
+  currentIndex: number
+) {
+  clearEditorSearchHighlights();
+  if (!editor || editor.isDestroyed || !editor.isInitialized || !matches.length) return;
+  const ranges = matches.map((match) => editorDomRange(editor, match)).filter((range): range is Range => Boolean(range));
+  const currentRange = editorDomRange(editor, matches[currentIndex] || matches[0]);
+  const api = searchHighlightRegistry();
+  if (api && ranges.length) {
+    api.registry.set(SEARCH_RESULT_HIGHLIGHT, new api.HighlightConstructor(...ranges));
+    if (currentRange) {
+      api.registry.set(SEARCH_CURRENT_HIGHLIGHT, new api.HighlightConstructor(currentRange));
+    }
+  } else {
+    const match = matches[currentIndex] || matches[0];
+    editor.chain().setTextSelection(match).scrollIntoView().run();
+  }
+  const anchor = currentRange?.startContainer.nodeType === Node.TEXT_NODE
+    ? currentRange.startContainer.parentElement
+    : currentRange?.startContainer instanceof Element
+      ? currentRange.startContainer
+      : null;
+  anchor?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+}
 
 const EMPTY_TOOLBAR_STATE = {
   bold: false,
@@ -194,7 +300,15 @@ function ToolbarButton({
   );
 }
 
-function RichMarkdownToolbar({ editor }: { editor: Editor | null }) {
+function RichMarkdownToolbar({
+  editor,
+  searchOpen,
+  onOpenSearch
+}: {
+  editor: Editor | null;
+  searchOpen: boolean;
+  onOpenSearch: () => void;
+}) {
   const state = useEditorState({
     editor,
     selector: ({ editor: current }) => readToolbarState(current)
@@ -279,6 +393,15 @@ function RichMarkdownToolbar({ editor }: { editor: Editor | null }) {
       </div>
       <div>
         <ToolbarButton
+          active={searchOpen}
+          disabled={!editorAvailable}
+          label="搜索文档（Ctrl/⌘+F）"
+          onClick={onOpenSearch}
+        >
+          <Search size={15} />
+        </ToolbarButton>
+        <span className="rich-markdown-divider" />
+        <ToolbarButton
           disabled={!editorAvailable || !toolbarState.canUndo}
           label="撤销"
           onClick={() => runEditorCommand(editor, "撤销", (current) => {
@@ -316,7 +439,16 @@ export default function RichMarkdownEditor({
   const noticeTimerRef = useRef<number | null>(null);
   const changePublishTimerRef = useRef<number | null>(null);
   const onChangeRef = useRef(onChange);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchOpenRef = useRef(false);
+  const searchQueryRef = useRef("");
+  const searchMatchesRef = useRef<EditorTextMatch[]>([]);
+  const searchIndexRef = useRef(0);
   const [imageNotice, setImageNotice] = useState<{ tone: "busy" | "success" | "error"; text: string } | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchMatches, setSearchMatches] = useState<EditorTextMatch[]>([]);
+  const [searchIndex, setSearchIndex] = useState(0);
   onChangeRef.current = onChange;
 
   useEffect(() => () => {
@@ -324,7 +456,73 @@ export default function RichMarkdownEditor({
     if (changePublishTimerRef.current !== null) {
       window.clearTimeout(changePublishTimerRef.current);
     }
+    clearEditorSearchHighlights();
   }, []);
+
+  useEffect(() => {
+    searchOpenRef.current = searchOpen;
+  }, [searchOpen]);
+
+  useEffect(() => {
+    const handleFindShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase("en-US") === "f") {
+        event.preventDefault();
+        setSearchOpen(true);
+        searchOpenRef.current = true;
+        window.requestAnimationFrame(() => {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        });
+      } else if (event.key === "Escape" && searchOpenRef.current) {
+        event.preventDefault();
+        setSearchOpen(false);
+        searchOpenRef.current = false;
+        clearEditorSearchHighlights();
+      }
+    };
+    window.addEventListener("keydown", handleFindShortcut, true);
+    return () => window.removeEventListener("keydown", handleFindShortcut, true);
+  }, []);
+
+  function refreshSearch(current: Editor | null, query: string, preferredIndex = 0) {
+    const matches = findEditorTextMatches(current, query);
+    const nextIndex = matches.length
+      ? ((preferredIndex % matches.length) + matches.length) % matches.length
+      : 0;
+    searchQueryRef.current = query;
+    searchMatchesRef.current = matches;
+    searchIndexRef.current = nextIndex;
+    setSearchQuery(query);
+    setSearchMatches(matches);
+    setSearchIndex(nextIndex);
+    applyEditorSearchHighlights(current, matches, nextIndex);
+  }
+
+  function openSearch() {
+    setSearchOpen(true);
+    searchOpenRef.current = true;
+    refreshSearch(editorRef.current, searchQueryRef.current, searchIndexRef.current);
+    window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }
+
+  function closeSearch() {
+    setSearchOpen(false);
+    searchOpenRef.current = false;
+    clearEditorSearchHighlights();
+  }
+
+  function moveSearch(direction: 1 | -1) {
+    const matches = searchMatchesRef.current;
+    if (!matches.length) return;
+    const nextIndex = (searchIndexRef.current + direction + matches.length) % matches.length;
+    searchIndexRef.current = nextIndex;
+    setSearchIndex(nextIndex);
+    applyEditorSearchHighlights(editorRef.current, matches, nextIndex);
+    window.requestAnimationFrame(() => searchInputRef.current?.focus());
+  }
 
   function publishEditorMarkdown(current = editorRef.current) {
     if (!current || current.isDestroyed || !current.isInitialized) return;
@@ -490,6 +688,9 @@ export default function RichMarkdownEditor({
     onUpdate: ({ editor: current }) => {
       if (hydratingRef.current || current.isDestroyed) return;
       scheduleEditorMarkdownPublish();
+      if (searchOpenRef.current && searchQueryRef.current) {
+        refreshSearch(current, searchQueryRef.current, searchIndexRef.current);
+      }
     }
   });
 
@@ -503,7 +704,41 @@ export default function RichMarkdownEditor({
         onBlur?.();
       }}
     >
-      <RichMarkdownToolbar editor={editor} />
+      <RichMarkdownToolbar editor={editor} searchOpen={searchOpen} onOpenSearch={openSearch} />
+      {searchOpen && (
+        <div className="rich-markdown-search" role="search" aria-label="搜索 Markdown 文档">
+          <Search size={14} aria-hidden="true" />
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            placeholder="搜索文档"
+            aria-label="搜索关键词"
+            spellCheck={false}
+            onChange={(event) => refreshSearch(editorRef.current, event.target.value, 0)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                moveSearch(event.shiftKey ? -1 : 1);
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                closeSearch();
+              }
+            }}
+          />
+          <span className="rich-markdown-search-count" aria-live="polite">
+            {searchQuery.trim() ? `${searchMatches.length ? searchIndex + 1 : 0}/${searchMatches.length}` : ""}
+          </span>
+          <button type="button" onClick={() => moveSearch(-1)} disabled={!searchMatches.length} title="上一个匹配">
+            <ChevronUp size={14} />
+          </button>
+          <button type="button" onClick={() => moveSearch(1)} disabled={!searchMatches.length} title="下一个匹配">
+            <ChevronDown size={14} />
+          </button>
+          <button type="button" onClick={closeSearch} title="关闭搜索" aria-label="关闭搜索">
+            <X size={14} />
+          </button>
+        </div>
+      )}
       <div className="rich-markdown-scroll">
         <EditorContent editor={editor} />
       </div>

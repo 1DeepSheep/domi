@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld("workbench", {
   importFiles: (sourcePaths, workspacePath) => ipcRenderer.invoke("files:import", sourcePaths, workspacePath),
   importFileData: (files, workspacePath) => ipcRenderer.invoke("files:import-data", files, workspacePath),
   openResource: (resource) => ipcRenderer.invoke("resource:open", resource),
+  openMarkdownExternal: (resource) => ipcRenderer.invoke("markdown:open-external", resource),
   showNotification: (request) => ipcRenderer.invoke("app:notify", request),
   listDocumentLibrary: (request) => ipcRenderer.invoke("document-library:list", request),
   createDocumentLibraryEntry: (request) => ipcRenderer.invoke("document-library:create", request),

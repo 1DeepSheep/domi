@@ -32,6 +32,12 @@ declare global {
         workspacePath?: string
       ) => Promise<FileSelectionResult>;
       openResource: (resource: string) => Promise<{ ok: boolean; error?: string; target?: string }>;
+      openMarkdownExternal: (resource: string) => Promise<{
+        ok: boolean;
+        error?: string;
+        target?: string;
+        application?: string;
+      }>;
       showNotification: (request: DesktopNotificationRequest) => Promise<DesktopNotificationResult>;
       listDocumentLibrary: (
         request?: DocumentLibraryListRequest
@@ -358,6 +364,18 @@ export type DomiPerson = {
   cities: string[];
   updatedAt?: number;
   link: string;
+  documents: Array<{
+    title: string;
+    link: string;
+    kind: string;
+    updatedAt: number;
+  }>;
+  interactionDocuments: Array<{
+    title: string;
+    link: string;
+    kind: string;
+    updatedAt: number;
+  }>;
 };
 
 export type DomiSnapshot = {
