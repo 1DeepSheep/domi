@@ -5,6 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   DomiIntegration,
+  classifyPlaudConnectionFailure,
   describeFeishuSyncError,
   isRetryableFeishuReadError,
   parseTaskLedger,
@@ -13,6 +14,21 @@ const {
   resolveWeeklyNewsTimestamps
 } = require("../electron/domi-integration.cjs");
 const { LocalDomiRepository } = require("../electron/local-domi-repository.cjs");
+
+test("PLAUD connection errors request login only for confirmed authentication failures", () => {
+  const pending = classifyPlaudConnectionFailure(
+    new Error("PLAUD_SESSION_PROBE_INCOMPLETE: authorization request was not observed"),
+    "tabbit"
+  );
+  assert.equal(pending.status, "verification_pending");
+  assert.match(pending.error, /无需重新登录/);
+
+  const auth = classifyPlaudConnectionFailure(
+    new Error("PLAUD_AUTH_REQUIRED: account sign-in is required"),
+    "tabbit"
+  );
+  assert.equal(auth.status, "auth_required");
+});
 
 test("Finder-launched app resolves the npm lark-cli launcher to its native binary", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-lark-cli-"));

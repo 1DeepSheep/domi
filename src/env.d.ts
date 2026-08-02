@@ -686,6 +686,7 @@ export type DomiPlaudConnectionResult = {
   status?:
     | "connected"
     | "auth_required"
+    | "verification_pending"
     | "profile_locked"
     | "browser_unavailable"
     | "runtime_unavailable"
