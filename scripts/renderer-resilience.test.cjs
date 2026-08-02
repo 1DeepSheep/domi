@@ -49,6 +49,26 @@ assert.match(
   /resolveMarkdownImage[\s\S]*?previewUrl/,
   "Relative Markdown images must resolve through the protected local preview protocol."
 );
+assert.match(
+  editor,
+  /findEditorTextMatches[\s\S]*?SEARCH_RESULT_HIGHLIGHT[\s\S]*?applyEditorSearchHighlights/,
+  "Markdown search must locate and highlight editor text without mutating the document."
+);
+assert.match(
+  editor,
+  /event\.ctrlKey \|\| event\.metaKey[\s\S]*?key\.toLocaleLowerCase\("en-US"\) === "f"[\s\S]*?preventDefault/,
+  "Markdown search must intercept Ctrl/Command+F while the document preview is open."
+);
+assert.match(
+  editor,
+  /event\.key === "Enter"[\s\S]*?event\.shiftKey \? -1 : 1[\s\S]*?上一个匹配[\s\S]*?下一个匹配/,
+  "Markdown search must support keyboard and button navigation between matches."
+);
+assert.match(
+  app,
+  /person\.documents \|\| person\.interactionDocuments[\s\S]*?相关文档/,
+  "The people database must expose research and interaction documents through one compact document column."
+);
 
 assert.match(
   app,
@@ -74,6 +94,21 @@ assert.match(
   app,
   /openMarkdown[\s\S]*?await saveOpenMarkdown\(\)[\s\S]*?openPdf[\s\S]*?await saveOpenMarkdown\(\)[\s\S]*?async function closeMarkdown[\s\S]*?await saveOpenMarkdown\(\)/,
   "Switching or closing documents must flush pending Markdown edits."
+);
+assert.match(
+  app,
+  /markdownExternalOpenInFlightRef[\s\S]*?async function openMarkdownInExternalEditor[\s\S]*?await saveOpenMarkdown\(\)[\s\S]*?await closeMarkdown\(\)[\s\S]*?openMarkdownExternal/,
+  "External Markdown opening must be deduplicated and release the internal editor after saving."
+);
+assert.match(
+  main,
+  /async function openMarkdownExternally[\s\S]*?resolveMarkdownPath[\s\S]*?\/usr\/bin\/open[\s\S]*?TextEdit/,
+  "macOS Markdown files must bypass unstable default associations and use the system text editor."
+);
+assert.match(
+  preload,
+  /openMarkdownExternal[\s\S]*?markdown:open-external/,
+  "External Markdown opening must use a dedicated preload bridge."
 );
 assert.doesNotMatch(
   app,

@@ -162,6 +162,46 @@ function textValue(value) {
   return value.text || value.name || "";
 }
 
+function interactionDocumentsValue(value) {
+  const documents = [];
+  const append = (title, link) => {
+    const normalizedLink = String(link || "").trim();
+    if (!/^(?:https?|file):\/\//i.test(normalizedLink)) return;
+    documents.push({
+      title: String(title || "交流纪要").trim() || "交流纪要",
+      link: normalizedLink,
+      kind: "交流纪要",
+      updatedAt: 0
+    });
+  };
+  const visit = (item) => {
+    if (!item) return;
+    if (Array.isArray(item)) {
+      item.forEach(visit);
+      return;
+    }
+    if (typeof item === "object") {
+      const link = item.link || item.url || item.href;
+      if (link) append(item.text || item.name || item.title, link);
+      else Object.values(item).forEach(visit);
+      return;
+    }
+    const text = String(item);
+    for (const line of text.split(/[\r\n;；]+/).map((entry) => entry.trim()).filter(Boolean)) {
+      const url = line.match(/(?:https?|file):\/\/[^\s<>]+/i)?.[0] || "";
+      if (!url) continue;
+      append(line.replace(url, "").replace(/[<>《》【】()[\]：:：-]+$/g, "").trim(), url);
+    }
+  };
+  visit(value);
+  const seen = new Set();
+  return documents.filter((document) => {
+    if (seen.has(document.link)) return false;
+    seen.add(document.link);
+    return true;
+  });
+}
+
 function boundedTaskText(value, limit = 800) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
 }
@@ -1114,7 +1154,7 @@ class DomiIntegration {
     }
     this.intakeFieldsPromiseKey = readinessKey;
     this.intakeFieldsPromise = this.runJson(process.execPath, [script, "ensure"], {
-        label: "项目与人脉入库时间字段初始化",
+        label: "项目与人脉系统字段初始化",
         queue: "lark",
         timeout: 180000,
         env: {
@@ -2448,7 +2488,9 @@ class DomiIntegration {
             || null,
           lastContact: timestampValue(fields["最后联系日期"]),
           cities: stringList(fields["城市"]),
-          link: textValue(fields["链接"])
+          link: textValue(fields["链接"]),
+          documents: interactionDocumentsValue(fields["交流文档"]),
+          interactionDocuments: interactionDocumentsValue(fields["交流文档"])
         };
       })
       .filter((item) => item.recordId && item.name);
@@ -2776,7 +2818,7 @@ class DomiIntegration {
       });
       peopleRecords = await this.fetchRecords({
         ...peopleSource,
-        fieldNames: ["人名", "类型", "所属组织&身份", "进展状态", "评级", "入库时间", "最后联系日期", "城市", "链接"]
+        fieldNames: ["人名", "类型", "所属组织&身份", "进展状态", "评级", "入库时间", "最后联系日期", "城市", "交流文档", "链接"]
       });
     } catch (error) {
       return {
