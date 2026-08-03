@@ -48,6 +48,7 @@ const {
   listDocumentLibrary
 } = require("./document-library.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
+const { normalizeLocalDocumentResource } = require("./document-resource.cjs");
 const { prepareApplicationBrandPaths } = require("./brand-migration.cjs");
 const { withMediaRuntimeEnvironment } = require("./media-runtime.cjs");
 
@@ -547,8 +548,9 @@ async function openResource(resource) {
   }
 
   const target = resource.trim();
-  let localPath = target;
-  if (/^file:\/\//i.test(target)) {
+  const documentResource = normalizeLocalDocumentResource(target);
+  let localPath = documentResource?.path || target;
+  if (!documentResource && /^file:\/\//i.test(target)) {
     try {
       localPath = fileURLToPath(target);
     } catch {
@@ -615,15 +617,11 @@ function resolveMarkdownPath(resource, basePath) {
     throw new Error("Markdown 文件地址为空。");
   }
 
-  let localPath = resource.trim();
-  if (/^file:\/\//i.test(localPath)) {
-    localPath = fileURLToPath(localPath);
+  const documentResource = normalizeLocalDocumentResource(resource);
+  if (!documentResource || ![".md", ".markdown"].includes(documentResource.extension)) {
+    throw new Error("右侧文档面板仅支持 Markdown 文件。");
   }
-  try {
-    localPath = decodeURIComponent(localPath);
-  } catch {
-    // Keep literal percent signs in local paths.
-  }
+  let localPath = documentResource.path;
 
   if (!path.isAbsolute(localPath)) {
     if (typeof basePath !== "string" || !path.isAbsolute(basePath)) {
@@ -644,15 +642,11 @@ function resolvePdfPath(resource, basePath) {
     throw new Error("PDF 文件地址为空。");
   }
 
-  let localPath = resource.trim();
-  if (/^file:\/\//i.test(localPath)) {
-    localPath = fileURLToPath(localPath);
+  const documentResource = normalizeLocalDocumentResource(resource);
+  if (!documentResource || documentResource.extension !== ".pdf") {
+    throw new Error("右侧 PDF 面板仅支持 PDF 文件。");
   }
-  try {
-    localPath = decodeURIComponent(localPath);
-  } catch {
-    // Keep literal percent signs in local paths.
-  }
+  let localPath = documentResource.path;
 
   if (!path.isAbsolute(localPath)) {
     if (typeof basePath !== "string" || !path.isAbsolute(basePath)) {
