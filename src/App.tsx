@@ -67,6 +67,7 @@ import {
   useState
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
+import { isLocalPdfResource } from "./document-resources";
 import MarkdownEditorErrorBoundary from "./MarkdownEditorErrorBoundary";
 import SectionErrorBoundary, { RenderRegion } from "./SectionErrorBoundary";
 import {
@@ -682,11 +683,6 @@ type TimelineItem = {
   status?: string;
   kind: CodexEventItem["kind"] | "event";
 };
-
-function isLocalPdfResource(resource?: string) {
-  if (!resource || /^https?:\/\//i.test(resource) || resource.startsWith("#")) return false;
-  return /\.pdf(?:[?#].*)?$/i.test(resource);
-}
 
 function formatFileSize(size: number) {
   if (size < 1024) return `${size} B`;
