@@ -1,22 +1,13 @@
 import { memo } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { workbench } from "./bridge";
+import { isLocalMarkdownResource, isLocalPdfResource } from "./document-resources";
 
 type MessageContentMessage = {
   role: "user" | "assistant" | "system";
   content: string;
 };
-
-function isLocalMarkdownResource(resource?: string) {
-  if (!resource || /^https?:\/\//i.test(resource) || resource.startsWith("#")) return false;
-  return /\.(?:md|markdown)(?:[?#].*)?$/i.test(resource);
-}
-
-function isLocalPdfResource(resource?: string) {
-  if (!resource || /^https?:\/\//i.test(resource) || resource.startsWith("#")) return false;
-  return /\.pdf(?:[?#].*)?$/i.test(resource);
-}
 
 function humanizeMessageStates(content: string) {
   return content
@@ -44,6 +35,13 @@ const MessageContent = memo(function MessageContent({
     <div className="message-text message-markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={(url, key, node) => {
+          if (
+            key === "href"
+            && (isLocalMarkdownResource(url) || isLocalPdfResource(url))
+          ) return url;
+          return defaultUrlTransform(url);
+        }}
         components={{
           a: ({ href, children }) => (
             <a
