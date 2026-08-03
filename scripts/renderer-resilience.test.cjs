@@ -192,8 +192,23 @@ assert.match(
 );
 assert.match(
   app,
-  /databaseStatusFilter[\s\S]*?databaseSortKey[\s\S]*?databaseSortDirection[\s\S]*?filtered\.length/,
+  /databaseFilterKey[\s\S]*?databaseFilterValue[\s\S]*?databaseSortKey[\s\S]*?databaseSortDirection[\s\S]*?filtered\.length/,
   "Database grids must expose filtering, sorting, and a visible result count."
+);
+assert.match(
+  app,
+  /project:[\s\S]*?value: "rating", label: "项目评级"[\s\S]*?value: "city", label: "城市"[\s\S]*?value: "investor", label: "投资机构"/,
+  "Project database filters must cover rating, city, taxonomy, status, and investors."
+);
+assert.match(
+  app,
+  /DATABASE_SORT_OPTIONS[\s\S]*?value: "rating", label: "项目评级"[\s\S]*?value: "valuation", label: "最新估值"/,
+  "Project database sorting must cover rating and valuation."
+);
+assert.match(
+  app,
+  /\{ S: 4, A: 3, B: 2, C: 1 \}/,
+  "Database rating sorting must follow the investment ranking order S, A, B, C."
 );
 assert.match(
   app,

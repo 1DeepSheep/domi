@@ -8279,12 +8279,16 @@ body.panel-resizing .main-grid {
 }
 
 .database-grid-filter select {
-  max-width: 136px;
+  max-width: 154px;
   border: 0;
   outline: 0;
   color: #3e403d;
   background: transparent;
   font-size: var(--text-secondary);
+}
+
+.database-grid-filter-value select {
+  max-width: 188px;
 }
 
 .database-sort-direction {

@@ -123,8 +123,100 @@ const MessageContent = lazy(() => import("./MessageContent"));
 type Role = "user" | "assistant" | "system";
 type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents";
 type DatabaseEntityType = "project" | "person" | "news";
-type DatabaseSortKey = "updated" | "name" | "created";
+type DatabaseFilterKey =
+  | "none"
+  | "status"
+  | "rating"
+  | "city"
+  | "domain"
+  | "subdomain"
+  | "investor"
+  | "type"
+  | "organization"
+  | "source"
+  | "evidence"
+  | "following";
+type DatabaseSortKey =
+  | "updated"
+  | "name"
+  | "created"
+  | "rating"
+  | "city"
+  | "domain"
+  | "status"
+  | "valuation"
+  | "organization"
+  | "contact"
+  | "importance"
+  | "confidence"
+  | "source";
 type DatabaseSortDirection = "asc" | "desc";
+
+type DatabaseToolbarOption<T extends string> = {
+  value: T;
+  label: string;
+};
+
+const DATABASE_EMPTY_FILTER_VALUE = "__domi_empty__";
+const DATABASE_FILTER_OPTIONS: Record<DatabaseEntityType, Array<DatabaseToolbarOption<DatabaseFilterKey>>> = {
+  project: [
+    { value: "none", label: "不筛选" },
+    { value: "rating", label: "项目评级" },
+    { value: "city", label: "城市" },
+    { value: "domain", label: "领域" },
+    { value: "subdomain", label: "子领域" },
+    { value: "status", label: "进展状态" },
+    { value: "investor", label: "投资机构" }
+  ],
+  person: [
+    { value: "none", label: "不筛选" },
+    { value: "rating", label: "评级" },
+    { value: "city", label: "城市" },
+    { value: "status", label: "进展状态" },
+    { value: "type", label: "类型" },
+    { value: "organization", label: "所属组织与身份" }
+  ],
+  news: [
+    { value: "none", label: "不筛选" },
+    { value: "domain", label: "领域" },
+    { value: "subdomain", label: "子领域" },
+    { value: "type", label: "信息类型" },
+    { value: "source", label: "来源" },
+    { value: "evidence", label: "证据状态" },
+    { value: "following", label: "继续展示" }
+  ]
+};
+const DATABASE_SORT_OPTIONS: Record<DatabaseEntityType, Array<DatabaseToolbarOption<DatabaseSortKey>>> = {
+  project: [
+    { value: "updated", label: "最后更新" },
+    { value: "created", label: "入库时间" },
+    { value: "name", label: "公司名称" },
+    { value: "rating", label: "项目评级" },
+    { value: "valuation", label: "最新估值" },
+    { value: "city", label: "城市" },
+    { value: "domain", label: "领域" },
+    { value: "status", label: "进展状态" }
+  ],
+  person: [
+    { value: "updated", label: "最后更新" },
+    { value: "contact", label: "最后联系" },
+    { value: "created", label: "入库时间" },
+    { value: "name", label: "姓名" },
+    { value: "rating", label: "评级" },
+    { value: "city", label: "城市" },
+    { value: "status", label: "进展状态" },
+    { value: "organization", label: "所属组织与身份" }
+  ],
+  news: [
+    { value: "created", label: "发布时间" },
+    { value: "updated", label: "最后更新" },
+    { value: "name", label: "新闻标题" },
+    { value: "importance", label: "重要性" },
+    { value: "confidence", label: "置信度" },
+    { value: "domain", label: "领域" },
+    { value: "source", label: "来源" }
+  ]
+};
 
 type DatabaseDraft = {
   entityType: DatabaseEntityType;
@@ -382,6 +474,124 @@ function databaseRecordTitle(
   return entityType === "news"
     ? (record as DomiNewsItem).title
     : (record as DomiProject | DomiPerson).name;
+}
+
+function databaseFilterValues(
+  entityType: DatabaseEntityType,
+  record: DomiProject | DomiPerson | DomiNewsItem,
+  filterKey: DatabaseFilterKey
+) {
+  let values: Array<string | null | undefined> = [];
+  if (entityType === "project") {
+    const project = record as DomiProject;
+    if (filterKey === "status") values = [project.status];
+    else if (filterKey === "rating") values = [project.rating];
+    else if (filterKey === "city") values = project.cities || [];
+    else if (filterKey === "domain") values = [project.domain];
+    else if (filterKey === "subdomain") values = project.subdomains || [];
+    else if (filterKey === "investor") values = project.investors || [];
+  } else if (entityType === "person") {
+    const person = record as DomiPerson;
+    if (filterKey === "status") values = [person.status];
+    else if (filterKey === "rating") values = [person.rating];
+    else if (filterKey === "city") values = person.cities || [];
+    else if (filterKey === "type") values = person.types || [];
+    else if (filterKey === "organization") values = [person.organization];
+  } else {
+    const item = record as DomiNewsItem;
+    if (filterKey === "domain") values = item.domains || [];
+    else if (filterKey === "subdomain") values = item.subdomains || [];
+    else if (filterKey === "type") values = item.types || [];
+    else if (filterKey === "source") values = [item.source];
+    else if (filterKey === "evidence") values = [item.evidenceStatus];
+    else if (filterKey === "following") values = [item.worthFollowing === false ? "否" : "是"];
+  }
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function databaseFilterValueOptions(
+  entityType: DatabaseEntityType,
+  records: Array<DomiProject | DomiPerson | DomiNewsItem>,
+  filterKey: DatabaseFilterKey
+) {
+  if (filterKey === "none") return [{ value: "全部", label: "全部" }];
+  const values = new Set<string>();
+  let hasEmpty = false;
+  records.forEach((record) => {
+    const recordValues = databaseFilterValues(entityType, record, filterKey);
+    if (recordValues.length === 0) hasEmpty = true;
+    recordValues.forEach((value) => values.add(value));
+  });
+  const ratingRank = new Map(["S", "A", "B", "C"].map((value, index) => [value, index]));
+  const sorted = [...values].sort((left, right) => {
+    if (filterKey === "rating") {
+      return (ratingRank.get(left) ?? 99) - (ratingRank.get(right) ?? 99)
+        || left.localeCompare(right, "zh-CN", { numeric: true });
+    }
+    return left.localeCompare(right, "zh-CN", { numeric: true, sensitivity: "base" });
+  });
+  return [
+    { value: "全部", label: "全部" },
+    ...sorted.map((value) => ({ value, label: value })),
+    ...(hasEmpty ? [{ value: DATABASE_EMPTY_FILTER_VALUE, label: "未填写" }] : [])
+  ];
+}
+
+function databaseSortValue(
+  entityType: DatabaseEntityType,
+  record: DomiProject | DomiPerson | DomiNewsItem,
+  sortKey: DatabaseSortKey
+): number | string | null {
+  if (sortKey === "name") return databaseRecordTitle(entityType, record) || null;
+  if (sortKey === "updated") {
+    const value = entityType === "project"
+      ? Number((record as DomiProject).lastFollowup || record.updatedAt || 0)
+      : entityType === "news"
+        ? Number(record.updatedAt || (record as DomiNewsItem).publishedAt || 0)
+        : Number(record.updatedAt || 0);
+    return value > 0 ? value : null;
+  }
+  if (sortKey === "created") {
+    const value = entityType === "news"
+      ? Number((record as DomiNewsItem).publishedAt || 0)
+      : Number((record as DomiProject | DomiPerson).createdAt || 0);
+    return value > 0 ? value : null;
+  }
+  if (sortKey === "rating") {
+    const rating = entityType === "project"
+      ? (record as DomiProject).rating
+      : (record as DomiPerson).rating;
+    return ({ S: 4, A: 3, B: 2, C: 1 } as Record<string, number>)[rating] ?? null;
+  }
+  if (sortKey === "city") {
+    const cities = entityType === "project"
+      ? (record as DomiProject).cities
+      : (record as DomiPerson).cities;
+    return cities?.filter(Boolean).join("、") || null;
+  }
+  if (sortKey === "domain") {
+    return entityType === "project"
+      ? (record as DomiProject).domain || null
+      : (record as DomiNewsItem).domains?.filter(Boolean).join("、") || null;
+  }
+  if (sortKey === "status") {
+    return entityType === "project"
+      ? (record as DomiProject).status || null
+      : (record as DomiPerson).status || null;
+  }
+  if (sortKey === "valuation") {
+    const value = (record as DomiProject).latestValuationUsd100m;
+    return Number.isFinite(value) ? Number(value) : null;
+  }
+  if (sortKey === "organization") return (record as DomiPerson).organization || null;
+  if (sortKey === "contact") {
+    const value = Number((record as DomiPerson).lastContact || 0);
+    return value > 0 ? value : null;
+  }
+  if (sortKey === "importance") return Number((record as DomiNewsItem).importance);
+  if (sortKey === "confidence") return Number((record as DomiNewsItem).confidence);
+  if (sortKey === "source") return (record as DomiNewsItem).source || null;
+  return null;
 }
 
 function databaseDate(value: number | null | undefined, includeTime = false) {
@@ -1378,7 +1588,8 @@ function App() {
   const [databaseDraft, setDatabaseDraft] = useState<DatabaseDraft | null>(null);
   const [databaseExpandedCell, setDatabaseExpandedCell] = useState<DatabaseExpandedCell | null>(null);
   const [databaseQuery, setDatabaseQuery] = useState("");
-  const [databaseStatusFilter, setDatabaseStatusFilter] = useState("全部");
+  const [databaseFilterKey, setDatabaseFilterKey] = useState<DatabaseFilterKey>("none");
+  const [databaseFilterValue, setDatabaseFilterValue] = useState("全部");
   const [databaseSortKey, setDatabaseSortKey] = useState<DatabaseSortKey>("updated");
   const [databaseSortDirection, setDatabaseSortDirection] = useState<DatabaseSortDirection>("desc");
   const [databaseVisibleLimit, setDatabaseVisibleLimit] = useState(100);
@@ -2949,7 +3160,8 @@ function App() {
     const selected = records[0];
     setDatabaseEntityType(entityType);
     setDatabaseQuery("");
-    setDatabaseStatusFilter("全部");
+    setDatabaseFilterKey("none");
+    setDatabaseFilterValue("全部");
     setDatabaseSortKey("updated");
     setDatabaseSortDirection("desc");
     setDatabaseVisibleLimit(100);
@@ -6993,16 +7205,13 @@ function App() {
   function renderDatabaseWorkspace() {
     const records = databaseRecords(databaseSnapshot, databaseEntityType);
     const query = deferredDatabaseQuery.trim().toLocaleLowerCase("zh-CN");
-    const statusForRecord = (record: DomiProject | DomiPerson | DomiNewsItem) =>
-      databaseEntityType === "project"
-        ? (record as DomiProject).status || "未填写"
-        : databaseEntityType === "person"
-          ? (record as DomiPerson).status || "未填写"
-          : (record as DomiNewsItem).evidenceStatus || "未填写";
-    const statusOptions = [
-      "全部",
-      ...new Set(records.map(statusForRecord).filter(Boolean))
-    ];
+    const filterOptions = DATABASE_FILTER_OPTIONS[databaseEntityType];
+    const filterValueOptions = databaseFilterValueOptions(
+      databaseEntityType,
+      records,
+      databaseFilterKey
+    );
+    const sortOptions = DATABASE_SORT_OPTIONS[databaseEntityType];
     const filtered = records.filter((record) => {
       const searchText = databaseEntityType === "project"
         ? [
@@ -7030,30 +7239,32 @@ function App() {
               (record as DomiNewsItem).summary
             ].join(" ");
       const matchesQuery = !query || searchText.toLocaleLowerCase("zh-CN").includes(query);
-      const matchesStatus = databaseStatusFilter === "全部"
-        || statusForRecord(record) === databaseStatusFilter;
-      return matchesQuery && matchesStatus;
+      const filterValues = databaseFilterValues(databaseEntityType, record, databaseFilterKey);
+      const matchesFilter = databaseFilterKey === "none"
+        || databaseFilterValue === "全部"
+        || (databaseFilterValue === DATABASE_EMPTY_FILTER_VALUE
+          ? filterValues.length === 0
+          : filterValues.includes(databaseFilterValue));
+      return matchesQuery && matchesFilter;
     }).sort((left, right) => {
-      const name = (record: DomiProject | DomiPerson | DomiNewsItem) =>
-        databaseRecordTitle(databaseEntityType, record);
-      const updated = (record: DomiProject | DomiPerson | DomiNewsItem) =>
-        databaseEntityType === "project"
-          ? Number((record as DomiProject).lastFollowup || record.updatedAt || 0)
-          : databaseEntityType === "news"
-            ? Number(record.updatedAt || (record as DomiNewsItem).publishedAt || 0)
-            : Number(record.updatedAt || 0);
-      const created = (record: DomiProject | DomiPerson | DomiNewsItem) =>
-        databaseEntityType === "news"
-          ? Number((record as DomiNewsItem).publishedAt || 0)
-          : Number((record as DomiProject | DomiPerson).createdAt || 0);
       const direction = databaseSortDirection === "asc" ? 1 : -1;
-      if (databaseSortKey === "name") {
-        return direction * name(left).localeCompare(name(right), "zh-CN");
+      const leftValue = databaseSortValue(databaseEntityType, left, databaseSortKey);
+      const rightValue = databaseSortValue(databaseEntityType, right, databaseSortKey);
+      if (leftValue === null && rightValue === null) {
+        return databaseRecordTitle(databaseEntityType, left)
+          .localeCompare(databaseRecordTitle(databaseEntityType, right), "zh-CN", { numeric: true });
       }
-      const leftValue = databaseSortKey === "created" ? created(left) : updated(left);
-      const rightValue = databaseSortKey === "created" ? created(right) : updated(right);
-      return direction * (leftValue - rightValue)
-        || name(left).localeCompare(name(right), "zh-CN");
+      if (leftValue === null) return 1;
+      if (rightValue === null) return -1;
+      const comparison = typeof leftValue === "number" && typeof rightValue === "number"
+        ? leftValue - rightValue
+        : String(leftValue).localeCompare(String(rightValue), "zh-CN", {
+            numeric: true,
+            sensitivity: "base"
+          });
+      return direction * comparison
+        || databaseRecordTitle(databaseEntityType, left)
+          .localeCompare(databaseRecordTitle(databaseEntityType, right), "zh-CN", { numeric: true });
     });
     const visibleRecords = filtered.slice(0, databaseVisibleLimit);
     const stopGridEvent = (event: SyntheticEvent) => event.stopPropagation();
@@ -7205,15 +7416,34 @@ function App() {
               <label className="database-grid-filter">
                 <span>筛选</span>
                 <select
-                  value={databaseStatusFilter}
+                  value={databaseFilterKey}
                   onChange={(event) => {
-                    setDatabaseStatusFilter(event.target.value);
+                    setDatabaseFilterKey(event.target.value as DatabaseFilterKey);
+                    setDatabaseFilterValue("全部");
                     setDatabaseVisibleLimit(100);
                   }}
                 >
-                  {statusOptions.map((item) => <option key={item}>{item}</option>)}
+                  {filterOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
                 </select>
               </label>
+              {databaseFilterKey !== "none" && (
+                <label className="database-grid-filter database-grid-filter-value">
+                  <span>条件</span>
+                  <select
+                    value={databaseFilterValue}
+                    onChange={(event) => {
+                      setDatabaseFilterValue(event.target.value);
+                      setDatabaseVisibleLimit(100);
+                    }}
+                  >
+                    {filterValueOptions.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <label className="database-grid-filter">
                 <span>排序</span>
                 <select
@@ -7223,9 +7453,9 @@ function App() {
                     setDatabaseVisibleLimit(100);
                   }}
                 >
-                  <option value="updated">最后更新</option>
-                  <option value="created">{databaseEntityType === "news" ? "发布时间" : "入库时间"}</option>
-                  <option value="name">{databaseEntityType === "news" ? "标题" : "名称"}</option>
+                  {sortOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
                 </select>
               </label>
               <button
