@@ -1,86 +1,12 @@
 /**
  * Canonical project taxonomy shared by the project library and industry news.
  *
- * Source of truth:
- * build/domi-plugin/skills/investment-mgmt/references/taxonomy.md
+ * Source of truth: shared/investment-taxonomy.json. The public plugin taxonomy
+ * contract is validated against the same vocabulary during release checks.
  */
-export const PROJECT_DOMAIN_SUBDOMAINS = {
-  AI: [
-    "AI互动娱乐",
-    "AI社交",
-    "AI游戏",
-    "AI视频",
-    "AI图片",
-    "AI造物",
-    "AI心理",
-    "AI语音",
-    "AI效率工具",
-    "AI Coding",
-    "AI营销",
-    "AI金融",
-    "AI制药",
-    "AI医疗",
-    "AI招聘",
-    "AI健康",
-    "Agent",
-    "AI数据",
-    "模型层",
-    "AI基础设施",
-    "AI4S",
-    "世界模型",
-    "AI陪伴",
-    "AI搜索",
-    "AI 3D",
-    "AI教育",
-    "AI旅游"
-  ],
-  消费科技: ["NAS／私有云", "可穿戴", "AR/VR元宇宙", "AI玩具"],
-  半导体: [
-    "存储",
-    "算力芯片",
-    "通信芯片",
-    "微处理器",
-    "模拟芯片",
-    "功率半导体",
-    "光电芯片",
-    "传感器",
-    "晶圆制造",
-    "封测",
-    "半导体设备",
-    "半导体材料",
-    "EDA&IP",
-    "无源器件"
-  ],
-  智能出行: [
-    "自动驾驶",
-    "OEM",
-    "动力电池",
-    "BMS",
-    "电机电驱",
-    "激光雷达",
-    "毫米波雷达",
-    "智能座舱",
-    "汽车芯片",
-    "汽车软件",
-    "充换电",
-    "线控底盘",
-    "热管理",
-    "新能源商用车"
-  ],
-  "具身智能&机器人": [
-    "工业机器人",
-    "协作机器人",
-    "物流仓储机器人",
-    "室内移动机器人",
-    "末端执行器",
-    "扫地机器人"
-  ],
-  前沿科技: ["卫星互联网", "eVTOL", "低空经济", "商业航天", "量子计算"],
-  消费: [],
-  互联网科技: [],
-  能源: [],
-  企业软件: []
-} as const satisfies Record<string, readonly string[]>;
+import canonicalTaxonomy from "../shared/investment-taxonomy.json";
+
+export const PROJECT_DOMAIN_SUBDOMAINS = canonicalTaxonomy;
 
 export type ProjectDomain = keyof typeof PROJECT_DOMAIN_SUBDOMAINS;
 

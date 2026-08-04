@@ -450,6 +450,40 @@ const browserFallback: Window["workbench"] = {
       action: "继续跟踪",
       worthFollowing: true,
       updatedAt: 1
+    }],
+    taxonomy: {
+      domains: [
+        { name: "AI", subdomains: ["Agent", "AI视频"] },
+        { name: "半导体", subdomains: ["EDA&IP", "算力芯片"] }
+      ],
+      customSubdomains: []
+    },
+    classificationReviews: [{
+      project: {
+        recordId: "preview_unclassified",
+        name: "示例待分类项目",
+        domain: "_未分类",
+        subdomains: [],
+        status: "待交流",
+        rating: "",
+        notes: "演示分类审核，不代表真实项目。",
+        cities: ["上海"],
+        investors: [],
+        financingHistory: "",
+        latestValuationUsd100m: null,
+        createdAt: Date.now(),
+        lastFollowup: null,
+        updatedAt: 2,
+        link: ""
+      },
+      status: "pending",
+      suggestedDomain: "AI",
+      suggestedSubdomains: ["Agent"],
+      confidence: 0.82,
+      reason: "项目自身材料命中：智能体。可比公司与行业材料仅作参考，不会当作项目事实。",
+      deferredAt: null,
+      updatedAt: Date.now(),
+      evidence: []
     }]
   }),
   updateDomiDatabaseRecord: async (request) => {
@@ -504,6 +538,12 @@ const browserFallback: Window["workbench"] = {
     entityType: request.entityType,
     recordId: request.recordId,
     filesPreserved: true,
+    updatedAt: Date.now()
+  }),
+  classifyDomiDatabaseProject: async (request) => ({
+    ok: true,
+    action: request.action,
+    recordId: request.recordId,
     updatedAt: Date.now()
   }),
   previewStorageMigration: async () => ({

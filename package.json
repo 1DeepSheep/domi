@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "0.6.15",
+  "version": "0.6.16",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -76,6 +76,7 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "shared/**/*",
       "public/domi-dock-icon.png",
       "package.json"
     ],

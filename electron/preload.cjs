@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld("workbench", {
   updateDomiDatabaseRecord: (request) => ipcRenderer.invoke("domi:database-update", request),
   previewDomiDatabaseRecord: (request) => ipcRenderer.invoke("domi:database-preview", request),
   deleteDomiDatabaseRecord: (request) => ipcRenderer.invoke("domi:database-delete", request),
+  classifyDomiDatabaseProject: (request) => ipcRenderer.invoke("domi:database-classify", request),
   previewStorageMigration: () => ipcRenderer.invoke("domi:migration-preview"),
   listWeeklyNews: (request) => ipcRenderer.invoke("domi:weekly-news", request),
   saveWeeklyNewsCheckpoint: (request) => ipcRenderer.invoke("domi:weekly-news-checkpoint", request),
