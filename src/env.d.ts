@@ -72,6 +72,9 @@ declare global {
       deleteDomiDatabaseRecord: (
         request: DomiDatabaseDeleteRequest
       ) => Promise<DomiDatabaseDeleteResult>;
+      classifyDomiDatabaseProject: (
+        request: DomiClassificationActionRequest
+      ) => Promise<DomiClassificationActionResult>;
       previewStorageMigration: () => Promise<StorageMigrationPreview>;
       listWeeklyNews: (request?: DomiWeeklyNewsRequest) => Promise<DomiWeeklyNewsSnapshot>;
       saveWeeklyNewsCheckpoint: (
@@ -498,6 +501,65 @@ export type DomiDatabaseSnapshot = {
   projects: DomiProject[];
   people: DomiPerson[];
   news: DomiNewsItem[];
+  taxonomy?: DomiProjectTaxonomy;
+  classificationReviews?: DomiClassificationReview[];
+  error?: string;
+};
+
+export type DomiProjectTaxonomy = {
+  domains: Array<{
+    name: string;
+    subdomains: string[];
+  }>;
+  customSubdomains: Array<{
+    id: string;
+    parentDomain: string;
+    name: string;
+    source: "user" | string;
+    createdAt: number;
+    updatedAt: number;
+  }>;
+};
+
+export type DomiClassificationEvidence = {
+  title: string;
+  resource: string;
+  relativePath: string;
+  role: "project" | "comparable" | "industry";
+  snippet: string;
+  updatedAt: number;
+  canonical: boolean;
+};
+
+export type DomiClassificationReview = {
+  project: DomiProject;
+  status: "pending" | "deferred" | "confirmed";
+  suggestedDomain: string;
+  suggestedSubdomains: string[];
+  confidence: number;
+  reason: string;
+  deferredAt: number | null;
+  updatedAt: number;
+  evidence: DomiClassificationEvidence[];
+};
+
+export type DomiClassificationActionRequest = {
+  action: "apply" | "defer" | "undo";
+  recordId: string;
+  expectedUpdatedAt: number;
+  domain?: string;
+  subdomains?: string[];
+  createSubdomainName?: string;
+  createSubdomainParentDomain?: string;
+};
+
+export type DomiClassificationActionResult = {
+  ok: boolean;
+  action?: "apply" | "defer" | "undo";
+  recordId?: string;
+  record?: DomiProject;
+  taxonomy?: DomiProjectTaxonomy;
+  updatedAt?: number;
   error?: string;
 };
 

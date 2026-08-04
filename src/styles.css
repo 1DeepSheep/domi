@@ -8190,6 +8190,21 @@ body.panel-resizing .main-grid {
   background: #eef5f0;
 }
 
+.database-message > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.database-message-action {
+  flex: none;
+  padding: 5px 9px;
+  border: 1px solid rgba(86, 121, 99, 0.24);
+  border-radius: 7px;
+  color: var(--green);
+  background: #fff;
+  font-size: var(--text-caption);
+}
+
 .database-list-empty,
 .database-empty {
   display: flex;
@@ -8201,6 +8216,549 @@ body.panel-resizing .main-grid {
   color: var(--faint);
   font-size: var(--text-secondary);
   text-align: center;
+}
+
+.classification-review-layout {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(250px, 310px) minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid #dfe1e5;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 28px rgba(42, 42, 38, 0.035);
+}
+
+.classification-review-list {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid #e4e5e7;
+  background: #fafaf8;
+}
+
+.classification-review-list > header {
+  padding: 16px 14px 12px;
+  border-bottom: 1px solid #e6e6e3;
+}
+
+.classification-review-list > header > div,
+.classification-evidence-group > header > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.classification-review-list > header strong {
+  font-size: var(--text-control);
+}
+
+.classification-review-list > header span,
+.classification-evidence-group > header span {
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--faint);
+  background: rgba(44, 45, 42, 0.06);
+  font-size: 10px;
+}
+
+.classification-review-list > header small,
+.classification-evidence-group > header small {
+  display: block;
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: var(--text-caption);
+}
+
+.classification-review-items {
+  min-height: 0;
+  overflow: auto;
+  padding: 7px;
+}
+
+.classification-review-items > button {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 5px;
+  padding: 11px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.classification-review-items > button:hover {
+  background: #fff;
+}
+
+.classification-review-items > button.active {
+  border-color: rgba(207, 105, 76, 0.32);
+  background: #fff;
+  box-shadow: 0 3px 12px rgba(48, 48, 44, 0.06);
+}
+
+.classification-review-item-title {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.classification-review-item-title strong {
+  overflow: hidden;
+  font-size: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.classification-review-item-title em {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: #fff0ea;
+  font-size: 9px;
+  font-style: normal;
+}
+
+.classification-review-item-title em.deferred {
+  color: #8b7240;
+  background: #f8f1df;
+}
+
+.classification-review-current,
+.classification-review-suggestion {
+  width: 100%;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--text-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.classification-review-suggestion {
+  color: #5c7166;
+}
+
+.classification-review-confidence {
+  display: flex;
+  position: relative;
+  width: 100%;
+  height: 4px;
+  align-items: center;
+  margin-top: 2px;
+  overflow: visible;
+  border-radius: 999px;
+  color: transparent;
+  background: #ecece8;
+  font-size: 0;
+}
+
+.classification-review-confidence i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #7ea08c;
+}
+
+.classification-review-detail {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 20px 20px;
+}
+
+.classification-review-empty {
+  display: flex;
+  min-height: 240px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 7px;
+  padding: 24px;
+  color: var(--faint);
+  text-align: center;
+}
+
+.classification-review-empty strong {
+  color: var(--muted);
+  font-size: var(--text-control);
+}
+
+.classification-review-empty span {
+  font-size: var(--text-caption);
+}
+
+.classification-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #ebece9;
+}
+
+.classification-kicker {
+  color: var(--accent);
+  font-size: var(--text-caption);
+  font-weight: 650;
+}
+
+.classification-detail-header h2 {
+  margin: 3px 0 5px;
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.classification-detail-header p {
+  max-width: 720px;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.classification-preview-button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #51534f;
+  background: #fff;
+  font-size: var(--text-secondary);
+}
+
+.classification-form-card {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.65fr) minmax(260px, 1.35fr);
+  gap: 12px;
+  margin-top: 14px;
+  padding: 13px;
+  border: 1px solid #e5e5e1;
+  border-radius: 9px;
+  background: #fbfbf9;
+}
+
+.classification-form-card label,
+.classification-create-fields > label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.classification-form-card label > span,
+.classification-create-fields > label > span,
+.classification-directory-preview > span {
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+
+.classification-form-card input,
+.classification-form-card select,
+.classification-create-fields input,
+.classification-create-fields select {
+  width: 100%;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid #dcdedb;
+  border-radius: 7px;
+  outline: 0;
+  color: var(--text);
+  background: #fff;
+  font: inherit;
+  font-size: var(--text-secondary);
+}
+
+.classification-form-card input:focus,
+.classification-form-card select:focus,
+.classification-create-fields input:focus,
+.classification-create-fields select:focus {
+  border-color: rgba(207, 105, 76, 0.62);
+  box-shadow: 0 0 0 3px rgba(207, 105, 76, 0.08);
+}
+
+.classification-subdomain-field small {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.classification-create-option {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  grid-column: 1 / -1;
+  padding: 6px 9px;
+  border: 1px dashed rgba(207, 105, 76, 0.45);
+  border-radius: 7px;
+  color: var(--accent);
+  background: #fff8f5;
+  font-size: var(--text-secondary);
+}
+
+.classification-evidence-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.classification-evidence-group {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #e6e7e4;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.classification-evidence-group > header {
+  min-height: 65px;
+  padding: 11px;
+  border-bottom: 1px solid #ecece9;
+  background: #fafbf9;
+}
+
+.classification-evidence-group.project > header {
+  background: #f3f8f4;
+}
+
+.classification-evidence-group.comparable > header {
+  background: #faf7ef;
+}
+
+.classification-evidence-group.industry > header {
+  background: #f5f6fa;
+}
+
+.classification-evidence-group > button {
+  display: flex;
+  width: 100%;
+  min-height: 54px;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 0;
+  border-bottom: 1px solid #eeeeeb;
+  color: var(--muted);
+  background: #fff;
+  text-align: left;
+}
+
+.classification-evidence-group > button:last-child {
+  border-bottom: 0;
+}
+
+.classification-evidence-group > button:hover {
+  background: #fafafa;
+}
+
+.classification-evidence-group > button > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.classification-evidence-group > button strong,
+.classification-evidence-group > button small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.classification-evidence-group > button strong {
+  color: var(--text);
+  font-size: var(--text-secondary);
+}
+
+.classification-evidence-group > button small {
+  margin-top: 3px;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.classification-evidence-empty {
+  padding: 18px 10px;
+  color: var(--faint);
+  font-size: var(--text-caption);
+  text-align: center;
+}
+
+.classification-review-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 13px;
+  border-top: 1px solid #ebece9;
+}
+
+.classification-review-actions button,
+.classification-create-dialog > footer button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: #fff;
+  font-size: var(--text-secondary);
+}
+
+.classification-review-actions button.primary,
+.classification-create-dialog > footer button.primary {
+  border-color: var(--accent);
+  color: #fff;
+  background: var(--accent);
+}
+
+.classification-review-actions button:disabled,
+.classification-create-dialog button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.classification-create-backdrop {
+  z-index: 70;
+}
+
+.classification-create-dialog {
+  width: min(540px, calc(100vw - 40px));
+  overflow: hidden;
+  border: 1px solid #dedfdb;
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 24px 80px rgba(31, 30, 27, 0.22);
+}
+
+.classification-create-dialog > header {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 28px;
+  gap: 11px;
+  padding: 18px 19px 15px;
+  border-bottom: 1px solid #e7e7e4;
+}
+
+.classification-create-icon {
+  display: flex;
+  width: 38px;
+  height: 38px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: var(--accent);
+  background: #fff0e9;
+}
+
+.classification-create-dialog > header span {
+  color: var(--accent);
+  font-size: var(--text-caption);
+  font-weight: 650;
+}
+
+.classification-create-dialog > header h3 {
+  margin: 1px 0 4px;
+  font-size: 18px;
+}
+
+.classification-create-dialog > header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  line-height: 1.55;
+}
+
+.classification-create-dialog > header > button {
+  display: flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 7px;
+  color: var(--faint);
+  background: transparent;
+}
+
+.classification-create-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 13px;
+  padding: 17px 19px;
+}
+
+.classification-create-main {
+  grid-column: 1 / -1;
+  flex-direction: row !important;
+  align-items: flex-start;
+  gap: 9px !important;
+  padding: 10px;
+  border: 1px solid #e7e8e4;
+  border-radius: 8px;
+  background: #fafaf8;
+}
+
+.classification-create-main input {
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+}
+
+.classification-create-main > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.classification-create-main strong {
+  color: var(--text);
+  font-size: var(--text-secondary);
+}
+
+.classification-create-main small {
+  color: var(--faint);
+  font-size: var(--text-caption);
+}
+
+.classification-directory-preview {
+  display: flex;
+  min-width: 0;
+  grid-column: 1 / -1;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.classification-directory-preview code {
+  overflow: hidden;
+  padding: 9px 10px;
+  border-radius: 7px;
+  color: #58665e;
+  background: #f1f5f2;
+  font-size: var(--text-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.classification-create-dialog > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 19px 16px;
+  border-top: 1px solid #ecece9;
 }
 
 .database-grid-layout {
@@ -8889,5 +9447,46 @@ body.panel-resizing .main-grid {
 
   .database-grid-count {
     margin-left: 0;
+  }
+
+  .classification-review-layout {
+    grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+  }
+
+  .classification-evidence-groups {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .classification-review-layout {
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+  }
+
+  .classification-review-list {
+    max-height: 230px;
+    border-right: 0;
+    border-bottom: 1px solid #e4e5e7;
+  }
+
+  .classification-review-detail {
+    overflow: visible;
+    padding: 15px;
+  }
+
+  .classification-detail-header,
+  .classification-form-card {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .classification-preview-button {
+    align-self: flex-start;
+  }
+
+  .classification-create-fields {
+    grid-template-columns: 1fr;
   }
 }

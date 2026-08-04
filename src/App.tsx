@@ -81,6 +81,7 @@ import {
   CodexEventItem,
   CodexUsage,
   DomiPerson,
+  DomiClassificationReview,
   DomiDatabaseDeleteRequest,
   DomiDatabaseSnapshot,
   DomiDatabaseUpdateRequest,
@@ -112,6 +113,7 @@ import {
 } from "./workflows";
 import {
   FOLLOWED_PROJECT_TAXONOMY_PROMPT,
+  PROJECT_DOMAIN_SUBDOMAINS,
   projectDomainsForNews,
   projectSubdomainsForNews
 } from "./investmentTaxonomy";
@@ -123,6 +125,7 @@ const MessageContent = lazy(() => import("./MessageContent"));
 type Role = "user" | "assistant" | "system";
 type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents";
 type DatabaseEntityType = "project" | "person" | "news";
+type DatabaseWorkspaceTab = DatabaseEntityType | "classification";
 type DatabaseFilterKey =
   | "none"
   | "status"
@@ -269,6 +272,18 @@ type DatabaseDeleteTarget = DomiDatabaseDeleteRequest & {
 type DatabaseRowContextMenu = DatabaseDeleteTarget & {
   left: number;
   top: number;
+};
+
+type ClassificationCreateDialog = {
+  recordId: string;
+  name: string;
+  parentDomain: string;
+};
+
+type ClassificationUndoAction = {
+  recordId: string;
+  expectedUpdatedAt: number;
+  projectName: string;
 };
 
 const DATABASE_FIELD_LABELS: Partial<Record<keyof DatabaseDraft, string>> = {
@@ -1582,6 +1597,7 @@ function App() {
   const [domiError, setDomiError] = useState("");
   const [domiQuery, setDomiQuery] = useState("");
   const [databaseSnapshot, setDatabaseSnapshot] = useState<DomiDatabaseSnapshot | null>(null);
+  const [databaseWorkspaceTab, setDatabaseWorkspaceTab] = useState<DatabaseWorkspaceTab>("project");
   const [databaseEntityType, setDatabaseEntityType] = useState<DatabaseEntityType>("project");
   const [databaseSelectedId, setDatabaseSelectedId] = useState("");
   const [databaseEditingId, setDatabaseEditingId] = useState("");
@@ -1600,6 +1616,12 @@ function App() {
   const [databaseDeleteTarget, setDatabaseDeleteTarget] = useState<DatabaseDeleteTarget | null>(null);
   const [databaseRowContextMenu, setDatabaseRowContextMenu] = useState<DatabaseRowContextMenu | null>(null);
   const [databaseDeleting, setDatabaseDeleting] = useState(false);
+  const [classificationSelectedId, setClassificationSelectedId] = useState("");
+  const [classificationDomain, setClassificationDomain] = useState("");
+  const [classificationSubdomains, setClassificationSubdomains] = useState("");
+  const [classificationSaving, setClassificationSaving] = useState(false);
+  const [classificationCreateDialog, setClassificationCreateDialog] = useState<ClassificationCreateDialog | null>(null);
+  const [classificationUndo, setClassificationUndo] = useState<ClassificationUndoAction | null>(null);
   const [weeklyNews, setWeeklyNews] = useState<DomiWeeklyNewsSnapshot | null>(null);
   const [weeklyNewsLoading, setWeeklyNewsLoading] = useState(false);
   const [weeklyNewsScanning, setWeeklyNewsScanning] = useState(false);
@@ -3125,6 +3147,26 @@ function App() {
     setDatabaseExpandedCell(null);
   }
 
+  function setClassificationDraftFromReview(review?: DomiClassificationReview) {
+    if (!review) {
+      setClassificationSelectedId("");
+      setClassificationDomain("");
+      setClassificationSubdomains("");
+      return;
+    }
+    const currentDomain = review.project.domain && !["_未分类", "未分类"].includes(review.project.domain)
+      ? review.project.domain
+      : "";
+    const currentSubdomains = review.project.subdomains.filter((item) =>
+      !["_未分类", "未分类"].includes(item)
+    );
+    setClassificationSelectedId(review.project.recordId);
+    setClassificationDomain(currentDomain || review.suggestedDomain || "");
+    setClassificationSubdomains(
+      (currentSubdomains.length ? currentSubdomains : review.suggestedSubdomains).join("、")
+    );
+  }
+
   async function refreshDatabase(options: { preserveSelection?: boolean } = {}) {
     if (databaseLoading) return null;
     setDatabaseLoading(true);
@@ -3146,6 +3188,11 @@ function App() {
       setDatabaseDraft(
         selected ? databaseDraftForRecord(databaseEntityType, selected) : null
       );
+      const reviews = result.classificationReviews || [];
+      const preferredReviewId = options.preserveSelection ? classificationSelectedId : "";
+      const selectedReview = reviews.find((item) => item.project.recordId === preferredReviewId)
+        || reviews[0];
+      setClassificationDraftFromReview(selectedReview);
       return result;
     } catch (error) {
       setDatabaseError(error instanceof Error ? error.message : String(error));
@@ -3158,6 +3205,7 @@ function App() {
   function switchDatabaseEntity(entityType: DatabaseEntityType) {
     const records = databaseRecords(databaseSnapshot, entityType);
     const selected = records[0];
+    setDatabaseWorkspaceTab(entityType);
     setDatabaseEntityType(entityType);
     setDatabaseQuery("");
     setDatabaseFilterKey("none");
@@ -3171,6 +3219,99 @@ function App() {
     setDatabaseDraft(selected ? databaseDraftForRecord(entityType, selected) : null);
     setDatabaseError("");
     setDatabaseNotice("");
+  }
+
+  function switchDatabaseClassification() {
+    void flushDatabaseAutoSave();
+    const reviews = databaseSnapshot?.classificationReviews || [];
+    const selected = reviews.find((item) => item.project.recordId === classificationSelectedId)
+      || reviews[0];
+    setDatabaseWorkspaceTab("classification");
+    setDatabaseEditingId("");
+    setDatabaseExpandedCell(null);
+    setDatabaseError("");
+    setDatabaseNotice("");
+    setClassificationDraftFromReview(selected);
+  }
+
+  async function mutateProjectClassification(
+    action: "apply" | "defer" | "undo",
+    createSubdomain?: { name: string; parentDomain: string; subdomains?: string[] }
+  ) {
+    const reviews = databaseSnapshot?.classificationReviews || [];
+    const review = reviews.find((item) => item.project.recordId === classificationSelectedId);
+    const undo = classificationUndo;
+    const recordId = action === "undo" ? undo?.recordId : review?.project.recordId;
+    const expectedUpdatedAt = action === "undo"
+      ? undo?.expectedUpdatedAt
+      : Number(review?.project.updatedAt);
+    const stableExpectedUpdatedAt = Number(expectedUpdatedAt);
+    if (!recordId || !Number.isFinite(stableExpectedUpdatedAt)) {
+      setDatabaseError(action === "undo" ? "没有可以撤销的分类操作。" : "请先选择一个待审核项目。");
+      return;
+    }
+
+    const subdomains = createSubdomain?.subdomains || splitDatabaseList(classificationSubdomains);
+    if (action === "apply") {
+      if (!classificationDomain) {
+        setDatabaseError("请先选择正式一级领域。");
+        return;
+      }
+      const allowed = databaseSnapshot?.taxonomy?.domains
+        .find((item) => item.name === classificationDomain)?.subdomains || [];
+      const unknown = subdomains.find((item) =>
+        !allowed.some((candidate) => candidate.localeCompare(item, "zh-CN", { sensitivity: "base" }) === 0)
+      );
+      if (unknown && !createSubdomain) {
+        setClassificationCreateDialog({
+          recordId,
+          name: unknown,
+          parentDomain: classificationDomain
+        });
+        return;
+      }
+    }
+
+    setClassificationSaving(true);
+    setDatabaseError("");
+    setDatabaseNotice("");
+    try {
+      const result = await workbench.classifyDomiDatabaseProject({
+        action,
+        recordId,
+        expectedUpdatedAt: stableExpectedUpdatedAt,
+        domain: classificationDomain,
+        subdomains,
+        createSubdomainName: createSubdomain?.name,
+        createSubdomainParentDomain: createSubdomain?.parentDomain
+      });
+      if (!result.ok) {
+        setDatabaseError(result.error || "分类操作失败。");
+        return;
+      }
+      if (action === "apply" && result.record) {
+        setClassificationUndo({
+          recordId: result.record.recordId,
+          expectedUpdatedAt: Number(result.record.updatedAt) || Number(result.updatedAt) || Date.now(),
+          projectName: result.record.name
+        });
+        setDatabaseNotice(
+          `已确认“${result.record.name}”的正式分类，并同步更新 SQLite、项目主页与资料目录。`
+        );
+      } else if (action === "defer") {
+        setDatabaseNotice("已暂缓该项目；材料与建议保留在分类审核台中。");
+      } else {
+        setClassificationUndo(null);
+        setDatabaseNotice("已撤销上一次分类，项目已回到分类审核台。");
+      }
+      setClassificationCreateDialog(null);
+      await refreshDatabase({ preserveSelection: action !== "apply" });
+      setDatabaseWorkspaceTab("classification");
+    } catch (error) {
+      setDatabaseError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setClassificationSaving(false);
+    }
   }
 
   function updateDatabaseDraft<K extends keyof DatabaseDraft>(
@@ -7204,6 +7345,22 @@ function App() {
 
   function renderDatabaseWorkspace() {
     const records = databaseRecords(databaseSnapshot, databaseEntityType);
+    const classificationReviews = databaseSnapshot?.classificationReviews || [];
+    const selectedClassificationReview = classificationReviews.find((item) =>
+      item.project.recordId === classificationSelectedId
+    ) || classificationReviews[0];
+    const taxonomyDomains = databaseSnapshot?.taxonomy?.domains
+      || Object.entries(PROJECT_DOMAIN_SUBDOMAINS).map(([name, subdomains]) => ({
+        name,
+        subdomains: [...subdomains]
+      }));
+    const selectedTaxonomyDomain = taxonomyDomains.find((item) => item.name === classificationDomain);
+    const classificationSubdomainValues = splitDatabaseList(classificationSubdomains);
+    const unknownClassificationSubdomain = classificationSubdomainValues.find((item) =>
+      !(selectedTaxonomyDomain?.subdomains || []).some((candidate) =>
+        candidate.localeCompare(item, "zh-CN", { sensitivity: "base" }) === 0
+      )
+    );
     const query = deferredDatabaseQuery.trim().toLocaleLowerCase("zh-CN");
     const filterOptions = DATABASE_FILTER_OPTIONS[databaseEntityType];
     const filterValueOptions = databaseFilterValueOptions(
@@ -7347,15 +7504,18 @@ function App() {
             {([
               ["project", "项目库", databaseSnapshot?.projects?.length || 0],
               ["person", "人脉库", databaseSnapshot?.people?.length || 0],
-              ["news", "行业信息库", databaseSnapshot?.news?.length || 0]
-            ] as Array<[DatabaseEntityType, string, number]>).map(([type, label, count]) => (
+              ["news", "行业信息库", databaseSnapshot?.news?.length || 0],
+              ["classification", "分类审核", classificationReviews.length]
+            ] as Array<[DatabaseWorkspaceTab, string, number]>).map(([type, label, count]) => (
               <button
                 key={type}
                 type="button"
-                className={databaseEntityType === type ? "active" : ""}
-                onClick={() => switchDatabaseEntity(type)}
+                className={databaseWorkspaceTab === type ? "active" : ""}
+                onClick={() => type === "classification"
+                  ? switchDatabaseClassification()
+                  : switchDatabaseEntity(type)}
                 role="tab"
-                aria-selected={databaseEntityType === type}
+                aria-selected={databaseWorkspaceTab === type}
               >
                 {label}<span>{count}</span>
               </button>
@@ -7371,7 +7531,20 @@ function App() {
           <div className="database-message error"><AlertCircle size={15} />{databaseError}</div>
         )}
         {databaseNotice && (
-          <div className="database-message success"><CheckCircle2 size={15} />{databaseNotice}</div>
+          <div className="database-message success">
+            <CheckCircle2 size={15} />
+            <span>{databaseNotice}</span>
+            {classificationUndo && (
+              <button
+                type="button"
+                className="database-message-action"
+                onClick={() => void mutateProjectClassification("undo")}
+                disabled={classificationSaving}
+              >
+                撤销“{classificationUndo.projectName}”分类
+              </button>
+            )}
+          </div>
         )}
         {databaseLoading && !databaseSnapshot && (
           <div className="database-empty"><RefreshCw className="spinning" size={18} />正在读取资料库</div>
@@ -7383,7 +7556,194 @@ function App() {
           </div>
         )}
 
-        {databaseSnapshot?.editable && (
+        {databaseSnapshot?.editable && databaseWorkspaceTab === "classification" && (
+          <div className="classification-review-layout">
+            <aside className="classification-review-list" aria-label="待分类项目">
+              <header>
+                <div>
+                  <strong>待审核项目</strong>
+                  <span>{classificationReviews.length} 个</span>
+                </div>
+                <small>先看项目自身材料，再决定正式分类</small>
+              </header>
+              {classificationReviews.length === 0 ? (
+                <div className="classification-review-empty">
+                  <CheckCircle2 size={22} />
+                  <strong>当前没有待审核项目</strong>
+                  <span>新入库的未分类项目会自动出现在这里。</span>
+                </div>
+              ) : (
+                <div className="classification-review-items">
+                  {classificationReviews.map((review) => (
+                    <button
+                      key={review.project.recordId}
+                      type="button"
+                      className={selectedClassificationReview?.project.recordId === review.project.recordId ? "active" : ""}
+                      onClick={() => {
+                        setClassificationDraftFromReview(review);
+                        setDatabaseError("");
+                        setDatabaseNotice("");
+                      }}
+                    >
+                      <span className="classification-review-item-title">
+                        <strong>{review.project.name}</strong>
+                        <em className={review.status}>{review.status === "deferred" ? "已暂缓" : "待审核"}</em>
+                      </span>
+                      <span className="classification-review-current">
+                        当前：{review.project.domain || "未分类"}
+                        {review.project.subdomains.length ? ` / ${review.project.subdomains.join("、")}` : ""}
+                      </span>
+                      <span className="classification-review-suggestion">
+                        建议：{review.suggestedDomain || "待人工判断"}
+                        {review.suggestedSubdomains.length ? ` / ${review.suggestedSubdomains.join("、")}` : ""}
+                      </span>
+                      <span className="classification-review-confidence">
+                        <i style={{ width: `${Math.round(review.confidence * 100)}%` }} />
+                        {review.confidence > 0 ? `${Math.round(review.confidence * 100)}%` : "未自动判断"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </aside>
+
+            <section className="classification-review-detail">
+              {!selectedClassificationReview ? (
+                <div className="classification-review-empty">
+                  <Sparkles size={24} />
+                  <strong>分类审核已完成</strong>
+                  <span>以后出现未分类项目时，可在这里查看证据并确认。</span>
+                </div>
+              ) : (
+                <>
+                  <header className="classification-detail-header">
+                    <div>
+                      <span className="classification-kicker">分类审核</span>
+                      <h2>{selectedClassificationReview.project.name}</h2>
+                      <p>{selectedClassificationReview.reason}</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="classification-preview-button"
+                      onClick={() => void previewDatabaseRecord("project", selectedClassificationReview.project)}
+                    >
+                      <FileText size={14} />预览核心文档
+                    </button>
+                  </header>
+
+                  <div className="classification-form-card">
+                    <label>
+                      <span>正式一级领域</span>
+                      <select
+                        value={classificationDomain}
+                        onChange={(event) => {
+                          const nextDomain = event.target.value;
+                          setClassificationDomain(nextDomain);
+                          const suggested = selectedClassificationReview.suggestedDomain === nextDomain
+                            ? selectedClassificationReview.suggestedSubdomains
+                            : [];
+                          setClassificationSubdomains(suggested.join("、"));
+                          setDatabaseError("");
+                        }}
+                      >
+                        <option value="">请选择</option>
+                        {taxonomyDomains.map((item) => <option key={item.name}>{item.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="classification-subdomain-field">
+                      <span>正式子领域</span>
+                      <input
+                        list="classification-subdomain-options"
+                        value={classificationSubdomains}
+                        placeholder="选择已有子领域，或直接输入新名称"
+                        onChange={(event) => {
+                          setClassificationSubdomains(event.target.value);
+                          setDatabaseError("");
+                        }}
+                      />
+                      <datalist id="classification-subdomain-options">
+                        {(selectedTaxonomyDomain?.subdomains || []).map((item) => (
+                          <option key={item} value={item} />
+                        ))}
+                      </datalist>
+                      <small>多个子领域用顿号、逗号或换行分隔；第一个将作为主子领域和目录层级。</small>
+                    </label>
+                    {unknownClassificationSubdomain && classificationDomain && (
+                      <button
+                        type="button"
+                        className="classification-create-option"
+                        onClick={() => setClassificationCreateDialog({
+                          recordId: selectedClassificationReview.project.recordId,
+                          name: unknownClassificationSubdomain,
+                          parentDomain: classificationDomain
+                        })}
+                      >
+                        <Plus size={14} />
+                        将“{unknownClassificationSubdomain}”新建为正式子领域
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="classification-evidence-groups">
+                    {([
+                      ["project", "项目自身材料", "可作为项目事实与分类依据"],
+                      ["comparable", "可比公司 / 相关公司", "仅用于理解相似性，不写成项目事实"],
+                      ["industry", "行业与赛道材料", "仅用于判断行业边界与命名"]
+                    ] as const).map(([role, label, hint]) => {
+                      const evidence = selectedClassificationReview.evidence.filter((item) => item.role === role);
+                      return (
+                        <section key={role} className={`classification-evidence-group ${role}`}>
+                          <header>
+                            <div><strong>{label}</strong><span>{evidence.length}</span></div>
+                            <small>{hint}</small>
+                          </header>
+                          {evidence.length === 0 ? (
+                            <div className="classification-evidence-empty">暂无此类材料</div>
+                          ) : evidence.map((item) => (
+                            <button
+                              key={item.resource || item.relativePath}
+                              type="button"
+                              onClick={() => item.resource && openDocument(item.resource)}
+                            >
+                              <FileText size={14} />
+                              <span>
+                                <strong>{item.title}</strong>
+                                <small>{item.snippet || item.relativePath}</small>
+                              </span>
+                              <ChevronRight size={14} />
+                            </button>
+                          ))}
+                        </section>
+                      );
+                    })}
+                  </div>
+
+                  <footer className="classification-review-actions">
+                    <button
+                      type="button"
+                      onClick={() => void mutateProjectClassification("defer")}
+                      disabled={classificationSaving}
+                    >
+                      稍后处理
+                    </button>
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => void mutateProjectClassification("apply")}
+                      disabled={classificationSaving || !classificationDomain || !classificationSubdomainValues.length}
+                    >
+                      {classificationSaving
+                        ? <><RefreshCw className="spinning" size={14} />正在同步</>
+                        : <><Check size={14} />确认并同步分类</>}
+                    </button>
+                  </footer>
+                </>
+              )}
+            </section>
+          </div>
+        )}
+
+        {databaseSnapshot?.editable && databaseWorkspaceTab !== "classification" && (
           <div className="database-grid-layout">
             <div className="database-grid-controls">
               <label className="database-search database-grid-search">
@@ -7924,6 +8284,113 @@ function App() {
                     : <><Trash2 size={14} />移出资料库</>}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+        {classificationCreateDialog && (
+          <div
+            className="database-delete-backdrop classification-create-backdrop"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.currentTarget === event.target && !classificationSaving) {
+                setClassificationCreateDialog(null);
+              }
+            }}
+          >
+            <div
+              className="classification-create-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="classification-create-title"
+            >
+              <header>
+                <div className="classification-create-icon"><Plus size={18} /></div>
+                <div>
+                  <span>本地正式分类</span>
+                  <h3 id="classification-create-title">新建正式子领域</h3>
+                  <p>新分类只保存在这台 Mac 的 domi 资料库中，更新应用后仍会保留，不会上传 GitHub。</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setClassificationCreateDialog(null)}
+                  aria-label="关闭"
+                  disabled={classificationSaving}
+                >
+                  <X size={16} />
+                </button>
+              </header>
+              <div className="classification-create-fields">
+                <label>
+                  <span>子领域名称</span>
+                  <input
+                    autoFocus
+                    value={classificationCreateDialog.name}
+                    onChange={(event) => setClassificationCreateDialog((current) =>
+                      current ? { ...current, name: event.target.value } : current
+                    )}
+                  />
+                </label>
+                <label>
+                  <span>所属一级领域</span>
+                  <select
+                    value={classificationCreateDialog.parentDomain}
+                    onChange={(event) => {
+                      const parentDomain = event.target.value;
+                      setClassificationCreateDialog((current) =>
+                        current ? { ...current, parentDomain } : current
+                      );
+                      setClassificationDomain(parentDomain);
+                    }}
+                  >
+                    {taxonomyDomains.map((item) => <option key={item.name}>{item.name}</option>)}
+                  </select>
+                </label>
+                <label className="classification-create-main">
+                  <input type="checkbox" checked readOnly />
+                  <span>
+                    <strong>设为主子领域</strong>
+                    <small>该分类将成为项目目录的一级分类路径。</small>
+                  </span>
+                </label>
+                <div className="classification-directory-preview">
+                  <span>目录预览</span>
+                  <code>
+                    3.项目库 / {classificationCreateDialog.parentDomain} / {classificationCreateDialog.name || "新子领域"} / {selectedClassificationReview?.project.name || "项目"}
+                  </code>
+                </div>
+              </div>
+              <footer>
+                <button
+                  type="button"
+                  onClick={() => setClassificationCreateDialog(null)}
+                  disabled={classificationSaving}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={classificationSaving || !classificationCreateDialog.name.trim()}
+                  onClick={() => {
+                    const nextName = classificationCreateDialog.name.trim();
+                    const nextSubdomains = [
+                      nextName,
+                      ...splitDatabaseList(classificationSubdomains)
+                        .filter((item) => item !== unknownClassificationSubdomain && item !== nextName)
+                    ];
+                    setClassificationSubdomains(nextSubdomains.join("、"));
+                    void mutateProjectClassification("apply", {
+                      name: nextName,
+                      parentDomain: classificationCreateDialog.parentDomain,
+                      subdomains: nextSubdomains
+                    });
+                  }}
+                >
+                  {classificationSaving
+                    ? <><RefreshCw className="spinning" size={14} />正在创建</>
+                    : <><Check size={14} />创建并应用</>}
+                </button>
+              </footer>
             </div>
           </div>
         )}
