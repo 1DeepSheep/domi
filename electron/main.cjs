@@ -2443,6 +2443,8 @@ ipcMain.handle("domi:database-list", async () => {
       projects: [],
       people: [],
       news: [],
+      taxonomy: { domains: [], customSubdomains: [] },
+      classificationReviews: [],
       error: error instanceof Error ? error.message : String(error)
     };
   }
@@ -2469,6 +2471,18 @@ ipcMain.handle("domi:database-preview", async (_event, request) => {
 ipcMain.handle("domi:database-delete", async (_event, request) => {
   try {
     const result = await getDomiIntegration().deleteDatabaseRecord(request);
+    if (result.ok) {
+      serviceCoordinator.invalidate("domi:database-list");
+      serviceCoordinator.invalidate("domi:weekly-news:");
+    }
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:database-classify", async (_event, request) => {
+  try {
+    const result = getDomiIntegration().classifyDatabaseProject(request);
     if (result.ok) {
       serviceCoordinator.invalidate("domi:database-list");
       serviceCoordinator.invalidate("domi:weekly-news:");

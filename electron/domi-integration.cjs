@@ -2635,6 +2635,8 @@ class DomiIntegration {
         projects: [],
         people: [],
         news: [],
+        taxonomy: { domains: [], customSubdomains: [] },
+        classificationReviews: [],
         error: "客户端内直接编辑数据库目前仅支持本地资料库；飞书资料库请继续通过同步工作流维护。"
       };
     }
@@ -2647,7 +2649,9 @@ class DomiIntegration {
         loadedAt: Date.now(),
         projects: repository.listProjects(),
         people: repository.listPeople(),
-        news: repository.listAllNews()
+        news: repository.listAllNews(),
+        taxonomy: repository.listTaxonomy(),
+        classificationReviews: repository.listClassificationReviews()
       };
     });
   }
@@ -2753,6 +2757,42 @@ class DomiIntegration {
       snapshot,
       updatedAt: Date.now()
     };
+  }
+
+  classifyDatabaseProject(request = {}) {
+    const source = this.readProjectConfig();
+    if (source.backend !== "local") {
+      return {
+        ok: false,
+        error: "分类审核目前仅支持本地资料库。"
+      };
+    }
+    const result = this.withLocalRepository(source, (repository) =>
+      repository.applyProjectClassification(request)
+    );
+    this.materialIndexCache.clear();
+    if (result.record) {
+      const cached = this.stateStore.loadCache(CACHE_KEY)?.value;
+      if (cached?.backend === "local") {
+        const currentItems = Array.isArray(cached.projects) ? cached.projects : [];
+        const nextItems = currentItems.some((item) => item.recordId === result.record.recordId)
+          ? currentItems.map((item) => item.recordId === result.record.recordId ? result.record : item)
+          : [result.record, ...currentItems];
+        this.stateStore.saveCache(CACHE_KEY, {
+          ...cached,
+          syncedAt: Date.now(),
+          projects: nextItems,
+          sources: {
+            ...(cached.sources || {}),
+            projects: {
+              ...(cached.sources?.projects || {}),
+              total: nextItems.length
+            }
+          }
+        });
+      }
+    }
+    return result;
   }
 
   async sync() {

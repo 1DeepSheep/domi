@@ -5,8 +5,9 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { DatabaseSync } = require("node:sqlite");
 const { ensureDocumentLibraryStructure } = require("./document-library.cjs");
+const CANONICAL_PROJECT_TAXONOMY = require("../shared/investment-taxonomy.json");
 
-const LOCAL_REPOSITORY_SCHEMA = 4;
+const LOCAL_REPOSITORY_SCHEMA = 5;
 const PROJECTS_DIRECTORY = "3.项目库";
 const PEOPLE_DIRECTORY = "4.人脉库";
 const NEWS_DIRECTORY = "2.行业动态";
@@ -32,6 +33,28 @@ const TRACKED_INVESTORS = new Set([
 ]);
 const LEGACY_BULK_IMPORT_MIN = 20;
 const LEGACY_BULK_INTAKE_MIGRATION_KEY = "legacy_bulk_intake_v1";
+const CLASSIFICATION_REVIEW_STATUSES = new Set(["pending", "deferred", "confirmed"]);
+const CANONICAL_PROJECT_DOMAINS = new Set(Object.keys(CANONICAL_PROJECT_TAXONOMY));
+const CLASSIFICATION_KEYWORD_RULES = [
+  { domain: "AI", subdomain: "AI视频", keywords: ["视频生成", "视频模型", "数字人", "文生视频"] },
+  { domain: "AI", subdomain: "AI社交", keywords: ["ai社交", "社交产品", "社交网络", "陌生人社交"] },
+  { domain: "AI", subdomain: "Agent", keywords: ["agent", "智能体", "自主执行", "工作流自动化"] },
+  { domain: "AI", subdomain: "AI基础设施", keywords: ["ai基础设施", "推理平台", "训练平台", "算力集群"] },
+  { domain: "AI", subdomain: "AI制药", keywords: ["ai制药", "药物发现", "蛋白质", "分子生成"] },
+  { domain: "AI", subdomain: "AI数据", keywords: ["数据标注", "合成数据", "训练数据", "数据闭环"] },
+  { domain: "半导体", subdomain: "EDA&IP", keywords: ["eda", "芯片设计自动化", "ip授权", "芯片ip"] },
+  { domain: "半导体", subdomain: "算力芯片", keywords: ["算力芯片", "gpu", "npu", "ai芯片", "加速卡"] },
+  { domain: "半导体", subdomain: "通信芯片", keywords: ["通信芯片", "基带", "射频芯片", "光通信芯片"] },
+  { domain: "半导体", subdomain: "光电芯片", keywords: ["光电芯片", "硅光", "光模块", "光子芯片"] },
+  { domain: "半导体", subdomain: "模拟芯片", keywords: ["模拟芯片", "电源管理", "adc", "dac"] },
+  { domain: "半导体", subdomain: "半导体设备", keywords: ["半导体设备", "刻蚀机", "薄膜沉积", "清洗设备"] },
+  { domain: "半导体", subdomain: "半导体材料", keywords: ["半导体材料", "光刻胶", "抛光液", "电子特气"] },
+  { domain: "智能出行", subdomain: "自动驾驶", keywords: ["自动驾驶", "辅助驾驶", "智驾", "adas"] },
+  { domain: "具身智能&机器人", subdomain: "工业机器人", keywords: ["工业机器人", "机械臂", "机器人本体"] },
+  { domain: "前沿科技", subdomain: "卫星互联网", keywords: ["卫星互联网", "卫星通信", "星座"] },
+  { domain: "前沿科技", subdomain: "商业航天", keywords: ["商业航天", "火箭", "卫星制造"] },
+  { domain: "消费科技", subdomain: "可穿戴", keywords: ["可穿戴", "智能眼镜", "智能手表"] }
+];
 
 function resolveHomePath(value) {
   const raw = String(value || "").trim();
@@ -423,6 +446,153 @@ function safePathSegment(value, fallback = "_未分类") {
   return normalized || fallback;
 }
 
+function normalizedTaxonomyLabel(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .trim()
+    .replace(/[\/\\]/g, "／")
+    .replace(/[\u0000-\u001f:*?"<>|]/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 48);
+}
+
+function canonicalSubdomainParent(value) {
+  const normalized = normalizedName(value);
+  for (const [domain, subdomains] of Object.entries(CANONICAL_PROJECT_TAXONOMY)) {
+    if (subdomains.some((subdomain) => normalizedName(subdomain) === normalized)) return domain;
+  }
+  return "";
+}
+
+function classificationMaterialRole(relativePath, previewText = "") {
+  const value = `${relativePath} ${previewText.slice(0, 2_000)}`.normalize("NFKC");
+  if (/(?:对标|竞品|可比公司|类似公司|同类公司|benchmark|comparable)/i.test(value)) {
+    return "comparable";
+  }
+  if (/(?:行业研究|产业研究|赛道研究|市场研究|行业资料|产业链|market\s+research)/i.test(value)) {
+    return "industry";
+  }
+  return "project";
+}
+
+function markdownPreview(filePath, maxBytes = 48 * 1024) {
+  if (!/\.(?:md|markdown|txt)$/i.test(filePath)) return "";
+  try {
+    const descriptor = fs.openSync(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(maxBytes);
+      const bytes = fs.readSync(descriptor, buffer, 0, maxBytes, 0);
+      return buffer.subarray(0, bytes).toString("utf8");
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  } catch {
+    return "";
+  }
+}
+
+function classificationEvidenceSnippet(content) {
+  return String(content || "")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/^---[\s\S]*?---/m, " ")
+    .replace(/[#>*_`|\[\]()]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
+}
+
+function scanProjectClassificationEvidence(directoryPath, canonicalPath = "") {
+  const root = path.resolve(String(directoryPath || ""));
+  if (!root || !fs.existsSync(root)) return [];
+  const items = [];
+  const pending = [{ directory: root, depth: 0 }];
+  while (pending.length && items.length < 160) {
+    const current = pending.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current.directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const targetPath = path.join(current.directory, entry.name);
+      if (entry.isDirectory() && current.depth < 4) {
+        pending.push({ directory: targetPath, depth: current.depth + 1 });
+        continue;
+      }
+      if (!entry.isFile() || !PREVIEW_DOCUMENT_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+        continue;
+      }
+      const relativePath = path.relative(root, targetPath);
+      const preview = markdownPreview(targetPath);
+      let updatedAt = 0;
+      try { updatedAt = Math.round(fs.statSync(targetPath).mtimeMs); } catch {}
+      items.push({
+        title: path.basename(entry.name, path.extname(entry.name)),
+        resource: localDocumentUrl(targetPath),
+        relativePath,
+        role: classificationMaterialRole(relativePath, preview),
+        snippet: classificationEvidenceSnippet(preview),
+        updatedAt,
+        canonical: canonicalPath ? path.resolve(targetPath) === path.resolve(canonicalPath) : false,
+        classifierText: preview.slice(0, 16_000)
+      });
+      if (items.length >= 160) break;
+    }
+  }
+  return items
+    .sort((left, right) => {
+      const roleRank = { project: 3, comparable: 2, industry: 1 };
+      return (roleRank[right.role] || 0) - (roleRank[left.role] || 0)
+        || Number(right.canonical) - Number(left.canonical)
+        || right.updatedAt - left.updatedAt
+        || left.relativePath.localeCompare(right.relativePath, "zh-CN");
+    })
+    .slice(0, 24);
+}
+
+function suggestProjectClassification(project, evidence) {
+  const projectEvidence = evidence.filter((item) => item.role === "project");
+  const source = [
+    project.name,
+    project.notes,
+    ...projectEvidence.flatMap((item) => [item.title, item.relativePath, item.classifierText])
+  ].join("\n").normalize("NFKC").toLocaleLowerCase("zh-CN");
+  const restrictedDomain = CANONICAL_PROJECT_DOMAINS.has(project.domain) ? project.domain : "";
+  const ranked = CLASSIFICATION_KEYWORD_RULES
+    .filter((rule) => !restrictedDomain || rule.domain === restrictedDomain)
+    .map((rule) => {
+      const matches = rule.keywords.filter((keyword) =>
+        source.includes(keyword.normalize("NFKC").toLocaleLowerCase("zh-CN"))
+      );
+      return { ...rule, matches, score: matches.length };
+    })
+    .filter((rule) => rule.score > 0)
+    .sort((left, right) => right.score - left.score
+      || left.domain.localeCompare(right.domain, "zh-CN")
+      || left.subdomain.localeCompare(right.subdomain, "zh-CN"));
+  const best = ranked[0];
+  if (!best) {
+    return {
+      domain: restrictedDomain,
+      subdomains: [],
+      confidence: 0,
+      reason: projectEvidence.length
+        ? "项目自身材料中没有命中现有正式子领域，请人工选择或新建正式子领域。"
+        : "尚未找到可用于判断的项目自身材料，请补充材料后再分类。"
+    };
+  }
+  const runnerUp = ranked[1]?.score || 0;
+  const confidence = Math.min(0.96, 0.55 + best.score * 0.12 + (best.score - runnerUp) * 0.08);
+  return {
+    domain: best.domain,
+    subdomains: [best.subdomain],
+    confidence: Math.round(confidence * 100) / 100,
+    reason: `项目自身材料命中：${best.matches.slice(0, 4).join("、")}。可比公司与行业材料仅作参考，不会当作项目事实。`
+  };
+}
+
 function assertWithin(rootPath, targetPath) {
   const root = path.resolve(rootPath);
   const target = path.resolve(targetPath);
@@ -785,6 +955,32 @@ class LocalDomiRepository {
       );
       CREATE INDEX IF NOT EXISTS idx_repository_tombstones_source
         ON repository_tombstones(entity_type, source_path);
+      CREATE TABLE IF NOT EXISTS custom_taxonomy (
+        id TEXT PRIMARY KEY,
+        parent_domain TEXT NOT NULL,
+        name TEXT NOT NULL,
+        normalized_name TEXT NOT NULL UNIQUE,
+        source TEXT NOT NULL DEFAULT 'user',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_custom_taxonomy_parent
+        ON custom_taxonomy(parent_domain, name);
+      CREATE TABLE IF NOT EXISTS classification_reviews (
+        project_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'pending',
+        suggested_domain TEXT NOT NULL DEFAULT '',
+        suggested_subdomains_json TEXT NOT NULL DEFAULT '[]',
+        confidence REAL NOT NULL DEFAULT 0,
+        reason TEXT NOT NULL DEFAULT '',
+        previous_domain TEXT NOT NULL DEFAULT '',
+        previous_subdomains_json TEXT NOT NULL DEFAULT '[]',
+        deferred_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_classification_reviews_status
+        ON classification_reviews(status, updated_at DESC);
       CREATE TABLE IF NOT EXISTS document_migrations (
         source_path TEXT NOT NULL,
         target_space_id TEXT NOT NULL,
@@ -1330,12 +1526,240 @@ class LocalDomiRepository {
     };
   }
 
+  listTaxonomy() {
+    const customSubdomains = this.database.prepare(`
+      SELECT id, parent_domain, name, source, created_at, updated_at
+      FROM custom_taxonomy
+      ORDER BY parent_domain ASC, name ASC
+    `).all().map((row) => ({
+      id: row.id,
+      parentDomain: row.parent_domain,
+      name: row.name,
+      source: row.source,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+    const domains = Object.entries(CANONICAL_PROJECT_TAXONOMY).map(([name, subdomains]) => ({
+      name,
+      subdomains: [
+        ...subdomains,
+        ...customSubdomains
+          .filter((item) => item.parentDomain === name)
+          .map((item) => item.name)
+      ].filter((item, index, all) =>
+        all.findIndex((candidate) => normalizedName(candidate) === normalizedName(item)) === index
+      )
+    }));
+    return { domains, customSubdomains };
+  }
+
+  projectNeedsClassificationReview(project, taxonomy) {
+    const domain = String(project.domain || "").trim();
+    const subdomains = stringList(project.subdomains);
+    if (!domain || ["_未分类", "未分类"].includes(domain)) return true;
+    if (subdomains.some((item) => ["_未分类", "未分类"].includes(item))) return true;
+    const domainEntry = taxonomy.domains.find((item) => item.name === domain);
+    return Boolean(domainEntry?.subdomains?.length) && subdomains.length === 0;
+  }
+
+  listClassificationReviews() {
+    const taxonomy = this.listTaxonomy();
+    const persisted = new Map(this.database.prepare(`
+      SELECT project_id, status, suggested_domain, suggested_subdomains_json,
+        confidence, reason, previous_domain, previous_subdomains_json,
+        deferred_at, updated_at
+      FROM classification_reviews
+    `).all().map((row) => [row.project_id, row]));
+    const reviews = [];
+    for (const project of this.listProjects()) {
+      const review = persisted.get(project.recordId);
+      const needsReview = this.projectNeedsClassificationReview(project, taxonomy);
+      if (!needsReview) {
+        if (review && review.status !== "confirmed") {
+          this.database.prepare(`
+            UPDATE classification_reviews
+            SET status = 'confirmed', updated_at = ?
+            WHERE project_id = ?
+          `).run(Date.now(), project.recordId);
+        }
+        continue;
+      }
+      const directory = this.recordDirectory("project", project.recordId);
+      const canonicalPath = project.link && project.link.startsWith("file:")
+        ? decodeURIComponent(new URL(project.link).pathname)
+        : "";
+      const evidence = scanProjectClassificationEvidence(directory, canonicalPath);
+      const suggestion = suggestProjectClassification(project, evidence);
+      const now = Date.now();
+      const status = CLASSIFICATION_REVIEW_STATUSES.has(review?.status)
+        ? review.status
+        : "pending";
+      const suggestionChanged = !review
+        || review.suggested_domain !== suggestion.domain
+        || review.suggested_subdomains_json !== JSON.stringify(suggestion.subdomains)
+        || Number(review.confidence) !== suggestion.confidence
+        || review.reason !== suggestion.reason;
+      if (!review || (status === "pending" && suggestionChanged)) {
+        this.database.prepare(`
+          INSERT INTO classification_reviews (
+            project_id, status, suggested_domain, suggested_subdomains_json,
+            confidence, reason, previous_domain, previous_subdomains_json,
+            deferred_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, '', '[]', NULL, ?)
+          ON CONFLICT(project_id) DO UPDATE SET
+            status = excluded.status,
+            suggested_domain = excluded.suggested_domain,
+            suggested_subdomains_json = excluded.suggested_subdomains_json,
+            confidence = excluded.confidence,
+            reason = excluded.reason,
+            updated_at = excluded.updated_at
+        `).run(
+          project.recordId,
+          status,
+          suggestion.domain,
+          JSON.stringify(suggestion.subdomains),
+          suggestion.confidence,
+          suggestion.reason,
+          now
+        );
+      }
+      reviews.push({
+        project,
+        status,
+        suggestedDomain: suggestion.domain,
+        suggestedSubdomains: suggestion.subdomains,
+        confidence: suggestion.confidence,
+        reason: suggestion.reason,
+        deferredAt: Number(review?.deferred_at) || null,
+        updatedAt: Number(review?.updated_at) || now,
+        evidence: evidence.map(({ classifierText: _classifierText, ...item }) => item)
+      });
+    }
+    return reviews.sort((left, right) => {
+      const statusRank = { pending: 2, deferred: 1, confirmed: 0 };
+      return (statusRank[right.status] || 0) - (statusRank[left.status] || 0)
+        || right.confidence - left.confidence
+        || left.project.name.localeCompare(right.project.name, "zh-CN");
+    });
+  }
+
+  deferClassificationReview(request = {}) {
+    const projectId = String(request.recordId || "").trim();
+    if (!projectId || !this.database.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId)) {
+      throw new Error("找不到要暂缓的分类项目。");
+    }
+    const now = Date.now();
+    this.database.prepare(`
+      INSERT INTO classification_reviews (
+        project_id, status, suggested_domain, suggested_subdomains_json,
+        confidence, reason, previous_domain, previous_subdomains_json,
+        deferred_at, updated_at
+      ) VALUES (?, 'deferred', '', '[]', 0, '', '', '[]', ?, ?)
+      ON CONFLICT(project_id) DO UPDATE SET
+        status = 'deferred', deferred_at = excluded.deferred_at, updated_at = excluded.updated_at
+    `).run(projectId, now, now);
+    return { ok: true, action: "defer", recordId: projectId, updatedAt: now };
+  }
+
+  applyProjectClassification(request = {}) {
+    const projectId = String(request.recordId || "").trim();
+    const row = this.database.prepare("SELECT * FROM projects WHERE id = ?").get(projectId);
+    if (!row) throw new Error("找不到要分类的项目。");
+    const current = projectRow(row);
+    const action = String(request.action || "apply").trim();
+    if (action === "defer") return this.deferClassificationReview(request);
+
+    let domain = String(request.domain || "").trim();
+    let subdomains = stringList(request.subdomains);
+    let customSubdomain = null;
+    if (action === "undo") {
+      const review = this.database.prepare(`
+        SELECT previous_domain, previous_subdomains_json
+        FROM classification_reviews WHERE project_id = ?
+      `).get(projectId);
+      if (!review) throw new Error("没有可以撤销的分类操作。");
+      domain = String(review.previous_domain || "").trim() || "_未分类";
+      subdomains = parseList(review.previous_subdomains_json);
+    } else {
+      if (!CANONICAL_PROJECT_DOMAINS.has(domain)) {
+        throw new Error("一级领域必须从现有正式领域中选择。");
+      }
+      const requestedCustomName = normalizedTaxonomyLabel(request.createSubdomainName);
+      if (requestedCustomName) {
+        const parentDomain = String(request.createSubdomainParentDomain || domain).trim();
+        if (parentDomain !== domain || !CANONICAL_PROJECT_DOMAINS.has(parentDomain)) {
+          throw new Error("新子领域必须归属于当前选择的正式一级领域。");
+        }
+        if (["_未分类", "未分类"].includes(requestedCustomName)) {
+          throw new Error("新子领域不能使用系统保留名称。");
+        }
+        const canonicalParent = canonicalSubdomainParent(requestedCustomName);
+        if (canonicalParent && canonicalParent !== domain) {
+          throw new Error(`“${requestedCustomName}”已经是“${canonicalParent}”下的正式子领域。`);
+        }
+        const existingCustom = this.database.prepare(`
+          SELECT parent_domain, name FROM custom_taxonomy WHERE normalized_name = ?
+        `).get(normalizedName(requestedCustomName));
+        if (existingCustom && existingCustom.parent_domain !== domain) {
+          throw new Error(`“${existingCustom.name}”已经归属于“${existingCustom.parent_domain}”。`);
+        }
+        customSubdomain = existingCustom ? null : { name: requestedCustomName, parentDomain: domain };
+        if (!subdomains.some((item) => normalizedName(item) === normalizedName(requestedCustomName))) {
+          subdomains = [requestedCustomName, ...subdomains];
+        }
+      }
+
+      const taxonomy = this.listTaxonomy();
+      const allowed = new Set(
+        (taxonomy.domains.find((item) => item.name === domain)?.subdomains || [])
+          .map(normalizedName)
+      );
+      if (customSubdomain) allowed.add(normalizedName(customSubdomain.name));
+      const invalid = subdomains.find((item) => !allowed.has(normalizedName(item)));
+      if (invalid) throw new Error(`子领域“${invalid}”不属于一级领域“${domain}”。`);
+      if (allowed.size > 0 && subdomains.length === 0) {
+        throw new Error("请选择一个子领域，或输入名称创建新的正式子领域。");
+      }
+    }
+
+    const record = this.updateProject({
+      recordId: current.recordId,
+      expectedUpdatedAt: Number(request.expectedUpdatedAt),
+      name: current.name,
+      domain,
+      subdomains,
+      status: current.status,
+      rating: current.rating,
+      notes: current.notes || "",
+      cities: current.cities || [],
+      investors: current.investors || [],
+      financingHistory: current.financingHistory || "",
+      latestValuationUsd100m: current.latestValuationUsd100m ?? null,
+      customSubdomain,
+      classificationReview: {
+        status: action === "undo" ? "pending" : "confirmed",
+        previousDomain: action === "undo" ? "" : current.domain,
+        previousSubdomains: action === "undo" ? [] : current.subdomains,
+        preservePrevious: action === "undo"
+      }
+    });
+    return {
+      ok: true,
+      action,
+      record,
+      taxonomy: this.listTaxonomy(),
+      updatedAt: record.updatedAt
+    };
+  }
+
   projectDirectory(project) {
     const root = path.join(this.libraryDir, PROJECTS_DIRECTORY);
     const domain = safePathSegment(project.domain);
-    const mainSubdomain = safePathSegment(project.subdomains[0]);
+    const mainSubdomain = project.subdomains[0]
+      ? safePathSegment(project.subdomains[0])
+      : "";
     const projectName = safePathSegment(project.name, "未命名项目");
-    const directory = domain === "_未分类" && mainSubdomain === "_未分类"
+    const directory = !mainSubdomain || mainSubdomain === "_未分类"
       ? path.join(root, domain, projectName)
       : path.join(root, domain, mainSubdomain, projectName);
     assertWithin(root, directory);
@@ -1391,6 +1815,13 @@ class LocalDomiRepository {
       throw new Error("最新估值必须是非负数字，单位为亿美元。");
     }
     const now = Date.now();
+    const customSubdomain = request.customSubdomain && request.customSubdomain.name
+      ? {
+          name: normalizedTaxonomyLabel(request.customSubdomain.name),
+          parentDomain: String(request.customSubdomain.parentDomain || domain).trim()
+        }
+      : null;
+    const classificationReview = request.classificationReview || null;
     const project = {
       recordId: id,
       name,
@@ -1432,6 +1863,23 @@ class LocalDomiRepository {
     let previousPageContent = "";
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      if (customSubdomain) {
+        this.database.prepare(`
+          INSERT INTO custom_taxonomy (
+            id, parent_domain, name, normalized_name, source, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'user', ?, ?)
+          ON CONFLICT(normalized_name) DO UPDATE SET
+            updated_at = excluded.updated_at
+          WHERE custom_taxonomy.parent_domain = excluded.parent_domain
+        `).run(
+          stableId("tax", `${customSubdomain.parentDomain}:${normalizedName(customSubdomain.name)}`),
+          customSubdomain.parentDomain,
+          customSubdomain.name,
+          normalizedName(customSubdomain.name),
+          now,
+          now
+        );
+      }
       if (currentDirectory && targetDirectory !== currentDirectory && fs.existsSync(currentDirectory)) {
         fs.mkdirSync(path.dirname(targetDirectory), { recursive: true });
         fs.renameSync(currentDirectory, targetDirectory);
@@ -1474,6 +1922,40 @@ class LocalDomiRepository {
       );
       if (Number(updateResult.changes) !== 1) {
         throw new Error("项目已被其他流程更新，请刷新后再保存。");
+      }
+      if (classificationReview) {
+        const reviewStatus = CLASSIFICATION_REVIEW_STATUSES.has(classificationReview.status)
+          ? classificationReview.status
+          : "confirmed";
+        const existingReview = this.database.prepare(`
+          SELECT previous_domain, previous_subdomains_json
+          FROM classification_reviews WHERE project_id = ?
+        `).get(id);
+        const previousDomain = classificationReview.preservePrevious
+          ? String(existingReview?.previous_domain || "")
+          : String(classificationReview.previousDomain || "");
+        const previousSubdomains = classificationReview.preservePrevious
+          ? parseList(existingReview?.previous_subdomains_json)
+          : stringList(classificationReview.previousSubdomains);
+        this.database.prepare(`
+          INSERT INTO classification_reviews (
+            project_id, status, suggested_domain, suggested_subdomains_json,
+            confidence, reason, previous_domain, previous_subdomains_json,
+            deferred_at, updated_at
+          ) VALUES (?, ?, '', '[]', 0, '', ?, ?, NULL, ?)
+          ON CONFLICT(project_id) DO UPDATE SET
+            status = excluded.status,
+            previous_domain = excluded.previous_domain,
+            previous_subdomains_json = excluded.previous_subdomains_json,
+            deferred_at = NULL,
+            updated_at = excluded.updated_at
+        `).run(
+          id,
+          reviewStatus,
+          previousDomain,
+          JSON.stringify(previousSubdomains),
+          now
+        );
       }
       this.database.exec("COMMIT");
     } catch (error) {

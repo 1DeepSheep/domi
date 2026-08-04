@@ -1340,6 +1340,80 @@ test("local database preview selects the richest document and row deletion prese
   );
 });
 
+test("classification review keeps evidence roles separate and applies local formal subdomains atomically", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-classification-review-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const originalDirectory = path.join(libraryDir, "3.项目库", "_未分类", "边缘项目");
+  const canonicalPath = path.join(originalDirectory, "项目主页.md");
+  const projectEvidence = path.join(originalDirectory, "原始材料", "路演纪要.md");
+  const comparableEvidence = path.join(originalDirectory, "研究", "可比公司-智慧尘埃.md");
+  const industryEvidence = path.join(originalDirectory, "研究", "行业研究-边缘智能.md");
+  fs.mkdirSync(path.dirname(projectEvidence), { recursive: true });
+  fs.mkdirSync(path.dirname(comparableEvidence), { recursive: true });
+  fs.writeFileSync(canonicalPath, "# 边缘项目\n");
+  fs.writeFileSync(projectEvidence, "项目研发智能体和边缘计算产品。\n");
+  fs.writeFileSync(comparableEvidence, "# 可比公司\n仅用于理解类似公司的产品路径。\n");
+  fs.writeFileSync(industryEvidence, "# 行业研究\n边缘智能市场与产业链。\n");
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const version = 1_700_000_000_000;
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_classification", "边缘项目", "边缘项目", "_未分类", "[]", "待交流", "", "",
+    "[]", "[]", "", null, version, canonicalPath, version, version
+  );
+
+  const reviews = repository.listClassificationReviews();
+  assert.equal(reviews.length, 1);
+  assert.deepEqual(
+    new Set(reviews[0].evidence.map((item) => item.role)),
+    new Set(["project", "comparable", "industry"])
+  );
+  assert.match(reviews[0].reason, /项目自身材料|人工选择/);
+
+  const applied = repository.applyProjectClassification({
+    action: "apply",
+    recordId: "prj_classification",
+    expectedUpdatedAt: version,
+    domain: "AI",
+    subdomains: ["边缘智能"],
+    createSubdomainName: "边缘智能",
+    createSubdomainParentDomain: "AI"
+  });
+  assert.equal(applied.ok, true);
+  assert.equal(applied.record.domain, "AI");
+  assert.deepEqual(applied.record.subdomains, ["边缘智能"]);
+  assert.ok(applied.taxonomy.customSubdomains.some((item) =>
+    item.name === "边缘智能" && item.parentDomain === "AI"
+  ));
+  const classifiedDirectory = path.join(libraryDir, "3.项目库", "AI", "边缘智能", "边缘项目");
+  assert.equal(fs.existsSync(path.join(classifiedDirectory, "项目主页.md")), true);
+  assert.equal(fs.existsSync(originalDirectory), false);
+  assert.match(fs.readFileSync(path.join(classifiedDirectory, "项目主页.md"), "utf8"), /边缘智能/);
+  assert.equal(repository.listClassificationReviews().length, 0);
+
+  const undone = repository.applyProjectClassification({
+    action: "undo",
+    recordId: "prj_classification",
+    expectedUpdatedAt: applied.record.updatedAt
+  });
+  assert.equal(undone.record.domain, "_未分类");
+  assert.deepEqual(undone.record.subdomains, []);
+  assert.equal(
+    fs.existsSync(path.join(libraryDir, "3.项目库", "_未分类", "边缘项目", "项目主页.md")),
+    true
+  );
+  assert.equal(repository.listClassificationReviews().length, 1);
+});
+
 test("local repository mode syncs projects, people and news without Feishu", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-integration-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

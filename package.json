@@ -76,6 +76,7 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "shared/**/*",
       "public/domi-dock-icon.png",
       "package.json"
     ],
