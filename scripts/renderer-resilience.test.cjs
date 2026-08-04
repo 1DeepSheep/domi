@@ -16,6 +16,7 @@ const sectionBoundary = read("src/SectionErrorBoundary.tsx");
 const main = read("electron/main.cjs");
 const preload = read("electron/preload.cjs");
 const taxonomy = read("src/investmentTaxonomy.ts");
+const canonicalTaxonomy = JSON.parse(read("shared/investment-taxonomy.json"));
 const styles = read("src/styles.css");
 const workflows = read("src/workflows.ts");
 
@@ -192,8 +193,43 @@ assert.match(
 );
 assert.match(
   app,
-  /databaseStatusFilter[\s\S]*?databaseSortKey[\s\S]*?databaseSortDirection[\s\S]*?filtered\.length/,
+  /databaseFilterKey[\s\S]*?databaseFilterValue[\s\S]*?databaseSortKey[\s\S]*?databaseSortDirection[\s\S]*?filtered\.length/,
   "Database grids must expose filtering, sorting, and a visible result count."
+);
+assert.match(
+  app,
+  /project:[\s\S]*?value: "rating", label: "项目评级"[\s\S]*?value: "city", label: "城市"[\s\S]*?value: "investor", label: "投资机构"/,
+  "Project database filters must cover rating, city, taxonomy, status, and investors."
+);
+assert.match(
+  app,
+  /DATABASE_SORT_OPTIONS[\s\S]*?value: "rating", label: "项目评级"[\s\S]*?value: "valuation", label: "最新估值"/,
+  "Project database sorting must cover rating and valuation."
+);
+assert.match(
+  app,
+  /\{ S: 4, A: 3, B: 2, C: 1 \}/,
+  "Database rating sorting must follow the investment ranking order S, A, B, C."
+);
+assert.match(
+  app,
+  /\["classification", "分类审核", classificationReviews\.length\][\s\S]*?项目自身材料[\s\S]*?可比公司 \/ 相关公司[\s\S]*?行业与赛道材料/,
+  "Classification review must be a peer database tab and keep material roles visibly separate."
+);
+assert.match(
+  app,
+  /新建正式子领域[\s\S]*?更新应用后仍会保留，不会上传 GitHub[\s\S]*?创建并应用/,
+  "Users must be able to create a local formal subdomain with an explicit privacy confirmation."
+);
+assert.match(
+  preload,
+  /classifyDomiDatabaseProject:[\s\S]*?domi:database-classify/,
+  "The isolated renderer bridge must expose the atomic classification operation."
+);
+assert.match(
+  main,
+  /ipcMain\.handle\("domi:database-classify"[\s\S]*?classifyDatabaseProject/,
+  "The main process must own classification writes instead of letting the renderer touch local files."
 );
 assert.match(
   app,
@@ -376,15 +412,19 @@ assert.match(
   /WEEKLY_NEWS_LIGHT_SYNC_INTERVAL_MS[\s\S]*?WEEKLY_NEWS_RADAR_INTERVAL_MS/,
   "Weekly news must retain separate lightweight and radar refresh schedules."
 );
-assert.match(
-  taxonomy,
-  /智能出行:\s*\[[\s\S]*?"汽车芯片"/,
+assert.ok(
+  canonicalTaxonomy["智能出行"].includes("汽车芯片"),
   "Automotive chips must follow the project library taxonomy under smart mobility."
 );
-assert.doesNotMatch(
-  taxonomy.match(/AI:\s*\[[\s\S]*?\n\s*\],/)?.[0] || "",
-  /汽车芯片/,
+assert.equal(
+  canonicalTaxonomy.AI.includes("汽车芯片"),
+  false,
   "Automotive chips must not appear under AI."
+);
+assert.match(
+  taxonomy,
+  /import canonicalTaxonomy from "\.\.\/shared\/investment-taxonomy\.json"/,
+  "The renderer must consume the same canonical taxonomy file as the local repository."
 );
 assert.match(
   app,
