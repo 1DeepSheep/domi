@@ -45,9 +45,11 @@ function parseJson(value, fallback = null) {
 class WorkbenchStateStore {
   constructor({ databasePath, projectsDir }) {
     this.projectsDir = path.resolve(projectsDir);
+    this.workspaceRoot = path.dirname(this.projectsDir);
     this.databasePath = path.resolve(databasePath);
     this.threadValueCache = new Map();
     this.metaValueCache = "";
+    this.lastCacheUpdatedAt = 0;
     fs.mkdirSync(path.dirname(this.databasePath), { recursive: true });
     fs.mkdirSync(this.projectsDir, { recursive: true });
     const databaseExisted = fs.existsSync(this.databasePath);
@@ -147,6 +149,12 @@ class WorkbenchStateStore {
       VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
     `);
+    this.listCacheStatement = this.database.prepare(
+      "SELECT key, updated_at FROM domi_cache WHERE key LIKE ? ORDER BY updated_at DESC, key"
+    );
+    this.deleteCacheStatement = this.database.prepare(
+      "DELETE FROM domi_cache WHERE key = ?"
+    );
     this.readSettingsStatement = this.database.prepare(
       "SELECT value, updated_at FROM app_settings WHERE key = ?"
     );
@@ -185,7 +193,23 @@ class WorkbenchStateStore {
   projectWorkspacePath(projectId, projectName, preferredPath) {
     const preferred = preferredPath ? path.resolve(preferredPath) : "";
     const rootPrefix = `${this.projectsDir}${path.sep}`;
+    const sharedTask = String(projectName || "").trim() === "未命名项目";
+    if (sharedTask) {
+      if (preferred.startsWith(rootPrefix) && path.basename(preferred).startsWith("task-")) {
+        return preferred;
+      }
+      const idPart = safeSegment(projectId, "workspace").slice(-24);
+      return path.join(this.projectsDir, `task-${idPart}`);
+    }
+    if (preferred === this.workspaceRoot) return preferred;
     if (preferred.startsWith(rootPrefix)) return preferred;
+    if (preferred && path.isAbsolute(preferred)) {
+      try {
+        if (fs.statSync(preferred).isDirectory()) return preferred;
+      } catch {
+        // Missing external entity directories fall back to a managed runtime workspace.
+      }
+    }
     const projectPart = safeSegment(String(projectName || "").split("·")[0], "project");
     const idPart = safeSegment(projectId, "workspace").slice(-12);
     return path.join(this.projectsDir, `${projectPart}-${idPart}`);
@@ -193,8 +217,12 @@ class WorkbenchStateStore {
 
   ensureProjectWorkspace(projectId, projectName, preferredPath) {
     const workspacePath = this.projectWorkspacePath(projectId, projectName, preferredPath);
-    fs.mkdirSync(path.join(workspacePath, "attachments"), { recursive: true });
-    fs.mkdirSync(path.join(workspacePath, "outputs"), { recursive: true });
+    const managedRuntimeWorkspace = workspacePath === this.workspaceRoot
+      || workspacePath.startsWith(`${this.projectsDir}${path.sep}`);
+    if (managedRuntimeWorkspace) {
+      fs.mkdirSync(path.join(workspacePath, "attachments"), { recursive: true });
+      fs.mkdirSync(path.join(workspacePath, "outputs"), { recursive: true });
+    }
     return workspacePath;
   }
 
@@ -461,9 +489,47 @@ class WorkbenchStateStore {
   }
 
   saveCache(key, value) {
-    const updatedAt = Date.now();
-    this.writeCacheStatement.run(String(key), JSON.stringify(value), updatedAt);
+    const cacheKey = String(key);
+    const currentUpdatedAt = Number(this.readCacheStatement.get(cacheKey)?.updated_at || 0);
+    const updatedAt = Math.max(Date.now(), currentUpdatedAt + 1, this.lastCacheUpdatedAt + 1);
+    this.writeCacheStatement.run(cacheKey, JSON.stringify(value), updatedAt);
+    this.lastCacheUpdatedAt = updatedAt;
     return { value, updatedAt };
+  }
+
+  saveCacheIfUnchanged(key, value, expectedUpdatedAt = 0) {
+    const cacheKey = String(key);
+    const expected = Number(expectedUpdatedAt || 0);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.readCacheStatement.get(cacheKey);
+      const currentUpdatedAt = Number(current?.updated_at || 0);
+      if (currentUpdatedAt !== expected) {
+        this.database.exec("ROLLBACK");
+        return { saved: false, currentUpdatedAt };
+      }
+      const updatedAt = Math.max(Date.now(), currentUpdatedAt + 1, this.lastCacheUpdatedAt + 1);
+      this.writeCacheStatement.run(cacheKey, JSON.stringify(value), updatedAt);
+      this.database.exec("COMMIT");
+      this.lastCacheUpdatedAt = updatedAt;
+      return { saved: true, value, updatedAt };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  pruneCache(prefix, { maxAgeMs = Number.MAX_SAFE_INTEGER, maxEntries = 500 } = {}) {
+    const rows = this.listCacheStatement.all(`${String(prefix)}%`);
+    const cutoff = Date.now() - Math.max(0, Number(maxAgeMs) || 0);
+    const retained = Math.max(0, Number(maxEntries) || 0);
+    const staleKeys = new Set(
+      rows
+        .filter((row, index) => index >= retained || Number(row.updated_at || 0) < cutoff)
+        .map((row) => String(row.key))
+    );
+    for (const key of staleKeys) this.deleteCacheStatement.run(key);
+    return { deleted: staleKeys.size, retained: rows.length - staleKeys.size };
   }
 
   loadAppSettings(key, fallback) {
