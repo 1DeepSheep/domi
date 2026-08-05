@@ -14,6 +14,7 @@ const editor = read("src/RichMarkdownEditor.tsx");
 const editorBoundary = read("src/MarkdownEditorErrorBoundary.tsx");
 const sectionBoundary = read("src/SectionErrorBoundary.tsx");
 const main = read("electron/main.cjs");
+const workspaceBoundary = read("electron/workspace-boundary.cjs");
 const preload = read("electron/preload.cjs");
 const taxonomy = read("src/investmentTaxonomy.ts");
 const canonicalTaxonomy = JSON.parse(read("shared/investment-taxonomy.json"));
@@ -170,6 +171,76 @@ assert.match(
   app,
   /<strong>新建任务<\/strong>/,
   "The primary creation action must be presented as a new task."
+);
+assert.match(
+  app,
+  /async function createThread\(\)[\s\S]*?createProjectWorkspace\(\{[\s\S]*?projectName: NEW_THREAD_PROJECT/,
+  "A generic new task must use an isolated hidden runtime without creating a visible project-library entry."
+);
+assert.match(
+  app,
+  /mentionedDomiProject[\s\S]*?matches\.size === 1[\s\S]*?bindThreadToMentionedProject[\s\S]*?resolveDomiEntityWorkspacePath[\s\S]*?importFiles/,
+  "A uniquely named project in a new task must bind to its canonical directory and archive attachments there."
+);
+assert.match(
+  app,
+  /\? 2 : 3[\s\S]*?bindThreadToMentionedProject[\s\S]*?isUnusedDraftThread\(thread\)[\s\S]*?domi-project-/,
+  "Short Chinese project names and cold-start caches must bind deterministically, while existing generic history moves to a project thread."
+);
+assert.match(
+  app,
+  /let effectiveDomiSnapshot = domiSnapshot[\s\S]*?loadDomiCache\(\)[\s\S]*?bindThreadToMentionedProject\([\s\S]*?effectiveDomiSnapshot/,
+  "A cold-start submission must pass the cache snapshot directly into project binding without waiting for React state."
+);
+assert.match(
+  app,
+  /resolveDomiEntityWorkspacePath\([\s\S]*?snapshot: DomiSnapshot \| null = domiSnapshot[\s\S]*?snapshot\?\.backend[\s\S]*?domiContextForThread\(effectiveDomiSnapshot, targetThread\)/,
+  "A cold-start cache snapshot must drive both canonical workspace resolution and the first-turn project context."
+);
+assert.match(
+  main,
+  /async function importLocalFileData[\s\S]*?const createdTargets = \[\][\s\S]*?for \(const \[index, sourceFile\] of sourceFiles\.entries\(\)\)[\s\S]*?createdTargets\.push\(targetPath\)[\s\S]*?Promise\.allSettled\(createdTargets\.map/,
+  "Clipboard and drag attachment batches must roll back every target when any file fails."
+);
+assert.match(
+  preload,
+  /loadDomiEntityWorkspace[\s\S]*?domi:entity-workspace/,
+  "The renderer bridge must expose the lightweight canonical entity workspace lookup."
+);
+assert.match(
+  main,
+  /ipcMain\.handle\("domi:entity-workspace"[\s\S]*?\.entityWorkspace\(request\)/,
+  "Canonical entity workspace lookup must not require a recursive materials scan."
+);
+assert.match(
+  app,
+  /resolveDomiEntityWorkspacePath[\s\S]*?loadDomiEntityWorkspace/,
+  "Project and person task setup must use the lightweight workspace lookup."
+);
+assert.equal(
+  (app.match(/loadDomiEntityMaterials/g) || []).length,
+  1,
+  "Recursive entity material loading must remain confined to the asynchronous overview refresh."
+);
+assert.doesNotMatch(
+  app,
+  /async function openDomiProject[\s\S]*?loadDomiEntityMaterials[\s\S]*?async function openDomiPerson/,
+  "Opening a project must not block on the recursive materials scan."
+);
+assert.doesNotMatch(
+  app,
+  /async function openDomiPerson[\s\S]*?loadDomiEntityMaterials[\s\S]*?function updateActiveThread/,
+  "Opening a person must not block on the recursive materials scan."
+);
+assert.match(
+  workflows,
+  /只有这些任务才先完整读取 \$domi:domi-router[\s\S]*?普通研究、分析、评级、项目管理或交易任务直接选择最匹配的单项 domi Skill/,
+  "Ordinary domi tasks must not pay the Router startup cost before loading their matching skill."
+);
+assert.match(
+  workflows,
+  /非招股书且用户未要求 slides、HTML、PDF 或 PPTX 时，默认只交付一份完整基本面分析主报告/,
+  "Ordinary fundamental analysis must not create a bundle of redundant intermediate artifacts."
 );
 assert.match(
   app,
@@ -374,8 +445,73 @@ assert.match(
 );
 assert.match(
   main,
-  /run\.output\.trim\(\) && !run\.privateOutput[\s\S]*?output: run\.privateOutput \? "" : run\.output/,
-  "Private Codex results must not be archived or published through the global event stream."
+  /const archiveGenericOutput = !run\.privateOutput[\s\S]*?&& !run\.externalType[\s\S]*?const updateResearchCache = !run\.privateOutput && Boolean/,
+  "Private Codex results must not be archived or written into the project research cache."
+);
+assert.match(
+  main,
+  /const archiveGenericOutput = !run\.privateOutput[\s\S]*?&& !run\.externalType[\s\S]*?secureWorkspaceSubdirectory\([\s\S]*?run\.workspacePath \|\| demoWorkspace,[\s\S]*?"outputs"/,
+  "Canonical project and person directories must not receive generic task output folders."
+);
+assert.match(
+  main,
+  /publishCodexEvent\(run\.sender, run\.runId,[\s\S]*?run\.resolve\(result\);[\s\S]*?queueRunPostProcessing\(run, type, finishedAt\)/,
+  "Foreground Codex results must be delivered before non-critical archive and cache maintenance starts."
+);
+assert.match(
+  main,
+  /output: run\.privateOutput \? "" : run\.output/,
+  "Private Codex results must not be published through the global event stream."
+);
+assert.match(
+  main,
+  /resolveProjectResearchCacheScope[\s\S]*?entityWorkspace[\s\S]*?researchCacheScope\.allowed[\s\S]*?externalType: undefined/,
+  "Project research caching must bind a record ID to its exact canonical local directory."
+);
+assert.match(
+  main,
+  /localEntityRequest[\s\S]*?getDomiIntegration\(\)\.entityWorkspace[\s\S]*?genericWorkspace = requestedWorkspace && !isEntityWorkspace[\s\S]*?const workspacePath = canonicalEntityWorkspace/,
+  "A persisted project or person thread must run in the record's current canonical directory, not a stale task workspace."
+);
+assert.match(
+  main,
+  /validateWorkspace: \(\) => researchCacheWorkspaceIsCurrent\(run\)[\s\S]*?workspaceIdentity: directoryIdentity\(workspacePath\)/,
+  "Background cache writes must revalidate both the record binding and directory identity."
+);
+assert.match(
+  main,
+  /NON_ARCHIVED_WORKFLOWS[\s\S]*?project-research[\s\S]*?&& !NON_ARCHIVED_WORKFLOWS\.has\(run\.workflowId\)/,
+  "Read-only project workflows must not leave duplicate generic output files."
+);
+assert.match(
+  main,
+  /managedStagingAttachment[\s\S]*?fs\.promises\.copyFile[\s\S]*?Promise\.allSettled\(managedStagingSources\.map[\s\S]*?fs\.promises\.unlink/,
+  "Auto-binding must move managed staging attachments into the canonical project instead of leaving duplicates."
+);
+assert.match(
+  main,
+  /secureWorkspaceSubdirectory[\s\S]*?stableDescendantRealPath[\s\S]*?attachmentDirectory[\s\S]*?secureWorkspaceSubdirectory/,
+  "Application-managed attachment and output directories must reject symlink redirection."
+);
+assert.match(
+  main,
+  /validAttachmentWorkspace[\s\S]*?entityWorkspace\(\{ entityType, recordId \}\)[\s\S]*?candidate && !isEntityWorkspace\(candidate\)/,
+  "Attachment writes must require an exact registered entity record instead of accepting an arbitrary category directory."
+);
+assert.match(
+  app,
+  /importFiles\([\s\S]*?\{ entityType: "project", recordId: project\.recordId \}/,
+  "Auto-bound project attachments must carry the exact record identity across IPC."
+);
+assert.match(
+  workspaceBoundary,
+  /realpathSync\.native[\s\S]*?allowRoot: false/,
+  "Entity workspaces must use real paths and reject repository roots or symlink escapes."
+);
+assert.match(
+  main,
+  /pendingRunPostProcessing[\s\S]*?Promise\.allSettled[\s\S]*?drainRunPostProcessing/,
+  "Background archive and cache maintenance must be tracked and drained during app shutdown."
 );
 assert.match(
   main,
@@ -394,8 +530,8 @@ assert.match(
 );
 assert.match(
   main,
-  /runtimeContextPromise = Promise\.all[\s\S]*?threadPromise = client\.start\(\)\.then[\s\S]*?Promise\.all\(\[[\s\S]*?threadPromise,[\s\S]*?runtimeContextPromise/,
-  "Codex startup and external-connection preflight must run concurrently."
+  /researchCachePromise = prepareProjectResearchCache[\s\S]*?repositoryContextPromise = Promise\.resolve[\s\S]*?larkContextPromise = larkRuntimeContext[\s\S]*?threadPromise = client\.start\(\)\.then[\s\S]*?Promise\.all\(\[[\s\S]*?threadPromise,[\s\S]*?repositoryContextPromise,[\s\S]*?larkContextPromise,[\s\S]*?researchCachePromise/,
+  "Codex startup, repository context, external-connection preflight, and research cache preparation must run concurrently."
 );
 assert.match(
   main,

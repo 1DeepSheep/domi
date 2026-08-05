@@ -24,12 +24,20 @@ declare global {
       runCodex: (payload: CodexRunRequest) => Promise<CodexRunResult>;
       stopCodex: (runId: string) => Promise<{ ok: boolean; error?: string }>;
       recoverCodexThread: (threadId: string) => Promise<CodexThreadRecoveryResult>;
-      selectFiles: (workspacePath?: string) => Promise<FileSelectionResult>;
+      selectFiles: (
+        workspacePath?: string,
+        entityRequest?: DomiEntityMaterialsRequest
+      ) => Promise<FileSelectionResult>;
       getPathForFile: (file: File) => string;
-      importFiles: (sourcePaths: string[], workspacePath?: string) => Promise<FileSelectionResult>;
+      importFiles: (
+        sourcePaths: string[],
+        workspacePath?: string,
+        entityRequest?: DomiEntityMaterialsRequest
+      ) => Promise<FileSelectionResult>;
       importFileData: (
         files: ClipboardAttachmentPayload[],
-        workspacePath?: string
+        workspacePath?: string,
+        entityRequest?: DomiEntityMaterialsRequest
       ) => Promise<FileSelectionResult>;
       openResource: (resource: string) => Promise<{ ok: boolean; error?: string; target?: string }>;
       openMarkdownExternal: (resource: string) => Promise<{
@@ -93,6 +101,9 @@ declare global {
       syncPlaud: (request?: DomiPlaudSyncRequest) => Promise<DomiPlaudSyncResult>;
       renamePlaud: (request: DomiPlaudRenameRequest) => Promise<DomiPlaudRenameResult>;
       deletePlaud: (request: DomiPlaudDeleteRequest) => Promise<DomiPlaudDeleteResult>;
+      loadDomiEntityWorkspace: (
+        request: DomiEntityMaterialsRequest
+      ) => Promise<DomiEntityWorkspaceResult>;
       loadDomiEntityMaterials: (request: DomiEntityMaterialsRequest) => Promise<DomiEntityMaterialsResult>;
       onCodexEvent: (callback: (payload: CodexEventPayload) => void) => () => void;
       onUpdateStatus: (callback: (status: UpdateStatus) => void) => () => void;
@@ -851,6 +862,7 @@ export type DomiEntityMaterials = {
   entityType: "project" | "person";
   recordId: string;
   searchRoot: string;
+  workspacePath?: string;
   files: DomiEntityMaterial[];
   generatedAt: number;
 };
@@ -858,6 +870,12 @@ export type DomiEntityMaterials = {
 export type DomiEntityMaterialsRequest = {
   entityType: "project" | "person";
   recordId: string;
+};
+
+export type DomiEntityWorkspaceResult = {
+  ok: boolean;
+  workspacePath?: string;
+  error?: string;
 };
 
 export type DomiEntityMaterialsResult = {
@@ -1115,6 +1133,9 @@ export type CodexRunRequest = {
   serviceTier?: string;
   workspacePath?: string;
   privateOutput?: boolean;
+  externalType?: "project" | "person";
+  externalRecordId?: string;
+  entityUpdatedAt?: number;
 };
 
 export type CodexRunResult = {
