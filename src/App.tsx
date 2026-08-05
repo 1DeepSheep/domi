@@ -1490,7 +1490,8 @@ function domiContextForThread(snapshot: DomiSnapshot | null, thread: Thread) {
       `Notes：${project.notes || "未填写"}`,
       `入库时间：${project.createdAt ? new Date(project.createdAt).toISOString() : "未填写"}`,
       `最近跟进时间：${project.lastFollowup ? new Date(project.lastFollowup).toISOString().slice(0, 10) : "未填写"}`,
-      `Wiki链接：${project.link || "未填写"}`
+      `Wiki链接：${project.link || "未填写"}`,
+      "归档约束：该任务已绑定正式项目。项目相关文件必须直接进入稳定项目目录的纪要／研究／原始材料／导出，不得写入任务 outputs 后再搬运。"
     ].join("\n");
   }
   const person = snapshot.people.find((item) => item.recordId === thread.externalRecordId);
@@ -1508,6 +1509,26 @@ function domiContextForThread(snapshot: DomiSnapshot | null, thread: Thread) {
     `城市：${person.cities.join("、") || "未填写"}`,
     `链接：${person.link || "未填写"}`
   ].join("\n");
+}
+
+function normalizedProjectMention(value: string) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("zh-CN")
+    .replace(/[^a-z0-9\u3400-\u9fff]+/g, "");
+}
+
+function mentionedDomiProject(snapshot: DomiSnapshot | null, text: string) {
+  if (!snapshot) return null;
+  const haystack = normalizedProjectMention(text);
+  if (!haystack) return null;
+  const matches = new Map(
+    snapshot.projects
+      .map((project) => ({ project, key: normalizedProjectMention(project.name) }))
+      .filter(({ key }) => key.length >= (/\p{Script=Han}/u.test(key) ? 2 : 3) && haystack.includes(key))
+      .map(({ project }) => [project.recordId, project] as const)
+  );
+  return matches.size === 1 ? [...matches.values()][0] : null;
 }
 
 const initialThreads: Thread[] = [
@@ -4163,16 +4184,12 @@ function App() {
       if (!targetThread) {
         const workspaceResult = await workbench.createProjectWorkspace({
           projectId,
-          projectName: `${item.fileName} 纪要`
+          projectName: NEW_THREAD_PROJECT
         });
-        if (!workspaceResult.ok || !workspaceResult.workspacePath) {
-          setPlaudError(workspaceResult.error || "无法为该录音创建纪要工作区。 ");
-          return;
-        }
         targetThread = {
           id: createId("thread"),
           projectId,
-          workspacePath: workspaceResult.workspacePath,
+          workspacePath: workspaceResult.ok ? workspaceResult.workspacePath : codexStatus?.workspacePath,
           title: `${item.fileName} 纪要`,
           project: "PLAUD · 纪要入库",
           updatedAt: nowLabel(),
@@ -4468,14 +4485,23 @@ function App() {
     try {
       const threadId = createId("thread");
       const projectId = createId("execution");
-      const workspaceResult = await workbench.createProjectWorkspace({
-        projectId,
-        projectName: suggestion.title
-      });
+      const entityWorkspacePath = suggestion.externalType && suggestion.externalRecordId
+        ? await resolveDomiEntityWorkspacePath(
+            suggestion.externalType,
+            suggestion.externalRecordId
+          )
+        : undefined;
+      const runtimeWorkspace = entityWorkspacePath
+        ? null
+        : await workbench.createProjectWorkspace({
+            projectId,
+            projectName: NEW_THREAD_PROJECT
+          });
       const nextThread: Thread = {
         id: threadId,
         projectId,
-        workspacePath: workspaceResult.ok ? workspaceResult.workspacePath : undefined,
+        workspacePath: entityWorkspacePath
+          || (runtimeWorkspace?.ok ? runtimeWorkspace.workspacePath : codexStatus?.workspacePath),
         title: suggestion.title,
         project: suggestion.projectLabel,
         updatedAt: nowLabel(),
@@ -4799,25 +4825,35 @@ function App() {
     });
   }
 
+  async function resolveDomiEntityWorkspacePath(
+    entityType: "project" | "person",
+    recordId: string,
+    snapshot: DomiSnapshot | null = domiSnapshot
+  ) {
+    if (snapshot?.backend !== "local") return undefined;
+    const result = await workbench.loadDomiEntityWorkspace({ entityType, recordId });
+    return result.ok ? result.workspacePath : undefined;
+  }
+
   async function openDomiProject(project: DomiProject) {
+    const entityWorkspacePath = await resolveDomiEntityWorkspacePath("project", project.recordId);
     const existing = threads.find(
       (thread) => thread.externalType === "project" && thread.externalRecordId === project.recordId
     );
     if (existing) {
+      if (entityWorkspacePath && existing.workspacePath !== entityWorkspacePath) {
+        patchThread(existing.id, { workspacePath: entityWorkspacePath });
+      }
       selectThread(existing.id);
       setDomiQuery("");
       void refreshDomiEntityOverview(existing.id, "project", project);
       return;
     }
     const projectId = `domi-project-${project.recordId}`;
-    const workspaceResult = await workbench.createProjectWorkspace({
-      projectId,
-      projectName: project.name
-    });
     const nextThread: Thread = {
       id: createId("thread"),
       projectId,
-      workspacePath: workspaceResult.ok ? workspaceResult.workspacePath : undefined,
+      workspacePath: entityWorkspacePath || codexStatus?.workspacePath,
       title: project.name,
       project: [project.domain, project.subdomains[0], project.status].filter(Boolean).join(" · "),
       updatedAt: nowLabel(),
@@ -4837,24 +4873,24 @@ function App() {
   }
 
   async function openDomiPerson(person: DomiPerson) {
+    const entityWorkspacePath = await resolveDomiEntityWorkspacePath("person", person.recordId);
     const existing = threads.find(
       (thread) => thread.externalType === "person" && thread.externalRecordId === person.recordId
     );
     if (existing) {
+      if (entityWorkspacePath && existing.workspacePath !== entityWorkspacePath) {
+        patchThread(existing.id, { workspacePath: entityWorkspacePath });
+      }
       selectThread(existing.id);
       setDomiQuery("");
       void refreshDomiEntityOverview(existing.id, "person", person);
       return;
     }
     const projectId = `domi-person-${person.recordId}`;
-    const workspaceResult = await workbench.createProjectWorkspace({
-      projectId,
-      projectName: person.name
-    });
     const nextThread: Thread = {
       id: createId("thread"),
       projectId,
-      workspacePath: workspaceResult.ok ? workspaceResult.workspacePath : undefined,
+      workspacePath: entityWorkspacePath || codexStatus?.workspacePath,
       title: person.name,
       project: [person.organization, cleanPeopleStatus(person.status)].filter(Boolean).join(" · "),
       updatedAt: nowLabel(),
@@ -5120,23 +5156,130 @@ function App() {
     }
   }
 
+  async function bindThreadToMentionedProject(
+    thread: Thread,
+    requestText: string,
+    selectedAttachments: LocalAttachment[],
+    useDomiPlugin: boolean,
+    projectSnapshot: DomiSnapshot | null,
+    workflow?: Workflow
+  ): Promise<{ thread: Thread; attachments: LocalAttachment[] }> {
+    if (!useDomiPlugin || thread.externalType) {
+      return { thread, attachments: selectedAttachments };
+    }
+    if (!projectSnapshot) return { thread, attachments: selectedAttachments };
+    const project = mentionedDomiProject(
+      projectSnapshot,
+      [thread.title, thread.project, requestText, ...selectedAttachments.map((attachment) => attachment.name)].join("\n")
+    );
+    if (!project) return { thread, attachments: selectedAttachments };
+
+    const entityWorkspacePath = await resolveDomiEntityWorkspacePath(
+      "project",
+      project.recordId,
+      projectSnapshot
+    );
+    const workspacePath = entityWorkspacePath || thread.workspacePath || codexStatus?.workspacePath;
+    const patch: Partial<Thread> = {
+      workspacePath,
+      externalType: "project",
+      externalRecordId: project.recordId,
+      project: [project.domain, project.subdomains[0], project.status].filter(Boolean).join(" · ")
+    };
+    if (!thread.manualTitle) {
+      patch.title = `${workflow?.title || "项目任务"}：${project.name}`;
+    }
+    let targetThread: Thread;
+    if (isUnusedDraftThread(thread)) {
+      patchThread(thread.id, patch);
+      targetThread = { ...thread, ...patch };
+    } else {
+      const existing = threads.find((candidate) =>
+        candidate.externalType === "project"
+        && candidate.externalRecordId === project.recordId
+      );
+      if (existing) {
+        patchThread(existing.id, patch);
+        targetThread = { ...existing, ...patch };
+      } else {
+        targetThread = {
+          id: createId("thread"),
+          projectId: `domi-project-${project.recordId}`,
+          workspacePath,
+          title: `${workflow?.title || "项目任务"}：${project.name}`,
+          project: String(patch.project || project.name),
+          updatedAt: nowLabel(),
+          lastActiveAt: Date.now(),
+          pinned: project.rating === "S",
+          manualTitle: true,
+          externalType: "project",
+          externalRecordId: project.recordId,
+          timeline: [],
+          lastUsage: null,
+          messages: []
+        };
+        setThreads((current) => [targetThread, ...current]);
+      }
+      setActiveThreadId(targetThread.id);
+      setWorkspaceView("conversation");
+      clearComposerDraft(targetThread.id);
+    }
+    let projectAttachments = selectedAttachments;
+    if (workspacePath && selectedAttachments.some((attachment) =>
+      !attachment.path.startsWith(`${workspacePath}/`)
+    )) {
+      const imported = await workbench.importFiles(
+        selectedAttachments.map((attachment) => attachment.path),
+        workspacePath,
+        { entityType: "project", recordId: project.recordId }
+      );
+      if (imported.ok && imported.files.length === selectedAttachments.length) {
+        projectAttachments = imported.files;
+      } else if (!imported.ok) {
+        workbench.reportRendererIssue({
+          kind: "document-operation",
+          message: imported.error || `无法把 ${selectedAttachments.length} 个附件归档到项目原始材料目录。`
+        });
+      }
+    }
+    return {
+      thread: targetThread,
+      attachments: projectAttachments
+    };
+  }
+
   async function submitToCodex(
     workflow?: Workflow,
     overrideInput?: string,
     options: SubmitToCodexOptions = {}
   ) {
-    const targetThread = options.thread || activeThread;
-    const targetAlreadyRunning = Boolean(activeRunsByThread[targetThread.id])
-      || [...runContextRef.current.values()].some((context) => context.threadId === targetThread.id);
-    if (targetAlreadyRunning) return;
-
+    let targetThread = options.thread || activeThread;
     const useDomiPlugin = options.useDomiPlugin ?? domiPluginEnabled;
     const rawInput = (overrideInput ?? input).trim();
-    const selectedAttachments = options.attachments ?? attachments;
+    let selectedAttachments = options.attachments ?? attachments;
     const messageText = rawInput || workflow?.defaultPrompt || (selectedAttachments.length ? "请分析所附材料" : "");
     if (!messageText) {
       return;
     }
+    let effectiveDomiSnapshot = domiSnapshot;
+    if (useDomiPlugin && !effectiveDomiSnapshot) {
+      const cached = await workbench.loadDomiCache();
+      effectiveDomiSnapshot = cached.snapshot || null;
+      if (effectiveDomiSnapshot) setDomiSnapshot(effectiveDomiSnapshot);
+    }
+    const binding = await bindThreadToMentionedProject(
+      targetThread,
+      messageText,
+      selectedAttachments,
+      useDomiPlugin,
+      effectiveDomiSnapshot,
+      workflow
+    );
+    targetThread = binding.thread;
+    selectedAttachments = binding.attachments;
+    const targetAlreadyRunning = Boolean(activeRunsByThread[targetThread.id])
+      || [...runContextRef.current.values()].some((context) => context.threadId === targetThread.id);
+    if (targetAlreadyRunning) return;
     const displayText = options.displayText?.trim() || messageText;
 
     const runId = createId("run");
@@ -5175,7 +5318,7 @@ function App() {
     const basePrompt = workflowPrompt(
       workflow,
       messageText,
-      domiContextForThread(domiSnapshot, targetThread),
+      domiContextForThread(effectiveDomiSnapshot, targetThread),
       useDomiPlugin
     );
     const prompt = selectedAttachments.length
@@ -5194,7 +5337,12 @@ function App() {
       reasoningEffort: options.reasoningEffort ?? reasoningEffort,
       serviceTier: options.serviceTier ?? serviceTier,
       background: options.background,
-      workspacePath: targetThread.workspacePath
+      workspacePath: targetThread.workspacePath,
+      externalType: targetThread.externalType,
+      externalRecordId: targetThread.externalRecordId,
+      entityUpdatedAt: targetThread.externalType === "project"
+        ? effectiveDomiSnapshot?.projects.find((project) => project.recordId === targetThread.externalRecordId)?.updatedAt
+        : effectiveDomiSnapshot?.people.find((person) => person.recordId === targetThread.externalRecordId)?.updatedAt
     });
 
     if (result.threadId) {
@@ -5287,7 +5435,14 @@ function App() {
   }
 
   async function chooseAttachments() {
-    const result = await workbench.selectFiles(activeThread.workspacePath);
+    const entityRequest = activeThread.externalRecordId
+      && ["project", "person"].includes(activeThread.externalType || "")
+      ? {
+          entityType: activeThread.externalType as "project" | "person",
+          recordId: activeThread.externalRecordId
+        }
+      : undefined;
+    const result = await workbench.selectFiles(activeThread.workspacePath, entityRequest);
     if (!result.ok) {
       setAttachmentError(result.error || "无法添加所选文件。");
       return;
@@ -5304,6 +5459,14 @@ function App() {
 
   async function importAttachmentFiles(files: File[]) {
     if (files.length === 0) return;
+
+    const entityRequest = activeThread.externalRecordId
+      && ["project", "person"].includes(activeThread.externalType || "")
+      ? {
+          entityType: activeThread.externalType as "project" | "person",
+          recordId: activeThread.externalRecordId
+        }
+      : undefined;
 
     const sourcePaths: string[] = [];
     const inMemoryFiles: File[] = [];
@@ -5324,7 +5487,11 @@ function App() {
     const importedFiles: LocalAttachment[] = [];
     const errors: string[] = [];
     if (sourcePaths.length > 0) {
-      const pathResult = await workbench.importFiles(sourcePaths, activeThread.workspacePath);
+      const pathResult = await workbench.importFiles(
+        sourcePaths,
+        activeThread.workspacePath,
+        entityRequest
+      );
       if (pathResult.ok) {
         importedFiles.push(...pathResult.files);
       } else {
@@ -5341,7 +5508,11 @@ function App() {
             data: await file.arrayBuffer()
           }))
         );
-        const dataResult = await workbench.importFileData(payloads, activeThread.workspacePath);
+        const dataResult = await workbench.importFileData(
+          payloads,
+          activeThread.workspacePath,
+          entityRequest
+        );
         if (dataResult.ok) {
           importedFiles.push(...dataResult.files);
         } else {
@@ -5362,7 +5533,18 @@ function App() {
 
   async function importAttachmentPaths(sourcePaths: string[]) {
     if (sourcePaths.length === 0) return;
-    const result = await workbench.importFiles(sourcePaths, activeThread.workspacePath);
+    const entityRequest = activeThread.externalRecordId
+      && ["project", "person"].includes(activeThread.externalType || "")
+      ? {
+          entityType: activeThread.externalType as "project" | "person",
+          recordId: activeThread.externalRecordId
+        }
+      : undefined;
+    const result = await workbench.importFiles(
+      sourcePaths,
+      activeThread.workspacePath,
+      entityRequest
+    );
     if (!result.ok) {
       setAttachmentError(result.error || "无法导入剪贴板中的本地文件。");
       return;
@@ -5469,7 +5651,7 @@ function App() {
       const nextThread: Thread = {
         id: threadId,
         projectId,
-        workspacePath: workspaceResult.ok ? workspaceResult.workspacePath : undefined,
+        workspacePath: workspaceResult.ok ? workspaceResult.workspacePath : codexStatus?.workspacePath,
         title: NEW_THREAD_TITLE,
         project: NEW_THREAD_PROJECT,
         updatedAt: nowLabel(),

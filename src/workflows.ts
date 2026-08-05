@@ -322,10 +322,10 @@ export const workflows: Workflow[] = [
     title: "项目研究",
     shortTitle: "研究项目",
     skill: "$domi:domi-router",
-    description: "先读内部材料，再完成项目只读研究；不评级、不归档、不写入外部系统。",
+    description: "先读内部材料，再完成项目只读研究；不评级、不保存研究报告、不更新结构化记录。",
     output: "项目研究、关键判断、信息缺口和是否继续评级入库的确认",
     defaultPrompt:
-      "运行 domi 投资项目只读研究工作流。优先使用当前绑定项目或用户输入的项目目标；如果目标仍不明确，先询问项目名称、官网或材料。目标明确后调用 desk-research，先查询内部已有材料再开展公开研究；本轮不要评级、归档或写入外部系统，完成后询问是否继续评级并入库。",
+      "运行 domi 投资项目只读研究工作流。优先使用当前绑定项目或用户输入的项目目标；如果目标仍不明确，先询问项目名称、官网或材料。目标明确后调用 desk-research，先查询内部已有材料再开展公开研究；本轮不要评级、保存研究报告或更新结构化记录，完成后询问是否继续评级并入库。用户本轮明确选择或拖入的附件仍属于该项目原始材料，应保留在项目固定目录中。",
     hidden: true,
     webSearch: true
   },
@@ -406,7 +406,7 @@ export const workflows: Workflow[] = [
     description: "分析招股书、财务报表、模型或BP中的业务、财务与经营质量。",
     output: "研究底稿、财务拆解、关键风险和验证清单",
     defaultPrompt:
-      "请识别当前材料类型，并按 Investment Analysis 的质量门完成公司基本面分析。",
+      "请识别当前材料类型并完成公司基本面分析。若不是招股书 full analysis，且我没有要求 slides、HTML、PDF 或 PPTX，默认把财务拆解、关键风险、证据与验证清单整合为一份主报告，不创建多份控制件或重复版本。",
     webSearch: true
   },
   {
@@ -446,6 +446,35 @@ export const quickStartWorkflows = workflows.filter(
   (workflow) => workflow.quickStart
 );
 
+const PROJECT_CONTEXT_WORKFLOW_IDS = new Set([
+  "domi-router",
+  "meeting-prep",
+  "project-research",
+  "project-intake",
+  "meeting-note",
+  "desk-research",
+  "investment-review",
+  "investment-analysis",
+  "ic-memo",
+  "investment-mgmt",
+  "deal-negotiation"
+]);
+
+const PROJECT_READ_ONLY_WORKFLOW_IDS = new Set([
+  "meeting-prep",
+  "project-research"
+]);
+
+const PARALLEL_RESEARCH_WORKFLOW_IDS = new Set([
+  "meeting-prep",
+  "project-research",
+  "project-intake",
+  "desk-research",
+  "investment-review",
+  "investment-analysis",
+  "ic-memo"
+]);
+
 export function workflowPrompt(
   workflow: Workflow | undefined,
   userInput: string,
@@ -468,9 +497,13 @@ export function workflowPrompt(
     return [
       "你正在 domi 投资工作台中运行，底层是本地 Codex。",
       "当前启用的分析师是 domi-AI分析师。必须使用已安装的 domi 插件完成本轮任务。",
-      "开始前先采用并完整读取 domi 插件中的 $domi:domi-router；根据用户意图路由到插件内最匹配的投资 Skill，并在进入对应阶段前完整读取该 Skill 及其 references。不要使用同名的非 domi Skill 替代。",
-      "如果请求不属于 Router 已定义的多阶段工作流，仍应从 domi 插件中选择最匹配的单项投资 Skill；确实没有匹配 Skill 时，再以投资分析师身份直接回答。",
+      "先判断是否属于 PLAUD、录音、纪要后续入库等明确的多阶段串联任务；只有这些任务才先完整读取 $domi:domi-router。普通研究、分析、评级、项目管理或交易任务直接选择最匹配的单项 domi Skill，并只读取该 Skill 要求的 references，避免重复加载 Router。不要使用同名的非 domi Skill 替代。",
+      "确实没有匹配 Skill 时，再以投资分析师身份直接回答；不得为了形式完整而加载与本轮无关的 Skill 或 references。",
       "请用中文直接完成任务。优先使用已有 Watching List、People、Wiki、本地资料库和下面的 domi 绑定上下文，避免重复研究；不得编造项目、人脉、融资、财务或会议事实；外部写入必须遵循对应 Skill 的确认、去重和字段校验规则。",
+      "若请求对应资料库中的具体项目，先按项目名查重并绑定稳定项目目录；项目材料和产物统一进入该项目的纪要／研究／原始材料／导出目录，不得写入当前任务工作区的 outputs 后再搬运。查询优先使用 SQLite 与当前实体目录，不递归扫描整个工作区。",
+      "如果运行上下文提供本机项目前次研究快照，先复用其中的研究摘录和来源线索；网址只作为线索，时效事实、关键判断、证据缺口和冲突信息仍须用当前材料或最新一手来源核验。需要联网时，把互不依赖的查询合并为并行多查询调用，不要逐项串行等待。",
+      "标准或深度研究若至少包含两个相互独立的事实簇，且当前 Codex 支持子任务并行，应按任务内容一次性派发最多 3 个互斥的只读子任务（例如产品与技术、团队与融资、市场与竞品）；子任务不得写数据库或文件、不得向用户提问、不得继续派生子任务。快速研究或单点核验只使用并行多查询，不强制创建子任务。所有正式写入、关键回读和最终判断由当前主任务串行完成，并合并证据、去除转载重复、标记来源冲突。",
+      "主回答和用户要求的正式文档完成必要保存与关键回读后立即返回；不要为了生成重复副本、刷新全库索引、整理内部回执或其他非关键收尾延迟答复，客户端会在后台维护通用运行归档和研究缓存。",
       domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
       "",
       "用户请求：",
@@ -479,6 +512,13 @@ export function workflowPrompt(
   }
 
   const outputFile = `./outputs/${new Date().toISOString().slice(0, 10)}-${workflow.id}.md`;
+  const projectContextWorkflow = PROJECT_CONTEXT_WORKFLOW_IDS.has(workflow.id);
+  const projectReadOnlyWorkflow = PROJECT_READ_ONLY_WORKFLOW_IDS.has(workflow.id);
+  const outputRule = projectReadOnlyWorkflow
+    ? "本轮研究结论只在主回答中交付，不保存研究报告、不更新结构化记录或外部系统，也不写任务 outputs。仍应绑定当前项目或人物的稳定实体目录以读取既有材料；用户本轮明确选择或拖入的新附件视为该实体的原始材料，可归入其原始材料目录，这是唯一允许的前置写入。"
+    : projectContextWorkflow
+      ? "项目相关产物不得写入任务工作区的 outputs。先按当前后端查重并定位稳定项目；只有用户要求、工作流定义或对应 Skill 明确要求持久化时，才把纪要／研究／原始材料／导出写入该项目的规范位置并做关键回读；否则直接在主回答中交付。查询优先使用 SQLite 与当前实体目录，不递归扫描整个工作区。"
+      : `默认直接在主回答中交付；只有用户明确要求文件时，才按 Skill 约定写入文件，不要同时生成重复副本（建议文件名：${outputFile}）。`;
   if (workflow.id === "investment-radar") {
     return [
       "你正在 domi 投资工作台中运行，底层是本地 Codex。",
@@ -520,8 +560,17 @@ export function workflowPrompt(
     "1. 遵循该 domi Skill 的去重、核验、信息不足和外部写入确认规则。",
     "2. 先使用已有 Watching List、People、Wiki 或本地资料库上下文，避免重复研究和重复建档。",
     "3. 不得编造项目、人脉、融资、财务或会议事实。",
-    `4. 遵循 Skill 自己的产物路径；如 Skill 未指定路径，长产物写入 ${outputFile}。`,
+    `4. ${outputRule}`,
     "5. 不要修改 domi 工作台应用源码。",
+    PARALLEL_RESEARCH_WORKFLOW_IDS.has(workflow.id)
+      ? "6. 若运行上下文提供本机项目前次研究快照，先复用其中的研究摘录和来源线索；网址只作线索，时效事实、关键判断、证据缺口和冲突信息仍须用当前材料或最新一手来源核验。把互不依赖的查询合并成并行多查询调用。标准或深度研究至少包含两个独立事实簇时，如当前 Codex 支持子任务并行，应按任务内容一次性派发最多 3 个互斥的只读子任务（例如产品与技术、团队与融资、市场与竞品）；子任务不得写数据库或文件、不得向用户提问、不得继续派生子任务。快速研究或单点核验不强制创建子任务。正式写入、关键回读和最终判断只由当前主任务串行完成，并合并证据、去除转载重复、标记来源冲突。"
+      : "",
+    projectContextWorkflow
+      ? "7. 用户要求的正式文档完成必要保存和关键写后验证后立即返回；不要等待重复副本、全库索引刷新、内部回执排版或通用运行归档，客户端会在后台更新研究缓存和非关键归档。"
+      : "",
+    workflow.id === "investment-analysis"
+      ? "8. 非招股书且用户未要求 slides、HTML、PDF 或 PPTX 时，默认只交付一份完整基本面分析主报告；把必要证据、计算口径和验证清单整合进主报告，不额外创建“交付版／研究底稿／证据账本／披露完整性清单”等多份中间文件。只有招股书 full analysis、slides 或用户明确要求审计控制件时，才执行对应的多文件质量门。"
+      : "",
     "",
     "用户输入：",
     trimmed || workflow.defaultPrompt

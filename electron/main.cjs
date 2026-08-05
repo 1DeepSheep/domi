@@ -1,5 +1,6 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, Notification, protocol, safeStorage, session, shell } = require("electron");
 const { execFile } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -51,6 +52,18 @@ const { normalizeWebResource } = require("./resource-target.cjs");
 const { normalizeLocalDocumentResource } = require("./document-resource.cjs");
 const { prepareApplicationBrandPaths } = require("./brand-migration.cjs");
 const { withMediaRuntimeEnvironment } = require("./media-runtime.cjs");
+const {
+  preparedProjectResearchCacheContext,
+  prepareProjectResearchCache,
+  updateProjectResearchCache
+} = require("./research-cache.cjs");
+const {
+  isEntityWorkspace: workspaceIsEntity,
+  pathIsWithin,
+  projectResearchCacheScope: resolveProjectResearchCacheScope,
+  stableDescendantRealPath,
+  validCodexWorkspace: validateCodexWorkspace
+} = require("./workspace-boundary.cjs");
 
 const brandPaths = prepareApplicationBrandPaths(app);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -80,6 +93,26 @@ protocol.registerSchemesAsPrivileged([
 ]);
 const activeRuns = new Map();
 const liveCodexThreads = new Map();
+const pendingRunPostProcessing = new Set();
+let researchCacheWriteQueue = Promise.resolve();
+const NON_ARCHIVED_WORKFLOWS = new Set([
+  "deal-negotiation",
+  "desk-research",
+  "domi-router",
+  "ic-memo",
+  "investment-analysis",
+  "investment-mgmt",
+  "investment-radar",
+  "investment-review",
+  "meeting-prep",
+  "meeting-note",
+  "people-intake",
+  "project-intake",
+  "project-research",
+  "schedule",
+  "sourcing",
+  "task"
+]);
 const allowedMarkdownAssetPaths = new Set();
 const CODEX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const CODEX_CHECK_CACHE_TTL_MS = 60 * 1000;
@@ -313,19 +346,132 @@ function getUpdateService() {
   return updateService;
 }
 
-function validProjectWorkspace(candidate) {
-  if (!candidate) {
-    return null;
-  }
-  const resolved = path.resolve(candidate);
-  return resolved.startsWith(`${path.resolve(projectsDir)}${path.sep}`) ? resolved : null;
+function validCodexWorkspace(candidate) {
+  return validateCodexWorkspace({
+    candidate,
+    demoWorkspace,
+    projectsDir,
+    settings: getAppSettings().load().settings
+  });
 }
 
-async function importLocalFiles(requestedWorkspacePath, requestedPaths) {
+function isEntityWorkspace(workspacePath) {
+  return workspaceIsEntity({
+    workspacePath,
+    settings: getAppSettings().load().settings
+  });
+}
+
+function projectResearchCacheScope(payload, workspacePath) {
+  return resolveProjectResearchCacheScope({
+    payload,
+    workspacePath,
+    settings: getAppSettings().load().settings,
+    resolveEntityWorkspace: (request) => getDomiIntegration().entityWorkspace(request)
+  });
+}
+
+function directoryIdentity(directoryPath) {
+  try {
+    const canonicalPath = fs.realpathSync.native(directoryPath);
+    const stat = fs.statSync(canonicalPath);
+    if (!stat.isDirectory()) return null;
+    return {
+      canonicalPath,
+      device: String(stat.dev),
+      inode: String(stat.ino)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameDirectoryIdentity(left, right) {
+  return Boolean(left && right)
+    && left.canonicalPath === right.canonicalPath
+    && left.device === right.device
+    && left.inode === right.inode;
+}
+
+function researchCacheWorkspaceIsCurrent(run) {
+  const scope = projectResearchCacheScope({
+    externalType: run.externalType,
+    externalRecordId: run.externalRecordId
+  }, run.workspacePath);
+  return Boolean(scope.allowed && scope.workspacePath)
+    && sameDirectoryIdentity(run.workspaceIdentity, directoryIdentity(scope.workspacePath));
+}
+
+function enqueueResearchCacheWrite(operation) {
+  const queued = researchCacheWriteQueue
+    .catch(() => undefined)
+    .then(operation);
+  researchCacheWriteQueue = queued.then(() => undefined, () => undefined);
+  return queued;
+}
+
+function researchCacheNamespace() {
+  const settings = getAppSettings().load().settings;
+  const backend = settings.storageBackend === "feishu" ? "feishu" : "local";
+  const identity = backend === "feishu"
+    ? [settings.projectBaseToken, settings.projectTableId, settings.wikiSpaceId]
+    : [settings.localRepositoryDir, settings.localDatabasePath];
+  const digest = crypto
+    .createHash("sha256")
+    .update(identity.map((value) => String(value || "")).join("\0"))
+    .digest("hex")
+    .slice(0, 16);
+  return `${backend}-${digest}`;
+}
+
+function secureWorkspaceSubdirectory(workspacePath, directoryName) {
+  const requested = path.join(workspacePath, directoryName);
+  fs.mkdirSync(requested, { recursive: true });
+  const verified = stableDescendantRealPath(workspacePath, requested, { allowRoot: false });
+  if (!verified) {
+    throw new Error(`${directoryName} 目录不是当前工作区内的安全目录。`);
+  }
+  return verified;
+}
+
+function attachmentDirectory(workspacePath) {
+  return secureWorkspaceSubdirectory(
+    workspacePath,
+    isEntityWorkspace(workspacePath) ? "原始材料" : "attachments"
+  );
+}
+
+function validAttachmentWorkspace(requestedWorkspacePath, entityRequest) {
+  const entityType = ["project", "person"].includes(entityRequest?.entityType)
+    ? entityRequest.entityType
+    : "";
+  const recordId = String(entityRequest?.recordId || "").trim();
+  if (entityType && recordId && getAppSettings().load().settings.storageBackend === "local") {
+    return validCodexWorkspace(getDomiIntegration().entityWorkspace({ entityType, recordId })) || "";
+  }
+  const candidate = validCodexWorkspace(requestedWorkspacePath);
+  return candidate && !isEntityWorkspace(candidate) ? candidate : demoWorkspace;
+}
+
+function managedStagingAttachment(filePath) {
+  const parent = path.dirname(path.resolve(String(filePath || "")));
+  if (path.basename(parent) !== "attachments") return false;
+  return pathIsWithin(demoWorkspace, parent)
+    || pathIsWithin(projectsDir, parent);
+}
+
+async function importLocalFiles(requestedWorkspacePath, requestedPaths, entityRequest) {
   ensureDemoWorkspace();
-  const workspacePath = validProjectWorkspace(requestedWorkspacePath) || demoWorkspace;
-  const attachmentsDir = path.join(workspacePath, "attachments");
-  fs.mkdirSync(attachmentsDir, { recursive: true });
+  const workspacePath = validAttachmentWorkspace(requestedWorkspacePath, entityRequest);
+  if (!workspacePath) {
+    return { ok: false, canceled: false, files: [], error: "没有找到该项目或人物的固定资料目录。" };
+  }
+  let attachmentsDir;
+  try {
+    attachmentsDir = attachmentDirectory(workspacePath);
+  } catch (error) {
+    return { ok: false, canceled: false, files: [], error: error instanceof Error ? error.message : String(error) };
+  }
 
   const sourcePaths = Array.isArray(requestedPaths)
     ? [...new Set(requestedPaths.filter((value) => typeof value === "string" && value.trim()))]
@@ -334,24 +480,32 @@ async function importLocalFiles(requestedWorkspacePath, requestedPaths) {
     return { ok: false, canceled: false, files: [], error: "没有读取到可导入的本地文件。" };
   }
 
+  const createdTargets = [];
   try {
     const stamp = Date.now();
-    const files = await Promise.all(
-      sourcePaths.map(async (sourcePath, index) => {
-        const resolvedSourcePath = path.resolve(sourcePath);
-        const sourceStat = await fs.promises.stat(resolvedSourcePath);
-        if (!sourceStat.isFile()) {
-          throw new Error(`${path.basename(resolvedSourcePath)} 不是可导入的文件。`);
-        }
-        const name = path.basename(resolvedSourcePath);
-        const targetPath = path.join(attachmentsDir, `${stamp}-${index}-${name}`);
-        await fs.promises.copyFile(resolvedSourcePath, targetPath);
-        const stat = await fs.promises.stat(targetPath);
-        return { name, path: targetPath, size: stat.size };
-      })
-    );
+    const files = [];
+    const managedStagingSources = [];
+    for (const [index, sourcePath] of sourcePaths.entries()) {
+      const resolvedSourcePath = path.resolve(sourcePath);
+      const sourceStat = await fs.promises.stat(resolvedSourcePath);
+      if (!sourceStat.isFile()) {
+        throw new Error(`${path.basename(resolvedSourcePath)} 不是可导入的文件。`);
+      }
+      attachmentsDir = attachmentDirectory(workspacePath);
+      const name = path.basename(resolvedSourcePath);
+      const targetPath = path.join(attachmentsDir, `${stamp}-${index}-${name}`);
+      await fs.promises.copyFile(resolvedSourcePath, targetPath, fs.constants.COPYFILE_EXCL);
+      createdTargets.push(targetPath);
+      const stat = await fs.promises.stat(targetPath);
+      files.push({ name, path: targetPath, size: stat.size });
+      if (isEntityWorkspace(workspacePath) && managedStagingAttachment(resolvedSourcePath)) {
+        managedStagingSources.push(resolvedSourcePath);
+      }
+    }
+    await Promise.allSettled(managedStagingSources.map((sourcePath) => fs.promises.unlink(sourcePath)));
     return { ok: true, canceled: false, files };
   } catch (error) {
+    await Promise.allSettled(createdTargets.map((targetPath) => fs.promises.unlink(targetPath)));
     return {
       ok: false,
       canceled: false,
@@ -371,39 +525,49 @@ function sanitizedAttachmentName(candidate, index) {
   return sanitized || fallback;
 }
 
-async function importLocalFileData(requestedWorkspacePath, requestedFiles) {
+async function importLocalFileData(requestedWorkspacePath, requestedFiles, entityRequest) {
   ensureDemoWorkspace();
-  const workspacePath = validProjectWorkspace(requestedWorkspacePath) || demoWorkspace;
-  const attachmentsDir = path.join(workspacePath, "attachments");
-  fs.mkdirSync(attachmentsDir, { recursive: true });
+  const workspacePath = validAttachmentWorkspace(requestedWorkspacePath, entityRequest);
+  if (!workspacePath) {
+    return { ok: false, canceled: false, files: [], error: "没有找到该项目或人物的固定资料目录。" };
+  }
+  let attachmentsDir;
+  try {
+    attachmentsDir = attachmentDirectory(workspacePath);
+  } catch (error) {
+    return { ok: false, canceled: false, files: [], error: error instanceof Error ? error.message : String(error) };
+  }
 
   const sourceFiles = Array.isArray(requestedFiles) ? requestedFiles : [];
   if (sourceFiles.length === 0) {
     return { ok: false, canceled: false, files: [], error: "剪贴板中没有可导入的文件。" };
   }
 
+  const createdTargets = [];
   try {
     const stamp = Date.now();
-    const files = await Promise.all(
-      sourceFiles.map(async (sourceFile, index) => {
-        const data = sourceFile?.data;
-        const bytes = data instanceof ArrayBuffer
-          ? Buffer.from(data)
-          : ArrayBuffer.isView(data)
-            ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
-            : null;
-        if (!bytes || bytes.length === 0) {
-          throw new Error(`${sanitizedAttachmentName(sourceFile?.name, index)} 没有可读取的文件内容。`);
-        }
-        const name = sanitizedAttachmentName(sourceFile?.name, index);
-        const targetPath = path.join(attachmentsDir, `${stamp}-${index}-${name}`);
-        await fs.promises.writeFile(targetPath, bytes, { flag: "wx" });
-        const stat = await fs.promises.stat(targetPath);
-        return { name, path: targetPath, size: stat.size };
-      })
-    );
+    const files = [];
+    for (const [index, sourceFile] of sourceFiles.entries()) {
+      const data = sourceFile?.data;
+      const bytes = data instanceof ArrayBuffer
+        ? Buffer.from(data)
+        : ArrayBuffer.isView(data)
+          ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+          : null;
+      if (!bytes || bytes.length === 0) {
+        throw new Error(`${sanitizedAttachmentName(sourceFile?.name, index)} 没有可读取的文件内容。`);
+      }
+      attachmentsDir = attachmentDirectory(workspacePath);
+      const name = sanitizedAttachmentName(sourceFile?.name, index);
+      const targetPath = path.join(attachmentsDir, `${stamp}-${index}-${name}`);
+      await fs.promises.writeFile(targetPath, bytes, { flag: "wx" });
+      createdTargets.push(targetPath);
+      const stat = await fs.promises.stat(targetPath);
+      files.push({ name, path: targetPath, size: stat.size });
+    }
     return { ok: true, canceled: false, files };
   } catch (error) {
+    await Promise.allSettled(createdTargets.map((targetPath) => fs.promises.unlink(targetPath)));
     return {
       ok: false,
       canceled: false,
@@ -413,7 +577,7 @@ async function importLocalFileData(requestedWorkspacePath, requestedFiles) {
   }
 }
 
-async function selectLocalFiles(sender, requestedWorkspacePath) {
+async function selectLocalFiles(sender, requestedWorkspacePath, entityRequest) {
   const owner = BrowserWindow.fromWebContents(sender);
   const result = await dialog.showOpenDialog(owner, {
     title: "选择投资材料",
@@ -435,7 +599,7 @@ async function selectLocalFiles(sender, requestedWorkspacePath) {
   if (result.canceled) {
     return { ok: true, canceled: true, files: [] };
   }
-  return importLocalFiles(requestedWorkspacePath, result.filePaths);
+  return importLocalFiles(requestedWorkspacePath, result.filePaths, entityRequest);
 }
 
 function expandHomeDirectory(input) {
@@ -1195,6 +1359,73 @@ function armRunIdleTimeout(run) {
   run.idleTimer.unref();
 }
 
+function queueRunPostProcessing(run, type, completedAt) {
+  if (type !== "completed" || !run.output.trim()) return;
+  const archiveGenericOutput = !run.privateOutput
+    && !run.externalType
+    && !NON_ARCHIVED_WORKFLOWS.has(run.workflowId)
+    && !isEntityWorkspace(run.workspacePath || demoWorkspace);
+  const updateResearchCache = !run.privateOutput && Boolean(run.researchCache?.identity);
+  if (!archiveGenericOutput && !updateResearchCache) return;
+
+  const task = new Promise((resolve) => setImmediate(resolve)).then(async () => {
+    const archiveTask = archiveGenericOutput
+      ? (async () => {
+          const archiveDir = secureWorkspaceSubdirectory(
+            run.workspacePath || demoWorkspace,
+            "outputs"
+          );
+          const stamp = new Date(completedAt).toISOString().replace(/[:.]/g, "-");
+          await fs.promises.writeFile(
+            path.join(archiveDir, `${stamp}-${run.runId}.md`),
+            run.output,
+            "utf8"
+          );
+          return true;
+        })()
+      : Promise.resolve(false);
+    const cacheWorkspaceValid = updateResearchCache && researchCacheWorkspaceIsCurrent(run);
+    const cacheTask = cacheWorkspaceValid
+      ? enqueueResearchCacheWrite(() => updateProjectResearchCache({
+            stateStore: getStateStore(),
+            preparation: run.researchCache,
+            output: run.output,
+            appVersion: app.getVersion(),
+            completedAt,
+            workspacePath: run.researchCache.workspacePath || "",
+            sourceThreadId: run.threadId,
+            validateWorkspace: () => researchCacheWorkspaceIsCurrent(run)
+          }))
+      : Promise.resolve({ updated: false });
+    const [archiveResult, cacheResult] = await Promise.allSettled([archiveTask, cacheTask]);
+    if (archiveResult.status === "rejected") {
+        appendRuntimeLog("codex-run-postprocess-failed", {
+          stage: "archive",
+          message: boundedRuntimeText(archiveResult.reason?.message || archiveResult.reason, 2_000)
+        });
+    }
+    if (cacheResult.status === "rejected") {
+      appendRuntimeLog("codex-run-postprocess-failed", {
+        stage: "research-cache",
+        message: boundedRuntimeText(cacheResult.reason?.message || cacheResult.reason, 2_000)
+      });
+    }
+    const cacheValue = cacheResult.status === "fulfilled" ? cacheResult.value : {};
+      appendRuntimeLog("codex-run-postprocess", {
+        archived: archiveResult.status === "fulfilled" && archiveResult.value === true,
+        cacheUpdated: Boolean(cacheValue.updated),
+        cacheFileCount: Number(cacheValue.fileCount || 0),
+        cacheSourceCount: Number(cacheValue.sourceCount || 0)
+      });
+  });
+  pendingRunPostProcessing.add(task);
+  void task.then(
+    () => pendingRunPostProcessing.delete(task),
+    () => pendingRunPostProcessing.delete(task)
+  );
+  return task;
+}
+
 function finishRun(run, type, details = {}) {
   if (run.finished) {
     return;
@@ -1205,14 +1436,6 @@ function finishRun(run, type, details = {}) {
 
   const stopped = type === "stopped";
   const ok = type === "completed" || stopped;
-  let outputPath = "";
-  if (type === "completed" && run.output.trim() && !run.privateOutput) {
-    const archiveDir = path.join(run.workspacePath || demoWorkspace, "outputs");
-    fs.mkdirSync(archiveDir, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    outputPath = path.join(archiveDir, `${stamp}-${run.runId}.md`);
-    fs.writeFileSync(outputPath, run.output, "utf8");
-  }
   const result = {
     ok,
     stopped,
@@ -1222,7 +1445,7 @@ function finishRun(run, type, details = {}) {
     output: run.output,
     error: ok ? "" : details.error || "Codex 执行失败。",
     workspacePath: run.workspacePath || demoWorkspace,
-    outputPath,
+    outputPath: "",
     eventCount: run.eventCount
   };
   const finishedAt = Date.now();
@@ -1235,7 +1458,8 @@ function finishRun(run, type, details = {}) {
       ? Math.max(0, run.turnAcceptedAt - (run.threadReadyAt || run.acceptedAt))
       : undefined,
     totalMs: Math.max(0, finishedAt - run.acceptedAt),
-    eventCount: run.eventCount
+    eventCount: run.eventCount,
+    researchCacheHit: Boolean(run.researchCache?.cacheHit)
   });
 
   publishCodexEvent(run.sender, run.runId, {
@@ -1244,10 +1468,11 @@ function finishRun(run, type, details = {}) {
     turnId: run.turnId,
     output: run.privateOutput ? "" : run.output,
     error: result.error,
-    outputPath,
+    outputPath: "",
     eventCount: run.eventCount
   });
   run.resolve(result);
+  queueRunPostProcessing(run, type, finishedAt);
 }
 
 function prepareCodexConnectionMaintenance(blockedError) {
@@ -2021,11 +2246,38 @@ async function confirmExternalDomiRun(sender, payload) {
 
 async function runCodex(sender, payload) {
   ensureDemoWorkspace();
-  const workspacePath = validProjectWorkspace(payload?.workspacePath) || demoWorkspace;
+  const settings = getAppSettings().load().settings;
+  const localEntityRequest = settings.storageBackend === "local"
+    && ["project", "person"].includes(payload?.externalType)
+    && String(payload?.externalRecordId || "").trim()
+    ? {
+        entityType: payload.externalType,
+        recordId: String(payload.externalRecordId).trim()
+      }
+    : null;
+  const canonicalEntityWorkspace = localEntityRequest
+    ? validCodexWorkspace(getDomiIntegration().entityWorkspace(localEntityRequest))
+    : null;
+  const requestedWorkspace = validCodexWorkspace(payload?.workspacePath);
+  const genericWorkspace = requestedWorkspace && !isEntityWorkspace(requestedWorkspace)
+    ? requestedWorkspace
+    : null;
+  const workspacePath = canonicalEntityWorkspace
+    || (localEntityRequest ? null : genericWorkspace)
+    || demoWorkspace;
 
   const runId = payload?.runId || `run-${Date.now()}`;
   const acceptedAt = Date.now();
   const prompt = String(payload?.prompt || "").trim();
+  if (localEntityRequest && !canonicalEntityWorkspace) {
+    return {
+      ok: false,
+      runId,
+      output: "",
+      error: "当前项目或人物记录没有可用的固定本地目录，请先同步资料库后重试。",
+      workspacePath: demoWorkspace
+    };
+  }
   if (!prompt) {
     return {
       ok: false,
@@ -2059,17 +2311,41 @@ async function runCodex(sender, payload) {
       };
     }
     const client = getCodexClient();
-    const runtimeContextPromise = Promise.all([
-      Promise.resolve(repositoryRuntimeContext(payload)),
-      larkRuntimeContext(larkRequired)
-    ]).then((parts) => parts.filter(Boolean).join("\n\n"));
+    const researchCacheScope = projectResearchCacheScope(payload, workspacePath);
+    const researchCachePromise = prepareProjectResearchCache({
+      stateStore: getStateStore(),
+      payload: {
+        ...payload,
+        ...(researchCacheScope.allowed ? {} : { externalType: undefined }),
+        cacheNamespace: researchCacheNamespace()
+      },
+      workspacePath: researchCacheScope.workspacePath
+    }).catch(() => ({
+      context: "",
+      cacheHit: false,
+      identity: null,
+      inventory: null,
+      previous: null
+    }));
+    const repositoryContextPromise = Promise.resolve(repositoryRuntimeContext(payload));
+    const larkContextPromise = larkRuntimeContext(larkRequired);
     const threadPromise = client.start().then(() =>
       resolveThread(client, payload, workspacePath, execution.sandbox)
     );
-    const [threadId, runtimeContext] = await Promise.all([
+    const [threadId, repositoryContext, larkContext, preparedResearchCache] = await Promise.all([
       threadPromise,
-      runtimeContextPromise
+      repositoryContextPromise,
+      larkContextPromise,
+      researchCachePromise
     ]);
+    const actualCacheContext = preparedProjectResearchCacheContext(
+      preparedResearchCache,
+      threadId
+    );
+    const researchCache = { ...preparedResearchCache, ...actualCacheContext };
+    const runtimeContext = [repositoryContext, larkContext, researchCache.context]
+      .filter(Boolean)
+      .join("\n\n");
     const threadReadyAt = Date.now();
 
     const completion = new Promise((resolve) => {
@@ -2083,10 +2359,15 @@ async function runCodex(sender, payload) {
         eventCount: 0,
         workspacePath,
         privateOutput: payload?.privateOutput === true,
+        externalType: payload?.externalType || "",
+        externalRecordId: payload?.externalRecordId || "",
+        workflowId: payload?.workflowId || "",
+        workspaceIdentity: directoryIdentity(workspacePath),
         finished: false,
         acceptedAt,
         threadReadyAt,
         turnAcceptedAt: null,
+        researchCache,
         resolve
       };
       activeRuns.set(runId, run);
@@ -2275,11 +2556,43 @@ app.on("second-instance", () => {
   win.focus();
 });
 
-app.on("before-quit", () => {
+let quitDrainStarted = false;
+let quitDrainComplete = false;
+
+async function drainRunPostProcessing(timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (pendingRunPostProcessing.size > 0 && Date.now() < deadline) {
+    const remaining = Math.max(1, deadline - Date.now());
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, remaining);
+      void Promise.allSettled([...pendingRunPostProcessing]).then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+  return pendingRunPostProcessing.size;
+}
+
+app.on("before-quit", (event) => {
   appendRuntimeLog("app-before-quit");
   updateService?.stop();
   codexClient?.close();
-  stateStore?.close();
+  if (quitDrainComplete) return;
+  if (pendingRunPostProcessing.size === 0) {
+    quitDrainComplete = true;
+    stateStore?.close();
+    return;
+  }
+  event.preventDefault();
+  if (quitDrainStarted) return;
+  quitDrainStarted = true;
+  void drainRunPostProcessing().then((remaining) => {
+    appendRuntimeLog("app-postprocess-drained", { remaining });
+    if (remaining === 0) stateStore?.close();
+    quitDrainComplete = true;
+    app.quit();
+  });
 });
 
 app.on("window-all-closed", () => {
@@ -2358,14 +2671,14 @@ ipcMain.handle("update:status", () => getUpdateService().snapshot());
 ipcMain.handle("update:check", () => getUpdateService().check());
 ipcMain.handle("update:download", () => getUpdateService().download());
 ipcMain.handle("update:install", () => getUpdateService().install());
-ipcMain.handle("files:select", (event, workspacePath) =>
-  selectLocalFiles(event.sender, workspacePath)
+ipcMain.handle("files:select", (event, workspacePath, entityRequest) =>
+  selectLocalFiles(event.sender, workspacePath, entityRequest)
 );
-ipcMain.handle("files:import", (_event, sourcePaths, workspacePath) =>
-  importLocalFiles(workspacePath, sourcePaths)
+ipcMain.handle("files:import", (_event, sourcePaths, workspacePath, entityRequest) =>
+  importLocalFiles(workspacePath, sourcePaths, entityRequest)
 );
-ipcMain.handle("files:import-data", (_event, files, workspacePath) =>
-  importLocalFileData(workspacePath, files)
+ipcMain.handle("files:import-data", (_event, files, workspacePath, entityRequest) =>
+  importLocalFileData(workspacePath, files, entityRequest)
 );
 ipcMain.handle("resource:open", (_event, resource) => openResource(resource));
 ipcMain.handle("markdown:open-external", (_event, resource) =>
@@ -2382,6 +2695,16 @@ ipcMain.handle("markdown:image-preview", (_event, request) => resolveMarkdownIma
 ipcMain.handle("markdown:image-save", (_event, request) => saveMarkdownImage(request));
 ipcMain.handle("markdown:copy", (_event, request) => copyMarkdownDocument(request));
 ipcMain.handle("pdf:read", (_event, request) => readPdfDocument(request));
+ipcMain.handle("domi:entity-workspace", (_event, request) => {
+  try {
+    const workspacePath = getDomiIntegration().entityWorkspace(request);
+    return workspacePath
+      ? { ok: true, workspacePath }
+      : { ok: false, error: "没有找到该实体的本地固定目录。" };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
 ipcMain.handle("domi:entity-materials", async (_event, request) => {
   try {
     const cacheKey = `domi:entity-materials:${JSON.stringify(request || {})}`;
@@ -2418,7 +2741,7 @@ ipcMain.handle("workspace:create", (_event, { projectId, projectName }) => {
 
 ipcMain.handle("workspace:open", async (_event, requestedWorkspacePath) => {
   ensureDemoWorkspace();
-  const workspacePath = validProjectWorkspace(requestedWorkspacePath) || demoWorkspace;
+  const workspacePath = validCodexWorkspace(requestedWorkspacePath) || demoWorkspace;
   const error = await shell.openPath(workspacePath);
   return { ok: !error, error, workspacePath };
 });

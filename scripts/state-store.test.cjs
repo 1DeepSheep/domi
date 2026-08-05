@@ -95,3 +95,105 @@ test("state store migrates legacy snapshots and writes only changed threads", as
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("generic tasks use isolated hidden runtimes while entity tasks keep their canonical directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-state-workspaces-"));
+  const databasePath = path.join(root, "domi.sqlite3");
+  const projectsDir = path.join(root, "projects");
+  const entityDirectory = path.join(root, "domi工作区", "3.项目库", "AI", "Agent", "示例项目");
+  fs.mkdirSync(entityDirectory, { recursive: true });
+  const store = new WorkbenchStateStore({ databasePath, projectsDir });
+  try {
+    const normalized = store.normalize({
+      activeThreadId: "generic",
+      threads: [
+        {
+          id: "generic",
+          projectId: "generic-project",
+          project: "未命名项目",
+          workspacePath: path.join(projectsDir, "old-generic-runtime"),
+          messages: []
+        },
+        {
+          id: "generic-two",
+          projectId: "generic-project-two",
+          project: "未命名项目",
+          workspacePath: root,
+          messages: []
+        },
+        {
+          id: "entity",
+          projectId: "entity-project",
+          project: "AI · Agent",
+          workspacePath: entityDirectory,
+          messages: []
+        }
+      ]
+    }, { ensureWorkspace: true });
+
+    assert.equal(normalized.threads[0].workspacePath.startsWith(`${projectsDir}${path.sep}task-`), true);
+    assert.notEqual(normalized.threads[0].workspacePath, root);
+    assert.equal(normalized.threads[1].workspacePath.startsWith(`${projectsDir}${path.sep}task-`), true);
+    assert.notEqual(normalized.threads[0].workspacePath, normalized.threads[1].workspacePath);
+    assert.equal(normalized.threads[2].workspacePath, entityDirectory);
+    assert.equal(fs.existsSync(path.join(entityDirectory, "attachments")), false);
+    assert.equal(fs.existsSync(path.join(entityDirectory, "outputs")), false);
+    assert.equal(fs.existsSync(path.join(normalized.threads[0].workspacePath, "attachments")), true);
+    assert.equal(fs.existsSync(path.join(normalized.threads[0].workspacePath, "outputs")), true);
+  } finally {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cache pruning is scoped by prefix and retains only the newest entries", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-state-cache-"));
+  const store = new WorkbenchStateStore({
+    databasePath: path.join(root, "domi.sqlite3"),
+    projectsDir: path.join(root, "projects")
+  });
+  try {
+    store.saveCache("research-cache-v1:project:a", { value: "a" });
+    await pause(3);
+    store.saveCache("research-cache-v1:project:b", { value: "b" });
+    store.saveCache("other-cache", { value: "keep" });
+    const result = store.pruneCache("research-cache-v1:project:", { maxEntries: 1 });
+    assert.equal(result.deleted, 1);
+    assert.equal(store.loadCache("research-cache-v1:project:a"), null);
+    assert.deepEqual(store.loadCache("research-cache-v1:project:b")?.value, { value: "b" });
+    assert.deepEqual(store.loadCache("other-cache")?.value, { value: "keep" });
+  } finally {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cache compare-and-swap rejects a stale concurrent writer", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-state-cache-cas-"));
+  const store = new WorkbenchStateStore({
+    databasePath: path.join(root, "domi.sqlite3"),
+    projectsDir: path.join(root, "projects")
+  });
+  try {
+    const initial = store.saveCache("research-cache-v1:project:example", { value: "initial" });
+    const newer = store.saveCacheIfUnchanged(
+      "research-cache-v1:project:example",
+      { value: "newer" },
+      initial.updatedAt
+    );
+    const stale = store.saveCacheIfUnchanged(
+      "research-cache-v1:project:example",
+      { value: "stale" },
+      initial.updatedAt
+    );
+    assert.equal(newer.saved, true);
+    assert.equal(stale.saved, false);
+    assert.deepEqual(
+      store.loadCache("research-cache-v1:project:example")?.value,
+      { value: "newer" }
+    );
+  } finally {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

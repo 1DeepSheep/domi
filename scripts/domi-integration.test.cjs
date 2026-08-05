@@ -1563,7 +1563,12 @@ test("local materials use the exact entity directory and database edits avoid a 
     entityType: "project",
     recordId: "prj_fast"
   });
+  assert.equal(integration.entityWorkspace({
+    entityType: "project",
+    recordId: "prj_fast"
+  }), projectDirectory);
   assert.equal(materials.searchRoot, projectDirectory);
+  assert.equal(materials.workspacePath, projectDirectory);
   assert.ok(materials.files.some((item) => item.path === materialPath));
   assert.equal(materials.files.some((item) => item.path === unrelatedPath), false);
 

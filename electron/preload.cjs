@@ -22,10 +22,10 @@ contextBridge.exposeInMainWorld("workbench", {
   runCodex: (payload) => ipcRenderer.invoke("codex:run", payload),
   stopCodex: (runId) => ipcRenderer.invoke("codex:stop", runId),
   recoverCodexThread: (threadId) => ipcRenderer.invoke("codex:recover-thread", threadId),
-  selectFiles: (workspacePath) => ipcRenderer.invoke("files:select", workspacePath),
+  selectFiles: (workspacePath, entityRequest) => ipcRenderer.invoke("files:select", workspacePath, entityRequest),
   getPathForFile: (file) => webUtils.getPathForFile(file),
-  importFiles: (sourcePaths, workspacePath) => ipcRenderer.invoke("files:import", sourcePaths, workspacePath),
-  importFileData: (files, workspacePath) => ipcRenderer.invoke("files:import-data", files, workspacePath),
+  importFiles: (sourcePaths, workspacePath, entityRequest) => ipcRenderer.invoke("files:import", sourcePaths, workspacePath, entityRequest),
+  importFileData: (files, workspacePath, entityRequest) => ipcRenderer.invoke("files:import-data", files, workspacePath, entityRequest),
   openResource: (resource) => ipcRenderer.invoke("resource:open", resource),
   openMarkdownExternal: (resource) => ipcRenderer.invoke("markdown:open-external", resource),
   showNotification: (request) => ipcRenderer.invoke("app:notify", request),
@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld("workbench", {
   syncPlaud: (request) => ipcRenderer.invoke("domi:plaud-sync", request),
   renamePlaud: (request) => ipcRenderer.invoke("domi:plaud-rename", request),
   deletePlaud: (request) => ipcRenderer.invoke("domi:plaud-delete", request),
+  loadDomiEntityWorkspace: (request) => ipcRenderer.invoke("domi:entity-workspace", request),
   loadDomiEntityMaterials: (request) => ipcRenderer.invoke("domi:entity-materials", request),
   onCodexEvent: (callback) => {
     const handler = (_event, payload) => callback(payload);
