@@ -386,6 +386,10 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "浏览器预览模式不能删除 PLAUD 录音。"
   }),
+  loadDomiEntityWorkspace: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中读取 domi 项目和人脉目录。"
+  }),
   loadDomiEntityMaterials: async () => ({
     ok: false,
     error: "请在 Electron 窗口中读取 domi 项目和人脉材料。"

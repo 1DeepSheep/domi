@@ -879,6 +879,18 @@ class DomiIntegration {
     }));
   }
 
+  entityWorkspace(request) {
+    const entityType = request?.entityType === "person" ? "person" : "project";
+    const recordId = String(request?.recordId || "").trim();
+    if (!recordId) return "";
+    const projectConfig = this.readProjectConfig();
+    if (projectConfig.backend !== "local") return "";
+    return this.withLocalRepository(
+      projectConfig,
+      (repository) => repository.recordDirectory(entityType, recordId)
+    ) || "";
+  }
+
   async entityMaterials(request) {
     const entityType = request?.entityType === "person" ? "person" : "project";
     const recordId = String(request?.recordId || "");
@@ -890,10 +902,7 @@ class DomiIntegration {
 
     const projectConfig = this.readProjectConfig();
     if (projectConfig.backend === "local") {
-      const entityRoot = this.withLocalRepository(
-        projectConfig,
-        (repository) => repository.recordDirectory(entityType, recordId)
-      );
+      const entityRoot = this.entityWorkspace({ entityType, recordId });
       const files = entityRoot
         ? await this.listEntityDirectoryFiles(entityRoot)
         : [];
@@ -901,6 +910,7 @@ class DomiIntegration {
         entityType,
         recordId,
         searchRoot: entityRoot || projectConfig.localLibraryDir,
+        workspacePath: entityRoot || undefined,
         files,
         generatedAt: Date.now()
       };
@@ -913,6 +923,7 @@ class DomiIntegration {
       entityType,
       recordId,
       searchRoot,
+      workspacePath: undefined,
       files,
       generatedAt: Date.now()
     };
