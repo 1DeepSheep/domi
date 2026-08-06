@@ -216,6 +216,10 @@ const browserFallback: Window["workbench"] = {
     status: "unknown",
     error: "浏览器预览模式不能恢复本地 Codex 对话。"
   }),
+  bindCodexRun: async () => ({
+    ok: false,
+    error: "浏览器预览模式不能绑定本地 Codex 任务。"
+  }),
   selectFiles: async () => ({
     ok: false,
     canceled: false,
@@ -235,6 +239,7 @@ const browserFallback: Window["workbench"] = {
     files: [],
     error: "请使用 Electron 窗口粘贴图片或录音文件。"
   }),
+  discardStagedAttachment: async () => ({ ok: true, removed: false }),
   openResource: async (resource) => {
     const target = browserWebResource(resource);
     if (target) {

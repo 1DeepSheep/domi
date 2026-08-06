@@ -172,20 +172,30 @@ assert.match(
   /<strong>新建任务<\/strong>/,
   "The primary creation action must be presented as a new task."
 );
-assert.match(
-  app,
-  /async function createThread\(\)[\s\S]*?createProjectWorkspace\(\{[\s\S]*?projectName: NEW_THREAD_PROJECT/,
-  "A generic new task must use an isolated hidden runtime without creating a visible project-library entry."
+assert.doesNotMatch(
+  app.match(/async function createThread\(\)[\s\S]*?async function stopRun/)?.[0] || "",
+  /createProjectWorkspace/,
+  "A blank task must not allocate a hidden workspace before an actual project is resolved."
 );
 assert.match(
   app,
-  /mentionedDomiProject[\s\S]*?matches\.size === 1[\s\S]*?bindThreadToMentionedProject[\s\S]*?resolveDomiEntityWorkspacePath[\s\S]*?importFiles/,
-  "A uniquely named project in a new task must bind to its canonical directory and archive attachments there."
+  /import \{ filesFromClipboardData \}[\s\S]*?handleComposerPaste[\s\S]*?filesFromClipboardData\(event\.clipboardData\)/,
+  "Composer image paste must select one authoritative clipboard file view instead of importing files and items twice."
 );
 assert.match(
   app,
-  /\? 2 : 3[\s\S]*?bindThreadToMentionedProject[\s\S]*?isUnusedDraftThread\(thread\)[\s\S]*?domi-project-/,
-  "Short Chinese project names and cold-start caches must bind deterministically, while existing generic history moves to a project thread."
+  /projectMentionMatches[\s\S]*?chooseMentionedProject[\s\S]*?bindThreadToMentionedProject/,
+  "Explicit project candidates must be resolved before a task binds and archives attachments."
+);
+assert.match(
+  app,
+  /PERSON_TARGET_WORKFLOW_IDS[\s\S]*?workflowAllowsProjectRouting\(workflow\)[\s\S]*?thread\.externalType === "person"/,
+  "People intake and sourcing workflows must not project-route their attachments before the person target is known."
+);
+assert.match(
+  app,
+  /当前对话归属于[\s\S]*?是否切换到[\s\S]*?较短或含数字[\s\S]*?多个项目[\s\S]*?本次消息尚未发送/,
+  "Cross-project and ambiguous messages must ask before changing the canonical archive target."
 );
 assert.match(
   app,
@@ -388,6 +398,21 @@ assert.match(
   "A rejected settings save must always release the setup-wide saving lock."
 );
 assert.match(
+  setupCenter,
+  /getUpdateStatus\(\)[\s\S]*?\.catch\(\(statusError\)[\s\S]*?getCodexRuntimeStatus\(\)[\s\S]*?\.catch\(\(runtimeError\)/,
+  "Setup must surface rejected update and runtime status IPC reads instead of leaking unhandled promises."
+);
+assert.match(
+  setupCenter,
+  /let receivedLiveUpdateStatus = false;[\s\S]*?onUpdateStatus\(\(status\) => \{[\s\S]*?receivedLiveUpdateStatus = true;[\s\S]*?getUpdateStatus\(\)\.then\(\(status\) => \{[\s\S]*?!receivedLiveUpdateStatus/,
+  "A delayed setup update-status snapshot must not replace a newer live downloading or downloaded event."
+);
+assert.match(
+  setupCenter,
+  /async function installDownloadedUpdate\(\)[\s\S]*?try \{[\s\S]*?await workbench\.installUpdate\(\)[\s\S]*?catch \(updateError\)[\s\S]*?finally \{[\s\S]*?setUpdateBusy\(false\)/,
+  "A rejected update install IPC call must always release the update busy lock."
+);
+assert.match(
   app,
   /void refreshAfterDataConnectionSave\(result\.settings\)/,
   "Saving a data connection must not wait for the first background synchronization."
@@ -416,6 +441,17 @@ assert.doesNotMatch(
   app,
   /workflow-launcher-dock/,
   "The removed workflow launcher must not return above the conversation composer."
+);
+
+assert.match(
+  app,
+  /const visibleUpdateEntry = sidebarUpdateEntry\(updateStatus\)[\s\S]*?sidebar-update-card[\s\S]*?setSettingsInitialTab\("updates"\)[\s\S]*?setSettingsOpen\(true\)/,
+  "An actionable software update must appear in the sidebar and open the existing update settings page."
+);
+assert.match(
+  styles,
+  /\.sidebar-update-card[\s\S]*?\.sidebar-update-card\.downloaded[\s\S]*?\.sidebar-update-copy/,
+  "The conditional sidebar update entry must retain its compact available and ready states."
 );
 
 assert.match(
@@ -485,8 +521,13 @@ assert.match(
 );
 assert.match(
   main,
-  /managedStagingAttachment[\s\S]*?fs\.promises\.copyFile[\s\S]*?Promise\.allSettled\(managedStagingSources\.map[\s\S]*?fs\.promises\.unlink/,
-  "Auto-binding must move managed staging attachments into the canonical project instead of leaving duplicates."
+  /cleanupImportedStagingSources[\s\S]*?attempt < 2[\s\S]*?fs\.promises\.unlink[\s\S]*?attachment-staging-source-cleanup-failed[\s\S]*?fs\.promises\.copyFile[\s\S]*?await cleanupImportedStagingSources\(managedStagingSources\)/,
+  "Auto-binding must retry managed staging cleanup without logging private paths or silently leaving duplicates."
+);
+assert.match(
+  main,
+  /discardManagedStagingAttachment[\s\S]*?managedStagingAttachment[\s\S]*?fs\.promises\.unlink[\s\S]*?files:discard-staged/,
+  "Removing a composer attachment must delete only its application-managed staging copy."
 );
 assert.match(
   main,
@@ -499,9 +540,44 @@ assert.match(
   "Attachment writes must require an exact registered entity record instead of accepting an arbitrary category directory."
 );
 assert.match(
+  main,
+  /entityType && recordId[\s\S]*?storageBackend !== "local"\) return ""/,
+  "A Feishu entity without a stable local workspace must fail attachment commit instead of falling back to a generic task directory."
+);
+assert.match(
+  main,
+  /logicalStagingAttachmentName[\s\S]*?replace\(\/\^\\d\+-\\d\+-[\s\S]*?const name = logicalStagingAttachmentName/,
+  "Moving a managed staged attachment must not stack a second timestamp prefix onto its logical name."
+);
+assert.match(
   app,
-  /importFiles\([\s\S]*?\{ entityType: "project", recordId: project\.recordId \}/,
-  "Auto-bound project attachments must carry the exact record identity across IPC."
+  /commitAttachmentsToEntity[\s\S]*?importFiles\([\s\S]*?entityType: thread\.externalType, recordId: thread\.externalRecordId/,
+  "Committed attachments must carry the exact bound entity identity across IPC."
+);
+assert.match(
+  app,
+  /finalizeEntityBinding[\s\S]*?synced\.stale[\s\S]*?规范名称[\s\S]*?loadDomiEntityWorkspace[\s\S]*?attachmentsToCommit = context\.attachments[\s\S]*?setThreads/,
+  "Machine receipts must be verified against a fresh snapshot and commit only this turn before atomically changing ownership."
+);
+assert.doesNotMatch(
+  app.match(/async function finalizeEntityBinding[\s\S]*?function handleCodexEvent/)?.[0] || "",
+  /thread\.messages\.flatMap/,
+  "Entity finalization must never sweep attachment history from previous turns."
+);
+assert.match(
+  app,
+  /settlingThreadIdsRef[\s\S]*?finalizeEntityBinding[\s\S]*?\.finally\(releaseRun\)/,
+  "A completed run must retain its per-thread lock until entity binding and attachment settlement finish."
+);
+assert.match(
+  app,
+  /QUEUED_SUBMISSIONS_STORAGE_KEY[\s\S]*?readQueuedSubmissions[\s\S]*?onAccepted[\s\S]*?result\.stopped[\s\S]*?retryQueuedSubmission/,
+  "Queued work must persist locally, dequeue only after acceptance, and be recoverable after cancellation or failure."
+);
+assert.match(
+  app,
+  /attachmentImportCount > 0[\s\S]*?附件仍在导入[\s\S]*?disabled=\{[\s\S]*?attachmentImportCount > 0/,
+  "The composer must block submission while a pasted or dropped attachment is still importing."
 );
 assert.match(
   workspaceBoundary,
@@ -784,8 +860,8 @@ assert.match(
 );
 assert.match(
   main,
-  /const fresh = request\?\.fresh === true[\s\S]*?force: fresh[\s\S]*?allowStale: !fresh/,
-  "Fresh PLAUD status reads must bypass the service cache and stale fallback."
+  /const fresh = request\?\.fresh === true[\s\S]*?plaudQueue\(\{ offset, limit, fresh \}\)[\s\S]*?retries: 0[\s\S]*?force: fresh[\s\S]*?allowStale: false/,
+  "PLAUD reads must have one retry owner and fresh reads must bypass every service-level stale fallback."
 );
 assert.match(
   setupCenter,
@@ -806,6 +882,197 @@ assert.match(
   preload,
   /loginPlaud:[\s\S]*?domi:plaud-login[\s\S]*?checkPlaudConnection:[\s\S]*?domi:plaud-connection[\s\S]*?disconnectPlaud:[\s\S]*?domi:plaud-disconnect/,
   "The renderer bridge must expose login, verification, and local-profile removal."
+);
+assert.match(
+  setupCenter,
+  /rate_limited:\s*"PLAUD 暂时限流"[\s\S]*?service_unavailable:\s*"PLAUD 服务暂时不可用"/,
+  "PLAUD settings must explain vendor throttling and outages without asking for a new login."
+);
+assert.match(
+  app,
+  /loadMorePlaudQueue[\s\S]*?setPlaudSnapshot[\s\S]*?remoteStatus:\s*result\.remoteStatus[\s\S]*?retryable:\s*result\.retryable/,
+  "A later-page failure must propagate its remote status so the recovery action stays accurate."
+);
+assert.match(
+  app,
+  /WORKSPACE_SCROLL_SELECTORS[\s\S]*?captureWorkspaceUiState[\s\S]*?restoreWorkspaceUiState[\s\S]*?navigateWorkspace/,
+  "Each workspace view must preserve its own scroll and right-panel state."
+);
+assert.doesNotMatch(
+  app,
+  /conversation:\s*\[[^\]]*\.chat-scroll/,
+  "Per-thread conversation scroll must not be overwritten by workspace-level restoration."
+);
+assert.match(
+  app,
+  /flushDatabaseAutoSaveAndWait[\s\S]*?async function selectDatabaseRecord[\s\S]*?switchingRecord[\s\S]*?阻止切换[\s\S]*?async function switchDatabaseEntity/,
+  "Database row and tab switches must wait for the previous record to persist."
+);
+assert.match(
+  setupCenter,
+  /hasUnsavedChanges[\s\S]*?requestClose[\s\S]*?设置尚未保存/,
+  "Closing settings must warn before discarding an edited draft."
+);
+assert.match(
+  app,
+  /settingsDirtyRef[\s\S]*?flushClientStateRef\.current[\s\S]*?设置页还有未保存的修改/,
+  "Application close must be blocked while settings contain unsaved changes."
+);
+assert.match(
+  app,
+  /DocumentPreviewOrigin[\s\S]*?previousRightPanelOpen[\s\S]*?restoreDocumentPreviewOrigin/,
+  "Closing an internal document must restore the panel state that preceded it."
+);
+assert.match(
+  app,
+  /DATABASE_SAVE_RETRY_DELAYS_MS[\s\S]*?queueDatabaseAutoSaveRetry[\s\S]*?setGlobalPersistenceError/,
+  "Failed database auto-saves must retain their draft, retry with backoff, and remain visible globally."
+);
+assert.match(
+  app,
+  /isThreadActivelyVisible[\s\S]*?workspaceViewRef\.current === "conversation"[\s\S]*?documentPanelFocusedRef/,
+  "Task completion may be marked read only while its conversation is actually visible and focused."
+);
+assert.match(
+  main,
+  /requestRendererFlush[\s\S]*?app:prepare-close[\s\S]*?domi 已阻止关闭窗口[\s\S]*?before-quit/,
+  "Window close and application quit must wait for renderer persistence and block on failure."
+);
+assert.match(
+  preload,
+  /onPrepareClose[\s\S]*?app:prepare-close-result/,
+  "The renderer must acknowledge close preparation through the isolated preload bridge."
+);
+assert.match(
+  main,
+  /function bindCodexRun\(runId, sender\)[\s\S]*?run\.sender = sender[\s\S]*?ipcMain\.handle\("codex:bind-run", \(event, runId\) => bindCodexRun\(runId, event\.sender\)\)/,
+  "A recovered live Codex thread must explicitly rebind subsequent events to the current renderer."
+);
+assert.match(
+  app,
+  /reboundRunId = result\.runId[\s\S]*?runContextRef\.current\.set\(reboundRunId[\s\S]*?await workbench\.bindCodexRun\(reboundRunId\)[\s\S]*?recoverCodexThread\(thread\.codexThreadId\)/,
+  "The renderer must register recovery context before binding live events and reconcile a bind race."
+);
+assert.match(
+  app,
+  /result\.status === "completed"[\s\S]*?finalizeRecoveredEntityBinding[\s\S]*?function finalizeRecoveredEntityBinding[\s\S]*?parseDomiEntityResult\(output\)[\s\S]*?finalizeEntityBinding/,
+  "A task completed while the window was closed must settle its verified entity workspace after recovery."
+);
+assert.match(
+  preload,
+  /recoverCodexThread:[\s\S]*?codex:recover-thread[\s\S]*?bindCodexRun:[\s\S]*?codex:bind-run/,
+  "The isolated renderer bridge must expose the live-run bind handshake."
+);
+assert.match(
+  app,
+  /flushClientStateRef\.current = async \(\) =>[\s\S]*?settlingThreadIdsRef\.current\.size > 0[\s\S]*?项目资料仍在归档[\s\S]*?persistWorkbenchStateNow/,
+  "Application close must wait for completed-run entity binding and attachment settlement."
+);
+assert.match(
+  app,
+  /const currentThreads = flushAssistantDeltas\(\)[\s\S]*?function flushAssistantDeltas\(\): Thread\[\][\s\S]*?threadsRef\.current = nextSnapshot/,
+  "A close-time persistence snapshot must synchronously include buffered assistant deltas."
+);
+assert.match(
+  app,
+  /async function openDomiProject\(project: DomiProject\) \{\s*if \(!await navigateWorkspace\("conversation"\)\) return;[\s\S]*?async function openDomiPerson\(person: DomiPerson\) \{\s*if \(!await navigateWorkspace\("conversation"\)\) return;/,
+  "Opening a project or person for the first time must visibly enter its conversation."
+);
+assert.match(
+  app,
+  /async function openDocumentLibrary\(\)[\s\S]*?if \(!await navigateWorkspace\("documents"\)\) return;[\s\S]*?async function openPrimaryWorkspace\(view: "tasks" \| "news" \| "data"\)[\s\S]*?if \(!await navigateWorkspace\(view\)\) return;/,
+  "Sidebar UI state must change only after the current page has safely completed navigation."
+);
+
+const deleteThreadStart = app.indexOf("function deleteThread(thread: Thread)");
+const deleteThreadEnd = app.indexOf("function toggleSection", deleteThreadStart);
+assert.ok(deleteThreadStart >= 0 && deleteThreadEnd > deleteThreadStart);
+const deleteThreadBody = app.slice(deleteThreadStart, deleteThreadEnd);
+assert.doesNotMatch(
+  deleteThreadBody,
+  /thread\.messages|message\.attachments/,
+  "Deleting a conversation must not delete attachments referenced by historical messages."
+);
+assert.match(
+  app,
+  /PAUSED_QUEUED_SUBMISSIONS_STORAGE_KEY[\s\S]*?readPausedQueuedSubmissionIds[\s\S]*?JSON\.stringify\(\[\.\.\.pausedQueuedSubmissionIds\]\)/,
+  "Paused queue state must survive an application restart."
+);
+assert.match(
+  app,
+  /repositoryIdentity\?: string[\s\S]*?queueRepositoryIdentity[\s\S]*?!queued\.repositoryIdentity[\s\S]*?queued\.repositoryIdentity !== currentRepositoryIdentity/,
+  "A queued task must not silently run against a different repository after restart or reconfiguration."
+);
+assert.match(
+  app,
+  /function pauseThreadQueueAfterTerminal[\s\S]*?context\.queuedSubmission[\s\S]*?setPausedQueuedSubmissionIds[\s\S]*?pauseThreadQueueAfterTerminal\(context\);\s*releaseRun\(\)/,
+  "A stopped or failed queued task must be restored and paused before the next task can start."
+);
+assert.doesNotMatch(
+  app,
+  /\.filter\(\(item\): item is \{ submission: QueuedSubmission; thread: Thread \} => Boolean\(item\.thread\)\)/,
+  "Queued tasks whose original conversation was deleted must remain visible and removable."
+);
+assert.match(
+  app,
+  /prepareNeutralProjectTarget[\s\S]*?workflow\?\.id === "project-intake" && thread\.externalType === "project"[\s\S]*?作为新项目暂存[\s\S]*?prepareNeutralProjectTarget/,
+  "A new project launched from an existing project must use a neutral staging thread instead of polluting the old project."
+);
+assert.match(
+  app,
+  /if \(!storageReady \|\| codexRecoveryStartedRef\.current\) return;[\s\S]*?for \(const thread of candidates\)[\s\S]*?setCodexRecoveryReady\(true\)[\s\S]*?if \(!storageReady \|\| !codexRecoveryReady \|\| !appSettings\) return;/,
+  "The persistent queue pump must wait until storage loading and every candidate Codex recovery have settled."
+);
+assert.match(
+  app,
+  /for \(const thread of candidates\)[\s\S]*?try \{[\s\S]*?await workbench\.recoverCodexThread[\s\S]*?catch \(error\)[\s\S]*?blockRecoveredThread/,
+  "Each recovery candidate must settle independently so one rejected read cannot release the queue gate early."
+);
+assert.match(
+  app,
+  /pauseRecoveredThreadQueue[\s\S]*?blockRecoveredThread[\s\S]*?if \(!result\.ok\)[\s\S]*?result\.status === "running"[\s\S]*?!result\.runId[\s\S]*?bindCodexRun[\s\S]*?\["completed", "stopped", "failed"\][\s\S]*?result\.status === "stopped"[\s\S]*?pauseRecoveredThreadQueue\(thread\.id\)[\s\S]*?result\.status === "failed"[\s\S]*?pauseRecoveredThreadQueue\(thread\.id\)[\s\S]*?blockRecoveredThread/,
+  "Unknown, unbound, stopped and failed recoveries must safely block or pause their thread queues."
+);
+assert.match(
+  app,
+  /result\.status === "completed"[\s\S]*?await finalizeRecoveredEntityBinding[\s\S]*?setCodexRecoveryReady\(true\)/,
+  "Completed recoveries must finish entity finalization before the persistent queue gate opens."
+);
+assert.match(
+  main,
+  /async function recoverCodexThread[\s\S]*?const activeRun = \[\.\.\.activeRuns\.values\(\)\][\s\S]*?catch \(error\)[\s\S]*?if \(activeRun\)[\s\S]*?status: "running"/,
+  "A live main-process run must remain recoverable when the diagnostic thread read transiently fails."
+);
+assert.doesNotMatch(
+  app.match(/const candidates = threadsRef\.current[\s\S]*?void \(async \(\) =>/)?.[0] || "",
+  /\.slice\(/,
+  "Codex recovery must not leave later candidate threads unreconciled before starting queued work."
+);
+assert.match(
+  app,
+  /const routedQueuedSubmission = options\.queuedSubmission[\s\S]*?threadId: targetThread\.id[\s\S]*?attachments: selectedAttachments[\s\S]*?repositoryIdentity: queueRepositoryIdentity\(appSettingsRef\.current\)[\s\S]*?queuedSubmission: routedQueuedSubmission[\s\S]*?onAccepted\?\.\(routedQueuedSubmission\)/,
+  "A routed queued run must persist its final thread, attachment paths and repository identity before it can be restored."
+);
+const retainedQueueStart = app.indexOf(
+  "if (options.queuedSubmission.threadId === targetThread.id)"
+);
+const crossTargetMoveStart = app.indexOf("const withoutSource", retainedQueueStart);
+assert.ok(retainedQueueStart >= 0 && crossTargetMoveStart > retainedQueueStart);
+const retainedQueueBranch = app.slice(retainedQueueStart, crossTargetMoveStart);
+assert.match(
+  retainedQueueBranch,
+  /targetQueue\.map[\s\S]*?movedSubmission[\s\S]*?return \{ ok: true, queued: true/,
+  "A same-thread target race must retain and normalize the existing queued item."
+);
+assert.doesNotMatch(
+  retainedQueueBranch,
+  /onAccepted/,
+  "Retaining a same-thread queued item must not trigger source-dequeue semantics."
+);
+assert.match(
+  app,
+  /if \(!accepted && result && "queued" in result && result\.queued\)[\s\S]*?return;/,
+  "The queue pump must recognize an intentionally retained item without pausing or deleting it."
 );
 
 console.log("renderer resilience checks passed");

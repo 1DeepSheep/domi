@@ -41,6 +41,7 @@ type SetupCenterProps = {
   codexStatus: CodexCheckResult | null;
   required: boolean;
   onClose: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
   onSave: (request: AppSettingsSaveRequest) => Promise<AppSettingsSaveResult>;
   onLogin: () => Promise<ChatGPTLoginResult>;
   onRefresh: () => Promise<void>;
@@ -89,6 +90,8 @@ function plaudStatusLabel(status: string) {
     browser_unavailable: "浏览器连接不可用",
     runtime_unavailable: "内置音频组件不完整",
     network_error: "网络不可用",
+    rate_limited: "PLAUD 暂时限流",
+    service_unavailable: "PLAUD 服务暂时不可用",
     service_changed: "PLAUD 服务可能已更新",
     unknown: "需要继续诊断"
   }[status] || "";
@@ -100,6 +103,7 @@ export default function SetupCenter({
   codexStatus,
   required,
   onClose,
+  onDirtyChange,
   onSave,
   onLogin,
   onRefresh
@@ -133,11 +137,19 @@ export default function SetupCenter({
   const [outlookProfileBusy, setOutlookProfileBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
   const switchingLocalToFeishu = settings.storageBackend === "local"
     && draft.storageBackend === "feishu";
+  const hasUnsavedChanges = JSON.stringify(draft) !== JSON.stringify(settings)
+    || Boolean(relayApiKey.trim());
 
   useEffect(() => setDraft(settings), [settings]);
   useEffect(() => setTab(initialTab), [initialTab]);
+  useEffect(() => {
+    onDirtyChangeRef.current?.(hasUnsavedChanges);
+  }, [hasUnsavedChanges]);
+  useEffect(() => () => onDirtyChangeRef.current?.(false), []);
 
   useEffect(() => {
     if (!switchingLocalToFeishu) {
@@ -159,13 +171,30 @@ export default function SetupCenter({
 
   useEffect(() => {
     let cancelled = false;
+    let receivedLiveUpdateStatus = false;
+    const unsubscribe = workbench.onUpdateStatus((status) => {
+      if (cancelled) return;
+      receivedLiveUpdateStatus = true;
+      setUpdateStatus(status);
+    });
     workbench.getUpdateStatus().then((status) => {
-      if (!cancelled) setUpdateStatus(status);
+      if (!cancelled && !receivedLiveUpdateStatus) setUpdateStatus(status);
+    }).catch((statusError) => {
+      if (!cancelled) {
+        setError(statusError instanceof Error
+          ? statusError.message
+          : `无法读取软件更新状态：${String(statusError)}`);
+      }
     });
     workbench.getCodexRuntimeStatus().then((status) => {
       if (!cancelled) setCodexRuntime(status);
+    }).catch((runtimeError) => {
+      if (!cancelled) {
+        setError(runtimeError instanceof Error
+          ? runtimeError.message
+          : `无法读取 Codex Runtime 状态：${String(runtimeError)}`);
+      }
     });
-    const unsubscribe = workbench.onUpdateStatus((status) => setUpdateStatus(status));
     return () => {
       cancelled = true;
       unsubscribe();
@@ -201,6 +230,17 @@ export default function SetupCenter({
     } finally {
       setSaving(false);
     }
+  }
+
+  function requestClose() {
+    if (saving) return;
+    if (
+      hasUnsavedChanges
+      && !window.confirm("设置尚未保存。关闭后会丢失本次修改，确定要关闭吗？")
+    ) {
+      return;
+    }
+    onClose();
   }
 
   async function saveConnection(continueToData: boolean) {
@@ -658,9 +698,14 @@ export default function SetupCenter({
   async function installDownloadedUpdate() {
     setUpdateBusy(true);
     setError("");
-    const result = await workbench.installUpdate();
-    if (!result.ok) {
-      setError(result.error || "暂时无法安装更新。");
+    try {
+      const result = await workbench.installUpdate();
+      if (!result.ok) {
+        setError(result.error || "暂时无法安装更新。");
+      }
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : String(updateError));
+    } finally {
       setUpdateBusy(false);
     }
   }
@@ -812,7 +857,7 @@ export default function SetupCenter({
                   : "检查 Codex、Keychain、本地数据库、工作区和 domi 插件。"}</p>
             </div>
             {!required && (
-              <button className="setup-close" type="button" onClick={onClose} title="关闭设置"><X size={18} /></button>
+              <button className="setup-close" type="button" onClick={requestClose} title="关闭设置"><X size={18} /></button>
             )}
           </header>
 
