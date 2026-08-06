@@ -7,6 +7,7 @@ const {
   DomiIntegration,
   classifyPlaudConnectionFailure,
   describeFeishuSyncError,
+  isRetryablePlaudReadFailure,
   isRetryableFeishuReadError,
   parseTaskLedger,
   resolveLarkCliExecutable,
@@ -28,6 +29,48 @@ test("PLAUD connection errors request login only for confirmed authentication fa
     "tabbit"
   );
   assert.equal(auth.status, "auth_required");
+
+  const detachedPage = classifyPlaudConnectionFailure(
+    new Error("page.reload: Protocol error (Page.reload): Not attached to an active page"),
+    "tabbit"
+  );
+  assert.equal(detachedPage.status, "browser_unavailable");
+  assert.match(detachedPage.error, /无需重新登录/);
+  assert.equal(
+    classifyPlaudConnectionFailure(
+      new Error("PLAUD 专用浏览器未能建立本机连接。请重新同步。"),
+      "tabbit"
+    ).status,
+    "browser_unavailable"
+  );
+  assert.equal(isRetryablePlaudReadFailure(new Error("HTTP 429: too many requests")), true);
+  assert.equal(isRetryablePlaudReadFailure(new Error("HTTP 401: unauthorized")), false);
+  assert.equal(
+    classifyPlaudConnectionFailure(
+      new Error("PLAUD 登录已失效，请在设置中重新登录并验证。"),
+      "tabbit"
+    ).status,
+    "auth_required"
+  );
+  const incompleteNetworkProbe = classifyPlaudConnectionFailure(
+    new Error("PLAUD probe not completed: network timeout"),
+    "tabbit"
+  );
+  assert.equal(incompleteNetworkProbe.status, "network_error");
+  assert.match(incompleteNetworkProbe.error, /确认网络后重试/);
+});
+
+test("PLAUD list IPC leaves retry ownership to the worker and forwards fresh reads", () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+  const start = mainSource.indexOf('ipcMain.handle("domi:plaud-list"');
+  const end = mainSource.indexOf('ipcMain.handle("domi:plaud-sync"', start);
+  const handler = mainSource.slice(start, end);
+
+  assert.match(handler, /domi:plaud-list:\$\{fresh \? "fresh" : "cached"\}/);
+  assert.match(handler, /plaudQueue\(\{ offset, limit, fresh \}\)/);
+  assert.match(handler, /retries:\s*0/);
+  assert.match(handler, /allowStale:\s*false/);
+  assert.doesNotMatch(handler, /retries:\s*1/);
 });
 
 test("Finder-launched app resolves the npm lark-cli launcher to its native binary", async (t) => {
@@ -1680,6 +1723,7 @@ test("PLAUD queue preserves the last successful remote list when a later refresh
   const fresh = await integration.plaudQueue();
   assert.equal(fresh.ok, true);
   assert.equal(fresh.stale, false);
+  for (const cached of cache.values()) cached.value.syncedAt = 12_345;
 
   integration.runPlaudWorker = async () => {
     throw new Error("PLAUD 接口读取超时（15 秒）。");
@@ -1692,8 +1736,24 @@ test("PLAUD queue preserves the last successful remote list when a later refresh
   assert.equal(stale.hasMore, false);
   assert.deepEqual(stale.items.map((item) => item.fileId), ["cached-recording"]);
   assert.match(stale.warning, /上次成功读取/);
+  assert.equal(stale.remoteStatus, "network_error");
+  assert.equal(stale.retryable, true);
   assert.equal(stale.error, "");
+  assert.equal(stale.syncedAt, 12_345);
   assert.equal(integration.plaudRemoteHealth.ok, false);
+
+  const failedFresh = await integration.plaudQueue({ fresh: true });
+  assert.equal(failedFresh.ok, false);
+  assert.equal(failedFresh.stale, true);
+  assert.deepEqual(failedFresh.items, []);
+  assert.equal(failedFresh.remoteStatus, "network_error");
+  assert.equal(failedFresh.lastSuccessfulSnapshot.ok, true);
+  assert.equal(failedFresh.lastSuccessfulSnapshot.stale, true);
+  assert.equal(failedFresh.lastSuccessfulSnapshot.syncedAt, 12_345);
+  assert.deepEqual(
+    failedFresh.lastSuccessfulSnapshot.items.map((item) => item.fileId),
+    ["cached-recording"]
+  );
 });
 
 test("PLAUD sync never submits generation from a stale cached list", async () => {
@@ -1750,6 +1810,38 @@ test("PLAUD queue requests later pages without duplicating local workflow-only r
   assert.equal(result.pageSize, 50);
   assert.equal(result.nextOffset, 100);
   assert.deepEqual(result.items.map((item) => item.fileId), ["older-recording"]);
+});
+
+test("PLAUD later-page failures never substitute the cached first page", async () => {
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => ({
+        value: {
+          syncedAt: 10,
+          pendingCount: 1,
+          pageSize: 50,
+          items: [{ fileId: "cached-first-page", fileName: "首页缓存" }]
+        }
+      }),
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test"
+  });
+  integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
+  integration.loadPlaudWorkflowRecords = () => [];
+  integration.loadActivePlaudWorkflowRecords = () => [];
+  integration.runPlaudWorker = async () => {
+    throw new Error("PLAUD 最近录音读取执行超时（120 秒）。");
+  };
+
+  const result = await integration.plaudQueue({ offset: 50, limit: 50 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stale, false);
+  assert.equal(result.pageOffset, 50);
+  assert.deepEqual(result.items, []);
+  assert.equal(result.lastSuccessfulSnapshot, undefined);
+  assert.equal(result.remoteStatus, "network_error");
 });
 
 test("PLAUD health status reuses the latest queue result without reopening a browser", async () => {
@@ -1920,6 +2012,7 @@ test("PLAUD workers receive the app Playwright runtime through NODE_PATH", async
   assert.equal(receivedOptions.env.DOMI_FFMPEG_PATH, mediaRuntime.ffmpegPath);
   assert.equal(receivedOptions.env.DOMI_FFPROBE_PATH, mediaRuntime.ffprobePath);
   assert.equal(receivedOptions.env.NODE_PATH.split(path.delimiter)[0], playwrightNodeModules);
+  assert.equal(receivedOptions.timeout, 85_000);
 });
 
 test("PLAUD connection uses the selected private browser profile command", async () => {
@@ -1956,7 +2049,53 @@ test("PLAUD connection uses the selected private browser profile command", async
   assert.deepEqual(calls[3].args.slice(-2), ["connection", "tabbit"]);
   assert.equal(calls[1].options.queue, "plaud");
   assert.equal(calls[1].options.timeout, 11 * 60 * 1000);
+  assert.equal(calls[3].options.timeout, 85_000);
   assert.equal(check.browserLabel, "Tabbit");
+});
+
+test("PLAUD connection leaves transient rebuild to the plugin under one bounded command", async () => {
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-test",
+    configProvider: () => ({ plaudConnectionMode: "enabled", plaudBrowser: "tabbit" }),
+    sleep: async () => undefined
+  });
+  integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
+  let attempts = 0;
+  let receivedTimeout = 0;
+  integration.runJson = async (_binary, _args, options) => {
+    attempts += 1;
+    receivedTimeout = options.timeout;
+    throw new Error("page.reload: Protocol error (Page.reload): Not attached to an active page");
+  };
+
+  await assert.rejects(
+    integration.runPlaudConnectionCommand("connection", "tabbit"),
+    /Not attached to an active page/
+  );
+  assert.equal(attempts, 1);
+  assert.equal(receivedTimeout, 85_000);
+});
+
+test("PLAUD connection does not retry a confirmed logout", async () => {
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-test",
+    configProvider: () => ({ plaudConnectionMode: "enabled", plaudBrowser: "tabbit" }),
+    sleep: async () => undefined
+  });
+  integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
+  let attempts = 0;
+  integration.runJson = async () => {
+    attempts += 1;
+    throw new Error("PLAUD_AUTH_REQUIRED: account sign-in is required");
+  };
+
+  await assert.rejects(
+    integration.runPlaudConnectionCommand("connection", "tabbit"),
+    /PLAUD_AUTH_REQUIRED/
+  );
+  assert.equal(attempts, 1);
 });
 
 test("PLAUD login reports a structured failure before opening a browser when runtime check fails", async () => {

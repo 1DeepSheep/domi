@@ -504,6 +504,7 @@ export function workflowPrompt(
       "如果运行上下文提供本机项目前次研究快照，先复用其中的研究摘录和来源线索；网址只作为线索，时效事实、关键判断、证据缺口和冲突信息仍须用当前材料或最新一手来源核验。需要联网时，把互不依赖的查询合并为并行多查询调用，不要逐项串行等待。",
       "标准或深度研究若至少包含两个相互独立的事实簇，且当前 Codex 支持子任务并行，应按任务内容一次性派发最多 3 个互斥的只读子任务（例如产品与技术、团队与融资、市场与竞品）；子任务不得写数据库或文件、不得向用户提问、不得继续派生子任务。快速研究或单点核验只使用并行多查询，不强制创建子任务。所有正式写入、关键回读和最终判断由当前主任务串行完成，并合并证据、去除转载重复、标记来源冲突。",
       "主回答和用户要求的正式文档完成必要保存与关键回读后立即返回；不要为了生成重复副本、刷新全库索引、整理内部回执或其他非关键收尾延迟答复，客户端会在后台维护通用运行归档和研究缓存。",
+      '如果本轮成功新增或更新一个项目或人物记录并按 record_id 回读验证，在最终回复末尾输出一次隐藏机器回执：<!-- DOMI_ENTITY_RESULT_V1 {"entityType":"project或person","recordId":"实际record_id","name":"规范名称"} -->；没有实际写入时不得输出。',
       domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
       "",
       "用户请求：",
@@ -568,6 +569,13 @@ export function workflowPrompt(
     projectContextWorkflow
       ? "7. 用户要求的正式文档完成必要保存和关键写后验证后立即返回；不要等待重复副本、全库索引刷新、内部回执排版或通用运行归档，客户端会在后台更新研究缓存和非关键归档。"
       : "",
+    workflow.id === "project-intake"
+      ? '8. 成功新增或更新项目记录并按 record_id 回读验证后，在最终回复末尾输出且只输出一次隐藏机器回执：<!-- DOMI_ENTITY_RESULT_V1 {"entityType":"project","recordId":"实际record_id","name":"规范项目名"} -->。必须填写本轮最终写入并验证的真实记录 ID；未完成写入时不得输出。'
+      : workflow.id === "people-intake"
+        ? '8. 成功新增或更新人物记录并按 record_id 回读验证后，在最终回复末尾输出且只输出一次隐藏机器回执：<!-- DOMI_ENTITY_RESULT_V1 {"entityType":"person","recordId":"实际record_id","name":"规范姓名"} -->。必须填写本轮最终写入并验证的真实记录 ID；未完成写入时不得输出。'
+        : ["domi-router", "investment-mgmt"].includes(workflow.id)
+          ? '8. 如果本轮成功新增或更新了一个项目或人物记录并按 record_id 回读验证，在最终回复末尾输出一次隐藏机器回执：<!-- DOMI_ENTITY_RESULT_V1 {"entityType":"project或person","recordId":"实际record_id","name":"规范名称"} -->；没有实际写入时不得输出。'
+        : "",
     workflow.id === "investment-analysis"
       ? "8. 非招股书且用户未要求 slides、HTML、PDF 或 PPTX 时，默认只交付一份完整基本面分析主报告；把必要证据、计算口径和验证清单整合进主报告，不额外创建“交付版／研究底稿／证据账本／披露完整性清单”等多份中间文件。只有招股书 full analysis、slides 或用户明确要求审计控制件时，才执行对应的多文件质量门。"
       : "",

@@ -13,6 +13,7 @@ import {
   ClipboardList,
   Copy,
   Database,
+  Download,
   ExternalLink,
   FileText,
   FilePlus2,
@@ -67,7 +68,15 @@ import {
   useState
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
+import { filesFromClipboardData } from "./clipboard-files";
 import { isLocalPdfResource } from "./document-resources";
+import {
+  DomiEntityResult,
+  normalizedEntityMention,
+  parseDomiEntityResult,
+  ProjectMentionMatch,
+  projectMentionMatches
+} from "./entity-routing";
 import MarkdownEditorErrorBoundary from "./MarkdownEditorErrorBoundary";
 import SectionErrorBoundary, { RenderRegion } from "./SectionErrorBoundary";
 import {
@@ -99,8 +108,10 @@ import {
   DocumentLibrarySnapshot,
   LocalAttachment,
   MarkdownDocument,
-  PdfDocument
+  PdfDocument,
+  UpdateStatus
 } from "./env";
+import { sidebarUpdateEntry } from "./update-entry";
 import {
   quickStartWorkflows,
   radarDiscoveryWindow,
@@ -124,6 +135,45 @@ const MessageContent = lazy(() => import("./MessageContent"));
 
 type Role = "user" | "assistant" | "system";
 type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents";
+
+type WorkspaceScrollPosition = {
+  key: string;
+  top: number;
+  left: number;
+};
+
+type WorkspaceUiState = {
+  rightPanelOpen: boolean;
+  scrollPositions: WorkspaceScrollPosition[];
+};
+
+type DocumentPreviewOrigin = {
+  workspaceView: WorkspaceView;
+  threadId: string;
+  previousRightPanelOpen: boolean;
+};
+
+const WORKSPACE_VIEW_DEFAULT_RIGHT_PANEL: Record<WorkspaceView, boolean> = {
+  conversation: true,
+  tasks: true,
+  news: true,
+  data: false,
+  documents: false
+};
+
+const WORKSPACE_SCROLL_SELECTORS: Record<WorkspaceView, string[]> = {
+  // Conversation scroll is already restored per-thread by chatScrollPositionsRef.
+  // Keeping it here as well made a workspace-level restore race the thread-level
+  // restore, which could make a reopened conversation jump to another task's spot.
+  conversation: [".right-panel:not(.document-panel)"],
+  tasks: [".task-board-scroll", ".task-column-list", ".right-panel:not(.document-panel)"],
+  news: [".home-weekly-news", ".right-panel:not(.document-panel)"],
+  data: [".database-grid-shell", ".right-panel:not(.document-panel)"],
+  documents: [".rich-markdown-scroll"]
+};
+
+const COMPOSER_DRAFTS_STORAGE_KEY = "domi.composerDrafts.v1";
+const DATABASE_SAVE_RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 type DatabaseEntityType = "project" | "person" | "news";
 type DatabaseWorkspaceTab = DatabaseEntityType | "classification";
 type DatabaseFilterKey =
@@ -758,6 +808,8 @@ type SubmitToCodexOptions = {
   reasoningEffort?: string;
   serviceTier?: string;
   preserveComposer?: boolean;
+  onAccepted?: (queuedSubmission?: QueuedSubmission) => void;
+  queuedSubmission?: QueuedSubmission;
 };
 
 type QueuedSubmission = {
@@ -771,6 +823,87 @@ type QueuedSubmission = {
   reasoningEffort: string;
   serviceTier: string;
   createdAt: number;
+  repositoryIdentity?: string;
+};
+
+const QUEUED_SUBMISSIONS_STORAGE_KEY = "domi.queuedSubmissions.v1";
+const PAUSED_QUEUED_SUBMISSIONS_STORAGE_KEY = "domi.pausedQueuedSubmissions.v1";
+
+function queueRepositoryIdentity(settings: AppSettings | null | undefined) {
+  if (!settings) return "";
+  const backend = settings.storageBackend === "local" ? "local" : "feishu";
+  const source = backend === "local"
+    ? [settings.localRepositoryDir, settings.localDatabasePath]
+    : [
+        settings.projectBaseToken,
+        settings.projectTableId,
+        settings.peopleBaseToken,
+        settings.peopleTableId,
+        settings.wikiSpaceId
+      ];
+  // Store only a non-reversible local fingerprint, never the user's private
+  // Base tokens, Wiki identifiers or absolute repository paths.
+  let hash = 0x811c9dc5;
+  for (const character of source.map((value) => String(value || "")).join("\u0000")) {
+    hash ^= character.codePointAt(0) || 0;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${backend}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function readQueuedSubmissions(): Record<string, QueuedSubmission[]> {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(QUEUED_SUBMISSIONS_STORAGE_KEY) || "{}") as Record<
+      string,
+      unknown
+    >;
+    return Object.fromEntries(Object.entries(parsed).flatMap(([threadId, value]) => {
+      if (!threadId || !Array.isArray(value)) return [];
+      const queue = value.filter((item): item is QueuedSubmission => {
+        if (!item || typeof item !== "object") return false;
+        const candidate = item as Partial<QueuedSubmission>;
+        return typeof candidate.id === "string"
+          && candidate.threadId === threadId
+          && typeof candidate.input === "string"
+          && Array.isArray(candidate.attachments)
+          && typeof candidate.useDomiPlugin === "boolean"
+          && typeof candidate.model === "string"
+          && typeof candidate.reasoningEffort === "string"
+          && typeof candidate.serviceTier === "string"
+          && (candidate.repositoryIdentity === undefined
+            || typeof candidate.repositoryIdentity === "string")
+          && Number.isFinite(candidate.createdAt);
+      });
+      return queue.length ? [[threadId, queue] as const] : [];
+    }));
+  } catch {
+    return {};
+  }
+}
+
+function readPausedQueuedSubmissionIds() {
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(PAUSED_QUEUED_SUBMISSIONS_STORAGE_KEY) || "[]"
+    );
+    return new Set<string>(
+      Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []
+    );
+  } catch {
+    return new Set<string>();
+  }
+}
+
+type RunContext = {
+  threadId: string;
+  assistantMessageId: string;
+  userMessageId?: string;
+  workflowId?: string;
+  requestText?: string;
+  attachments?: LocalAttachment[];
+  knownProjectIds?: string[];
+  knownPersonIds?: string[];
+  queuedSubmission?: QueuedSubmission;
 };
 
 type ComposerDraft = {
@@ -790,6 +923,38 @@ const EMPTY_COMPOSER_DRAFT: ComposerDraft = {
   attachments: [],
   attachmentError: ""
 };
+
+function readStoredComposerDrafts(): Record<string, ComposerDraft> {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(COMPOSER_DRAFTS_STORAGE_KEY) || "null");
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
+    return Object.fromEntries(Object.entries(stored).flatMap(([threadId, value]) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      const draft = value as Partial<ComposerDraft>;
+      const attachments = Array.isArray(draft.attachments)
+        ? draft.attachments.filter((item): item is LocalAttachment => Boolean(
+            item
+            && typeof item.name === "string"
+            && typeof item.path === "string"
+            && Number.isFinite(Number(item.size))
+          ))
+        : [];
+      const normalized: ComposerDraft = {
+        input: typeof draft.input === "string" ? draft.input : "",
+        attachments,
+        attachmentError: "",
+        selectedWorkflowId: typeof draft.selectedWorkflowId === "string"
+          ? draft.selectedWorkflowId
+          : undefined
+      };
+      return normalized.input || normalized.attachments.length || normalized.selectedWorkflowId
+        ? [[threadId, normalized]]
+        : [];
+    }));
+  } catch {
+    return {};
+  }
+}
 
 type ExecutionSuggestionPriority = "P1" | "P2" | "P3";
 
@@ -1031,6 +1196,37 @@ const COMPOSER_SUGGESTIONS = [
   "从 Watching List 找出本周应优先推进的项目",
   "把这份研究材料整理入项目库"
 ];
+
+const PROJECT_TARGET_WORKFLOW_IDS = new Set([
+  "project-research",
+  "project-intake",
+  "desk-research",
+  "investment-review",
+  "investment-analysis",
+  "ic-memo",
+  "investment-mgmt",
+  "deal-negotiation"
+]);
+const ENTITY_RESULT_WORKFLOW_IDS = new Set([
+  "project-intake",
+  "people-intake",
+  "domi-router",
+  "investment-mgmt"
+]);
+const PERSON_TARGET_WORKFLOW_IDS = new Set(["people-intake", "sourcing"]);
+
+function workflowAllowsProjectRouting(workflow?: Workflow) {
+  return !workflow || PROJECT_TARGET_WORKFLOW_IDS.has(workflow.id);
+}
+
+function workflowAllowsEntityResult(
+  workflowId: string | undefined,
+  entityType: "project" | "person"
+) {
+  if (workflowId === "project-intake") return entityType === "project";
+  if (workflowId === "people-intake") return entityType === "person";
+  return !workflowId || ["domi-router", "investment-mgmt"].includes(workflowId);
+}
 
 function isUnusedDraftThread(thread: Thread) {
   return !thread.externalType
@@ -1511,26 +1707,6 @@ function domiContextForThread(snapshot: DomiSnapshot | null, thread: Thread) {
   ].join("\n");
 }
 
-function normalizedProjectMention(value: string) {
-  return String(value || "")
-    .normalize("NFKC")
-    .toLocaleLowerCase("zh-CN")
-    .replace(/[^a-z0-9\u3400-\u9fff]+/g, "");
-}
-
-function mentionedDomiProject(snapshot: DomiSnapshot | null, text: string) {
-  if (!snapshot) return null;
-  const haystack = normalizedProjectMention(text);
-  if (!haystack) return null;
-  const matches = new Map(
-    snapshot.projects
-      .map((project) => ({ project, key: normalizedProjectMention(project.name) }))
-      .filter(({ key }) => key.length >= (/\p{Script=Han}/u.test(key) ? 2 : 3) && haystack.includes(key))
-      .map(({ project }) => [project.recordId, project] as const)
-  );
-  return matches.size === 1 ? [...matches.values()][0] : null;
-}
-
 const initialThreads: Thread[] = [
   {
     id: "thread-initial",
@@ -1602,17 +1778,19 @@ function App() {
   const [documentLibrarySidebarExpanded, setDocumentLibrarySidebarExpanded] = useState(false);
   const [composerDraftsByThread, setComposerDraftsByThread] = useState<
     Record<string, ComposerDraft>
-  >({});
+  >(readStoredComposerDrafts);
   const activeComposerDraft = composerDraftsByThread[activeThreadId] || EMPTY_COMPOSER_DRAFT;
   const input = activeComposerDraft.input;
   const attachments = activeComposerDraft.attachments;
   const attachmentError = activeComposerDraft.attachmentError;
   const selectedWorkflowId = activeComposerDraft.selectedWorkflowId;
   const [composerDragActive, setComposerDragActive] = useState(false);
+  const [attachmentImportCount, setAttachmentImportCount] = useState(0);
   const [codexStatus, setCodexStatus] = useState<CodexCheckResult | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<"connection" | "data" | "plaud" | "updates" | "diagnostics">("connection");
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [domiSnapshot, setDomiSnapshot] = useState<DomiSnapshot | null>(null);
   const [domiSyncing, setDomiSyncing] = useState(false);
   const [domiError, setDomiError] = useState("");
@@ -1634,6 +1812,7 @@ function App() {
   const [databaseSaving, setDatabaseSaving] = useState(false);
   const [databaseError, setDatabaseError] = useState("");
   const [databaseNotice, setDatabaseNotice] = useState("");
+  const [globalPersistenceError, setGlobalPersistenceError] = useState("");
   const [databaseDeleteTarget, setDatabaseDeleteTarget] = useState<DatabaseDeleteTarget | null>(null);
   const [databaseRowContextMenu, setDatabaseRowContextMenu] = useState<DatabaseRowContextMenu | null>(null);
   const [databaseDeleting, setDatabaseDeleting] = useState(false);
@@ -1697,10 +1876,14 @@ function App() {
   const [launchingPlaudIds, setLaunchingPlaudIds] = useState<Set<string>>(() => new Set());
   const [deletingPlaudId, setDeletingPlaudId] = useState<string | null>(null);
   const [storageReady, setStorageReady] = useState(false);
+  const [codexRecoveryReady, setCodexRecoveryReady] = useState(false);
   const [activeRunsByThread, setActiveRunsByThread] = useState<Record<string, string>>({});
   const [queuedSubmissionsByThread, setQueuedSubmissionsByThread] = useState<
     Record<string, QueuedSubmission[]>
-  >({});
+  >(readQueuedSubmissions);
+  const [pausedQueuedSubmissionIds, setPausedQueuedSubmissionIds] = useState<Set<string>>(
+    readPausedQueuedSubmissionIds
+  );
   const [model, setModel] = useState(NEW_THREAD_MODEL);
   const [reasoningEffort, setReasoningEffort] = useState(NEW_THREAD_REASONING_EFFORT);
   const [serviceTier, setServiceTier] = useState(NEW_THREAD_SERVICE_TIER);
@@ -1757,9 +1940,26 @@ function App() {
   const chatScrollRestoreTimersRef = useRef<number[]>([]);
   const threadListRef = useRef<HTMLDivElement>(null);
   const activeThreadIdRef = useRef(activeThreadId);
+  const workspaceViewRef = useRef<WorkspaceView>(workspaceView);
+  const rightPanelOpenRef = useRef(rightPanelOpen);
+  const workspaceUiStateRef = useRef<Record<WorkspaceView, WorkspaceUiState>>({
+    conversation: { rightPanelOpen: true, scrollPositions: [] },
+    tasks: { rightPanelOpen: true, scrollPositions: [] },
+    news: { rightPanelOpen: true, scrollPositions: [] },
+    data: { rightPanelOpen: false, scrollPositions: [] },
+    documents: { rightPanelOpen: false, scrollPositions: [] }
+  });
+  const documentPreviewOriginRef = useRef<DocumentPreviewOrigin | null>(null);
+  const documentPanelFocusedRef = useRef(false);
+  const windowFocusedRef = useRef(true);
   const threadsRef = useRef(threads);
+  const domiSnapshotRef = useRef(domiSnapshot);
   const persistedThreadsRef = useRef(new Map<string, Thread>());
   const persistenceQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const flushClientStateRef = useRef<() => Promise<{ ok: boolean; error?: string }>>(
+    async () => ({ ok: true })
+  );
+  const settingsDirtyRef = useRef(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const weeklyNewsRef = useRef<HTMLElement>(null);
   const weeklyNewsRunIdRef = useRef<string | null>(null);
@@ -1791,21 +1991,27 @@ function App() {
   const pdfOpenRequestRef = useRef(0);
   const markdownDraftRef = useRef(markdownDraft);
   const markdownDocumentRef = useRef(markdownDocument);
+  const pdfDocumentRef = useRef(pdfDocument);
   const databaseDraftRef = useRef(databaseDraft);
   const databaseAutoSaveTimerRef = useRef<number | null>(null);
   const databaseAutoSaveQueuedRef = useRef<DatabaseDraft | null>(null);
   const databaseAutoSaveInFlightRef = useRef(false);
+  const databaseAutoSaveRetryTimerRef = useRef<number | null>(null);
+  const databaseAutoSaveRetryRef = useRef(0);
   const plaudListPromiseRef = useRef<Promise<DomiPlaudSnapshot | null> | null>(null);
   const plaudSyncPromiseRef = useRef<Promise<DomiPlaudSyncResult | null> | null>(null);
   const plaudSnapshotRevisionRef = useRef(0);
   const plaudMutationIdsRef = useRef(new Set<string>());
   const launchingPlaudIdsRef = useRef(new Set<string>());
   const creatingThreadRef = useRef(false);
+  const attachmentImportCountRef = useRef(0);
+  const submissionStartingThreadIdsRef = useRef(new Set<string>());
   const codexRecoveryStartedRef = useRef(false);
   const queueStartingThreadIdsRef = useRef(new Set<string>());
-  const runContextRef = useRef(
-    new Map<string, { threadId: string; assistantMessageId: string }>()
-  );
+  const settlingThreadIdsRef = useRef(new Set<string>());
+  const queuedSubmissionsByThreadRef = useRef(queuedSubmissionsByThread);
+  const completedRunIdsRef = useRef(new Set<string>());
+  const runContextRef = useRef(new Map<string, RunContext>());
   const pendingAssistantDeltasRef = useRef(
     new Map<string, { threadId: string; messageId: string; content: string }>()
   );
@@ -1819,8 +2025,12 @@ function App() {
   } | null>(null);
 
   threadsRef.current = threads;
+  domiSnapshotRef.current = domiSnapshot;
+  workspaceViewRef.current = workspaceView;
+  rightPanelOpenRef.current = rightPanelOpen;
   markdownDraftRef.current = markdownDraft;
   markdownDocumentRef.current = markdownDocument;
+  pdfDocumentRef.current = pdfDocument;
   databaseDraftRef.current = databaseDraft;
   weeklyNewsSnapshotRef.current = weeklyNews;
   weeklyNewsPageRef.current = weeklyNewsPage;
@@ -1828,6 +2038,7 @@ function App() {
   weeklyNewsScanningRef.current = weeklyNewsScanning;
   weeklyNewsAutomationRef.current = weeklyNewsAutomation;
   appSettingsRef.current = appSettings;
+  queuedSubmissionsByThreadRef.current = queuedSubmissionsByThread;
 
   function updateWeeklyNewsAutomation(patch: Partial<WeeklyNewsAutomationState>) {
     const next = { ...weeklyNewsAutomationRef.current, ...patch };
@@ -1851,17 +2062,167 @@ function App() {
     setLaunchingPlaudIds(new Set(launchingPlaudIdsRef.current));
   }
 
+  function changeAttachmentImportCount(delta: number) {
+    attachmentImportCountRef.current = Math.max(0, attachmentImportCountRef.current + delta);
+    setAttachmentImportCount(attachmentImportCountRef.current);
+  }
+
   function currentMessageContent(threadId: string, messageId: string) {
     return threadsRef.current
       .find((thread) => thread.id === threadId)
       ?.messages.find((message) => message.id === messageId)?.content || "";
   }
 
-  function flushAssistantDeltas() {
+  function workspaceScrollElements(view: WorkspaceView) {
+    return WORKSPACE_SCROLL_SELECTORS[view].flatMap((selector) =>
+      [...document.querySelectorAll<HTMLElement>(selector)].map((element, index) => ({
+        element,
+        key: `${selector}:${index}`
+      }))
+    );
+  }
+
+  function captureWorkspaceUiState(
+    view = workspaceViewRef.current,
+    options: { preserveRightPanel?: boolean } = {}
+  ) {
+    const previous = workspaceUiStateRef.current[view];
+    workspaceUiStateRef.current[view] = {
+      rightPanelOpen: options.preserveRightPanel
+        ? previous?.rightPanelOpen ?? WORKSPACE_VIEW_DEFAULT_RIGHT_PANEL[view]
+        : rightPanelOpenRef.current,
+      scrollPositions: workspaceScrollElements(view).map(({ element, key }) => ({
+        key,
+        top: element.scrollTop,
+        left: element.scrollLeft
+      }))
+    };
+  }
+
+  function restoreWorkspaceUiState(view: WorkspaceView) {
+    const state = workspaceUiStateRef.current[view];
+    if (!state) return;
+    setRightPanelOpen(state.rightPanelOpen);
+    window.requestAnimationFrame(() => {
+      const positions = new Map(state.scrollPositions.map((item) => [item.key, item]));
+      for (const { element, key } of workspaceScrollElements(view)) {
+        const position = positions.get(key);
+        if (!position) continue;
+        element.scrollTop = position.top;
+        element.scrollLeft = position.left;
+      }
+    });
+  }
+
+  async function navigateWorkspace(view: WorkspaceView): Promise<boolean> {
+    if (view === workspaceViewRef.current) return true;
+    if (
+      workspaceViewRef.current === "data"
+      && view !== "data"
+      && !await flushDatabaseAutoSaveAndWait()
+    ) {
+      setDatabaseError("资料库修改尚未安全保存，已留在当前页面并保留草稿重试。");
+      return false;
+    }
+    captureWorkspaceUiState();
+    workspaceViewRef.current = view;
+    setWorkspaceView(view);
+    return true;
+  }
+
+  function isThreadActivelyVisible(threadId: string) {
+    return threadId === activeThreadIdRef.current
+      && workspaceViewRef.current === "conversation"
+      && windowFocusedRef.current
+      && document.visibilityState === "visible"
+      && !documentPanelFocusedRef.current;
+  }
+
+  async function persistWorkbenchStateNow(): Promise<boolean> {
+    const currentThreads = flushAssistantDeltas();
+    const patch = {
+      meta: {
+        version: 2,
+        activeThreadId: activeThreadIdRef.current,
+        agentPreferences: { model, reasoningEffort, serviceTier, domiPluginEnabled },
+        executionSuggestionState
+      },
+      threads: currentThreads,
+      deletedThreadIds: [...persistedThreadsRef.current.keys()]
+        .filter((id) => !currentThreads.some((thread) => thread.id === id)),
+      threadOrder: currentThreads.map((thread) => thread.id)
+    };
+    const persistedSnapshot = new Map(currentThreads.map((thread) => [thread.id, thread]));
+    const operation = persistenceQueueRef.current
+      .catch(() => undefined)
+      .then(() => workbench.saveStatePatch(patch));
+    persistenceQueueRef.current = operation;
+    try {
+      const result = await operation;
+      if (!result.ok) return false;
+      persistedThreadsRef.current = persistedSnapshot;
+      window.localStorage.setItem(
+        COMPOSER_DRAFTS_STORAGE_KEY,
+        JSON.stringify(composerDraftsByThread)
+      );
+      window.localStorage.setItem(
+        QUEUED_SUBMISSIONS_STORAGE_KEY,
+        JSON.stringify(queuedSubmissionsByThread)
+      );
+      window.localStorage.setItem(
+        PAUSED_QUEUED_SUBMISSIONS_STORAGE_KEY,
+        JSON.stringify([...pausedQueuedSubmissionIds])
+      );
+      setGlobalPersistenceError("");
+      return true;
+    } catch {
+      setGlobalPersistenceError("对话和草稿尚未安全保存，domi 已阻止关闭；请重试。");
+      return false;
+    }
+  }
+
+  flushClientStateRef.current = async () => {
+    if (settingsDirtyRef.current) {
+      return { ok: false, error: "设置页还有未保存的修改，请先保存或放弃修改后再关闭 domi。" };
+    }
+    // The main process allows 12 seconds for renderer shutdown. Keep all renderer-side
+    // settling inside one shared budget so we can return a useful blocking reason first.
+    const closeDeadline = Date.now() + 9_000;
+    while (attachmentImportCountRef.current > 0 && Date.now() < closeDeadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    if (attachmentImportCountRef.current > 0) {
+      return { ok: false, error: "附件仍在导入，请等待完成后再关闭 domi。" };
+    }
+    while (settlingThreadIdsRef.current.size > 0 && Date.now() < closeDeadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    if (settlingThreadIdsRef.current.size > 0) {
+      return { ok: false, error: "项目资料仍在归档，请等待完成后再关闭 domi。" };
+    }
+    if (!await saveOpenMarkdown()) {
+      return { ok: false, error: "Markdown 文档尚未保存，请处理保存错误后重试关闭。" };
+    }
+    while (databaseAutoSaveInFlightRef.current && Date.now() < closeDeadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    if (databaseAutoSaveInFlightRef.current) {
+      return { ok: false, error: "资料库仍在保存，请稍后重试关闭。" };
+    }
+    if (databaseAutoSaveQueuedRef.current && !await flushDatabaseAutoSave()) {
+      return { ok: false, error: "资料库修改尚未保存，草稿已保留并会自动重试。" };
+    }
+    if (!await persistWorkbenchStateNow()) {
+      return { ok: false, error: "对话或输入草稿尚未保存，请稍后重试关闭。" };
+    }
+    return { ok: true };
+  };
+
+  function flushAssistantDeltas(): Thread[] {
     assistantDeltaFlushTimerRef.current = null;
     const pending = [...pendingAssistantDeltasRef.current.values()];
     pendingAssistantDeltasRef.current.clear();
-    if (!pending.length) return;
+    if (!pending.length) return threadsRef.current;
 
     const patchesByThread = new Map<string, Map<string, string>>();
     for (const item of pending) {
@@ -1870,7 +2231,7 @@ function App() {
       patchesByThread.set(item.threadId, threadPatches);
     }
 
-    setThreads((current) => {
+    const applyPendingDeltas = (current: Thread[]) => {
       let changed = false;
       const next = current.map((thread) => {
         const patches = patchesByThread.get(thread.id);
@@ -1890,7 +2251,18 @@ function App() {
         return { ...thread, messages };
       });
       return changed ? next : current;
+    };
+
+    // React state updaters are asynchronous. Update the authoritative ref immediately so
+    // a close/save in the same tick cannot persist the pre-delta assistant message.
+    const nextSnapshot = applyPendingDeltas(threadsRef.current);
+    threadsRef.current = nextSnapshot;
+    setThreads((current) => {
+      const reconciled = applyPendingDeltas(current);
+      threadsRef.current = reconciled;
+      return reconciled;
     });
+    return nextSnapshot;
   }
 
   function queueAssistantDelta(
@@ -2235,7 +2607,6 @@ function App() {
       submission,
       thread: threads.find((thread) => thread.id === threadId)
     })))
-    .filter((item): item is { submission: QueuedSubmission; thread: Thread } => Boolean(item.thread))
     .sort((left, right) => left.submission.createdAt - right.submission.createdAt),
   [queuedSubmissionsByThread, threads]);
 
@@ -2424,6 +2795,23 @@ function App() {
     });
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let receivedLiveStatus = false;
+    const unsubscribe = workbench.onUpdateStatus((status) => {
+      if (cancelled) return;
+      receivedLiveStatus = true;
+      setUpdateStatus(status);
+    });
+    void workbench.getUpdateStatus().then((status) => {
+      if (!cancelled && !receivedLiveStatus) setUpdateStatus(status);
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unsubscribe();
     };
   }, []);
 
@@ -2655,7 +3043,15 @@ function App() {
         .catch(() => undefined)
         .then(() => workbench.saveStatePatch(patch))
         .then((result) => {
-          if (result.ok) persistedThreadsRef.current = persistedSnapshot;
+          if (result.ok) {
+            persistedThreadsRef.current = persistedSnapshot;
+            setGlobalPersistenceError((current) => current.startsWith("对话和草稿") ? "" : current);
+          } else {
+            setGlobalPersistenceError("对话和草稿暂时无法保存；domi 会继续重试，请暂时不要退出。");
+          }
+        })
+        .catch(() => {
+          setGlobalPersistenceError("对话和草稿暂时无法保存；domi 会继续重试，请暂时不要退出。");
         });
     }, 300);
     return () => window.clearTimeout(timer);
@@ -2714,7 +3110,10 @@ function App() {
 
   useEffect(() => {
     if (!storageReady || codexRecoveryStartedRef.current) return;
-    if (typeof workbench.recoverCodexThread !== "function") return;
+    if (typeof workbench.recoverCodexThread !== "function") {
+      setCodexRecoveryReady(true);
+      return;
+    }
     codexRecoveryStartedRef.current = true;
 
     const candidates = threadsRef.current
@@ -2727,8 +3126,37 @@ function App() {
           && latestAssistant
           && (latestAssistant.status === "running" || latestAssistant.status === "error")
         );
-      })
-      .slice(0, 12);
+      });
+
+    const pauseRecoveredThreadQueue = (threadId: string) => {
+      const waiting = queuedSubmissionsByThreadRef.current[threadId] || [];
+      if (waiting.length === 0) return;
+      setPausedQueuedSubmissionIds((current) => {
+        const next = new Set(current);
+        waiting.forEach((submission) => next.add(submission.id));
+        return next;
+      });
+    };
+    const blockRecoveredThread = (thread: Thread, assistant: Message, detail: string) => {
+      pauseRecoveredThreadQueue(thread.id);
+      patchMessage(assistant.id, {
+        content: [
+          assistant.content,
+          `任务恢复检查失败：${detail || "无法确认上一轮运行状态。"} 为避免重复执行，后续排队任务已暂停，可确认后手动重试。`
+        ].filter(Boolean).join("\n\n"),
+        status: "error"
+      });
+    };
+    const clearRecoveredRun = (threadId: string, runId: string) => {
+      if (!runId) return;
+      runContextRef.current.delete(runId);
+      setActiveRunsByThread((current) => {
+        if (!current[threadId] || current[threadId] !== runId) return current;
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
+    };
 
     void (async () => {
       for (const thread of candidates) {
@@ -2736,70 +3164,148 @@ function App() {
           .reverse()
           .find((message) => message.role === "assistant");
         if (!thread.codexThreadId || !latestAssistant) continue;
+        let reboundRunId = "";
+        try {
+          let result = await workbench.recoverCodexThread(thread.codexThreadId);
+          if (!result.ok) {
+            blockRecoveredThread(thread, latestAssistant, result.error || "无法读取上一轮运行状态。");
+            continue;
+          }
 
-        const result = await workbench.recoverCodexThread(thread.codexThreadId);
-        if (!result.ok) continue;
+          if (result.status === "running") {
+            if (!result.runId) {
+              blockRecoveredThread(thread, latestAssistant, "检测到运行中任务，但缺少可恢复的运行标识。");
+              continue;
+            }
+            reboundRunId = result.runId;
+            runContextRef.current.set(reboundRunId, {
+              threadId: thread.id,
+              assistantMessageId: latestAssistant.id
+            });
+            setActiveRunsByThread((current) => ({ ...current, [thread.id]: reboundRunId }));
+            patchMessage(latestAssistant.id, {
+              content: result.output || latestAssistant.content,
+              status: "running"
+            });
+            const bound = await workbench.bindCodexRun(reboundRunId);
+            if (bound.ok) {
+              reboundRunId = "";
+              continue;
+            }
 
-        if (result.status === "running" && result.runId) {
-          runContextRef.current.set(result.runId, {
-            threadId: thread.id,
-            assistantMessageId: latestAssistant.id
-          });
-          setActiveRunsByThread((current) => ({ ...current, [thread.id]: result.runId! }));
-          patchMessage(latestAssistant.id, {
-            content: result.output || latestAssistant.content,
-            status: "running"
-          });
-          continue;
-        }
+            // The run may have finished between the snapshot and bind handshake.
+            // Re-read once, then accept only a terminal disposition.
+            result = await workbench.recoverCodexThread(thread.codexThreadId);
+            clearRecoveredRun(thread.id, reboundRunId);
+            reboundRunId = "";
+            if (!result.ok || !["completed", "stopped", "failed"].includes(result.status)) {
+              blockRecoveredThread(
+                thread,
+                latestAssistant,
+                result.error || bound.error || "运行绑定失败且无法确认最终状态。"
+              );
+              continue;
+            }
+          }
 
-        if (result.status === "completed" && result.output) {
-          patchMessage(latestAssistant.id, { content: result.output, status: "done" });
-          patchThread(thread.id, {
-            updatedAt: nowLabel(),
-            lastActiveAt: Date.now(),
-            hasUnreadCompletion: thread.id !== activeThreadIdRef.current
-          });
-          continue;
-        }
+          if (result.status === "completed") {
+            patchMessage(latestAssistant.id, {
+              content: result.output || latestAssistant.content || "Codex 已完成。",
+              status: "done"
+            });
+            patchThread(thread.id, {
+              updatedAt: nowLabel(),
+              lastActiveAt: Date.now(),
+              hasUnreadCompletion: !isThreadActivelyVisible(thread.id)
+            });
+            await finalizeRecoveredEntityBinding(
+              thread,
+              latestAssistant,
+              result.output || latestAssistant.content
+            );
+            continue;
+          }
 
-        if (result.status === "stopped") {
-          const recoveryNote = "任务已中断。如果不是你主动停止，通常是 domi 重启、开发版刷新或 Codex 连接断开导致；在当前对话发送“继续”即可从中断处续做。";
-          const previousContent = latestAssistant.content
-            .replace(/\n*执行失败：Codex turn 状态：(interrupted|cancelled|canceled)\s*$/i, "")
-            .trim();
-          patchMessage(latestAssistant.id, {
-            content: [result.output || previousContent, recoveryNote]
-              .filter(Boolean)
-              .join("\n\n"),
-            status: "done"
-          });
-          patchThread(thread.id, {
-            updatedAt: nowLabel(),
-            lastActiveAt: Date.now(),
-            hasUnreadCompletion: thread.id !== activeThreadIdRef.current
-          });
-          addTimeline(thread.id, {
-            runId: result.runId || `recovery-${thread.id}`,
-            title: "执行已中断",
-            detail: "可在当前对话发送“继续”续做",
-            kind: "event",
-            status: "stopped"
-          });
-          continue;
-        }
+          if (result.status === "stopped") {
+            const recoveryNote = "任务已中断。如果不是你主动停止，通常是 domi 重启、开发版刷新或 Codex 连接断开导致；在当前对话发送“继续”即可从中断处续做。";
+            const previousContent = latestAssistant.content
+              .replace(/\n*执行失败：Codex turn 状态：(interrupted|cancelled|canceled)\s*$/i, "")
+              .trim();
+            patchMessage(latestAssistant.id, {
+              content: [result.output || previousContent, recoveryNote]
+                .filter(Boolean)
+                .join("\n\n"),
+              status: "done"
+            });
+            patchThread(thread.id, {
+              updatedAt: nowLabel(),
+              lastActiveAt: Date.now(),
+              hasUnreadCompletion: !isThreadActivelyVisible(thread.id)
+            });
+            addTimeline(thread.id, {
+              runId: result.runId || `recovery-${thread.id}`,
+              title: "执行已中断",
+              detail: "可在当前对话发送“继续”续做",
+              kind: "event",
+              status: "stopped"
+            });
+            pauseRecoveredThreadQueue(thread.id);
+            continue;
+          }
 
-        if (result.status === "failed" && result.error) {
-          patchMessage(latestAssistant.id, {
-            content: [result.output, `执行失败：${result.error}`].filter(Boolean).join("\n\n"),
-            status: "error"
-          });
+          if (result.status === "failed") {
+            patchMessage(latestAssistant.id, {
+              content: [
+                result.output,
+                `执行失败：${result.error || "Codex 未返回明确失败原因。"}`
+              ].filter(Boolean).join("\n\n"),
+              status: "error"
+            });
+            pauseRecoveredThreadQueue(thread.id);
+            continue;
+          }
+
+          blockRecoveredThread(thread, latestAssistant, `无法识别运行状态：${result.status || "unknown"}。`);
+        } catch (error) {
+          clearRecoveredRun(thread.id, reboundRunId);
+          blockRecoveredThread(
+            thread,
+            latestAssistant,
+            error instanceof Error ? error.message : String(error)
+          );
         }
       }
+      // The persistent queue may run only after every candidate has reached a
+      // bound-running, finalized-completed, paused-terminal or blocked state.
+      setCodexRecoveryReady(true);
     })();
   }, [storageReady]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        QUEUED_SUBMISSIONS_STORAGE_KEY,
+        JSON.stringify(queuedSubmissionsByThread)
+      );
+    } catch {
+      // Queue remains available for the current session if local persistence is unavailable.
+    }
+  }, [queuedSubmissionsByThread]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        PAUSED_QUEUED_SUBMISSIONS_STORAGE_KEY,
+        JSON.stringify([...pausedQueuedSubmissionIds])
+      );
+    } catch {
+      // Paused state remains available for the current session.
+    }
+  }, [pausedQueuedSubmissionIds]);
+
+  useEffect(() => {
+    if (!storageReady || !codexRecoveryReady || !appSettings) return;
+    const currentRepositoryIdentity = queueRepositoryIdentity(appSettings);
     for (const [threadId, queue] of Object.entries(queuedSubmissionsByThread)) {
       if (queue.length === 0 || activeRunsByThread[threadId]) continue;
       if (queueStartingThreadIdsRef.current.has(threadId)) continue;
@@ -2807,25 +3313,30 @@ function App() {
 
       const targetThread = threads.find((thread) => thread.id === threadId);
       if (!targetThread) {
-        setQueuedSubmissionsByThread((current) => {
-          const next = { ...current };
-          delete next[threadId];
+        setPausedQueuedSubmissionIds((current) => {
+          const next = new Set(current);
+          queue.forEach((submission) => next.add(submission.id));
           return next;
         });
         continue;
       }
 
       const queued = queue[0];
+      if (
+        !queued.repositoryIdentity
+        || queued.repositoryIdentity !== currentRepositoryIdentity
+      ) {
+        setPausedQueuedSubmissionIds((current) => {
+          if (current.has(queued.id)) return current;
+          return new Set(current).add(queued.id);
+        });
+        continue;
+      }
+      if (pausedQueuedSubmissionIds.has(queued.id)) continue;
       const workflow = workflows.find((item) => item.id === queued.workflowId);
       queueStartingThreadIdsRef.current.add(threadId);
-      setQueuedSubmissionsByThread((current) => {
-        const remaining = (current[threadId] || []).slice(1);
-        if (remaining.length > 0) return { ...current, [threadId]: remaining };
-        const next = { ...current };
-        delete next[threadId];
-        return next;
-      });
-
+      let accepted = false;
+      let acceptedSubmission = queued;
       void submitToCodex(workflow, queued.input, {
         thread: targetThread,
         useDomiPlugin: queued.useDomiPlugin,
@@ -2833,12 +3344,77 @@ function App() {
         model: queued.model,
         reasoningEffort: queued.reasoningEffort,
         serviceTier: queued.serviceTier,
-        preserveComposer: true
+        preserveComposer: true,
+        queuedSubmission: queued,
+        onAccepted: (routedSubmission) => {
+          accepted = true;
+          acceptedSubmission = routedSubmission || queued;
+          setQueuedSubmissionsByThread((current) => {
+            const remaining = (current[threadId] || []).filter((item) => item.id !== queued.id);
+            const next = remaining.length > 0
+              ? { ...current, [threadId]: remaining }
+              : { ...current };
+            if (remaining.length === 0) delete next[threadId];
+            queuedSubmissionsByThreadRef.current = next;
+            return next;
+          });
+          setPausedQueuedSubmissionIds((current) => {
+            if (!current.has(queued.id)) return current;
+            const next = new Set(current);
+            next.delete(queued.id);
+            return next;
+          });
+        }
+      }).then((result) => {
+        if (!accepted && result && "queued" in result && result.queued) {
+          // Same-thread/same-target race: submitToCodex intentionally retained
+          // the item until the active run releases this queue.
+          return;
+        }
+        if (!accepted || !result?.ok || result.stopped) {
+          if (accepted) {
+            setQueuedSubmissionsByThread((current) => {
+              const retryThreadId = acceptedSubmission.threadId;
+              const existing = current[retryThreadId] || [];
+              if (existing.some((item) => item.id === acceptedSubmission.id)) return current;
+              const next = {
+                ...current,
+                [retryThreadId]: [acceptedSubmission, ...existing]
+              };
+              queuedSubmissionsByThreadRef.current = next;
+              return next;
+            });
+          }
+          setPausedQueuedSubmissionIds((current) => new Set(current).add(acceptedSubmission.id));
+        }
+      }).catch(() => {
+        if (accepted) {
+          setQueuedSubmissionsByThread((current) => {
+            const retryThreadId = acceptedSubmission.threadId;
+            const existing = current[retryThreadId] || [];
+            if (existing.some((item) => item.id === acceptedSubmission.id)) return current;
+            const next = {
+              ...current,
+              [retryThreadId]: [acceptedSubmission, ...existing]
+            };
+            queuedSubmissionsByThreadRef.current = next;
+            return next;
+          });
+        }
+        setPausedQueuedSubmissionIds((current) => new Set(current).add(acceptedSubmission.id));
       }).finally(() => {
-        queueStartingThreadIdsRef.current.delete(threadId);
-      });
+          queueStartingThreadIdsRef.current.delete(threadId);
+        });
     }
-  }, [activeRunsByThread, queuedSubmissionsByThread, threads]);
+  }, [
+    activeRunsByThread,
+    appSettings,
+    codexRecoveryReady,
+    pausedQueuedSubmissionIds,
+    queuedSubmissionsByThread,
+    storageReady,
+    threads
+  ]);
 
   useLayoutEffect(() => {
     if (workspaceView !== "conversation" || !hasConversation) return;
@@ -2862,6 +3438,7 @@ function App() {
   }, [deferredThreadQuery]);
 
   useEffect(() => {
+    if (!isThreadActivelyVisible(activeThreadId)) return;
     setThreads((current) => {
       const activeHasUnreadCompletion = current.some(
         (thread) => thread.id === activeThreadId && thread.hasUnreadCompletion
@@ -2871,7 +3448,88 @@ function App() {
         ? { ...thread, hasUnreadCompletion: false }
         : thread);
     });
-  }, [activeThreadId]);
+  }, [activeThreadId, workspaceView]);
+
+  useLayoutEffect(() => {
+    workspaceViewRef.current = workspaceView;
+    restoreWorkspaceUiState(workspaceView);
+    return () => captureWorkspaceUiState(workspaceView, { preserveRightPanel: true });
+  }, [workspaceView]);
+
+  useEffect(() => {
+    workspaceUiStateRef.current[workspaceView].rightPanelOpen = rightPanelOpen;
+  }, [rightPanelOpen, workspaceView]);
+
+  useEffect(() => {
+    const clearVisibleThreadCompletion = () => {
+      const threadId = activeThreadIdRef.current;
+      if (!isThreadActivelyVisible(threadId)) return;
+      setThreads((current) => current.map((thread) =>
+        thread.id === threadId && thread.hasUnreadCompletion
+          ? { ...thread, hasUnreadCompletion: false }
+          : thread
+      ));
+    };
+    const handleFocus = () => {
+      windowFocusedRef.current = true;
+      window.requestAnimationFrame(clearVisibleThreadCompletion);
+    };
+    const handleBlur = () => {
+      windowFocusedRef.current = false;
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+      documentPanelFocusedRef.current = target instanceof Element
+        && Boolean(target.closest(".right-panel.document-panel, .document-library-content"));
+      if (!documentPanelFocusedRef.current) clearVisibleThreadCompletion();
+    };
+    const handleFocusOut = () => {
+      window.requestAnimationFrame(() => {
+        const active = document.activeElement;
+        documentPanelFocusedRef.current = active instanceof Element
+          && Boolean(active.closest(".right-panel.document-panel, .document-library-content"));
+      });
+    };
+    window.addEventListener("focus", handleFocus);
+    window.addEventListener("blur", handleBlur);
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("focusout", handleFocusOut);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("blur", handleBlur);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("focusout", handleFocusOut);
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(
+          COMPOSER_DRAFTS_STORAGE_KEY,
+          JSON.stringify(composerDraftsByThread)
+        );
+      } catch {
+        setGlobalPersistenceError("输入草稿暂时无法保存；请不要关闭 domi，并稍后重试。");
+      }
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [composerDraftsByThread]);
+
+  useEffect(() => {
+    if (typeof workbench.onPrepareClose !== "function") return;
+    return workbench.onPrepareClose(async () => flushClientStateRef.current());
+  }, []);
+
+  useEffect(() => {
+    if (workspaceView === "data") return;
+    setDatabaseExpandedCell(null);
+    setDatabaseRowContextMenu(null);
+    setClassificationCreateDialog(null);
+    if (databaseAutoSaveQueuedRef.current || databaseAutoSaveInFlightRef.current) {
+      void flushDatabaseAutoSave();
+    }
+  }, [workspaceView]);
 
   useEffect(() => {
     if (!markdownDocument) return;
@@ -2903,6 +3561,15 @@ function App() {
   ]);
 
   useEffect(() => () => clearMarkdownAutoSaveTimer(), []);
+
+  useEffect(() => () => {
+    if (databaseAutoSaveTimerRef.current !== null) {
+      window.clearTimeout(databaseAutoSaveTimerRef.current);
+    }
+    if (databaseAutoSaveRetryTimerRef.current !== null) {
+      window.clearTimeout(databaseAutoSaveRetryTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -3037,11 +3704,30 @@ function App() {
     }
   }
 
-  function selectDatabaseRecord(
+  async function flushDatabaseAutoSaveAndWait(timeoutMs = 7_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (databaseAutoSaveInFlightRef.current && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    if (databaseAutoSaveInFlightRef.current) return false;
+    if (!databaseAutoSaveQueuedRef.current) return true;
+    return flushDatabaseAutoSave();
+  }
+
+  async function selectDatabaseRecord(
     entityType: DatabaseEntityType,
     recordId: string,
     snapshot = databaseSnapshot
-  ) {
+  ): Promise<boolean> {
+    const switchingRecord = databaseDraftRef.current
+      && (
+        databaseDraftRef.current.entityType !== entityType
+        || databaseDraftRef.current.recordId !== recordId
+      );
+    if (switchingRecord && !await flushDatabaseAutoSaveAndWait()) {
+      setDatabaseError("上一条记录尚未安全保存，已保留当前编辑内容并阻止切换。");
+      return false;
+    }
     const record = databaseRecords(snapshot, entityType)
       .find((item) => item.recordId === recordId);
     setDatabaseEntityType(entityType);
@@ -3050,22 +3736,24 @@ function App() {
     setDatabaseExpandedCell(null);
     setDatabaseError("");
     setDatabaseNotice("");
+    return true;
   }
 
-  function beginDatabaseRecordEdit(
+  async function beginDatabaseRecordEdit(
     entityType: DatabaseEntityType,
     recordId: string,
     snapshot = databaseSnapshot
-  ) {
-    selectDatabaseRecord(entityType, recordId, snapshot);
+  ): Promise<boolean> {
+    if (!await selectDatabaseRecord(entityType, recordId, snapshot)) return false;
     setDatabaseEditingId(recordId);
+    return true;
   }
 
-  function beginDatabaseCellEdit(
+  async function beginDatabaseCellEdit(
     entityType: DatabaseEntityType,
     recordId: string,
     cell: HTMLTableCellElement
-  ) {
+  ): Promise<boolean> {
     const field = cell.dataset.databaseField as keyof DatabaseDraft | undefined;
     const content = cell.querySelector<HTMLElement>(
       ".database-grid-clamp, strong, .database-pill-list"
@@ -3080,7 +3768,9 @@ function App() {
     );
     const alreadyEditing = databaseEditingId === recordId
       && databaseDraft?.entityType === entityType;
-    if (!alreadyEditing) beginDatabaseRecordEdit(entityType, recordId);
+    if (!alreadyEditing && !await beginDatabaseRecordEdit(entityType, recordId)) {
+      return false;
+    }
     if (field && shouldExpand) {
       const rect = cell.getBoundingClientRect();
       const width = Math.min(480, Math.max(340, rect.width * 1.8));
@@ -3098,7 +3788,7 @@ function App() {
         top,
         width
       });
-      return;
+      return true;
     }
     setDatabaseExpandedCell(null);
     window.setTimeout(() => {
@@ -3111,6 +3801,7 @@ function App() {
         editor.select();
       }
     }, 0);
+    return true;
   }
 
   function reopenExpandedDatabaseCell(
@@ -3124,7 +3815,7 @@ function App() {
     const cell = event.currentTarget.closest<HTMLTableCellElement>("td");
     const draft = databaseDraftRef.current;
     if (!cell || !draft) return;
-    beginDatabaseCellEdit(draft.entityType, draft.recordId, cell);
+    void beginDatabaseCellEdit(draft.entityType, draft.recordId, cell);
   }
 
   function handleDatabaseRowClick(
@@ -3136,10 +3827,10 @@ function App() {
     if (target.closest("button, input, select, textarea, a")) return;
     const editableCell = target.closest<HTMLTableCellElement>("td[data-database-editable]");
     if (editableCell) {
-      beginDatabaseCellEdit(entityType, recordId, editableCell);
+      void beginDatabaseCellEdit(entityType, recordId, editableCell);
       return;
     }
-    selectDatabaseRecord(entityType, recordId);
+    void selectDatabaseRecord(entityType, recordId);
   }
 
   function handleDatabaseRowKeyDown(
@@ -3190,6 +3881,10 @@ function App() {
 
   async function refreshDatabase(options: { preserveSelection?: boolean } = {}) {
     if (databaseLoading) return null;
+    if (!await flushDatabaseAutoSaveAndWait()) {
+      setDatabaseError("当前资料库修改尚未安全保存，刷新已取消并保留草稿。");
+      return null;
+    }
     setDatabaseLoading(true);
     setDatabaseError("");
     try {
@@ -3223,7 +3918,11 @@ function App() {
     }
   }
 
-  function switchDatabaseEntity(entityType: DatabaseEntityType) {
+  async function switchDatabaseEntity(entityType: DatabaseEntityType) {
+    if (!await flushDatabaseAutoSaveAndWait()) {
+      setDatabaseError("当前资料库修改尚未安全保存，已阻止切换。");
+      return;
+    }
     const records = databaseRecords(databaseSnapshot, entityType);
     const selected = records[0];
     setDatabaseWorkspaceTab(entityType);
@@ -3242,8 +3941,11 @@ function App() {
     setDatabaseNotice("");
   }
 
-  function switchDatabaseClassification() {
-    void flushDatabaseAutoSave();
+  async function switchDatabaseClassification() {
+    if (!await flushDatabaseAutoSaveAndWait()) {
+      setDatabaseError("当前资料库修改尚未安全保存，已阻止切换。");
+      return;
+    }
     const reviews = databaseSnapshot?.classificationReviews || [];
     const selected = reviews.find((item) => item.project.recordId === classificationSelectedId)
       || reviews[0];
@@ -3351,6 +4053,10 @@ function App() {
 
   function scheduleDatabaseAutoSave(draft: DatabaseDraft, delay = 650) {
     databaseAutoSaveQueuedRef.current = draft;
+    if (databaseAutoSaveRetryTimerRef.current !== null) {
+      window.clearTimeout(databaseAutoSaveRetryTimerRef.current);
+      databaseAutoSaveRetryTimerRef.current = null;
+    }
     if (databaseAutoSaveTimerRef.current !== null) {
       window.clearTimeout(databaseAutoSaveTimerRef.current);
     }
@@ -3360,16 +4066,49 @@ function App() {
     }, delay);
   }
 
-  async function flushDatabaseAutoSave() {
+  function queueDatabaseAutoSaveRetry(draft: DatabaseDraft, message: string) {
+    const queued = databaseAutoSaveQueuedRef.current;
+    databaseAutoSaveQueuedRef.current = queued?.entityType === draft.entityType
+      && queued.recordId === draft.recordId
+      ? queued
+      : draft;
+    const retryIndex = Math.min(
+      databaseAutoSaveRetryRef.current,
+      DATABASE_SAVE_RETRY_DELAYS_MS.length - 1
+    );
+    databaseAutoSaveRetryRef.current = Math.min(
+      retryIndex + 1,
+      DATABASE_SAVE_RETRY_DELAYS_MS.length - 1
+    );
+    const delay = DATABASE_SAVE_RETRY_DELAYS_MS[retryIndex];
+    if (databaseAutoSaveRetryTimerRef.current !== null) {
+      window.clearTimeout(databaseAutoSaveRetryTimerRef.current);
+    }
+    databaseAutoSaveRetryTimerRef.current = window.setTimeout(() => {
+      databaseAutoSaveRetryTimerRef.current = null;
+      void flushDatabaseAutoSave();
+    }, delay);
+    setDatabaseError(`${message} domi 将在后台自动重试。`);
+    setGlobalPersistenceError(
+      `资料库修改尚未保存，已保留草稿并将在 ${Math.ceil(delay / 1_000)} 秒后重试。`
+    );
+  }
+
+  async function flushDatabaseAutoSave(): Promise<boolean> {
+    if (databaseAutoSaveRetryTimerRef.current !== null) {
+      window.clearTimeout(databaseAutoSaveRetryTimerRef.current);
+      databaseAutoSaveRetryTimerRef.current = null;
+    }
     if (databaseAutoSaveTimerRef.current !== null) {
       window.clearTimeout(databaseAutoSaveTimerRef.current);
       databaseAutoSaveTimerRef.current = null;
     }
-    if (databaseAutoSaveInFlightRef.current) return;
+    if (databaseAutoSaveInFlightRef.current) return false;
     const draft = databaseAutoSaveQueuedRef.current;
-    if (!draft) return;
+    if (!draft) return true;
     databaseAutoSaveQueuedRef.current = null;
     databaseAutoSaveInFlightRef.current = true;
+    let retryScheduled = false;
     let request: DomiDatabaseUpdateRequest;
     if (draft.entityType === "project") {
       const valuation = draft.latestValuationUsd100m.trim();
@@ -3438,8 +4177,9 @@ function App() {
     try {
       const result = await workbench.updateDomiDatabaseRecord(request);
       if (!result.ok) {
-        setDatabaseError(result.error || "资料库记录保存失败。");
-        return;
+        retryScheduled = true;
+        queueDatabaseAutoSaveRetry(draft, result.error || "资料库记录保存失败。");
+        return false;
       }
       if (result.snapshot) setDomiSnapshot(result.snapshot);
       const record = result.record;
@@ -3474,15 +4214,23 @@ function App() {
         });
       }
       setDatabaseNotice("已自动保存，并同步更新数据库、Markdown 和资料目录。");
+      databaseAutoSaveRetryRef.current = 0;
+      setGlobalPersistenceError((current) => current.startsWith("资料库修改") ? "" : current);
       if (draft.entityType === "news") {
         void refreshWeeklyNews(weeklyNewsPage, { silent: true });
       }
+      return true;
     } catch (error) {
-      setDatabaseError(error instanceof Error ? error.message : String(error));
+      retryScheduled = true;
+      queueDatabaseAutoSaveRetry(
+        draft,
+        error instanceof Error ? error.message : String(error)
+      );
+      return false;
     } finally {
       databaseAutoSaveInFlightRef.current = false;
       setDatabaseSaving(false);
-      if (databaseAutoSaveQueuedRef.current) {
+      if (databaseAutoSaveQueuedRef.current && !retryScheduled) {
         scheduleDatabaseAutoSave(databaseAutoSaveQueuedRef.current, 180);
       }
     }
@@ -4029,12 +4777,35 @@ function App() {
       try {
         const result = await workbench.listPlaud({ fresh, offset: 0, limit: 50 });
         if (revision === plaudSnapshotRevisionRef.current) {
-          setPlaudSnapshot(result);
+          setPlaudSnapshot((current) => {
+            if (result.lastSuccessfulSnapshot) {
+              return {
+                ...result.lastSuccessfulSnapshot,
+                stale: true,
+                remoteStatus: result.remoteStatus,
+                retryable: result.retryable,
+                warning: result.warning
+              };
+            }
+            if (!result.ok && current) {
+              return {
+                ...current,
+                stale: true,
+                remoteStatus: result.remoteStatus,
+                retryable: result.retryable,
+                warning: result.warning || result.error
+              };
+            }
+            return result;
+          });
           if (!result.ok) {
-            setPlaudError(result.error || "PLAUD 队列同步失败。 ");
+            setPlaudError(result.error || result.warning || "PLAUD 队列同步失败。 ");
+            setPlaudNotice("");
           } else if (result.stale) {
-            setPlaudNotice(result.warning || "PLAUD 暂时无法刷新，已显示上次成功读取的录音。");
+            setPlaudError(result.warning || "PLAUD 暂时无法刷新，已显示上次成功读取的录音。");
+            setPlaudNotice("");
           } else {
+            setPlaudError("");
             setPlaudNotice((current) =>
               current.startsWith("PLAUD 暂时无法刷新") ? "" : current
             );
@@ -4069,8 +4840,17 @@ function App() {
       try {
         const result = await workbench.listPlaud({ offset, limit: 50 });
         if (revision !== plaudSnapshotRevisionRef.current) return result;
-        if (!result.ok) {
-          setPlaudError(result.error || "更早的 PLAUD 录音读取失败。 ");
+        if (!result.ok || result.stale) {
+          setPlaudSnapshot((current) => current
+            ? {
+                ...current,
+                stale: true,
+                remoteStatus: result.remoteStatus,
+                retryable: result.retryable,
+                warning: result.warning || result.error
+              }
+            : current);
+          setPlaudError(result.error || result.warning || "更早的 PLAUD 录音读取失败。 ");
           return result;
         }
         setPlaudSnapshot((current) => {
@@ -4414,8 +5194,8 @@ function App() {
     setCodexStatus(status);
   }
 
-  function chooseWorkflow(workflow: Workflow) {
-    setWorkspaceView("conversation");
+  async function chooseWorkflow(workflow: Workflow) {
+    if (!await navigateWorkspace("conversation")) return;
     setSelectedWorkflowId(workflow.id);
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }
@@ -4479,6 +5259,7 @@ function App() {
       setExecutionSuggestionError(`未找到“${suggestion.title}”对应的 domi 工作流。`);
       return false;
     }
+    if (!await navigateWorkspace("conversation")) return false;
 
     setExecutingSuggestionId(suggestion.id);
     setExecutionSuggestionError("");
@@ -4517,7 +5298,6 @@ function App() {
 
       setThreads((current) => [nextThread, ...current]);
       setActiveThreadId(nextThread.id);
-      setWorkspaceView("conversation");
       clearComposerDraft(nextThread.id);
       setDomiPluginEnabled(true);
       setThreadMenuId(null);
@@ -4836,6 +5616,7 @@ function App() {
   }
 
   async function openDomiProject(project: DomiProject) {
+    if (!await navigateWorkspace("conversation")) return;
     const entityWorkspacePath = await resolveDomiEntityWorkspacePath("project", project.recordId);
     const existing = threads.find(
       (thread) => thread.externalType === "project" && thread.externalRecordId === project.recordId
@@ -4844,7 +5625,7 @@ function App() {
       if (entityWorkspacePath && existing.workspacePath !== entityWorkspacePath) {
         patchThread(existing.id, { workspacePath: entityWorkspacePath });
       }
-      selectThread(existing.id);
+      await selectThread(existing.id);
       setDomiQuery("");
       void refreshDomiEntityOverview(existing.id, "project", project);
       return;
@@ -4873,6 +5654,7 @@ function App() {
   }
 
   async function openDomiPerson(person: DomiPerson) {
+    if (!await navigateWorkspace("conversation")) return;
     const entityWorkspacePath = await resolveDomiEntityWorkspacePath("person", person.recordId);
     const existing = threads.find(
       (thread) => thread.externalType === "person" && thread.externalRecordId === person.recordId
@@ -4881,7 +5663,7 @@ function App() {
       if (entityWorkspacePath && existing.workspacePath !== entityWorkspacePath) {
         patchThread(existing.id, { workspacePath: entityWorkspacePath });
       }
-      selectThread(existing.id);
+      await selectThread(existing.id);
       setDomiQuery("");
       void refreshDomiEntityOverview(existing.id, "person", person);
       return;
@@ -4977,6 +5759,256 @@ function App() {
       };
       return next;
     });
+  }
+
+  function pauseThreadQueueAfterTerminal(context: RunContext) {
+    const currentState = queuedSubmissionsByThreadRef.current;
+    const existing = currentState[context.threadId] || [];
+    const restored = context.queuedSubmission
+      && !existing.some((item) => item.id === context.queuedSubmission!.id)
+      ? [context.queuedSubmission, ...existing]
+      : existing;
+    if (restored !== existing) {
+      const nextState = { ...currentState, [context.threadId]: restored };
+      queuedSubmissionsByThreadRef.current = nextState;
+      setQueuedSubmissionsByThread(nextState);
+    }
+    const ids = restored.map((item) => item.id);
+    if (!ids.length) return;
+    setPausedQueuedSubmissionIds((current) => {
+      if (ids.every((id) => current.has(id))) return current;
+      const next = new Set(current);
+      ids.forEach((id) => next.add(id));
+      return next;
+    });
+  }
+
+  async function finalizeRecoveredEntityBinding(
+    thread: Thread,
+    assistantMessage: Message,
+    output: string
+  ) {
+    // A task may finish while every domi window is closed. Only replay a persisted,
+    // machine-verifiable entity marker; never guess an entity from stale free text here.
+    if (!parseDomiEntityResult(output)) return;
+    const assistantIndex = thread.messages.findIndex((message) => message.id === assistantMessage.id);
+    const userMessage = assistantIndex > 0
+      ? [...thread.messages.slice(0, assistantIndex)].reverse().find((message) => message.role === "user")
+      : undefined;
+    settlingThreadIdsRef.current.add(thread.id);
+    try {
+      await finalizeEntityBinding({
+        threadId: thread.id,
+        assistantMessageId: assistantMessage.id,
+        userMessageId: userMessage?.id,
+        workflowId: assistantMessage.workflowId,
+        requestText: userMessage?.content,
+        attachments: userMessage?.attachments
+      }, output);
+    } catch (error) {
+      workbench.reportRendererIssue({
+        kind: "document-operation",
+        message: `恢复任务结果时实体归档失败：${error instanceof Error ? error.message : String(error)}`
+      });
+    } finally {
+      settlingThreadIdsRef.current.delete(thread.id);
+    }
+  }
+
+  async function finalizeEntityBinding(context: RunContext, output: string) {
+    const stableResult = parseDomiEntityResult(output);
+    if (!stableResult && (!context.workflowId || !ENTITY_RESULT_WORKFLOW_IDS.has(context.workflowId))) {
+      return;
+    }
+
+    const failBinding = (message: string) => {
+      workbench.reportRendererIssue({ kind: "document-operation", message });
+      addTimeline(context.threadId, {
+        runId: `entity-failed-${context.assistantMessageId}`,
+        title: "资料归属尚未完成",
+        detail: message,
+        kind: "error",
+        status: "failed"
+      });
+    };
+
+    let synced;
+    try {
+      synced = await workbench.syncDomi();
+    } catch (error) {
+      failBinding(`无法刷新资料库，未根据机器回执改变任务归属：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!synced.ok || synced.stale || !synced.snapshot) {
+      failBinding(synced.error || "资料库刷新失败或只返回旧缓存，未根据机器回执改变任务归属。");
+      return;
+    }
+    const snapshot = synced.snapshot;
+    domiSnapshotRef.current = snapshot;
+    setDomiSnapshot(snapshot);
+
+    let result: DomiEntityResult | null = stableResult;
+    if (!result && snapshot && context.workflowId === "project-intake") {
+      const knownIds = new Set(context.knownProjectIds || []);
+      const newlyCreated = snapshot.projects.filter((project) => !knownIds.has(project.recordId));
+      const candidates = projectMentionMatches(
+        newlyCreated,
+        [context.requestText, output].filter(Boolean).join("\n")
+      ).filter((candidate) => candidate.confidence === "high");
+      const project = candidates.length === 1 ? candidates[0].project : null;
+      if (project) {
+        result = { entityType: "project", recordId: project.recordId, name: project.name };
+      }
+    } else if (!result && snapshot && context.workflowId === "people-intake") {
+      const knownIds = new Set(context.knownPersonIds || []);
+      const newlyCreated = snapshot.people.filter((person) => !knownIds.has(person.recordId));
+      const outputText = normalizedEntityMention([context.requestText, output].filter(Boolean).join("\n"));
+      const mentionedPeople = newlyCreated.filter((person) => {
+        const name = normalizedEntityMention(person.name);
+        return name.length >= 2 && outputText.includes(name);
+      });
+      if (mentionedPeople.length === 1) {
+        result = {
+          entityType: "person",
+          recordId: mentionedPeople[0].recordId,
+          name: mentionedPeople[0].name
+        };
+      }
+    }
+    if (!result) return;
+    if (!workflowAllowsEntityResult(context.workflowId, result.entityType)) {
+      failBinding(`工作流“${context.workflowId || "通用任务"}”与 ${result.entityType} 回执不兼容，未改变任务归属。`);
+      return;
+    }
+
+    const thread = threadsRef.current.find((item) => item.id === context.threadId);
+    if (!thread) return;
+    const entity = result.entityType === "project"
+      ? snapshot.projects.find((item) => item.recordId === result!.recordId)
+      : snapshot.people.find((item) => item.recordId === result!.recordId);
+    if (!entity) {
+      failBinding(`最新资料库中不存在回执记录 ${result.recordId}，未改变任务归属。`);
+      return;
+    }
+    if (normalizedEntityMention(entity.name) !== normalizedEntityMention(result.name)) {
+      failBinding(`回执名称“${result.name}”与资料库规范名称“${entity.name}”不一致，未改变任务归属。`);
+      return;
+    }
+    if (
+      thread.externalType
+      && thread.externalRecordId
+      && (thread.externalType !== result.entityType || thread.externalRecordId !== result.recordId)
+    ) {
+      const confirmed = window.confirm(
+        `当前任务已经归属于“${thread.title}”，本轮回执指向“${entity.name}”。\n\n是否切换归属并仅把本轮附件归入“${entity.name}”？`
+      );
+      if (!confirmed) {
+        failBinding("用户取消了实体归属切换；原任务归属和本轮暂存附件均保持不变。");
+        return;
+      }
+    }
+
+    let workspace;
+    try {
+      workspace = await workbench.loadDomiEntityWorkspace({
+        entityType: result.entityType,
+        recordId: result.recordId
+      });
+    } catch (error) {
+      failBinding(`无法读取“${entity.name}”的固定资料目录：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!workspace.ok || !workspace.workspacePath) {
+      failBinding(
+        workspace.error
+          || `“${entity.name}”当前没有稳定的本地实体目录；未回退到通用任务目录，也未改变任务归属。`
+      );
+      return;
+    }
+
+    const assistantIndex = thread.messages.findIndex(
+      (message) => message.id === context.assistantMessageId
+    );
+    const userMessage = context.userMessageId
+      ? thread.messages.find((message) => message.id === context.userMessageId && message.role === "user")
+      : assistantIndex > 0
+        ? [...thread.messages.slice(0, assistantIndex)].reverse().find((message) => message.role === "user")
+        : undefined;
+    const attachmentsToCommit = context.attachments !== undefined
+      ? context.attachments
+      : userMessage?.attachments || [];
+    if (attachmentsToCommit.length > 0 && !userMessage) {
+      failBinding("无法定位本轮用户消息，未提交附件，也未改变任务归属。");
+      return;
+    }
+
+    const projectLabel = result.entityType === "project" && entity
+      ? [
+          (entity as DomiProject).domain,
+          (entity as DomiProject).subdomains[0],
+          (entity as DomiProject).status
+        ].filter(Boolean).join(" · ")
+      : result.entityType === "person" && entity
+        ? [
+            (entity as DomiPerson).organization,
+            cleanPeopleStatus((entity as DomiPerson).status)
+          ].filter(Boolean).join(" · ")
+        : result.name;
+    const patch: Partial<Thread> = {
+      projectId: `domi-${result.entityType}-${result.recordId}`,
+      externalType: result.entityType,
+      externalRecordId: result.recordId,
+      project: projectLabel,
+      workspacePath: workspace.workspacePath
+    };
+    if (!thread.manualTitle) {
+      const workflow = workflows.find((item) => item.id === context.workflowId);
+      patch.title = `${workflow?.title || (result.entityType === "project" ? "项目任务" : "人物任务")}：${result.name}`;
+    }
+    const boundThread = { ...thread, ...patch };
+    const committed = await commitAttachmentsToEntity(
+      boundThread,
+      attachmentsToCommit
+    );
+    if (!committed.ok) {
+      failBinding(committed.error || "附件仍保留在本机暂存区，实体归属未改变。");
+      return;
+    }
+
+    const byPath = new Map(
+      attachmentsToCommit.map(
+        (attachment, index) => [attachment.path, committed.attachments[index] || attachment] as const
+      )
+    );
+    setThreads((current) => current.map((currentThread) => {
+      if (currentThread.id !== context.threadId) return currentThread;
+      const messages = currentThread.messages.map((message) =>
+        message.id === userMessage?.id && message.attachments?.length
+          ? {
+              ...message,
+              attachments: message.attachments.map(
+                (attachment) => byPath.get(attachment.path) || attachment
+              )
+            }
+          : message
+      );
+      return {
+        ...currentThread,
+        ...patch,
+        messages,
+        timeline: [{
+          id: createId("timeline"),
+          runId: `entity-${result.recordId}`,
+          title: `已归入${result.entityType === "project" ? "项目" : "人物"}：${result.name}`,
+          detail: committed.attachments.length
+            ? `已绑定固定目录并归档 ${committed.attachments.length} 个本轮附件`
+            : "已绑定固定资料目录",
+          kind: "event" as const,
+          status: "done"
+        }, ...(currentThread.timeline || [])].slice(0, 18)
+      };
+    }));
+    void refreshDocumentLibrary({ silent: true, force: true });
   }
 
   function handleCodexEvent(payload: CodexEventPayload) {
@@ -5106,14 +6138,10 @@ function App() {
     }
 
     if (payload.type === "completed" || payload.type === "stopped" || payload.type === "failed") {
+      if (completedRunIdsRef.current.has(payload.runId)) return;
+      completedRunIdsRef.current.add(payload.runId);
       discardAssistantDelta(payload.runId);
       const runCompletedAt = Date.now();
-      setActiveRunsByThread((current) => {
-        if (current[context.threadId] !== payload.runId) return current;
-        const next = { ...current };
-        delete next[context.threadId];
-        return next;
-      });
 
       patchMessage(context.assistantMessageId, {
         content:
@@ -5135,7 +6163,7 @@ function App() {
         updatedAt: nowLabel(),
         lastActiveAt: runCompletedAt,
         hasUnreadCompletion:
-          payload.type === "completed" && context.threadId !== activeThreadIdRef.current
+          payload.type === "completed" && !isThreadActivelyVisible(context.threadId)
       });
 
       addTimeline(context.threadId, {
@@ -5152,8 +6180,179 @@ function App() {
         kind: payload.type === "failed" ? "error" : "assistant",
         status: payload.type
       });
-      runContextRef.current.delete(payload.runId);
+      const releaseRun = () => {
+        settlingThreadIdsRef.current.delete(context.threadId);
+        runContextRef.current.delete(payload.runId);
+        setActiveRunsByThread((current) => {
+          if (current[context.threadId] !== payload.runId) return current;
+          const next = { ...current };
+          delete next[context.threadId];
+          return next;
+        });
+      };
+      if (payload.type !== "completed") {
+        // Rebuild and pause the queue before releasing the per-thread run lock.
+        // Otherwise the next item can start in the small gap before the failed
+        // or stopped item is restored at the head of the queue.
+        pauseThreadQueueAfterTerminal(context);
+        releaseRun();
+        return;
+      }
+      settlingThreadIdsRef.current.add(context.threadId);
+      void finalizeEntityBinding(context, payload.output || "")
+        .catch((error) => {
+          workbench.reportRendererIssue({
+            kind: "document-operation",
+            message: `任务已完成，但实体归档结算失败：${error instanceof Error ? error.message : String(error)}`
+          });
+        })
+        .finally(releaseRun);
     }
+  }
+
+  async function commitAttachmentsToEntity(
+    thread: Thread,
+    selectedAttachments: LocalAttachment[]
+  ): Promise<{ ok: boolean; attachments: LocalAttachment[]; error?: string }> {
+    if (!selectedAttachments.length || !thread.externalType || !thread.externalRecordId) {
+      return { ok: true, attachments: selectedAttachments };
+    }
+    let workspace;
+    try {
+      workspace = await workbench.loadDomiEntityWorkspace({
+        entityType: thread.externalType,
+        recordId: thread.externalRecordId
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        attachments: selectedAttachments,
+        error: `无法读取固定资料目录：${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+    if (!workspace.ok || !workspace.workspacePath) {
+      return {
+        ok: false,
+        attachments: selectedAttachments,
+        error: workspace.error || "当前资料库后端没有稳定的本地实体目录；附件仍保留在本机暂存区。"
+      };
+    }
+    const workspacePath = workspace.workspacePath;
+    const pending = selectedAttachments.filter(
+      (attachment) => !attachment.path.startsWith(`${workspacePath}/`)
+    );
+    if (!pending.length) {
+      return { ok: true, attachments: selectedAttachments };
+    }
+    const imported = await workbench.importFiles(
+      pending.map((attachment) => attachment.path),
+      workspacePath,
+      { entityType: thread.externalType, recordId: thread.externalRecordId }
+    );
+    if (!imported.ok || imported.files.length !== pending.length) {
+      return {
+        ok: false,
+        attachments: selectedAttachments,
+        error: imported.error || `无法把 ${selectedAttachments.length} 个附件归档到固定资料目录。`
+      };
+    }
+    const replacements = new Map(
+      pending.map((attachment, index) => [attachment.path, imported.files[index]] as const)
+    );
+    return {
+      ok: true,
+      attachments: selectedAttachments.map((attachment) => replacements.get(attachment.path) || attachment)
+    };
+  }
+
+  function chooseMentionedProject(
+    thread: Thread,
+    candidates: ProjectMentionMatch<DomiProject>[]
+  ): DomiProject | null | undefined {
+    if (!candidates.length) return undefined;
+    if (candidates.length === 1) {
+      const { project, confidence } = candidates[0];
+      const switchingEntity = Boolean(
+        thread.externalType
+        && thread.externalRecordId
+        && (thread.externalType !== "project" || thread.externalRecordId !== project.recordId)
+      );
+      if (switchingEntity || confidence === "low") {
+        const current = domiSnapshotRef.current?.projects.find(
+          (item) => item.recordId === thread.externalRecordId
+        );
+        const confirmed = window.confirm(
+          switchingEntity
+            ? `当前对话归属于“${current?.name || thread.title}”，本次消息命中“${project.name}”。\n\n是否切换到“${project.name}”并把本轮材料归入它的固定目录？`
+            : `本次只通过较短或含数字的名称命中“${project.name}”，存在同名或误匹配风险。\n\n确认本轮项目就是“${project.name}”吗？`
+        );
+        return confirmed ? project : null;
+      }
+      return project;
+    }
+
+    const options = candidates.map(({ project, confidence }, index) =>
+      `${index + 1}. ${project.name}${confidence === "low" ? "（需确认）" : ""}`
+    ).join("\n");
+    const answer = window.prompt(
+      `本次消息命中了多个项目，请输入要归档的项目序号；取消则不发送，避免材料归错目录。\n\n${options}`,
+      thread.externalType === "project"
+        ? String(Math.max(1, candidates.findIndex((item) => item.project.recordId === thread.externalRecordId) + 1))
+        : "1"
+    );
+    if (answer === null) return null;
+    const index = Number.parseInt(answer.trim(), 10) - 1;
+    if (!Number.isInteger(index) || !candidates[index]) {
+      window.alert("没有识别到有效序号，本次消息尚未发送。");
+      return null;
+    }
+    return candidates[index].project;
+  }
+
+  async function prepareNeutralProjectTarget(
+    sourceThread: Thread,
+    workflow?: Workflow
+  ): Promise<Thread | null> {
+    if (!await navigateWorkspace("conversation")) return null;
+    const reusable = threadsRef.current.find((candidate) =>
+      candidate.id !== sourceThread.id
+      && isUnusedDraftThread(candidate)
+      && !composerDraftHasContent(candidate.id)
+    );
+    const patch: Partial<Thread> = {
+      workspacePath: codexStatus?.workspacePath,
+      title: `${workflow?.title || "项目任务"}：待确认项目`,
+      project: NEW_THREAD_PROJECT,
+      updatedAt: nowLabel(),
+      lastActiveAt: Date.now(),
+      manualTitle: false,
+      externalType: undefined,
+      externalRecordId: undefined
+    };
+    let target: Thread;
+    if (reusable) {
+      target = { ...reusable, ...patch };
+      patchThread(reusable.id, patch);
+    } else {
+      target = {
+        id: createId("thread"),
+        projectId: createId("project"),
+        workspacePath: codexStatus?.workspacePath,
+        title: String(patch.title),
+        project: NEW_THREAD_PROJECT,
+        updatedAt: nowLabel(),
+        lastActiveAt: Date.now(),
+        pinned: false,
+        manualTitle: false,
+        timeline: [],
+        lastUsage: null,
+        messages: []
+      };
+      setThreads((current) => [target, ...current]);
+    }
+    setActiveThreadId(target.id);
+    if (target.id !== sourceThread.id) clearComposerDraft(sourceThread.id);
+    return target;
   }
 
   async function bindThreadToMentionedProject(
@@ -5163,16 +6362,90 @@ function App() {
     useDomiPlugin: boolean,
     projectSnapshot: DomiSnapshot | null,
     workflow?: Workflow
-  ): Promise<{ thread: Thread; attachments: LocalAttachment[] }> {
-    if (!useDomiPlugin || thread.externalType) {
+  ): Promise<{ thread: Thread; attachments: LocalAttachment[]; canceled?: boolean }> {
+    if (!useDomiPlugin || !projectSnapshot) {
+      const committed = await commitAttachmentsToEntity(thread, selectedAttachments);
+      if (!committed.ok) {
+        setAttachmentError(committed.error || "附件归档失败，本次消息尚未发送。");
+        return { thread, attachments: selectedAttachments, canceled: true };
+      }
+      return { thread, attachments: committed.attachments };
+    }
+    if (!workflowAllowsProjectRouting(workflow)) {
+      if (thread.externalType === "person" && workflow && PERSON_TARGET_WORKFLOW_IDS.has(workflow.id)) {
+        const committed = await commitAttachmentsToEntity(thread, selectedAttachments);
+        if (!committed.ok) {
+          setAttachmentError(committed.error || "附件归档失败，本次消息尚未发送。");
+          return { thread, attachments: selectedAttachments, canceled: true };
+        }
+        return { thread, attachments: committed.attachments };
+      }
       return { thread, attachments: selectedAttachments };
     }
-    if (!projectSnapshot) return { thread, attachments: selectedAttachments };
-    const project = mentionedDomiProject(
-      projectSnapshot,
-      [thread.title, thread.project, requestText, ...selectedAttachments.map((attachment) => attachment.name)].join("\n")
-    );
-    if (!project) return { thread, attachments: selectedAttachments };
+    const explicitText = [
+      requestText,
+      ...selectedAttachments.map((attachment) => attachment.name)
+    ].join("\n");
+    let candidates = projectMentionMatches(projectSnapshot.projects, explicitText);
+    if (!candidates.length && !thread.externalType) {
+      candidates = projectMentionMatches(
+        projectSnapshot.projects,
+        [thread.title, thread.project].join("\n")
+      );
+    }
+    const project = chooseMentionedProject(thread, candidates);
+    if (project === null) {
+      return { thread, attachments: selectedAttachments, canceled: true };
+    }
+    if (!project) {
+      const unresolvedProjectTarget = Boolean(
+        workflow
+        && PROJECT_TARGET_WORKFLOW_IDS.has(workflow.id)
+        && workflow.id !== "investment-mgmt"
+      );
+      if (unresolvedProjectTarget && workflow?.id === "project-intake" && thread.externalType === "project") {
+        const currentProject = projectSnapshot.projects.find(
+          (item) => item.recordId === thread.externalRecordId
+        );
+        const answer = window.prompt(
+          `尚未在项目库中唯一匹配到本轮项目。请选择：\n\n1. 继续更新当前项目“${currentProject?.name || thread.title}”\n2. 作为新项目暂存，入库验证后再归入新项目\n\n取消则不发送。`,
+          "2"
+        );
+        if (answer === null) return { thread, attachments: selectedAttachments, canceled: true };
+        if (answer.trim() === "2") {
+          const neutral = await prepareNeutralProjectTarget(thread, workflow);
+          return neutral
+            ? { thread: neutral, attachments: selectedAttachments }
+            : { thread, attachments: selectedAttachments, canceled: true };
+        }
+        if (answer.trim() !== "1") {
+          window.alert("没有识别到有效序号，本次消息尚未发送。");
+          return { thread, attachments: selectedAttachments, canceled: true };
+        }
+      } else if (unresolvedProjectTarget && thread.externalType === "person") {
+        const confirmed = window.confirm(
+          `本轮没有唯一匹配到已有项目，不能在人物“${thread.title}”的目录中运行项目任务。\n\n是否改用中立暂存区执行，并在项目入库验证后再归档？`
+        );
+        if (!confirmed) return { thread, attachments: selectedAttachments, canceled: true };
+        const neutral = await prepareNeutralProjectTarget(thread, workflow);
+        return neutral
+          ? { thread: neutral, attachments: selectedAttachments }
+          : { thread, attachments: selectedAttachments, canceled: true };
+      } else if (unresolvedProjectTarget && thread.externalType !== "project") {
+        const confirmed = window.confirm(
+          workflow?.id === "project-intake"
+            ? `尚未在项目库中唯一匹配到本轮项目。\n\n继续后将先作为临时任务运行；完成入库并验证后，domi 会回绑新项目并归档本轮附件。是否继续？`
+            : `尚未在项目库中唯一匹配到本轮项目。\n\n继续后将作为临时任务运行，本轮附件先保留在暂存区，不会静默归入其他项目。是否继续？`
+        );
+        if (!confirmed) return { thread, attachments: selectedAttachments, canceled: true };
+      }
+      const committed = await commitAttachmentsToEntity(thread, selectedAttachments);
+      if (!committed.ok) {
+        setAttachmentError(committed.error || "附件归档失败，本次消息尚未发送。");
+        return { thread, attachments: selectedAttachments, canceled: true };
+      }
+      return { thread, attachments: committed.attachments };
+    }
 
     const entityWorkspacePath = await resolveDomiEntityWorkspacePath(
       "project",
@@ -5181,6 +6454,7 @@ function App() {
     );
     const workspacePath = entityWorkspacePath || thread.workspacePath || codexStatus?.workspacePath;
     const patch: Partial<Thread> = {
+      projectId: `domi-project-${project.recordId}`,
       workspacePath,
       externalType: "project",
       externalRecordId: project.recordId,
@@ -5190,18 +6464,18 @@ function App() {
       patch.title = `${workflow?.title || "项目任务"}：${project.name}`;
     }
     let targetThread: Thread;
-    if (isUnusedDraftThread(thread)) {
-      patchThread(thread.id, patch);
+    let createTargetThread = false;
+    if (isUnusedDraftThread(thread) || thread.externalRecordId === project.recordId) {
       targetThread = { ...thread, ...patch };
     } else {
-      const existing = threads.find((candidate) =>
+      const existing = threadsRef.current.find((candidate) =>
         candidate.externalType === "project"
         && candidate.externalRecordId === project.recordId
       );
       if (existing) {
-        patchThread(existing.id, patch);
         targetThread = { ...existing, ...patch };
       } else {
+        createTargetThread = true;
         targetThread = {
           id: createId("thread"),
           projectId: `domi-project-${project.recordId}`,
@@ -5218,34 +6492,27 @@ function App() {
           lastUsage: null,
           messages: []
         };
-        setThreads((current) => [targetThread, ...current]);
       }
+    }
+    if (targetThread.id !== thread.id && !await navigateWorkspace("conversation")) {
+      return { thread, attachments: selectedAttachments, canceled: true };
+    }
+    const committed = await commitAttachmentsToEntity(targetThread, selectedAttachments);
+    if (!committed.ok) {
+      setAttachmentError(committed.error || "附件归档失败，本次消息尚未发送。");
+      return { thread, attachments: selectedAttachments, canceled: true };
+    }
+    if (createTargetThread) {
+      setThreads((current) => [targetThread, ...current]);
+    } else {
+      patchThread(targetThread.id, patch);
+    }
+    if (targetThread.id !== thread.id) {
       setActiveThreadId(targetThread.id);
-      setWorkspaceView("conversation");
-      clearComposerDraft(targetThread.id);
     }
-    let projectAttachments = selectedAttachments;
-    if (workspacePath && selectedAttachments.some((attachment) =>
-      !attachment.path.startsWith(`${workspacePath}/`)
-    )) {
-      const imported = await workbench.importFiles(
-        selectedAttachments.map((attachment) => attachment.path),
-        workspacePath,
-        { entityType: "project", recordId: project.recordId }
-      );
-      if (imported.ok && imported.files.length === selectedAttachments.length) {
-        projectAttachments = imported.files;
-      } else if (!imported.ok) {
-        workbench.reportRendererIssue({
-          kind: "document-operation",
-          message: imported.error || `无法把 ${selectedAttachments.length} 个附件归档到项目原始材料目录。`
-        });
-      }
-    }
-    return {
-      thread: targetThread,
-      attachments: projectAttachments
-    };
+    if (targetThread.id !== thread.id) clearComposerDraft(thread.id);
+    setAttachmentError("");
+    return { thread: targetThread, attachments: committed.attachments };
   }
 
   async function submitToCodex(
@@ -5275,11 +6542,84 @@ function App() {
       effectiveDomiSnapshot,
       workflow
     );
+    if (binding.canceled) return;
     targetThread = binding.thread;
     selectedAttachments = binding.attachments;
+    // Project routing may move a persisted queue item to another canonical
+    // entity thread and may replace staging paths with committed attachments.
+    // Store only that final ownership in the run context so a later stop,
+    // failure or restart cannot restore the item to its stale source thread.
+    const routedQueuedSubmission = options.queuedSubmission
+      ? {
+          ...options.queuedSubmission,
+          threadId: targetThread.id,
+          attachments: selectedAttachments,
+          repositoryIdentity: queueRepositoryIdentity(appSettingsRef.current)
+        }
+      : undefined;
     const targetAlreadyRunning = Boolean(activeRunsByThread[targetThread.id])
       || [...runContextRef.current.values()].some((context) => context.threadId === targetThread.id);
-    if (targetAlreadyRunning) return;
+    if (targetAlreadyRunning) {
+      if (options.queuedSubmission && routedQueuedSubmission) {
+        const movedSubmission: QueuedSubmission = routedQueuedSubmission;
+        if (options.queuedSubmission.threadId === targetThread.id) {
+          // The pump can race with a run that starts after its initial idle
+          // check. Keep this same queue item for the next turn. Applying the
+          // normal acceptance callback would dequeue the equal source/target
+          // and silently lose the user's pending work.
+          setQueuedSubmissionsByThread((current) => {
+            const targetQueue = current[targetThread.id] || [];
+            const nextQueue = targetQueue.some((item) => item.id === movedSubmission.id)
+              ? targetQueue.map((item) => item.id === movedSubmission.id ? movedSubmission : item)
+              : [movedSubmission, ...targetQueue];
+            const next = { ...current, [targetThread.id]: nextQueue };
+            queuedSubmissionsByThreadRef.current = next;
+            return next;
+          });
+          return { ok: true, queued: true, stopped: false, error: undefined };
+        }
+        setQueuedSubmissionsByThread((current) => {
+          const withoutSource = (current[options.queuedSubmission!.threadId] || [])
+            .filter((item) => item.id !== options.queuedSubmission!.id);
+          const targetQueue = options.queuedSubmission!.threadId === targetThread.id
+            ? withoutSource
+            : current[targetThread.id] || [];
+          const next = { ...current };
+          if (withoutSource.length) next[options.queuedSubmission!.threadId] = withoutSource;
+          else delete next[options.queuedSubmission!.threadId];
+          next[targetThread.id] = targetQueue.some((item) => item.id === movedSubmission.id)
+            ? targetQueue
+            : [...targetQueue, movedSubmission];
+          queuedSubmissionsByThreadRef.current = next;
+          return next;
+        });
+        options.onAccepted?.(movedSubmission);
+        return { ok: true, queued: true, stopped: false, error: undefined };
+      }
+      const queuedSubmission: QueuedSubmission = {
+        id: createId("queue"),
+        threadId: targetThread.id,
+        input: messageText,
+        workflowId: workflow?.id,
+        attachments: selectedAttachments,
+        useDomiPlugin,
+        model: options.model ?? model,
+        reasoningEffort: options.reasoningEffort ?? reasoningEffort,
+        serviceTier: options.serviceTier ?? serviceTier,
+        createdAt: Date.now(),
+        repositoryIdentity: queueRepositoryIdentity(appSettingsRef.current)
+      };
+      setQueuedSubmissionsByThread((current) => {
+        const next = {
+          ...current,
+          [targetThread.id]: [...(current[targetThread.id] || []), queuedSubmission]
+        };
+        queuedSubmissionsByThreadRef.current = next;
+        return next;
+      });
+      if (!options.preserveComposer) clearComposerDraft(targetThread.id);
+      return;
+    }
     const displayText = options.displayText?.trim() || messageText;
 
     const runId = createId("run");
@@ -5311,9 +6651,17 @@ function App() {
     patchThread(targetThread.id, { timeline: [], lastUsage: null, hasUnreadCompletion: false });
     runContextRef.current.set(runId, {
       threadId: targetThread.id,
-      assistantMessageId: assistantId
+      assistantMessageId: assistantId,
+      userMessageId: userMessage.id,
+      workflowId: workflow?.id,
+      requestText: messageText,
+      attachments: selectedAttachments,
+      knownProjectIds: effectiveDomiSnapshot?.projects.map((project) => project.recordId),
+      knownPersonIds: effectiveDomiSnapshot?.people.map((person) => person.recordId),
+      queuedSubmission: routedQueuedSubmission
     });
     setActiveRunsByThread((current) => ({ ...current, [targetThread.id]: runId }));
+    options.onAccepted?.(routedQueuedSubmission);
 
     const basePrompt = workflowPrompt(
       workflow,
@@ -5356,24 +6704,40 @@ function App() {
         status: "done",
         runCompletedAt
       });
+      patchThread(targetThread.id, {
+        updatedAt: nowLabel(),
+        lastActiveAt: runCompletedAt,
+        hasUnreadCompletion: !isThreadActivelyVisible(targetThread.id)
+      });
+      const context = runContextRef.current.get(runId);
+      if (context) {
+        settlingThreadIdsRef.current.add(targetThread.id);
+        try {
+          await finalizeEntityBinding(context, result.output);
+        } catch (error) {
+          workbench.reportRendererIssue({
+            kind: "document-operation",
+            message: `任务已完成，但实体归档结算失败：${error instanceof Error ? error.message : String(error)}`
+          });
+        } finally {
+          settlingThreadIdsRef.current.delete(targetThread.id);
+        }
+      }
+      runContextRef.current.delete(runId);
       setActiveRunsByThread((current) => {
         if (current[targetThread.id] !== runId) return current;
         const next = { ...current };
         delete next[targetThread.id];
         return next;
       });
-      patchThread(targetThread.id, {
-        updatedAt: nowLabel(),
-        lastActiveAt: runCompletedAt,
-        hasUnreadCompletion: targetThread.id !== activeThreadIdRef.current
-      });
-      runContextRef.current.delete(runId);
     } else if (!result.ok) {
       patchMessage(assistantId, {
         content: result.error || "Codex 执行失败。",
         status: "error",
         runCompletedAt: Date.now()
       });
+      const context = runContextRef.current.get(runId);
+      if (context) pauseThreadQueueAfterTerminal(context);
       setActiveRunsByThread((current) => {
         if (current[targetThread.id] !== runId) return current;
         const next = { ...current };
@@ -5387,6 +6751,10 @@ function App() {
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
+    if (attachmentImportCount > 0) {
+      setAttachmentError("附件仍在导入，请等待完成后再发送。");
+      return;
+    }
     if (!input.trim() && attachments.length === 0) return;
     const threadHasActiveRun = Boolean(activeRunsByThread[activeThread.id])
       || [...runContextRef.current.values()].some((context) => context.threadId === activeThread.id);
@@ -5394,10 +6762,18 @@ function App() {
       enqueueSubmission(selectedWorkflow, input);
       return;
     }
-    void submitToCodex(selectedWorkflow, input);
+    if (submissionStartingThreadIdsRef.current.has(activeThread.id)) return;
+    submissionStartingThreadIdsRef.current.add(activeThread.id);
+    void submitToCodex(selectedWorkflow, input).finally(() => {
+      submissionStartingThreadIdsRef.current.delete(activeThread.id);
+    });
   }
 
   function enqueueSubmission(workflow?: Workflow, overrideInput?: string) {
+    if (attachmentImportCount > 0) {
+      setAttachmentError("附件仍在导入，请等待完成后再加入队列。");
+      return;
+    }
     const rawInput = (overrideInput ?? input).trim();
     const messageText = rawInput || workflow?.defaultPrompt || (attachments.length ? "请分析所附材料" : "");
     if (!messageText) return;
@@ -5412,164 +6788,171 @@ function App() {
       model,
       reasoningEffort,
       serviceTier,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      repositoryIdentity: queueRepositoryIdentity(appSettingsRef.current)
     };
-    setQueuedSubmissionsByThread((current) => ({
-      ...current,
-      [activeThread.id]: [...(current[activeThread.id] || []), queuedSubmission]
-    }));
+    setQueuedSubmissionsByThread((current) => {
+      const next = {
+        ...current,
+        [activeThread.id]: [...(current[activeThread.id] || []), queuedSubmission]
+      };
+      queuedSubmissionsByThreadRef.current = next;
+      return next;
+    });
     clearComposerDraft(activeThread.id);
     patchThread(activeThread.id, { updatedAt: nowLabel(), lastActiveAt: Date.now() });
   }
 
   function removeQueuedSubmission(threadId: string, queuedId: string) {
+    const queued = queuedSubmissionsByThread[threadId]?.find((item) => item.id === queuedId);
+    if (queued) {
+      void Promise.allSettled(
+        queued.attachments.map((attachment) => workbench.discardStagedAttachment(attachment.path))
+      );
+    }
     setQueuedSubmissionsByThread((current) => {
       const remaining = (current[threadId] || []).filter((item) => item.id !== queuedId);
       if (remaining.length > 0) {
-        return { ...current, [threadId]: remaining };
+        const next = { ...current, [threadId]: remaining };
+        queuedSubmissionsByThreadRef.current = next;
+        return next;
       }
       const next = { ...current };
       delete next[threadId];
+      queuedSubmissionsByThreadRef.current = next;
+      return next;
+    });
+    setPausedQueuedSubmissionIds((current) => {
+      if (!current.has(queuedId)) return current;
+      const next = new Set(current);
+      next.delete(queuedId);
+      return next;
+    });
+  }
+
+  function retryQueuedSubmission(queuedId: string) {
+    const located = Object.values(queuedSubmissionsByThreadRef.current)
+      .flat()
+      .find((item) => item.id === queuedId);
+    if (!located || !appSettingsRef.current) return;
+    const currentIdentity = queueRepositoryIdentity(appSettingsRef.current);
+    if (!located.repositoryIdentity || located.repositoryIdentity !== currentIdentity) {
+      const confirmed = window.confirm(
+        "这项任务来自另一个或无法确认的资料库配置。\n\n继续会使用当前资料库重新执行；取消则保持暂停，你也可以直接从队列删除。是否继续？"
+      );
+      if (!confirmed) return;
+      setQueuedSubmissionsByThread((current) => {
+        const next = Object.fromEntries(Object.entries(current).map(([threadId, items]) => [
+          threadId,
+          items.map((item) => item.id === queuedId
+            ? { ...item, repositoryIdentity: currentIdentity }
+            : item)
+        ]));
+        queuedSubmissionsByThreadRef.current = next;
+        return next;
+      });
+    }
+    setPausedQueuedSubmissionIds((current) => {
+      if (!current.has(queuedId)) return current;
+      const next = new Set(current);
+      next.delete(queuedId);
       return next;
     });
   }
 
   async function chooseAttachments() {
-    const entityRequest = activeThread.externalRecordId
-      && ["project", "person"].includes(activeThread.externalType || "")
-      ? {
-          entityType: activeThread.externalType as "project" | "person",
-          recordId: activeThread.externalRecordId
-        }
-      : undefined;
-    const result = await workbench.selectFiles(activeThread.workspacePath, entityRequest);
-    if (!result.ok) {
-      setAttachmentError(result.error || "无法添加所选文件。");
-      return;
+    changeAttachmentImportCount(1);
+    try {
+      const result = await workbench.selectFiles(activeThread.workspacePath);
+      if (!result.ok) {
+        setAttachmentError(result.error || "无法添加所选文件。");
+        return;
+      }
+      if (result.canceled || result.files.length === 0) return;
+      setAttachmentError("");
+      setAttachments((current) => {
+        const paths = new Set(current.map((file) => file.path));
+        return [...current, ...result.files.filter((file) => !paths.has(file.path))];
+      });
+    } finally {
+      changeAttachmentImportCount(-1);
     }
-    if (result.canceled || result.files.length === 0) {
-      return;
-    }
-    setAttachmentError("");
-    setAttachments((current) => {
-      const paths = new Set(current.map((file) => file.path));
-      return [...current, ...result.files.filter((file) => !paths.has(file.path))];
-    });
   }
 
   async function importAttachmentFiles(files: File[]) {
     if (files.length === 0) return;
-
-    const entityRequest = activeThread.externalRecordId
-      && ["project", "person"].includes(activeThread.externalType || "")
-      ? {
-          entityType: activeThread.externalType as "project" | "person",
-          recordId: activeThread.externalRecordId
+    changeAttachmentImportCount(1);
+    try {
+      const sourcePaths: string[] = [];
+      const inMemoryFiles: File[] = [];
+      files.forEach((file) => {
+        let sourcePath = "";
+        try {
+          sourcePath = workbench.getPathForFile(file);
+        } catch {
+          sourcePath = "";
         }
-      : undefined;
+        if (sourcePath) sourcePaths.push(sourcePath);
+        else inMemoryFiles.push(file);
+      });
 
-    const sourcePaths: string[] = [];
-    const inMemoryFiles: File[] = [];
-    files.forEach((file) => {
-      let sourcePath = "";
-      try {
-        sourcePath = workbench.getPathForFile(file);
-      } catch {
-        sourcePath = "";
+      const importedFiles: LocalAttachment[] = [];
+      const errors: string[] = [];
+      if (sourcePaths.length > 0) {
+        const pathResult = await workbench.importFiles(sourcePaths, activeThread.workspacePath);
+        if (pathResult.ok) importedFiles.push(...pathResult.files);
+        else errors.push(pathResult.error || "无法导入本地文件。");
       }
-      if (sourcePath) {
-        sourcePaths.push(sourcePath);
-      } else {
-        inMemoryFiles.push(file);
-      }
-    });
 
-    const importedFiles: LocalAttachment[] = [];
-    const errors: string[] = [];
-    if (sourcePaths.length > 0) {
-      const pathResult = await workbench.importFiles(
-        sourcePaths,
-        activeThread.workspacePath,
-        entityRequest
-      );
-      if (pathResult.ok) {
-        importedFiles.push(...pathResult.files);
-      } else {
-        errors.push(pathResult.error || "无法导入本地文件。");
-      }
-    }
-
-    if (inMemoryFiles.length > 0) {
-      try {
-        const payloads: ClipboardAttachmentPayload[] = await Promise.all(
-          inMemoryFiles.map(async (file, index) => ({
-            name: file.name || `clipboard-file-${index + 1}`,
-            type: file.type,
-            data: await file.arrayBuffer()
-          }))
-        );
-        const dataResult = await workbench.importFileData(
-          payloads,
-          activeThread.workspacePath,
-          entityRequest
-        );
-        if (dataResult.ok) {
-          importedFiles.push(...dataResult.files);
-        } else {
-          errors.push(dataResult.error || "无法读取剪贴板文件内容。");
+      if (inMemoryFiles.length > 0) {
+        try {
+          const payloads: ClipboardAttachmentPayload[] = await Promise.all(
+            inMemoryFiles.map(async (file, index) => ({
+              name: file.name || `clipboard-file-${index + 1}`,
+              type: file.type,
+              data: await file.arrayBuffer()
+            }))
+          );
+          const dataResult = await workbench.importFileData(payloads, activeThread.workspacePath);
+          if (dataResult.ok) importedFiles.push(...dataResult.files);
+          else errors.push(dataResult.error || "无法读取剪贴板文件内容。");
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : String(error));
         }
-      } catch (error) {
-        errors.push(error instanceof Error ? error.message : String(error));
       }
-    }
 
-    setAttachmentError(errors.join("；"));
-    if (importedFiles.length === 0) return;
-    setAttachments((current) => {
-      const paths = new Set(current.map((file) => file.path));
-      return [...current, ...importedFiles.filter((file) => !paths.has(file.path))];
-    });
+      setAttachmentError(errors.join("；"));
+      if (importedFiles.length === 0) return;
+      setAttachments((current) => {
+        const paths = new Set(current.map((file) => file.path));
+        return [...current, ...importedFiles.filter((file) => !paths.has(file.path))];
+      });
+    } finally {
+      changeAttachmentImportCount(-1);
+    }
   }
 
   async function importAttachmentPaths(sourcePaths: string[]) {
     if (sourcePaths.length === 0) return;
-    const entityRequest = activeThread.externalRecordId
-      && ["project", "person"].includes(activeThread.externalType || "")
-      ? {
-          entityType: activeThread.externalType as "project" | "person",
-          recordId: activeThread.externalRecordId
-        }
-      : undefined;
-    const result = await workbench.importFiles(
-      sourcePaths,
-      activeThread.workspacePath,
-      entityRequest
-    );
-    if (!result.ok) {
-      setAttachmentError(result.error || "无法导入剪贴板中的本地文件。");
-      return;
+    changeAttachmentImportCount(1);
+    try {
+      const result = await workbench.importFiles(sourcePaths, activeThread.workspacePath);
+      if (!result.ok) {
+        setAttachmentError(result.error || "无法导入剪贴板中的本地文件。");
+        return;
+      }
+      setAttachmentError("");
+      setAttachments((current) => {
+        const paths = new Set(current.map((file) => file.path));
+        return [...current, ...result.files.filter((file) => !paths.has(file.path))];
+      });
+    } finally {
+      changeAttachmentImportCount(-1);
     }
-    setAttachmentError("");
-    setAttachments((current) => {
-      const paths = new Set(current.map((file) => file.path));
-      return [...current, ...result.files.filter((file) => !paths.has(file.path))];
-    });
   }
 
   function handleComposerPaste(event: ReactClipboardEvent<HTMLFormElement>) {
-    const directFiles = Array.from(event.clipboardData.files);
-    const itemFiles = Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === "file")
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => Boolean(file));
-    const files = [...directFiles];
-    itemFiles.forEach((file) => {
-      const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
-      const isDuplicate = files.some((current) =>
-        `${current.name}:${current.size}:${current.type}:${current.lastModified}` === key
-      );
-      if (!isDuplicate) files.push(file);
-    });
+    const files = filesFromClipboardData(event.clipboardData);
     if (files.length === 0) {
       const fileUrlPaths = event.clipboardData.getData("text/uri-list")
         .split(/\r?\n/)
@@ -5585,10 +6968,12 @@ function App() {
         });
       if (fileUrlPaths.length === 0) return;
       event.preventDefault();
+      event.stopPropagation();
       void importAttachmentPaths(fileUrlPaths);
       return;
     }
     event.preventDefault();
+    event.stopPropagation();
     void importAttachmentFiles(files);
   }
 
@@ -5601,8 +6986,12 @@ function App() {
     }
   }
 
-  function removeAttachment(filePath: string) {
+  async function removeAttachment(filePath: string) {
     setAttachments((current) => current.filter((file) => file.path !== filePath));
+    const discarded = await workbench.discardStagedAttachment(filePath);
+    if (!discarded.ok && discarded.error && !discarded.error.includes("不是 domi 本轮管理")) {
+      setAttachmentError(`附件已从本轮移除，但暂存副本清理失败：${discarded.error}`);
+    }
   }
 
   function applyNewThreadAgentDefaults() {
@@ -5614,7 +7003,7 @@ function App() {
   }
 
   async function createThread() {
-    setWorkspaceView("conversation");
+    if (!await navigateWorkspace("conversation")) return;
     const currentDraftIsUnused = isUnusedDraftThread(activeThread)
       && !input.trim()
       && attachments.length === 0
@@ -5644,14 +7033,12 @@ function App() {
     const threadId = createId("thread");
     const projectId = createId("project");
     try {
-      const workspaceResult = await workbench.createProjectWorkspace({
-        projectId,
-        projectName: NEW_THREAD_PROJECT
-      });
       const nextThread: Thread = {
         id: threadId,
         projectId,
-        workspacePath: workspaceResult.ok ? workspaceResult.workspacePath : codexStatus?.workspacePath,
+        // A blank task does not allocate a hidden workspace. It uses the shared runtime
+        // until an actual project is resolved, then switches to that entity's fixed directory.
+        workspacePath: codexStatus?.workspacePath,
         title: NEW_THREAD_TITLE,
         project: NEW_THREAD_PROJECT,
         updatedAt: nowLabel(),
@@ -5739,10 +7126,18 @@ function App() {
     });
   }
 
-  function selectThread(threadId: string) {
+  async function selectThread(threadId: string) {
+    if (threadId !== activeThreadIdRef.current && documentPreviewOriginRef.current) {
+      if (markdownDocumentRef.current || markdownRequestLabel) {
+        await closeMarkdown({ restoreOrigin: false });
+        if (markdownDocumentRef.current) return;
+      }
+      if (pdfDocumentRef.current || pdfRequestLabel) closePdf({ restoreOrigin: false });
+      documentPreviewOriginRef.current = null;
+    }
     rememberActiveChatScrollPosition();
+    if (!await navigateWorkspace("conversation")) return;
     setActiveThreadId(threadId);
-    setWorkspaceView("conversation");
     setDocumentLibrarySidebarExpanded(false);
     setThreadMenuId(null);
     setComposerDragActive(false);
@@ -5776,8 +7171,27 @@ function App() {
     if (!confirmed) {
       return;
     }
+    const stagedPaths = [...new Set([
+      ...(composerDraftsByThread[thread.id]?.attachments || []),
+      ...(queuedSubmissionsByThread[thread.id] || []).flatMap((item) => item.attachments)
+    ].map((attachment) => attachment.path))];
+    void Promise.allSettled(
+      stagedPaths.map((filePath) => workbench.discardStagedAttachment(filePath))
+    );
     const remaining = threads.filter((item) => item.id !== thread.id);
     setThreads(remaining);
+    setQueuedSubmissionsByThread((current) => {
+      if (!current[thread.id]) return current;
+      const next = { ...current };
+      delete next[thread.id];
+      queuedSubmissionsByThreadRef.current = next;
+      return next;
+    });
+    setPausedQueuedSubmissionIds((current) => {
+      const queuedIds = new Set((queuedSubmissionsByThread[thread.id] || []).map((item) => item.id));
+      if (![...queuedIds].some((id) => current.has(id))) return current;
+      return new Set([...current].filter((id) => !queuedIds.has(id)));
+    });
     clearComposerDraft(thread.id);
     if (activeThreadId === thread.id) {
       setActiveThreadId(remaining[0].id);
@@ -5823,16 +7237,26 @@ function App() {
     }
   }
 
-  function openDocumentLibrary() {
-    setDocumentLibrarySidebarExpanded((current) =>
-      workspaceView === "documents" ? !current : true
-    );
-    setWorkspaceView("documents");
+  async function openDocumentLibrary() {
+    const shouldExpand = workspaceViewRef.current === "documents"
+      ? !documentLibrarySidebarExpanded
+      : true;
+    if (!await navigateWorkspace("documents")) return;
+    setDocumentLibrarySidebarExpanded(shouldExpand);
     setThreadMenuId(null);
     setRightPanelOpen(false);
     if (!documentLibraryLoading) {
       void refreshDocumentLibrary({ silent: Boolean(documentLibrary) });
     }
+  }
+
+  async function openPrimaryWorkspace(view: "tasks" | "news" | "data") {
+    if (!await navigateWorkspace(view)) return;
+    setDocumentLibrarySidebarExpanded(false);
+    setThreadMenuId(null);
+    if (view !== "data") return;
+    setRightPanelOpen(false);
+    if (!databaseSnapshot && !databaseLoading) void refreshDatabase();
   }
 
   function refreshDocumentIndexForSearch() {
@@ -5953,7 +7377,25 @@ function App() {
     else void openMarkdown(node.path);
   }
 
+  function rememberDocumentPreviewOrigin() {
+    if (documentPreviewOriginRef.current) return;
+    documentPreviewOriginRef.current = {
+      workspaceView: workspaceViewRef.current,
+      threadId: activeThreadIdRef.current,
+      previousRightPanelOpen: rightPanelOpenRef.current
+    };
+  }
+
+  function restoreDocumentPreviewOrigin() {
+    const origin = documentPreviewOriginRef.current;
+    documentPreviewOriginRef.current = null;
+    if (!origin || workspaceViewRef.current !== origin.workspaceView) return;
+    workspaceUiStateRef.current[origin.workspaceView].rightPanelOpen = origin.previousRightPanelOpen;
+    setRightPanelOpen(origin.previousRightPanelOpen);
+  }
+
   async function openMarkdown(resource: string, basePath?: string) {
+    rememberDocumentPreviewOrigin();
     const currentDocument = markdownDocumentRef.current;
     if (currentDocument && markdownDraftRef.current !== currentDocument.content) {
       const saved = await saveOpenMarkdown();
@@ -6003,6 +7445,7 @@ function App() {
   }
 
   async function openPdf(resource: string, basePath?: string, ignoreDirty = false) {
+    rememberDocumentPreviewOrigin();
     const currentDocument = markdownDocumentRef.current;
     if (
       !ignoreDirty
@@ -6269,7 +7712,7 @@ function App() {
     }
   }
 
-  async function closeMarkdown() {
+  async function closeMarkdown(options: { restoreOrigin?: boolean } = {}) {
     const currentDocument = markdownDocumentRef.current;
     if (currentDocument && markdownDraftRef.current !== currentDocument.content) {
       const saved = await saveOpenMarkdown();
@@ -6292,6 +7735,7 @@ function App() {
     setMarkdownError("");
     setMarkdownRequestLabel("");
     setMarkdownLoading(false);
+    if (options.restoreOrigin !== false) restoreDocumentPreviewOrigin();
   }
 
   async function openMarkdownInExternalEditor() {
@@ -6333,13 +7777,14 @@ function App() {
     await openPdf(pdfDocument.path, undefined, true);
   }
 
-  function closePdf() {
+  function closePdf(options: { restoreOrigin?: boolean } = {}) {
     pdfOpenRequestRef.current += 1;
     setPdfDocument(null);
     setPdfError("");
     setPdfRequestLabel("");
     setPdfLoading(false);
     setPdfFrameLoading(false);
+    if (options.restoreOrigin !== false) restoreDocumentPreviewOrigin();
   }
 
   function renderMarkdownPanel() {
@@ -6514,7 +7959,7 @@ function App() {
                 </button>
               </>
             )}
-            <button type="button" onClick={closePdf} title="关闭文档" aria-label="关闭 PDF">
+            <button type="button" onClick={() => closePdf()} title="关闭文档" aria-label="关闭 PDF">
               <X size={17} />
             </button>
           </div>
@@ -7157,23 +8602,49 @@ function App() {
                 {snoozedTaskSuggestions.length === 0 && queuedTaskItems.length === 0 && failedTaskThreads.length === 0 && (
                   <div className="task-column-empty">没有需要处理的待办事项</div>
                 )}
-                {queuedTaskItems.map(({ submission, thread }) => (
+                {queuedTaskItems.map(({ submission, thread }) => {
+                  const repositoryMismatch = Boolean(
+                    appSettings
+                    && (!submission.repositoryIdentity
+                      || submission.repositoryIdentity !== queueRepositoryIdentity(appSettings))
+                  );
+                  return (
                   <article className="task-card queued" key={submission.id}>
                     <div className="task-card-topline">
-                      <span className="task-card-kind">已排队</span>
+                      <span className="task-card-kind">
+                        {!thread
+                          ? "原对话已删除"
+                          : repositoryMismatch
+                            ? "资料库已变更"
+                          : pausedQueuedSubmissionIds.has(submission.id)
+                            ? "等待重试"
+                            : "已排队"}
+                      </span>
                       <time>{formatTaskTimestamp(submission.createdAt)}</time>
                     </div>
-                    <button className="task-card-open" type="button" onClick={() => selectThread(thread.id)}>
+                    <button
+                      className="task-card-open"
+                      type="button"
+                      onClick={() => thread && selectThread(thread.id)}
+                      disabled={!thread}
+                    >
                       <strong className="task-card-title">{submission.input}</strong>
-                      <p>{thread.title}</p>
+                      <p>{thread?.title || "任务不会自动执行，可从队列安全移除"}</p>
                     </button>
                     <div className="task-card-actions end-aligned">
-                      <button type="button" onClick={() => selectThread(thread.id)} title="打开对话">
-                        <ChevronRight size={14} />
-                      </button>
+                      {thread && pausedQueuedSubmissionIds.has(submission.id) && (
+                        <button type="button" onClick={() => retryQueuedSubmission(submission.id)} title="重试">
+                          <RefreshCw size={14} />
+                        </button>
+                      )}
+                      {thread && (
+                        <button type="button" onClick={() => selectThread(thread.id)} title="打开对话">
+                          <ChevronRight size={14} />
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => removeQueuedSubmission(thread.id, submission.id)}
+                        onClick={() => removeQueuedSubmission(submission.threadId, submission.id)}
                         title="从队列移除"
                         aria-label={`从队列移除 ${submission.input}`}
                       >
@@ -7181,7 +8652,8 @@ function App() {
                       </button>
                     </div>
                   </article>
-                ))}
+                  );
+                })}
                 {failedTaskThreads.map((thread) => (
                   <article className="task-card failed" key={`failed-${thread.id}`}>
                     <div className="task-card-topline">
@@ -8587,16 +10059,35 @@ function App() {
           <div className="queued-submissions" aria-label="待执行消息" aria-live="polite">
             {activeQueuedSubmissions.map((queued, index) => {
               const workflow = workflows.find((item) => item.id === queued.workflowId);
+              const repositoryMismatch = Boolean(
+                appSettings
+                && (!queued.repositoryIdentity
+                  || queued.repositoryIdentity !== queueRepositoryIdentity(appSettings))
+              );
               return (
                 <div className="queued-submission" key={queued.id}>
                   <Clock3 size={15} aria-hidden="true" />
                   <div className="queued-submission-copy">
                     <strong>{workflow ? `启动「${workflow.title}」：${queued.input}` : queued.input}</strong>
                     <span>
-                      排队中 · 第 {index + 1} 项
+                      {repositoryMismatch
+                        ? "资料库配置已变更 · 确认后重试"
+                        : pausedQueuedSubmissionIds.has(queued.id)
+                          ? "上次未启动或执行中断 · 点击重试"
+                          : `排队中 · 第 ${index + 1} 项`}
                       {queued.attachments.length > 0 ? ` · ${queued.attachments.length} 个附件` : ""}
                     </span>
                   </div>
+                  {pausedQueuedSubmissionIds.has(queued.id) && (
+                    <button
+                      type="button"
+                      onClick={() => retryQueuedSubmission(queued.id)}
+                      title="重试这条消息"
+                      aria-label="重试这条消息"
+                    >
+                      <RefreshCw size={15} />
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => removeQueuedSubmission(activeThread.id, queued.id)}
@@ -8697,6 +10188,9 @@ function App() {
               ))}
             </div>
           )}
+          {attachmentImportCount > 0 && (
+            <div className="attachment-error" role="status">正在安全导入附件，完成后即可发送…</div>
+          )}
           {attachmentError && <div className="attachment-error">{attachmentError}</div>}
 
           <div className="composer-toolbar">
@@ -8705,7 +10199,8 @@ function App() {
                 className="composer-icon-button"
                 type="button"
                 onClick={chooseAttachments}
-                title="选择本地文件"
+                disabled={attachmentImportCount > 0}
+                title={attachmentImportCount > 0 ? "正在导入附件" : "选择本地文件"}
                 aria-label="选择本地文件"
               >
                 <Plus size={20} />
@@ -8849,7 +10344,11 @@ function App() {
                 className="send-button"
                 type="submit"
                 title={isRunning ? "加入当前对话的待执行队列" : "发送给 Codex"}
-                disabled={!codexStatus?.ok || (!input.trim() && attachments.length === 0)}
+                disabled={
+                  attachmentImportCount > 0
+                  || !codexStatus?.ok
+                  || (!input.trim() && attachments.length === 0)
+                }
               >
                 <ArrowUp size={20} />
               </button>
@@ -8871,6 +10370,8 @@ function App() {
       </>
     );
   }
+
+  const visibleUpdateEntry = sidebarUpdateEntry(updateStatus);
 
   return (
     <>
@@ -8900,9 +10401,7 @@ function App() {
             className={`sidebar-nav-item ${workspaceView === "tasks" ? "active" : ""}`}
             type="button"
             onClick={() => {
-              setWorkspaceView("tasks");
-              setDocumentLibrarySidebarExpanded(false);
-              setThreadMenuId(null);
+              void openPrimaryWorkspace("tasks");
             }}
           >
             <ListChecks className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
@@ -8917,9 +10416,7 @@ function App() {
             className={`sidebar-nav-item ${workspaceView === "news" ? "active" : ""}`}
             type="button"
             onClick={() => {
-              setWorkspaceView("news");
-              setDocumentLibrarySidebarExpanded(false);
-              setThreadMenuId(null);
+              void openPrimaryWorkspace("news");
             }}
           >
             <Newspaper className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
@@ -8930,11 +10427,7 @@ function App() {
             className={`sidebar-nav-item ${workspaceView === "data" ? "active" : ""}`}
             type="button"
             onClick={() => {
-              setWorkspaceView("data");
-              setDocumentLibrarySidebarExpanded(false);
-              setRightPanelOpen(false);
-              setThreadMenuId(null);
-              if (!databaseSnapshot && !databaseLoading) void refreshDatabase();
+              void openPrimaryWorkspace("data");
             }}
           >
             <Database className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
@@ -9155,6 +10648,32 @@ function App() {
             )}
           </div>
         </div>
+
+        {visibleUpdateEntry && (
+          <button
+            className={`sidebar-update-card ${visibleUpdateEntry.state}`}
+            type="button"
+            onClick={() => {
+              setSettingsInitialTab("updates");
+              setSettingsOpen(true);
+            }}
+            title="打开软件更新"
+            aria-label={`${visibleUpdateEntry.label}，${visibleUpdateEntry.detail}`}
+          >
+            <span className="sidebar-update-icon" aria-hidden="true">
+              {visibleUpdateEntry.state === "downloading"
+                ? <RefreshCw className="spinning" size={15} />
+                : visibleUpdateEntry.state === "downloaded"
+                  ? <CheckCircle2 size={15} />
+                  : <Download size={15} />}
+            </span>
+            <span className="sidebar-update-copy">
+              <strong>{visibleUpdateEntry.label}</strong>
+              <small>{visibleUpdateEntry.detail}</small>
+            </span>
+            <ChevronRight size={15} aria-hidden="true" />
+          </button>
+        )}
 
         <button className="codex-card" type="button" onClick={() => {
           setSettingsInitialTab("connection");
@@ -9531,7 +11050,26 @@ function App() {
                 )}
                 {plaudEnabled ? (
                   <>
-                    {plaudError && <div className="domi-inline-error">{plaudError}</div>}
+                    {plaudError && (
+                      <div className="domi-inline-error actionable" role="status">
+                        <AlertCircle size={14} />
+                        <span>{plaudError}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (plaudSnapshot?.remoteStatus === "auth_required") {
+                              setSettingsInitialTab("plaud");
+                              setSettingsOpen(true);
+                              return;
+                            }
+                            void refreshPlaudQueue({ fresh: true });
+                          }}
+                          disabled={plaudLoading || plaudLoadingMore || plaudSyncing}
+                        >
+                          {plaudSnapshot?.remoteStatus === "auth_required" ? "重新登录" : "重试"}
+                        </button>
+                      </div>
+                    )}
                     {plaudNotice && <div className="plaud-inline-notice">{plaudNotice}</div>}
                     <div className="plaud-queue-header">
                       <strong>最近录音</strong>
@@ -9769,6 +11307,21 @@ function App() {
         </div>
       </main>
     </div>
+    {globalPersistenceError && (
+      <div className="global-persistence-alert" role="alert" aria-live="assertive">
+        <AlertCircle size={15} />
+        <span>{globalPersistenceError}</span>
+        <button
+          type="button"
+          onClick={() => {
+            if (databaseAutoSaveQueuedRef.current) void flushDatabaseAutoSave();
+            void persistWorkbenchStateNow();
+          }}
+        >
+          立即重试
+        </button>
+      </div>
+    )}
     {settingsOpen && appSettings && (
       <Suspense fallback={<div className="lazy-overlay"><RefreshCw className="spinning" size={20} />正在加载设置</div>}>
         <SetupCenter
@@ -9777,6 +11330,9 @@ function App() {
           codexStatus={codexStatus}
           required={!appSettings.onboardingComplete}
           onClose={() => setSettingsOpen(false)}
+          onDirtyChange={(dirty) => {
+            settingsDirtyRef.current = dirty;
+          }}
           onSave={saveAppSettings}
           onLogin={startChatGPTLogin}
           onRefresh={refreshCodex}

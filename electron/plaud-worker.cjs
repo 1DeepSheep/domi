@@ -18,6 +18,24 @@ function safeError(error) {
   if (/browserType\.connectOverCDP|WebSocket error:[\s\S]*ECONNREFUSED|connect ECONNREFUSED 127\.0\.0\.1/i.test(message)) {
     return "PLAUD 专用浏览器未能建立本机连接。请重新同步；domi 会清理旧连接后自动重试。";
   }
+  if (/Not attached to an active page|Target page, context or browser has been closed|Execution context was destroyed|Protocol error.*(?:Page|Target)/i.test(message)) {
+    return "PLAUD 后台页面本轮意外中断。domi 已关闭故障进程；重新同步时会自动建立新会话，无需重新登录。";
+  }
+  if (/PLAUD_SESSION_PROBE_INCOMPLETE|authorization request was not observed|会话验证未完成/i.test(message)) {
+    return "PLAUD 登录数据仍在，但本轮未及时完成会话验证。请重新同步，domi 会自动重建后台会话。";
+  }
+  if (/PLAUD_AUTH_REQUIRED|(?:HTTP|status)\s*(?:401|403)|unauthori|account sign-in is required/i.test(message)) {
+    return "PLAUD 登录已失效，请在设置中重新登录并验证。";
+  }
+  if (/(?:HTTP|status)\s*429|too many requests|rate.?limit|请求过于频繁/i.test(message)) {
+    return "PLAUD 服务暂时限流。domi 未修改任何录音，请稍后重新同步，无需重新登录。";
+  }
+  if (/(?:HTTP|status)\s*5\d\d|service unavailable|bad gateway|gateway timeout/i.test(message)) {
+    return "PLAUD 服务暂时不可用。domi 未修改任何录音，请稍后重新同步。";
+  }
+  if (/PLAUD (?:API|接口).*timed?\s*out|接口读取超时|ERR_(?:NETWORK_CHANGED|TIMED_OUT|NAME_NOT_RESOLVED)|ENOTFOUND|ENETUNREACH|fetch failed|socket hang up/i.test(message)) {
+    return "网络或 PLAUD 服务响应超时。domi 未修改任何录音，已保留上次成功列表，请稍后重新同步。";
+  }
   return message
     .replace(/\b(?:authorization|cookie|x-pld-user|x-device-id)\s*[:=]\s*[^\r\n]+/gi, "[REDACTED]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "[REDACTED]")
@@ -44,43 +62,58 @@ function safeRemoteFile(file) {
 }
 
 function isTransientNavigationError(error) {
-  return /page\.goto|connectOverCDP|WebSocket error|ECONNREFUSED|ERR_CONNECTION_(?:CLOSED|RESET|REFUSED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|socket hang up/i
+  return /page\.(?:goto|reload)|connectOverCDP|WebSocket error|Protocol error.*(?:Page|Target)|Not attached to an active page|Target page, context or browser has been closed|Execution context was destroyed|ECONNREFUSED|ECONNRESET|ERR_CONNECTION_(?:CLOSED|RESET|REFUSED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|socket hang up/i
     .test(error instanceof Error ? error.message : String(error));
+}
+
+function isRetryableReadError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/PLAUD_AUTH_REQUIRED|(?:HTTP|status)\s*(?:401|403)|unauthori|account sign-in is required/i.test(message)) {
+    return false;
+  }
+  // A rapid retry makes vendor rate limits last longer. Keep 429 actionable in
+  // the UI, but wait for the user (or Retry-After in a future API response)
+  // before opening another private browser session.
+  if (/(?:HTTP|status)\s*429|too many requests|rate.?limit|请求过于频繁/i.test(message)) {
+    return false;
+  }
+  return isTransientNavigationError(error)
+    || /PLAUD_SESSION_PROBE_INCOMPLETE|authorization request was not observed|PLAUD (?:API|接口).*timed?\s*out|接口读取超时|ENOTFOUND|ENETUNREACH|fetch failed|(?:HTTP|status)\s*5\d\d|service unavailable|bad gateway|gateway timeout/i.test(message);
 }
 
 function wait(delayMs) {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
-async function withClient(pluginRoot, callback) {
+async function withClient(pluginRoot, callback, options = {}) {
   const PlaudClient = resolveClient(pluginRoot);
-  let client;
   let lastError;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  const attempts = Math.min(Math.max(Number(options.attempts) || 2, 1), 3);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const candidate = new PlaudClient();
     activeClient = candidate;
+    let initialized = false;
     try {
-      client = await candidate.init();
-      break;
+      await candidate.init();
+      initialized = true;
+      return await callback(candidate);
     } catch (error) {
       lastError = error;
-      await candidate.close().catch(() => {});
+      const retryable = initialized
+        ? Boolean(options.retryOperation) && isRetryableReadError(error)
+        : isRetryableReadError(error);
+      if (!retryable || attempt + 1 >= attempts) throw error;
+    } finally {
+      if (signalShutdown) {
+        await signalShutdown;
+      } else {
+        await candidate.close().catch(() => {});
+      }
       if (activeClient === candidate) activeClient = null;
-      if (!isTransientNavigationError(error) || attempt === 1) throw error;
-      await wait(500 * (attempt + 1));
     }
+    await wait(attempt === 0 ? 400 : 1200);
   }
-  if (!client) throw lastError || new Error("PLAUD 会话初始化失败。 ");
-  try {
-    return await callback(client);
-  } finally {
-    if (signalShutdown) {
-      await signalShutdown;
-    } else {
-      await client.close();
-    }
-    if (activeClient === client) activeClient = null;
-  }
+  throw lastError || new Error("PLAUD 会话初始化失败。 ");
 }
 
 function installSignalCleanup() {
@@ -129,7 +162,7 @@ async function list(pluginRoot, requestedLimit, requestedOffset) {
       nextOffset: offset + Math.min(normalized.length, visibleLimit),
       items: normalized.slice(0, visibleLimit)
     };
-  });
+  }, { attempts: 3, retryOperation: true });
 }
 
 async function rename(pluginRoot, fileId, requestedTitle) {
@@ -199,6 +232,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  isRetryableReadError,
   isTransientNavigationError,
   list,
   safeError

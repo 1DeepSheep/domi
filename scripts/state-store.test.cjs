@@ -146,6 +146,43 @@ test("generic tasks use isolated hidden runtimes while entity tasks keep their c
   }
 });
 
+test("reopening an untouched new-task draft does not create a task workspace", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-state-unused-draft-"));
+  const databasePath = path.join(root, "domi.sqlite3");
+  const projectsDir = path.join(root, "projects");
+  const draft = {
+    id: "unused-draft",
+    projectId: "unused-draft-project",
+    title: "新的投资任务",
+    project: "未命名项目",
+    manualTitle: false,
+    messages: [{
+      id: "greeting",
+      role: "assistant",
+      status: "idle",
+      content: "新对话已创建。选择一个 workflow，或直接输入你要 Codex 完成的投资任务。"
+    }],
+    timeline: []
+  };
+
+  let store = new WorkbenchStateStore({ databasePath, projectsDir });
+  try {
+    const saved = store.save({ activeThreadId: draft.id, threads: [draft] });
+    const workspacePath = saved.state.threads[0].workspacePath;
+    assert.equal(workspacePath, root);
+    assert.deepEqual(fs.readdirSync(projectsDir), []);
+    store.close();
+
+    store = new WorkbenchStateStore({ databasePath, projectsDir });
+    const loaded = store.load({ activeThreadId: "", threads: [] });
+    assert.equal(loaded.state.threads[0].workspacePath, workspacePath);
+    assert.deepEqual(fs.readdirSync(projectsDir), []);
+  } finally {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("cache pruning is scoped by prefix and retains only the newest entries", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-state-cache-"));
   const store = new WorkbenchStateStore({

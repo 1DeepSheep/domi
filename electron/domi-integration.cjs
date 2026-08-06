@@ -81,31 +81,65 @@ function plaudBrowserLabel(browser) {
   return browser === "tabbit" ? "Tabbit" : "Google Chrome";
 }
 
-function classifyPlaudConnectionFailure(error, browser) {
+function plaudFailureStatus(error) {
   const message = error instanceof Error ? error.message : String(error || "");
   const normalized = message.toLocaleLowerCase("en-US");
-  let status = "unknown";
+  if (/音频运行时|ffmpeg|ffprobe/.test(normalized)) return "runtime_unavailable";
+  if (/singleton|profile.*(?:lock|use)|already in use|ebusy|process.*running/.test(normalized)) {
+    return "profile_locked";
+  }
+  if (/plaud_auth_required|(?:http|status)\s*(?:401|403)|unauthori|登录已失效|请[^。；\n]*重新登录|需要重新登录|需要登录/.test(normalized)) {
+    return "auth_required";
+  }
+  if (/(?:http|status)\s*429|too many requests|rate.?limit|请求过于频繁|服务暂时限流/.test(normalized)) {
+    return "rate_limited";
+  }
+  if (/plaud_session_probe_incomplete|authorization request was not observed|会话验证未完成|登录数据仍在/.test(normalized)) {
+    return "verification_pending";
+  }
+  if (/econnrefused|devtools|connectovercdp|browser.*(?:closed|launch)|executable|找不到.*浏览器|专用浏览器.*(?:本机连接|未能建立|启动)|not attached to an active page|target page, context or browser has been closed|execution context was destroyed|protocol error.*(?:page|target)|后台页面.*中断/.test(normalized)) {
+    return "browser_unavailable";
+  }
+  if (/enotfound|enetunreach|network|fetch failed|etimedout|timed?\s*out|timeout|超时|网络|err_(?:network_changed|timed_out|name_not_resolved)|socket hang up/.test(normalized)) {
+    return "network_error";
+  }
+  if (/(?:http|status)\s*5\d\d|service unavailable|bad gateway|gateway timeout|服务暂时不可用/.test(normalized)) {
+    return "service_unavailable";
+  }
+  if (/selector|unexpected response|parse|json|页面结构/.test(normalized)) return "service_changed";
+  return "unknown";
+}
+
+function isRetryablePlaudReadFailure(error) {
+  return new Set([
+    "verification_pending",
+    "browser_unavailable",
+    "network_error",
+    "rate_limited",
+    "service_unavailable"
+  ]).has(plaudFailureStatus(error));
+}
+
+function classifyPlaudConnectionFailure(error, browser) {
+  const status = plaudFailureStatus(error);
   let guidance = "请重新检测；如果仍然失败，可以让 Codex 连接助手继续诊断。";
-  if (/音频运行时|ffmpeg|ffprobe/.test(normalized)) {
-    status = "runtime_unavailable";
+  if (status === "runtime_unavailable") {
     guidance = "domi 内置音频运行时不完整，请重新安装最新版 domi。";
-  } else if (/singleton|profile.*(?:lock|use)|already in use|ebusy|process.*running/.test(normalized)) {
-    status = "profile_locked";
+  } else if (status === "profile_locked") {
     guidance = "PLAUD 专用浏览器 Profile 正被另一个 domi 实例占用，请关闭重复实例后重试。";
-  } else if (/plaud_session_probe_incomplete|authorization request was not observed|会话验证未完成/.test(normalized)) {
-    status = "verification_pending";
+  } else if (status === "verification_pending") {
     guidance = "PLAUD 登录数据仍在，但本轮未及时完成会话验证；domi 会自动恢复并重试，无需重新登录。";
-  } else if (/plaud_auth_required|(?:http|status)\s*(?:401|403)|unauthori|需要重新登录|需要登录|not completed/.test(normalized)) {
-    status = "auth_required";
+  } else if (status === "auth_required") {
     guidance = `请点击“登录并验证”，在 domi 专用 ${plaudBrowserLabel(browser)} 窗口中登录自己的 PLAUD 账号。`;
-  } else if (/econnrefused|devtools|browser.*(?:closed|launch)|executable|找不到.*浏览器/.test(normalized)) {
-    status = "browser_unavailable";
-    guidance = `${plaudBrowserLabel(browser)} 未能启动或调试连接已关闭，请重新打开登录流程。`;
-  } else if (/enotfound|enetunreach|network|fetch failed|etimedout|timeout|超时|网络/.test(normalized)) {
-    status = "network_error";
-    guidance = "网络暂时不可用或 PLAUD 服务响应超时，请确认网络后重试。";
-  } else if (/selector|unexpected response|parse|json|页面结构/.test(normalized)) {
-    status = "service_changed";
+  } else if (status === "browser_unavailable") {
+    guidance = `${plaudBrowserLabel(browser)} 后台页面本轮意外中断；domi 已关闭故障进程，重新检测时会自动建立新会话，无需重新登录。`;
+  } else if (status === "network_error") {
+    guidance = "网络暂时不可用或 PLAUD 服务响应超时；domi 未修改任何录音，请确认网络后重试。";
+  } else if (status === "rate_limited") {
+    guidance = "PLAUD 服务暂时限流；domi 未修改任何录音，请稍后重新检测，无需重新登录。";
+  } else if (status === "service_unavailable") {
+    guidance = "PLAUD 服务暂时不可用；domi 未修改任何录音，请稍后重新检测。";
+  } else if (status === "service_changed") {
     guidance = "PLAUD 页面或接口可能已更新，请使用 Codex 连接助手诊断并检查插件更新。";
   }
   return {
@@ -1130,7 +1164,9 @@ class DomiIntegration {
     }
     const { plugin } = this.plaudPaths(pluginInput);
     return this.runJson(process.execPath, [this.plaudWorker, command, plugin.root, ...args], {
-      timeout: 120000,
+      // Leave a few seconds inside the 90-second user-facing deadline for the
+      // worker's SIGTERM cleanup to close the private browser and release its lock.
+      timeout: 85_000,
       label: command === "list" ? "PLAUD 最近录音读取" : "PLAUD 操作",
       queue: "plaud",
       env: this.plaudRuntimeEnv()
@@ -1200,17 +1236,22 @@ class DomiIntegration {
       requestedBrowser || this.configProvider().plaudBrowser
     );
     return this.runJson(process.execPath, [script, command, browser], {
-      timeout: command === "login" ? 11 * 60 * 1000 : 180000,
-      label: command === "login"
-        ? "PLAUD 浏览器登录"
-        : command === "doctor"
-          ? "PLAUD 环境检查"
-        : command === "logout"
-          ? "PLAUD 本地登录清理"
-          : "PLAUD 登录验证",
-      queue: "plaud",
-      env: this.plaudRuntimeEnv()
-    });
+        timeout: command === "login"
+          ? 11 * 60 * 1000
+          : command === "connection"
+            // The child reserves up to four seconds for private-profile cleanup.
+            ? 85_000
+            : 180_000,
+        label: command === "login"
+          ? "PLAUD 浏览器登录"
+          : command === "doctor"
+            ? "PLAUD 环境检查"
+          : command === "logout"
+            ? "PLAUD 本地登录清理"
+            : "PLAUD 登录验证",
+        queue: "plaud",
+        env: this.plaudRuntimeEnv()
+      });
   }
 
   async loginPlaud(request = {}) {
@@ -1233,6 +1274,7 @@ class DomiIntegration {
     };
     this.plaudRemoteHealth = {
       ok: Boolean(result?.connected),
+      status: result.status,
       error: result?.connected ? "" : String(result?.error || ""),
       checkedAt: result.checkedAt
     };
@@ -1255,6 +1297,7 @@ class DomiIntegration {
       };
       this.plaudRemoteHealth = {
         ok: Boolean(result?.connected),
+        status: result.status,
         error: result?.connected ? "" : String(result?.error || ""),
         checkedAt: result.checkedAt
       };
@@ -1263,6 +1306,7 @@ class DomiIntegration {
       const result = classifyPlaudConnectionFailure(error, browser);
       this.plaudRemoteHealth = {
         ok: false,
+        status: result.status,
         error: result.error,
         checkedAt: result.checkedAt
       };
@@ -1316,6 +1360,7 @@ class DomiIntegration {
     const requested = typeof request === "number" ? { limit: request } : request || {};
     const limit = Math.min(Math.max(Number(requested.limit) || 50, 1), 100);
     const offset = Math.min(Math.max(Number(requested.offset) || 0, 0), 10_000);
+    const fresh = requested.fresh === true;
     if (!this.plaudEnabled()) {
       return {
         ok: false,
@@ -1346,54 +1391,90 @@ class DomiIntegration {
           items: remoteResult.value.items || []
         }
       : null;
-    let stale = false;
+    let cachedSnapshot = null;
     if (remoteSnapshot && offset === 0) {
       this.stateStore.saveCache(PLAUD_LIST_CACHE_KEY, remoteSnapshot);
     } else if (!remoteSnapshot && offset === 0) {
       const cached = this.stateStore.loadCache(PLAUD_LIST_CACHE_KEY)?.value;
       if (cached && Array.isArray(cached.items)) {
-        remoteSnapshot = cached;
-        stale = true;
+        cachedSnapshot = cached;
+        if (!fresh) remoteSnapshot = cached;
       }
     }
+    const stale = remoteResult.status === "rejected" && Boolean(cachedSnapshot);
     const queueItems = this.loadActivePlaudWorkflowRecords();
     const workflowById = new Map(
       this.loadPlaudWorkflowRecords().map((item) => [String(item.fileId), item])
     );
     for (const item of queueItems) workflowById.set(String(item.fileId), item);
-    const activeQueueById = new Map(queueItems.map((item) => [String(item.fileId), item]));
-    const remoteItems = remoteSnapshot?.items || [];
+    const remoteFailure = remoteResult.status === "rejected"
+      ? classifyPlaudConnectionFailure(
+          remoteResult.reason,
+          this.normalizePlaudBrowser(this.configProvider().plaudBrowser)
+        )
+      : null;
     this.plaudRemoteHealth = {
       ok: remoteResult.status === "fulfilled",
-      error: remoteResult.status === "rejected" ? remoteResult.reason.message : "",
+      status: remoteFailure?.status || "connected",
+      error: remoteFailure?.error || "",
       checkedAt
     };
-    const items = remoteItems.map((item) => {
-      const fileId = String(item.fileId);
-      const queued = workflowById.get(fileId);
-      activeQueueById.delete(fileId);
-      return {
-        ...item,
-        queueStage: String(queued?.stage || ""),
-        transcriptPath: String(queued?.transcriptPath || ""),
-        error: String(queued?.error || "")
-      };
-    });
-    if (offset === 0) {
-      for (const queued of activeQueueById.values()) {
-        items.push(this.normalizePlaudQueueItem(queued));
+    const mergeWorkflowState = (sourceItems, includeWorkflowOnly) => {
+      const activeQueueById = new Map(queueItems.map((item) => [String(item.fileId), item]));
+      const merged = (sourceItems || []).map((item) => {
+        const fileId = String(item.fileId);
+        const queued = workflowById.get(fileId);
+        activeQueueById.delete(fileId);
+        return {
+          ...item,
+          queueStage: String(queued?.stage || ""),
+          transcriptPath: String(queued?.transcriptPath || ""),
+          error: String(queued?.error || "")
+        };
+      });
+      if (includeWorkflowOnly) {
+        for (const queued of activeQueueById.values()) {
+          merged.push(this.normalizePlaudQueueItem(queued));
+        }
       }
-    }
-    items.sort(comparePlaudItems);
-    const remoteError = remoteResult.status === "rejected" ? remoteResult.reason.message : "";
+      merged.sort(comparePlaudItems);
+      return merged;
+    };
+    const items = remoteResult.status === "fulfilled" || (!fresh && stale)
+      ? mergeWorkflowState(remoteSnapshot?.items || [], offset === 0)
+      : [];
+    const remoteError = remoteFailure?.error || "";
     const warning = stale
-      ? "PLAUD 暂时无法刷新，已保留上次成功读取的录音列表；专用浏览器已自动清理，可稍后重试。"
+      ? `${remoteError || "PLAUD 暂时无法刷新。"} ${fresh ? "本轮刷新失败；界面仍保留上次成功读取的录音列表。" : "已显示上次成功读取的录音列表。"}`
       : "";
+    const remoteStatus = remoteFailure?.status || "connected";
+    const retryable = Boolean(remoteFailure && isRetryablePlaudReadFailure(remoteResult.reason));
+    const lastSuccessfulSnapshot = fresh && stale
+      ? {
+          ok: true,
+          stale: true,
+          syncedAt: Number(cachedSnapshot?.syncedAt) || checkedAt,
+          lastSuccessfulAt: Number(cachedSnapshot?.syncedAt) || undefined,
+          pendingCount: Number(cachedSnapshot?.pendingCount) || 0,
+          queueCount: queueItems.length,
+          pageOffset: 0,
+          pageSize: Number(cachedSnapshot?.pageSize) || limit,
+          hasMore: false,
+          nextOffset: 0,
+          items: mergeWorkflowState(cachedSnapshot?.items || [], true),
+          remoteStatus,
+          retryable,
+          warning,
+          error: ""
+        }
+      : undefined;
     return {
-      ok: remoteResult.status === "fulfilled" || stale,
+      ok: remoteResult.status === "fulfilled" || (!fresh && stale),
       stale,
-      syncedAt: Number(remoteSnapshot?.syncedAt) || checkedAt,
-      lastSuccessfulAt: Number(remoteSnapshot?.syncedAt) || undefined,
+      syncedAt: remoteResult.status === "fulfilled"
+        ? Number(remoteSnapshot?.syncedAt) || checkedAt
+        : Number(cachedSnapshot?.syncedAt) || checkedAt,
+      lastSuccessfulAt: Number(remoteSnapshot?.syncedAt || cachedSnapshot?.syncedAt) || undefined,
       pendingCount: Number(remoteSnapshot?.pendingCount) || 0,
       queueCount: queueItems.length,
       pageOffset: offset,
@@ -1403,8 +1484,11 @@ class DomiIntegration {
         ? Number(remoteSnapshot?.nextOffset) || offset
         : offset,
       items,
+      remoteStatus,
+      retryable,
+      ...(lastSuccessfulSnapshot ? { lastSuccessfulSnapshot } : {}),
       warning,
-      error: stale ? "" : remoteError
+      error: remoteResult.status === "fulfilled" || (!fresh && stale) ? "" : remoteError
     };
   }
 
@@ -1412,10 +1496,15 @@ class DomiIntegration {
     const current = await this.plaudQueue();
     if (!current.ok) return current;
     if (current.stale) {
+      const recovery = current.remoteStatus === "auth_required"
+        ? "PLAUD 登录已失效，请在设置中重新登录并验证后再生成文字稿。"
+        : current.remoteStatus === "rate_limited"
+          ? "PLAUD 服务暂时限流，本轮未执行任何生成操作；请稍后重试，无需重新登录。"
+          : "PLAUD 本轮远端读取未完成，本轮未执行任何生成操作；已保留上次成功列表，请重新同步。";
       return {
         ok: false,
         snapshot: current,
-        error: "PLAUD 当前未能完成远端读取，已显示上次成功列表；请重试连接后再生成文字稿。"
+        error: recovery
       };
     }
     if (current.pendingCount > 10 && !request.confirmed) {
@@ -2908,6 +2997,7 @@ module.exports = {
   DomiIntegration,
   classifyPlaudConnectionFailure,
   describeFeishuSyncError,
+  isRetryablePlaudReadFailure,
   resolveLarkCliExecutable,
   isRetryableFeishuReadError,
   normalizeTaskLedger,

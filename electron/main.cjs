@@ -446,11 +446,18 @@ function validAttachmentWorkspace(requestedWorkspacePath, entityRequest) {
     ? entityRequest.entityType
     : "";
   const recordId = String(entityRequest?.recordId || "").trim();
-  if (entityType && recordId && getAppSettings().load().settings.storageBackend === "local") {
+  if (entityType && recordId) {
+    if (getAppSettings().load().settings.storageBackend !== "local") return "";
     return validCodexWorkspace(getDomiIntegration().entityWorkspace({ entityType, recordId })) || "";
   }
   const candidate = validCodexWorkspace(requestedWorkspacePath);
   return candidate && !isEntityWorkspace(candidate) ? candidate : demoWorkspace;
+}
+
+function logicalStagingAttachmentName(filePath) {
+  const name = path.basename(filePath);
+  if (!managedStagingAttachment(filePath)) return name;
+  return name.replace(/^\d+-\d+-(?=.+)/, "");
 }
 
 function managedStagingAttachment(filePath) {
@@ -458,6 +465,48 @@ function managedStagingAttachment(filePath) {
   if (path.basename(parent) !== "attachments") return false;
   return pathIsWithin(demoWorkspace, parent)
     || pathIsWithin(projectsDir, parent);
+}
+
+async function discardManagedStagingAttachment(filePath) {
+  const resolved = path.resolve(String(filePath || ""));
+  if (!managedStagingAttachment(resolved)) {
+    return { ok: false, removed: false, error: "该文件不是 domi 本轮管理的暂存附件。" };
+  }
+  try {
+    await fs.promises.unlink(resolved);
+    return { ok: true, removed: true };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { ok: true, removed: false };
+    return {
+      ok: false,
+      removed: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function cleanupImportedStagingSources(sourcePaths) {
+  let failureCount = 0;
+  await Promise.all(sourcePaths.map(async (sourcePath) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await fs.promises.unlink(sourcePath);
+        return;
+      } catch (error) {
+        if (error?.code === "ENOENT") return;
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          continue;
+        }
+        failureCount += 1;
+      }
+    }
+  }));
+  if (failureCount > 0) {
+    // Do not log private file names or paths. The source remains in the
+    // application-managed staging area if both bounded cleanup attempts fail.
+    appendRuntimeLog("attachment-staging-source-cleanup-failed", { failureCount });
+  }
 }
 
 async function importLocalFiles(requestedWorkspacePath, requestedPaths, entityRequest) {
@@ -492,7 +541,7 @@ async function importLocalFiles(requestedWorkspacePath, requestedPaths, entityRe
         throw new Error(`${path.basename(resolvedSourcePath)} 不是可导入的文件。`);
       }
       attachmentsDir = attachmentDirectory(workspacePath);
-      const name = path.basename(resolvedSourcePath);
+      const name = logicalStagingAttachmentName(resolvedSourcePath);
       const targetPath = path.join(attachmentsDir, `${stamp}-${index}-${name}`);
       await fs.promises.copyFile(resolvedSourcePath, targetPath, fs.constants.COPYFILE_EXCL);
       createdTargets.push(targetPath);
@@ -502,7 +551,7 @@ async function importLocalFiles(requestedWorkspacePath, requestedPaths, entityRe
         managedStagingSources.push(resolvedSourcePath);
       }
     }
-    await Promise.allSettled(managedStagingSources.map((sourcePath) => fs.promises.unlink(sourcePath)));
+    await cleanupImportedStagingSources(managedStagingSources);
     return { ok: true, canceled: false, files };
   } catch (error) {
     await Promise.allSettled(createdTargets.map((targetPath) => fs.promises.unlink(targetPath)));
@@ -1129,6 +1178,49 @@ async function renameMarkdownDocument(request) {
   }
 }
 
+let rendererFlushSequence = 0;
+const pendingRendererFlushes = new Map();
+
+function requestRendererFlush(win, reason, timeoutMs = 12_000) {
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) {
+    return Promise.resolve({ ok: true });
+  }
+  const requestId = `renderer-flush-${process.pid}-${Date.now()}-${++rendererFlushSequence}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingRendererFlushes.delete(requestId);
+      resolve({ ok: false, error: "保存等待超时。窗口仍保持打开，数据没有被强制丢弃。" });
+    }, timeoutMs);
+    timer.unref();
+    pendingRendererFlushes.set(requestId, {
+      senderId: win.webContents.id,
+      resolve: (result) => {
+        clearTimeout(timer);
+        resolve(result);
+      }
+    });
+    win.webContents.send("app:prepare-close", {
+      requestId,
+      reason,
+      runningTaskCount: activeRuns.size
+    });
+  });
+}
+
+ipcMain.on("app:prepare-close-result", (event, result = {}) => {
+  const requestId = String(result.requestId || "");
+  const pending = pendingRendererFlushes.get(requestId);
+  if (!pending || pending.senderId !== event.sender.id) return;
+  pendingRendererFlushes.delete(requestId);
+  pending.resolve({
+    ok: result.ok === true,
+    error: boundedRuntimeText(result.error, 1_000)
+  });
+});
+
+let applicationQuitFlushComplete = false;
+let applicationQuitFlushStarted = false;
+
 function createWindow() {
   const appIcon = nativeImage.createFromPath(appIconPath);
   const win = new BrowserWindow({
@@ -1162,6 +1254,9 @@ function createWindow() {
 
   let rendererRecoveryAttempts = 0;
   let rendererStableTimer = null;
+  let rendererCloseReady = false;
+  let rendererClosePending = false;
+  let backgroundCloseConfirmed = false;
   const scheduleRendererRecovery = (trigger, baseDelayMs) => {
     rendererRecoveryAttempts += 1;
     const attempt = rendererRecoveryAttempts;
@@ -1234,6 +1329,47 @@ function createWindow() {
     });
   });
   win.on("responsive", () => appendRuntimeLog("renderer-responsive"));
+  win.on("close", (event) => {
+    if (rendererCloseReady || applicationQuitFlushComplete) return;
+    event.preventDefault();
+    if (rendererClosePending) return;
+    rendererClosePending = true;
+    void (async () => {
+      if (activeRuns.size > 0 && !backgroundCloseConfirmed) {
+        const choice = await dialog.showMessageBox(win, {
+          type: "question",
+          title: "任务仍在运行",
+          message: `还有 ${activeRuns.size} 个任务正在运行。`,
+          detail: "关闭窗口后任务会继续在后台运行；再次打开 domi 可查看进度和结果。",
+          buttons: ["保持窗口打开", "关闭窗口并在后台继续"],
+          defaultId: 1,
+          cancelId: 0,
+          noLink: true
+        });
+        if (choice.response !== 1 || win.isDestroyed()) {
+          rendererClosePending = false;
+          return;
+        }
+        backgroundCloseConfirmed = true;
+      }
+      const result = await requestRendererFlush(win, "window-close");
+      rendererClosePending = false;
+      if (win.isDestroyed()) return;
+      if (!result.ok) {
+        await dialog.showMessageBox(win, {
+          type: "warning",
+          title: "尚未安全保存",
+          message: "domi 已阻止关闭窗口。",
+          detail: result.error || "请处理页面中的保存错误后再试。",
+          buttons: ["返回继续处理"],
+          noLink: true
+        });
+        return;
+      }
+      rendererCloseReady = true;
+      win.close();
+    })();
+  });
   win.on("closed", () => {
     if (rendererStableTimer) clearTimeout(rendererStableTimer);
   });
@@ -1246,7 +1382,7 @@ function createWindow() {
 }
 
 function publishCodexEvent(sender, runId, payload) {
-  if (!sender.isDestroyed()) {
+  if (sender && !sender.isDestroyed()) {
     sender.send("codex:event", { runId, ...payload });
   }
 }
@@ -2483,8 +2619,8 @@ async function recoverCodexThread(threadId) {
     return { ok: false, threadId: "", status: "unknown", error: "Codex 对话 ID 不能为空。" };
   }
 
+  const activeRun = [...activeRuns.values()].find((run) => run.threadId === normalizedThreadId);
   try {
-    const activeRun = [...activeRuns.values()].find((run) => run.threadId === normalizedThreadId);
     const response = await getCodexClient().request("thread/read", {
       threadId: normalizedThreadId,
       includeTurns: true
@@ -2513,6 +2649,21 @@ async function recoverCodexThread(threadId) {
         : ""
     };
   } catch (error) {
+    // A reopened renderer can safely rebind a run still owned by this main
+    // process even when the diagnostic thread/read request is temporarily
+    // unavailable. Returning unknown here would let the persistent queue start
+    // a second turn for the same thread.
+    if (activeRun) {
+      return {
+        ok: true,
+        runId: activeRun.runId,
+        threadId: normalizedThreadId,
+        turnId: activeRun.turnId || "",
+        status: "running",
+        output: activeRun.output || "",
+        error: ""
+      };
+    }
     return {
       ok: false,
       threadId: normalizedThreadId,
@@ -2520,6 +2671,17 @@ async function recoverCodexThread(threadId) {
       error: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+function bindCodexRun(runId, sender) {
+  const normalizedRunId = String(runId || "").trim();
+  const run = activeRuns.get(normalizedRunId);
+  if (!run) return { ok: false, error: "该任务已经结束，请重新读取最终状态。" };
+  if (!sender || sender.isDestroyed()) return { ok: false, error: "当前窗口已经关闭。" };
+  // The renderer installs its run context before invoking this handshake. From this point
+  // onward no live delta can be delivered to a window that has not registered the run yet.
+  run.sender = sender;
+  return { ok: true };
 }
 
 if (hasSingleInstanceLock) app.whenReady().then(() => {
@@ -2556,9 +2718,6 @@ app.on("second-instance", () => {
   win.focus();
 });
 
-let quitDrainStarted = false;
-let quitDrainComplete = false;
-
 async function drainRunPostProcessing(timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (pendingRunPostProcessing.size > 0 && Date.now() < deadline) {
@@ -2576,23 +2735,56 @@ async function drainRunPostProcessing(timeoutMs = 5_000) {
 
 app.on("before-quit", (event) => {
   appendRuntimeLog("app-before-quit");
-  updateService?.stop();
-  codexClient?.close();
-  if (quitDrainComplete) return;
-  if (pendingRunPostProcessing.size === 0) {
-    quitDrainComplete = true;
-    stateStore?.close();
-    return;
-  }
+  if (applicationQuitFlushComplete) return;
   event.preventDefault();
-  if (quitDrainStarted) return;
-  quitDrainStarted = true;
-  void drainRunPostProcessing().then((remaining) => {
+  if (applicationQuitFlushStarted) return;
+  applicationQuitFlushStarted = true;
+  void (async () => {
+    const windows = BrowserWindow.getAllWindows().filter((candidate) => !candidate.isDestroyed());
+    if (activeRuns.size > 0 && windows[0]) {
+      const choice = await dialog.showMessageBox(windows[0], {
+        type: "question",
+        title: "退出 domi？",
+        message: `还有 ${activeRuns.size} 个任务正在运行。`,
+        detail: "完全退出会停止这些任务；如需任务继续，请只关闭窗口，不要退出 domi。",
+        buttons: ["取消退出", "退出并停止任务"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true
+      });
+      if (choice.response !== 1) {
+        applicationQuitFlushStarted = false;
+        return;
+      }
+    }
+
+    const flushResults = await Promise.all(
+      windows.map((win) => requestRendererFlush(win, "app-quit"))
+    );
+    const failed = flushResults.find((result) => !result.ok);
+    if (failed) {
+      applicationQuitFlushStarted = false;
+      if (windows[0] && !windows[0].isDestroyed()) {
+        await dialog.showMessageBox(windows[0], {
+          type: "warning",
+          title: "尚未安全保存",
+          message: "domi 已取消退出。",
+          detail: failed.error || "请处理页面中的保存错误后再试。",
+          buttons: ["返回继续处理"],
+          noLink: true
+        });
+      }
+      return;
+    }
+
+    const remaining = await drainRunPostProcessing();
     appendRuntimeLog("app-postprocess-drained", { remaining });
+    updateService?.stop();
+    codexClient?.close();
     if (remaining === 0) stateStore?.close();
-    quitDrainComplete = true;
+    applicationQuitFlushComplete = true;
     app.quit();
-  });
+  })();
 });
 
 app.on("window-all-closed", () => {
@@ -2651,6 +2843,7 @@ ipcMain.handle("codex:check", runCodexCheckCached);
 ipcMain.handle("codex:run", (event, payload) => runCodex(event.sender, payload));
 ipcMain.handle("codex:stop", (_event, runId) => stopCodex(runId));
 ipcMain.handle("codex:recover-thread", (_event, threadId) => recoverCodexThread(threadId));
+ipcMain.handle("codex:bind-run", (event, runId) => bindCodexRun(runId, event.sender));
 ipcMain.handle("settings:load", () => ({ ok: true, ...getAppSettings().load() }));
 ipcMain.handle("settings:save", (_event, request) => saveRuntimeSettings(request));
 ipcMain.handle("settings:select-directory", (event, currentPath) =>
@@ -2679,6 +2872,9 @@ ipcMain.handle("files:import", (_event, sourcePaths, workspacePath, entityReques
 );
 ipcMain.handle("files:import-data", (_event, files, workspacePath, entityRequest) =>
   importLocalFileData(workspacePath, files, entityRequest)
+);
+ipcMain.handle("files:discard-staged", (_event, filePath) =>
+  discardManagedStagingAttachment(filePath)
 );
 ipcMain.handle("resource:open", (_event, resource) => openResource(resource));
 ipcMain.handle("markdown:open-external", (_event, resource) =>
@@ -2913,14 +3109,14 @@ ipcMain.handle("domi:plaud-list", async (_event, request) => {
     const limit = Math.min(Math.max(Number(request?.limit) || 50, 1), 100);
     const offset = Math.min(Math.max(Number(request?.offset) || 0, 0), 10_000);
     return await serviceCoordinator.run(
-      `domi:plaud-list:${offset}:${limit}`,
-      () => getDomiIntegration().plaudQueue({ offset, limit }),
+      `domi:plaud-list:${fresh ? "fresh" : "cached"}:${offset}:${limit}`,
+      () => getDomiIntegration().plaudQueue({ offset, limit, fresh }),
       {
         ttlMs: 15_000,
-        retries: 1,
+        retries: 0,
         force: fresh,
-        allowStale: !fresh,
-        isSuccess: (value) => value?.ok !== false
+        allowStale: false,
+        ttlForValue: (value) => value?.ok && !value?.stale ? 15_000 : 0
       }
     );
   } catch (error) {

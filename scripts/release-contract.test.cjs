@@ -40,7 +40,7 @@ assert.match(afterPackSource, /app-update\.yml/);
 assert.match(afterPackSource, /provider: github/);
 assert.match(afterPackSource, /owner: 1DeepSheep/);
 assert.match(afterPackSource, /repo: domi/);
-assert.match(updateServiceSource, /autoUpdater\.setFeedURL\(PUBLIC_UPDATE_FEED\)/);
+assert.match(updateServiceSource, /this\.updater\.setFeedURL\(PUBLIC_UPDATE_FEED\)/);
 assert.match(runtimePreparationSource, /APPLE_TIMESTAMP_SERVER/);
 assert.match(runtimePreparationSource, /http:\/\/timestamp\.apple\.com\/ts01/);
 assert.match(runtimePreparationSource, /`--timestamp=\$\{timestampServer\}`/);
