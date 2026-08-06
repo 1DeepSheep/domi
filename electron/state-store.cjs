@@ -4,6 +4,9 @@ const { DatabaseSync } = require("node:sqlite");
 
 const CURRENT_DATABASE_SCHEMA = 2;
 const MAX_DATABASE_BACKUPS = 3;
+const NEW_THREAD_TITLE = "新的投资任务";
+const NEW_THREAD_PROJECT = "未命名项目";
+const NEW_THREAD_GREETING = "新对话已创建。选择一个 workflow，或直接输入你要 Codex 完成的投资任务。";
 
 function backupDatabase(database, databasePath, fromVersion) {
   database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
@@ -40,6 +43,22 @@ function parseJson(value, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function isUnusedDraftThread(thread) {
+  const messages = Array.isArray(thread?.messages) ? thread.messages : [];
+  const timeline = Array.isArray(thread?.timeline) ? thread.timeline : [];
+  return !thread?.externalType
+    && !thread?.codexThreadId
+    && !thread?.manualTitle
+    && String(thread?.title || "") === NEW_THREAD_TITLE
+    && String(thread?.project || NEW_THREAD_PROJECT) === NEW_THREAD_PROJECT
+    && timeline.length === 0
+    && messages.every((message) =>
+      message?.role === "assistant"
+      && message?.status === "idle"
+      && message?.content === NEW_THREAD_GREETING
+    );
 }
 
 class WorkbenchStateStore {
@@ -229,10 +248,7 @@ class WorkbenchStateStore {
   normalizeThread(thread, index, { ensureWorkspace = false, recoverInterrupted = false } = {}) {
     const id = String(thread?.id || `thread-${Date.now()}-${index}`);
     const projectId = String(thread?.projectId || `project-${id}`);
-    const project = String(thread?.project || "未命名项目");
-    const workspacePath = ensureWorkspace
-      ? this.ensureProjectWorkspace(projectId, project, thread?.workspacePath)
-      : this.projectWorkspacePath(projectId, project, thread?.workspacePath);
+    const project = String(thread?.project || NEW_THREAD_PROJECT);
     const messages = Array.isArray(thread?.messages)
       ? thread.messages.map((message) => recoverInterrupted && message?.status === "running" ? {
           ...message,
@@ -240,6 +256,29 @@ class WorkbenchStateStore {
           content: message.content || "上次运行在 domi 关闭时中断。"
         } : message)
       : [];
+    const timeline = Array.isArray(thread?.timeline) ? thread.timeline : [];
+    const manualTitle = typeof thread?.manualTitle === "boolean"
+      ? thread.manualTitle
+      : id.startsWith("thread-demo-");
+    const normalizedDraftCandidate = {
+      ...thread,
+      id,
+      projectId,
+      project,
+      manualTitle,
+      messages,
+      timeline
+    };
+    // Merely reopening domi must not materialize attachments/outputs for the
+    // untouched "new task" placeholder. The runtime is created only after the
+    // user actually starts using that task.
+    const unusedDraft = isUnusedDraftThread(normalizedDraftCandidate);
+    const shouldEnsureWorkspace = ensureWorkspace && !unusedDraft;
+    const workspacePath = unusedDraft
+      ? this.workspaceRoot
+      : shouldEnsureWorkspace
+        ? this.ensureProjectWorkspace(projectId, project, thread?.workspacePath)
+        : this.projectWorkspacePath(projectId, project, thread?.workspacePath);
 
     return {
       ...thread,
@@ -249,11 +288,9 @@ class WorkbenchStateStore {
       workspacePath,
       lastActiveAt: Number.isFinite(Number(thread?.lastActiveAt)) ? Number(thread.lastActiveAt) : 0,
       pinned: Boolean(thread?.pinned),
-      manualTitle: typeof thread?.manualTitle === "boolean"
-        ? thread.manualTitle
-        : id.startsWith("thread-demo-"),
+      manualTitle,
       messages,
-      timeline: Array.isArray(thread?.timeline) ? thread.timeline : [],
+      timeline,
       lastUsage: thread?.lastUsage || null
     };
   }

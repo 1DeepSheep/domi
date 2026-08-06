@@ -863,6 +863,88 @@ body.panel-resizing .main-grid {
   opacity: 0.45;
 }
 
+.sidebar-update-card {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 16px;
+  width: calc(100% - 14px);
+  min-height: 52px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  margin: 7px 7px 0;
+  border: 1px solid rgba(207, 103, 74, 0.3);
+  border-radius: 9px;
+  color: #82452f;
+  background: linear-gradient(135deg, #fff6f1, #fffaf7);
+  padding: 7px 8px;
+  text-align: left;
+  box-shadow: 0 2px 8px rgba(139, 67, 45, 0.06);
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.sidebar-update-card:hover {
+  border-color: rgba(193, 82, 51, 0.55);
+  background: #fff2eb;
+  box-shadow: 0 5px 14px rgba(139, 67, 45, 0.1);
+  transform: translateY(-1px);
+}
+
+.sidebar-update-card.downloaded {
+  border-color: rgba(98, 132, 109, 0.38);
+  color: #496b55;
+  background: linear-gradient(135deg, #f2f8f4, #f8fbf8);
+}
+
+.sidebar-update-card.downloaded:hover {
+  border-color: rgba(79, 117, 91, 0.58);
+  background: #edf6f0;
+}
+
+.sidebar-update-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 7px;
+  background: rgba(207, 103, 74, 0.11);
+}
+
+.sidebar-update-card.downloaded .sidebar-update-icon {
+  background: rgba(98, 132, 109, 0.12);
+}
+
+.sidebar-update-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.sidebar-update-copy strong,
+.sidebar-update-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-update-copy strong {
+  color: inherit;
+  font-family: var(--font-cn);
+  font-size: var(--text-secondary);
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.sidebar-update-copy small {
+  color: color-mix(in srgb, currentColor 72%, transparent);
+  font-size: var(--text-caption);
+  line-height: 16px;
+}
+
+.sidebar-update-card > svg {
+  color: currentColor;
+  opacity: 0.68;
+}
+
 .codex-card {
   display: grid;
   grid-template-columns: 12px minmax(0, 1fr) 16px;
@@ -8202,6 +8284,42 @@ body.panel-resizing .main-grid {
   border-radius: 7px;
   color: var(--green);
   background: #fff;
+  font-size: var(--text-caption);
+}
+
+.global-persistence-alert {
+  position: fixed;
+  right: 22px;
+  bottom: 20px;
+  z-index: 260;
+  display: flex;
+  max-width: min(520px, calc(100vw - 44px));
+  min-height: 42px;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid #e6b7a8;
+  border-radius: 9px;
+  color: var(--danger);
+  background: #fff6f2;
+  box-shadow: 0 10px 30px rgba(72, 42, 31, 0.14);
+  padding: 9px 10px 9px 12px;
+  font-family: var(--font-cn);
+  font-size: var(--text-secondary);
+}
+
+.global-persistence-alert > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.global-persistence-alert > button {
+  flex: none;
+  border: 1px solid #ddb0a1;
+  border-radius: 7px;
+  color: var(--danger);
+  background: #fff;
+  padding: 5px 9px;
+  font-family: inherit;
   font-size: var(--text-caption);
 }
 
