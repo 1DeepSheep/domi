@@ -22,13 +22,31 @@ contextBridge.exposeInMainWorld("workbench", {
   runCodex: (payload) => ipcRenderer.invoke("codex:run", payload),
   stopCodex: (runId) => ipcRenderer.invoke("codex:stop", runId),
   recoverCodexThread: (threadId) => ipcRenderer.invoke("codex:recover-thread", threadId),
+  bindCodexRun: (runId) => ipcRenderer.invoke("codex:bind-run", runId),
   selectFiles: (workspacePath, entityRequest) => ipcRenderer.invoke("files:select", workspacePath, entityRequest),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   importFiles: (sourcePaths, workspacePath, entityRequest) => ipcRenderer.invoke("files:import", sourcePaths, workspacePath, entityRequest),
   importFileData: (files, workspacePath, entityRequest) => ipcRenderer.invoke("files:import-data", files, workspacePath, entityRequest),
+  discardStagedAttachment: (filePath) => ipcRenderer.invoke("files:discard-staged", filePath),
   openResource: (resource) => ipcRenderer.invoke("resource:open", resource),
   openMarkdownExternal: (resource) => ipcRenderer.invoke("markdown:open-external", resource),
   showNotification: (request) => ipcRenderer.invoke("app:notify", request),
+  onPrepareClose: (callback) => {
+    const handler = async (_event, request) => {
+      let result;
+      try {
+        result = await callback(request);
+      } catch (error) {
+        result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      ipcRenderer.send("app:prepare-close-result", {
+        requestId: request?.requestId,
+        ...result
+      });
+    };
+    ipcRenderer.on("app:prepare-close", handler);
+    return () => ipcRenderer.removeListener("app:prepare-close", handler);
+  },
   listDocumentLibrary: (request) => ipcRenderer.invoke("document-library:list", request),
   createDocumentLibraryEntry: (request) => ipcRenderer.invoke("document-library:create", request),
   readMarkdown: (request) => ipcRenderer.invoke("markdown:read", request),

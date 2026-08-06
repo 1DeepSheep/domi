@@ -24,6 +24,7 @@ declare global {
       runCodex: (payload: CodexRunRequest) => Promise<CodexRunResult>;
       stopCodex: (runId: string) => Promise<{ ok: boolean; error?: string }>;
       recoverCodexThread: (threadId: string) => Promise<CodexThreadRecoveryResult>;
+      bindCodexRun: (runId: string) => Promise<{ ok: boolean; error?: string }>;
       selectFiles: (
         workspacePath?: string,
         entityRequest?: DomiEntityMaterialsRequest
@@ -39,6 +40,11 @@ declare global {
         workspacePath?: string,
         entityRequest?: DomiEntityMaterialsRequest
       ) => Promise<FileSelectionResult>;
+      discardStagedAttachment: (filePath: string) => Promise<{
+        ok: boolean;
+        removed: boolean;
+        error?: string;
+      }>;
       openResource: (resource: string) => Promise<{ ok: boolean; error?: string; target?: string }>;
       openMarkdownExternal: (resource: string) => Promise<{
         ok: boolean;
@@ -47,6 +53,9 @@ declare global {
         application?: string;
       }>;
       showNotification: (request: DesktopNotificationRequest) => Promise<DesktopNotificationResult>;
+      onPrepareClose?: (
+        callback: (request: AppPrepareCloseRequest) => Promise<AppPrepareCloseResult>
+      ) => () => void;
       listDocumentLibrary: (
         request?: DocumentLibraryListRequest
       ) => Promise<DocumentLibrarySnapshot>;
@@ -124,6 +133,17 @@ export type DesktopNotificationRequest = {
 };
 
 export type DesktopNotificationResult = {
+  ok: boolean;
+  error?: string;
+};
+
+export type AppPrepareCloseRequest = {
+  requestId: string;
+  reason: "window-close" | "app-quit";
+  runningTaskCount: number;
+};
+
+export type AppPrepareCloseResult = {
   ok: boolean;
   error?: string;
 };
@@ -768,22 +788,26 @@ export type DomiPlaudConnectionRequest = {
   browser?: "chrome" | "tabbit";
 };
 
+export type DomiPlaudRemoteStatus =
+  | "connected"
+  | "auth_required"
+  | "verification_pending"
+  | "profile_locked"
+  | "browser_unavailable"
+  | "runtime_unavailable"
+  | "network_error"
+  | "rate_limited"
+  | "service_unavailable"
+  | "service_changed"
+  | "unknown";
+
 export type DomiPlaudConnectionResult = {
   ok: boolean;
   connected?: boolean;
   browser?: "chrome" | "tabbit";
   browserLabel?: string;
   accountFingerprint?: string;
-  status?:
-    | "connected"
-    | "auth_required"
-    | "verification_pending"
-    | "profile_locked"
-    | "browser_unavailable"
-    | "runtime_unavailable"
-    | "network_error"
-    | "service_changed"
-    | "unknown";
+  status?: DomiPlaudRemoteStatus;
   checkedAt?: number;
   error?: string;
 };
@@ -806,6 +830,9 @@ export type DomiPlaudSnapshot = {
   hasMore?: boolean;
   nextOffset?: number;
   items?: DomiPlaudItem[];
+  remoteStatus?: DomiPlaudRemoteStatus;
+  retryable?: boolean;
+  lastSuccessfulSnapshot?: DomiPlaudSnapshot;
   warning?: string;
   error?: string;
 };
