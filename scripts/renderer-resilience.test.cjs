@@ -179,6 +179,11 @@ assert.match(
 );
 assert.match(
   app,
+  /import \{ filesFromClipboardData \}[\s\S]*?handleComposerPaste[\s\S]*?filesFromClipboardData\(event\.clipboardData\)/,
+  "Composer image paste must select one authoritative clipboard file view instead of importing files and items twice."
+);
+assert.match(
+  app,
   /mentionedDomiProject[\s\S]*?matches\.size === 1[\s\S]*?bindThreadToMentionedProject[\s\S]*?resolveDomiEntityWorkspacePath[\s\S]*?importFiles/,
   "A uniquely named project in a new task must bind to its canonical directory and archive attachments there."
 );

@@ -67,6 +67,7 @@ import {
   useState
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
+import { filesFromClipboardData } from "./clipboard-files";
 import { isLocalPdfResource } from "./document-resources";
 import MarkdownEditorErrorBoundary from "./MarkdownEditorErrorBoundary";
 import SectionErrorBoundary, { RenderRegion } from "./SectionErrorBoundary";
@@ -5557,19 +5558,7 @@ function App() {
   }
 
   function handleComposerPaste(event: ReactClipboardEvent<HTMLFormElement>) {
-    const directFiles = Array.from(event.clipboardData.files);
-    const itemFiles = Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === "file")
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => Boolean(file));
-    const files = [...directFiles];
-    itemFiles.forEach((file) => {
-      const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
-      const isDuplicate = files.some((current) =>
-        `${current.name}:${current.size}:${current.type}:${current.lastModified}` === key
-      );
-      if (!isDuplicate) files.push(file);
-    });
+    const files = filesFromClipboardData(event.clipboardData);
     if (files.length === 0) {
       const fileUrlPaths = event.clipboardData.getData("text/uri-list")
         .split(/\r?\n/)
@@ -5585,10 +5574,12 @@ function App() {
         });
       if (fileUrlPaths.length === 0) return;
       event.preventDefault();
+      event.stopPropagation();
       void importAttachmentPaths(fileUrlPaths);
       return;
     }
     event.preventDefault();
+    event.stopPropagation();
     void importAttachmentFiles(files);
   }
 
