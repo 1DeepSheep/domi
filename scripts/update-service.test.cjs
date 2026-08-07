@@ -479,6 +479,24 @@ test("updater errors are operation-scoped, clear stale status, and redact secret
   assert.equal(harness.destroyedSent.length, 0);
 });
 
+test("returning to an active app checks only when the previous result is stale", async () => {
+  const harness = createHarness();
+  startListeners(harness, { running: true });
+  harness.updater.checkImplementation = async () => ({
+    isUpdateAvailable: false,
+    updateInfo: { version: "9.8.7" }
+  });
+
+  harness.service.lastCheckCompletedAt = Date.now();
+  await harness.service.checkIfStale(5 * 60_000);
+  assert.equal(harness.calls.check, 0);
+
+  harness.service.lastCheckCompletedAt = Date.now() - 5 * 60_000 - 1;
+  await harness.service.checkIfStale(5 * 60_000);
+  assert.equal(harness.calls.check, 1);
+  assert.equal(harness.service.snapshot().state, "up-to-date");
+});
+
 test("development builds keep every updater operation disabled", async () => {
   const harness = createHarness({ packaged: false, channel: "beta" });
   harness.service.start();

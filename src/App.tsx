@@ -81,6 +81,12 @@ import MarkdownEditorErrorBoundary from "./MarkdownEditorErrorBoundary";
 import SectionErrorBoundary, { RenderRegion } from "./SectionErrorBoundary";
 import AssistantChoiceCard from "./AssistantChoiceCard";
 import {
+  DatabaseGrid,
+  type DatabaseCellOption,
+  type DatabaseGridColumn,
+  type DatabasePatchContext
+} from "./database";
+import {
   AppSettings,
   AppSettingsSaveRequest,
   AppSettingsSaveResult,
@@ -94,6 +100,7 @@ import {
   DomiPerson,
   DomiClassificationReview,
   DomiDatabaseDeleteRequest,
+  DomiDatabasePatchRequest,
   DomiDatabaseSnapshot,
   DomiDatabaseUpdateRequest,
   DomiNewsItem,
@@ -707,6 +714,29 @@ function databasePills(values: string[], empty = "—") {
       ))}
     </span>
   );
+}
+
+function databaseGridOptions(values: Array<string | null | undefined>): DatabaseCellOption[] {
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "zh-CN", {
+      numeric: true,
+      sensitivity: "base"
+    }))
+    .map((value) => ({
+      value,
+      label: value,
+      tone: databasePillTone(value) as DatabaseCellOption["tone"]
+    }));
+}
+
+function databaseMutationId(entityType: DatabaseEntityType, recordId: string) {
+  const suffix = globalThis.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `grid:${entityType}:${recordId}:${suffix}`;
+}
+
+function databaseRecordKey(entityType: DatabaseEntityType, recordId: string) {
+  return `${entityType}:${recordId}`;
 }
 
 type CalendarRecipientOption = {
@@ -2017,6 +2047,11 @@ function App() {
   const databaseAutoSaveInFlightRef = useRef(false);
   const databaseAutoSaveRetryTimerRef = useRef<number | null>(null);
   const databaseAutoSaveRetryRef = useRef(0);
+  const databasePatchQueuesRef = useRef(new Map<string, Promise<void>>());
+  const databaseCanonicalRecordsRef = useRef(
+    new Map<string, DomiProject | DomiPerson | DomiNewsItem>()
+  );
+  const databaseGridSaveCountRef = useRef(0);
   const plaudListPromiseRef = useRef<Promise<DomiPlaudSnapshot | null> | null>(null);
   const plaudSyncPromiseRef = useRef<Promise<DomiPlaudSyncResult | null> | null>(null);
   const plaudSnapshotRevisionRef = useRef(0);
@@ -2058,6 +2093,21 @@ function App() {
   weeklyNewsAutomationRef.current = weeklyNewsAutomation;
   appSettingsRef.current = appSettings;
   queuedSubmissionsByThreadRef.current = queuedSubmissionsByThread;
+  if (databaseSnapshot) {
+    ([
+      ["project", databaseSnapshot.projects || []],
+      ["person", databaseSnapshot.people || []],
+      ["news", databaseSnapshot.news || []]
+    ] as const).forEach(([entityType, items]) => {
+      items.forEach((record) => {
+        const key = databaseRecordKey(entityType, record.recordId);
+        const known = databaseCanonicalRecordsRef.current.get(key);
+        if (!known || Number(record.updatedAt || 0) >= Number(known.updatedAt || 0)) {
+          databaseCanonicalRecordsRef.current.set(key, record);
+        }
+      });
+    });
+  }
 
   function updateWeeklyNewsAutomation(patch: Partial<WeeklyNewsAutomationState>) {
     const next = { ...weeklyNewsAutomationRef.current, ...patch };
@@ -4255,6 +4305,82 @@ function App() {
         scheduleDatabaseAutoSave(databaseAutoSaveQueuedRef.current, 180);
       }
     }
+  }
+
+  async function patchDatabaseGridRecord<T extends DomiProject | DomiPerson | DomiNewsItem>(
+    entityType: DatabaseEntityType,
+    record: T,
+    patch: Partial<T>,
+    _context: DatabasePatchContext<T>
+  ): Promise<T> {
+    const key = databaseRecordKey(entityType, record.recordId);
+    const prior = databasePatchQueuesRef.current.get(key) || Promise.resolve();
+    let resolveRecord!: (value: T) => void;
+    let rejectRecord!: (reason?: unknown) => void;
+    const resultPromise = new Promise<T>((resolve, reject) => {
+      resolveRecord = resolve;
+      rejectRecord = reject;
+    });
+
+    const operation = prior.catch(() => undefined).then(async () => {
+      const current = (databaseCanonicalRecordsRef.current.get(key) || record) as T;
+      const changes = Object.fromEntries(
+        Object.entries(patch).filter(([, value]) => value !== undefined)
+      );
+      if (!Object.keys(changes).length) {
+        resolveRecord(current);
+        return;
+      }
+      const request = {
+        entityType,
+        recordId: current.recordId,
+        expectedUpdatedAt: Number(current.updatedAt) || 0,
+        mutationId: databaseMutationId(entityType, current.recordId),
+        changes
+      } as DomiDatabasePatchRequest;
+
+      databaseGridSaveCountRef.current += 1;
+      setDatabaseSaving(true);
+      try {
+        const result = await workbench.updateDomiDatabaseRecordPatch(request);
+        if (!result.ok || !result.record) {
+          throw new Error(result.error || "资料库字段保存失败，请重试。");
+        }
+        const saved = result.record as T;
+        databaseCanonicalRecordsRef.current.set(key, saved);
+        setDatabaseSnapshot((snapshot) =>
+          replaceDatabaseSnapshotRecord(snapshot, entityType, saved)
+        );
+        if (result.snapshot) setDomiSnapshot(result.snapshot);
+        if (
+          databaseDraftRef.current?.entityType === entityType
+          && databaseDraftRef.current.recordId === saved.recordId
+        ) {
+          const nextDraft = databaseDraftForRecord(entityType, saved);
+          databaseDraftRef.current = nextDraft;
+          setDatabaseDraft(nextDraft);
+        }
+        setDatabaseSelectedId(saved.recordId);
+        setDatabaseError("");
+        if (entityType === "news") {
+          void refreshWeeklyNews(weeklyNewsPage, { silent: true });
+        }
+        resolveRecord(saved);
+      } catch (error) {
+        rejectRecord(error);
+      } finally {
+        databaseGridSaveCountRef.current = Math.max(0, databaseGridSaveCountRef.current - 1);
+        if (databaseGridSaveCountRef.current === 0) setDatabaseSaving(false);
+      }
+    });
+    const tail = operation.then(() => undefined, () => undefined);
+    databasePatchQueuesRef.current.set(key, tail);
+    void tail.finally(() => {
+      if (databasePatchQueuesRef.current.get(key) === tail) {
+        databasePatchQueuesRef.current.delete(key);
+      }
+    });
+    return resultPromise;
   }
 
   async function previewDatabaseRecord(
@@ -9346,6 +9472,217 @@ function App() {
       );
     };
 
+    const projectStatusOptions = databaseGridOptions([
+      "待交流", "已交流", "深度跟踪", "已投", "Miss", "放弃",
+      ...(databaseSnapshot?.projects || []).map((project) => project.status)
+    ]);
+    const ratingOptions = databaseGridOptions(["S", "A", "B", "C"]);
+    const domainOptions = databaseGridOptions(taxonomyDomains.map((item) => item.name));
+    const subdomainOptions = databaseGridOptions(taxonomyDomains.flatMap((item) => item.subdomains));
+    const cityOptions = databaseGridOptions([
+      ...(databaseSnapshot?.projects || []).flatMap((project) => project.cities || []),
+      ...(databaseSnapshot?.people || []).flatMap((person) => person.cities || [])
+    ]);
+    const trackedInvestorOptions = databaseGridOptions([
+      "红杉", "高瓴", "IDG", "锦秋", "Monolith/励思资本", "五源", "蓝驰", "经纬"
+    ]);
+    const personTypeOptions = databaseGridOptions(
+      (databaseSnapshot?.people || []).flatMap((person) => person.types || [])
+    );
+    const personStatusOptions = databaseGridOptions(
+      (databaseSnapshot?.people || []).map((person) => person.status)
+    );
+    const newsDomainOptions = databaseGridOptions([
+      ...taxonomyDomains.map((item) => item.name),
+      ...(databaseSnapshot?.news || []).flatMap((item) => item.domains || [])
+    ]);
+    const newsSubdomainOptions = databaseGridOptions([
+      ...taxonomyDomains.flatMap((item) => item.subdomains),
+      ...(databaseSnapshot?.news || []).flatMap((item) => item.subdomains || [])
+    ]);
+    const newsTypeOptions = databaseGridOptions(
+      (databaseSnapshot?.news || []).flatMap((item) => item.types || [])
+    );
+    const evidenceOptions = databaseGridOptions([
+      "官方确认", "多源核验", "单一来源", "待核验",
+      ...(databaseSnapshot?.news || []).map((item) => item.evidenceStatus)
+    ]);
+
+    const projectGridColumns: DatabaseGridColumn<DomiProject>[] = [
+      { key: "name", label: "公司名称", kind: "text", width: 220, minWidth: 150, required: true },
+      { key: "notes", label: "Notes", kind: "longtext", width: 320, minWidth: 220 },
+      {
+        key: "preview",
+        label: "链接",
+        kind: "link",
+        width: 96,
+        minWidth: 82,
+        editable: false,
+        getValue: () => "预览"
+      },
+      {
+        key: "lastFollowup",
+        label: "最后更新",
+        kind: "date",
+        width: 126,
+        editable: false,
+        getValue: (project) => project.lastFollowup || project.updatedAt || null
+      },
+      { key: "domain", label: "领域", kind: "single", width: 128, options: domainOptions },
+      {
+        key: "subdomains",
+        label: "子领域",
+        kind: "multi",
+        width: 220,
+        options: subdomainOptions,
+        allowCustomOptions: true
+      },
+      { key: "status", label: "进展状态", kind: "single", width: 128, options: projectStatusOptions },
+      { key: "rating", label: "项目评级", kind: "single", width: 104, options: ratingOptions },
+      {
+        key: "latestValuationUsd100m",
+        label: "最新估值",
+        kind: "number",
+        width: 120,
+        align: "right",
+        formatValue: (value) => value === null || value === undefined || value === ""
+          ? "—"
+          : `${value} 亿美元`
+      },
+      {
+        key: "investors",
+        label: "投资机构",
+        kind: "multi",
+        width: 220,
+        options: trackedInvestorOptions
+      },
+      {
+        key: "cities",
+        label: "城市",
+        kind: "multi",
+        width: 150,
+        options: cityOptions,
+        allowCustomOptions: true
+      },
+      { key: "createdAt", label: "入库时间", kind: "date", width: 126, editable: false },
+      { key: "financingHistory", label: "历史融资", kind: "longtext", width: 360, minWidth: 240 }
+    ];
+
+    const personGridColumns: DatabaseGridColumn<DomiPerson>[] = [
+      { key: "name", label: "姓名", kind: "text", width: 180, minWidth: 130, required: true },
+      { key: "organization", label: "所属组织与身份", kind: "longtext", width: 320, minWidth: 220 },
+      {
+        key: "types",
+        label: "类型",
+        kind: "multi",
+        width: 190,
+        options: personTypeOptions,
+        allowCustomOptions: true
+      },
+      {
+        key: "status",
+        label: "进展状态",
+        kind: "single",
+        width: 128,
+        options: personStatusOptions,
+        allowCustomOptions: true
+      },
+      { key: "rating", label: "评级", kind: "single", width: 92, options: ratingOptions },
+      { key: "lastContact", label: "最后联系", kind: "date", width: 126 },
+      {
+        key: "cities",
+        label: "城市",
+        kind: "multi",
+        width: 150,
+        options: cityOptions,
+        allowCustomOptions: true
+      },
+      { key: "createdAt", label: "入库时间", kind: "date", width: 126, editable: false },
+      {
+        key: "documents",
+        label: "相关文档",
+        kind: "link",
+        width: 190,
+        editable: false,
+        getValue: (person) => {
+          const documents = person.documents || person.interactionDocuments || [];
+          return documents.length ? `${documents.length} 篇纪要` : "";
+        }
+      },
+      {
+        key: "link",
+        label: "人物主页",
+        kind: "link",
+        width: 110,
+        editable: false,
+        getValue: (person) => person.link ? "主页" : ""
+      }
+    ];
+
+    const newsGridColumns: DatabaseGridColumn<DomiNewsItem>[] = [
+      { key: "title", label: "新闻标题", kind: "longtext", width: 300, minWidth: 200, required: true },
+      { key: "summary", label: "核心事实", kind: "longtext", width: 360, minWidth: 240 },
+      { key: "publishedAt", label: "发布时间", kind: "date", width: 126 },
+      {
+        key: "domains",
+        label: "领域",
+        kind: "multi",
+        width: 180,
+        options: newsDomainOptions,
+        allowCustomOptions: true
+      },
+      {
+        key: "subdomains",
+        label: "子领域",
+        kind: "multi",
+        width: 220,
+        options: newsSubdomainOptions,
+        allowCustomOptions: true
+      },
+      {
+        key: "types",
+        label: "信息类型",
+        kind: "multi",
+        width: 180,
+        options: newsTypeOptions,
+        allowCustomOptions: true
+      },
+      { key: "source", label: "来源", kind: "text", width: 150 },
+      { key: "importance", label: "重要性", kind: "number", width: 100, align: "right" },
+      { key: "confidence", label: "置信度", kind: "number", width: 100, align: "right" },
+      {
+        key: "evidenceStatus",
+        label: "证据状态",
+        kind: "single",
+        width: 140,
+        options: evidenceOptions,
+        allowCustomOptions: true
+      },
+      { key: "action", label: "建议动作", kind: "longtext", width: 300, minWidth: 220 },
+      { key: "worthFollowing", label: "继续展示", kind: "boolean", width: 104, align: "center" },
+      {
+        key: "url",
+        label: "原文",
+        kind: "link",
+        width: 100,
+        editable: false,
+        getValue: (item) => item.url ? "原文" : ""
+      }
+    ];
+
+    const requestDatabaseGridDelete = (
+      entityType: DatabaseEntityType,
+      record: DomiProject | DomiPerson | DomiNewsItem
+    ) => {
+      setDatabaseDeleteTarget({
+        entityType,
+        recordId: record.recordId,
+        expectedUpdatedAt: Number(record.updatedAt) || 0,
+        title: databaseRecordTitle(entityType, record)
+      });
+      setDatabaseError("");
+    };
+
     return (
       <div className="database-stage">
         <div className="database-toolbar">
@@ -9683,6 +10020,57 @@ function App() {
               </span>
             </div>
 
+            {databaseEntityType === "project" ? (
+              <DatabaseGrid
+                records={filtered as DomiProject[]}
+                columns={projectGridColumns}
+                persistenceKey="domi-project-database-grid"
+                ariaLabel="项目库"
+                emptyMessage="没有匹配的项目"
+                height="min(68vh, 760px)"
+                onPatch={(record, patch, context) =>
+                  patchDatabaseGridRecord("project", record, patch, context)}
+                onPreview={(record) => void previewDatabaseRecord("project", record)}
+                onDelete={(record) => requestDatabaseGridDelete("project", record)}
+              />
+            ) : databaseEntityType === "person" ? (
+              <DatabaseGrid
+                records={filtered as DomiPerson[]}
+                columns={personGridColumns}
+                persistenceKey="domi-person-database-grid"
+                ariaLabel="人脉库"
+                emptyMessage="没有匹配的人脉"
+                height="min(68vh, 760px)"
+                onPatch={(record, patch, context) =>
+                  patchDatabaseGridRecord("person", record, patch, context)}
+                onPreview={(record, column) => {
+                  if (column.key === "documents") {
+                    const documents = record.documents || record.interactionDocuments || [];
+                    if (documents[0]?.link) openDocument(documents[0].link);
+                    else setDatabaseError("这个人物还没有可预览的交流文档。");
+                    return;
+                  }
+                  if (record.link) openDocument(record.link);
+                  else void previewDatabaseRecord("person", record);
+                }}
+                onDelete={(record) => requestDatabaseGridDelete("person", record)}
+              />
+            ) : (
+              <DatabaseGrid
+                records={filtered as DomiNewsItem[]}
+                columns={newsGridColumns}
+                persistenceKey="domi-news-database-grid"
+                ariaLabel="行业信息库"
+                emptyMessage="没有匹配的行业信息"
+                height="min(68vh, 760px)"
+                onPatch={(record, patch, context) =>
+                  patchDatabaseGridRecord("news", record, patch, context)}
+                onPreview={(record) => void previewDatabaseRecord("news", record)}
+                onDelete={(record) => requestDatabaseGridDelete("news", record)}
+              />
+            )}
+
+            {false && <>
             <div
               className="database-grid-shell"
               onScroll={() => {
@@ -9995,6 +10383,7 @@ function App() {
             <div className="database-grid-hint">
               单击任意可编辑单元格即可修改；右键点击行可删除。长文本会自动展开，修改后自动保存并同步更新 SQLite、Markdown 与资料目录。
             </div>
+            </>}
           </div>
         )}
         {databaseExpandedCell

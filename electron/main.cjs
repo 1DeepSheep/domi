@@ -1331,6 +1331,13 @@ function createWindow() {
     });
   });
   win.on("responsive", () => appendRuntimeLog("renderer-responsive"));
+  win.on("focus", () => {
+    void getUpdateService().checkIfStale().catch((error) => {
+      appendRuntimeLog("update-focus-check-failed", {
+        message: boundedRuntimeText(error?.message || error, 1_000)
+      });
+    });
+  });
   win.on("close", (event) => {
     if (rendererCloseReady || applicationQuitFlushComplete) return;
     event.preventDefault();
@@ -3130,6 +3137,18 @@ ipcMain.handle("domi:database-list", async () => {
 ipcMain.handle("domi:database-update", async (_event, request) => {
   try {
     const result = await getDomiIntegration().updateDatabaseRecord(request);
+    if (result.ok) {
+      serviceCoordinator.invalidate("domi:database-list");
+      serviceCoordinator.invalidate("domi:weekly-news:");
+    }
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:database-update-patch", async (_event, request) => {
+  try {
+    const result = await getDomiIntegration().updateDatabaseRecordPatch(request);
     if (result.ok) {
       serviceCoordinator.invalidate("domi:database-list");
       serviceCoordinator.invalidate("domi:weekly-news:");

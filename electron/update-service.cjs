@@ -2,7 +2,11 @@ const { BrowserWindow } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { CancellationToken } = require("builder-util-runtime");
 
-const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+// GitHub releases do not push an event into an already-running client. Keep the
+// background poll reasonably fresh, and also let the main process request a
+// throttled check when the user returns to domi.
+const CHECK_INTERVAL_MS = 15 * 60 * 1000;
+const ACTIVE_CHECK_MAX_AGE_MS = 5 * 60 * 1000;
 const STARTUP_DELAY_MS = 15 * 1000;
 const CHECK_TIMEOUT_MS = 60 * 1000;
 const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -63,6 +67,8 @@ class UpdateService {
     this.downloadedCandidate = null;
     this.pendingCheck = false;
     this.pendingCheckScheduled = false;
+    this.lastCheckStartedAt = 0;
+    this.lastCheckCompletedAt = 0;
     this.status = {
       state: app.isPackaged ? "idle" : "disabled",
       supported: app.isPackaged,
@@ -145,6 +151,16 @@ class UpdateService {
       this.pendingCheck = false;
       void this.check();
     });
+  }
+
+  checkIfStale(maxAgeMs = ACTIVE_CHECK_MAX_AGE_MS) {
+    if (!this.app.isPackaged || !this.running) return Promise.resolve(this.snapshot());
+    const maximumAge = Math.max(0, Number(maxAgeMs) || 0);
+    const lastActivityAt = Math.max(this.lastCheckStartedAt, this.lastCheckCompletedAt);
+    if (lastActivityAt > 0 && Date.now() - lastActivityAt < maximumAge) {
+      return Promise.resolve(this.snapshot());
+    }
+    return this.check();
   }
 
   configureChannel(value) {
@@ -387,6 +403,7 @@ class UpdateService {
 
     this.configureFeed();
     this.configureChannel(this.channelProvider());
+    this.lastCheckStartedAt = Date.now();
     this.pendingCheck = false;
     this.invalidateCandidate();
     this.publish({
@@ -411,6 +428,7 @@ class UpdateService {
       (result) => this.acceptCheckResult(operation, result),
       (error) => this.acceptOperationError(operation, error)
     ).finally(() => {
+      this.lastCheckCompletedAt = Date.now();
       if (this.activeCheck === operation) this.activeCheck = null;
       if (this.pendingCheck) this.requestRecheck();
     });

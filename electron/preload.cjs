@@ -67,6 +67,7 @@ contextBridge.exposeInMainWorld("workbench", {
   syncDomi: () => ipcRenderer.invoke("domi:sync"),
   listDomiDatabase: () => ipcRenderer.invoke("domi:database-list"),
   updateDomiDatabaseRecord: (request) => ipcRenderer.invoke("domi:database-update", request),
+  updateDomiDatabaseRecordPatch: (request) => ipcRenderer.invoke("domi:database-update-patch", request),
   previewDomiDatabaseRecord: (request) => ipcRenderer.invoke("domi:database-preview", request),
   deleteDomiDatabaseRecord: (request) => ipcRenderer.invoke("domi:database-delete", request),
   classifyDomiDatabaseProject: (request) => ipcRenderer.invoke("domi:database-classify", request),
