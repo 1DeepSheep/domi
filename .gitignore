@@ -6,6 +6,8 @@ build/domi-plugin/
 build/domi-plugin-lock.json
 build/codex-runtime/
 build/media-runtime/
+build/codex-runtime-*/
+build/media-runtime-*/
 .release-input/
 .DS_Store
 

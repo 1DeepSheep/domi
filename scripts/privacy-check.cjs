@@ -68,7 +68,7 @@ function isPrivacyChecker(filePath) {
 
 function isApprovedMediaRuntimeBinary(filePath) {
   const normalized = path.resolve(filePath).split(path.sep).join("/");
-  return /\/media-runtime\/bin\/(?:ffmpeg|ffprobe)$/.test(normalized);
+  return /\/media-runtime(?:-(?:arm64|x64))?\/bin\/(?:ffmpeg|ffprobe)$/.test(normalized);
 }
 
 function inspectContent(content, filePath, scanRoot, options = {}) {
