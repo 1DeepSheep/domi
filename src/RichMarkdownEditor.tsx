@@ -14,6 +14,7 @@ import {
   ChevronUp,
   Code2,
   Heading2,
+  ImagePlus,
   Italic,
   List,
   ListOrdered,
@@ -25,6 +26,7 @@ import {
 } from "lucide-react";
 import { workbench } from "./bridge";
 import { prepareMarkdownForEditor, restoreMarkdownFromEditor } from "./markdownDialect";
+import "./RichMarkdownEditor.css";
 
 type RichMarkdownEditorProps = {
   documentPath: string;
@@ -303,11 +305,13 @@ function ToolbarButton({
 function RichMarkdownToolbar({
   editor,
   searchOpen,
-  onOpenSearch
+  onOpenSearch,
+  onInsertImages
 }: {
   editor: Editor | null;
   searchOpen: boolean;
   onOpenSearch: () => void;
+  onInsertImages: () => void;
 }) {
   const state = useEditorState({
     editor,
@@ -390,6 +394,14 @@ function RichMarkdownToolbar({
         >
           <ListOrdered size={15} />
         </ToolbarButton>
+        <span className="rich-markdown-divider" />
+        <ToolbarButton
+          disabled={!editorAvailable}
+          label="插入图片（支持多选）"
+          onClick={onInsertImages}
+        >
+          <ImagePlus size={15} />
+        </ToolbarButton>
       </div>
       <div>
         <ToolbarButton
@@ -436,6 +448,9 @@ export default function RichMarkdownEditor({
   const imageExtension = useMemo(() => markdownImageExtension(documentPath), [documentPath]);
   const hydratingRef = useRef(true);
   const editorRef = useRef<Editor | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const imageInsertionPositionRef = useRef(1);
+  const imageDragDepthRef = useRef(0);
   const noticeTimerRef = useRef<number | null>(null);
   const changePublishTimerRef = useRef<number | null>(null);
   const onChangeRef = useRef(onChange);
@@ -445,6 +460,7 @@ export default function RichMarkdownEditor({
   const searchMatchesRef = useRef<EditorTextMatch[]>([]);
   const searchIndexRef = useRef(0);
   const [imageNotice, setImageNotice] = useState<{ tone: "busy" | "success" | "error"; text: string } | null>(null);
+  const [imageDragging, setImageDragging] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMatches, setSearchMatches] = useState<EditorTextMatch[]>([]);
@@ -561,7 +577,7 @@ export default function RichMarkdownEditor({
       : null;
   }
 
-  async function insertPastedImages(files: File[], insertionPosition: number) {
+  async function insertImageFiles(files: File[], insertionPosition: number) {
     showImageNotice("busy", `正在保存 ${files.length} 张图片…`, false);
     const assets: Array<{ relativePath: string; alt: string }> = [];
     const errors: string[] = [];
@@ -602,6 +618,9 @@ export default function RichMarkdownEditor({
           ...(index === assets.length - 1 ? [{ type: "paragraph" }] : [])
         ]);
         current.chain().focus().setTextSelection(position).insertContent(content).run();
+        // Publishing immediately makes the parent autosave observe the new assets even
+        // when the user inserts an image and switches documents right away.
+        publishEditorMarkdown(current);
       } catch (error) {
         reportEditorOperation("插入 Markdown 图片", error);
         showImageNotice("error", "图片已保存，但插入正文失败");
@@ -619,6 +638,13 @@ export default function RichMarkdownEditor({
     } else {
       showImageNotice("success", `已插入 ${assets.length} 张图片`);
     }
+  }
+
+  function openImagePicker() {
+    const current = editorRef.current;
+    if (!current || !current.isInitialized || current.isDestroyed) return;
+    imageInsertionPositionRef.current = current.state.selection.from;
+    imageInputRef.current?.click();
   }
 
   const editor = useEditor({
@@ -654,7 +680,21 @@ export default function RichMarkdownEditor({
           .filter((file): file is File => Boolean(file));
         if (!imageFiles.length) return false;
         event.preventDefault();
-        void insertPastedImages(imageFiles, view.state.selection.from);
+        void insertImageFiles(imageFiles, view.state.selection.from);
+        return true;
+      },
+      handleDrop: (view, event) => {
+        const files = Array.from(event.dataTransfer?.files || []);
+        if (!files.length) return false;
+        event.preventDefault();
+        const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+        if (!imageFiles.length) {
+          showImageNotice("error", "这里仅支持拖入 PNG、JPEG、GIF 或 WebP 图片");
+          return true;
+        }
+        const insertionPosition = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos
+          ?? view.state.selection.from;
+        void insertImageFiles(imageFiles, insertionPosition);
         return true;
       },
       handleDOMEvents: {
@@ -696,7 +736,25 @@ export default function RichMarkdownEditor({
 
   return (
     <div
-      className="rich-markdown-editor"
+      className={`rich-markdown-editor${imageDragging ? " image-dragging" : ""}`}
+      onDragEnter={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        imageDragDepthRef.current += 1;
+        setImageDragging(true);
+      }}
+      onDragOver={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={() => {
+        imageDragDepthRef.current = Math.max(0, imageDragDepthRef.current - 1);
+        if (imageDragDepthRef.current === 0) setImageDragging(false);
+      }}
+      onDrop={() => {
+        imageDragDepthRef.current = 0;
+        setImageDragging(false);
+      }}
       onBlur={(event) => {
         const nextTarget = event.relatedTarget;
         if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
@@ -704,7 +762,27 @@ export default function RichMarkdownEditor({
         onBlur?.();
       }}
     >
-      <RichMarkdownToolbar editor={editor} searchOpen={searchOpen} onOpenSearch={openSearch} />
+      <input
+        ref={imageInputRef}
+        className="rich-markdown-image-input"
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp"
+        multiple
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => {
+          const files = Array.from(event.currentTarget.files || []);
+          event.currentTarget.value = "";
+          if (!files.length) return;
+          void insertImageFiles(files, imageInsertionPositionRef.current);
+        }}
+      />
+      <RichMarkdownToolbar
+        editor={editor}
+        searchOpen={searchOpen}
+        onOpenSearch={openSearch}
+        onInsertImages={openImagePicker}
+      />
       {searchOpen && (
         <div className="rich-markdown-search" role="search" aria-label="搜索 Markdown 文档">
           <Search size={14} aria-hidden="true" />
@@ -742,6 +820,13 @@ export default function RichMarkdownEditor({
       <div className="rich-markdown-scroll">
         <EditorContent editor={editor} />
       </div>
+      {imageDragging && (
+        <div className="rich-markdown-image-drop-hint" aria-hidden="true">
+          <ImagePlus size={22} />
+          <strong>放下图片即可插入</strong>
+          <span>支持 PNG、JPEG、GIF 和 WebP，可一次拖入多张</span>
+        </div>
+      )}
       {imageNotice && (
         <div className={`markdown-image-notice ${imageNotice.tone}`} role="status">
           {imageNotice.text}

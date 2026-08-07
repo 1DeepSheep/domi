@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  automaticallyRoutedProject,
   mentionedProjectCandidates,
   normalizedEntityMention,
   parseDomiEntityResult,
@@ -61,6 +62,51 @@ test("long canonical names remain high confidence", () => {
   assert.deepEqual(
     projectMentionMatches(projects, "继续研究 ExampleSilicon"),
     [{ project: projects[0], confidence: "high", matchedKey: "examplesilicon" }]
+  );
+});
+
+test("automatic routing keeps an established project for ordinary comparative research", () => {
+  const matches = projectMentionMatches(projects, "比较示例数据科技和 ExampleTrust AI");
+  assert.equal(
+    automaticallyRoutedProject(matches, { currentProjectId: "project-b" }),
+    projects[1]
+  );
+  assert.equal(
+    automaticallyRoutedProject(matches, { currentProjectId: "project-a" }),
+    undefined
+  );
+});
+
+test("automatic routing accepts only one strong project and stages ambiguous or weak matches", () => {
+  assert.equal(
+    automaticallyRoutedProject(projectMentionMatches(projects, "继续研究 ExampleTrust AI")),
+    projects[2]
+  );
+  assert.equal(
+    automaticallyRoutedProject(projectMentionMatches(projects, "比较示例数据科技和 ExampleTrust AI")),
+    undefined
+  );
+  const weak = [{ recordId: "short", name: "甲乙" }];
+  assert.equal(
+    automaticallyRoutedProject(projectMentionMatches(weak, "继续看甲乙")),
+    undefined
+  );
+});
+
+test("project intake may route one explicit strong project but otherwise stays neutral", () => {
+  assert.equal(
+    automaticallyRoutedProject(
+      projectMentionMatches(projects, "研究并入库 ExampleTrust AI"),
+      { currentProjectId: "project-a", projectIntake: true }
+    ),
+    projects[2]
+  );
+  assert.equal(
+    automaticallyRoutedProject(
+      projectMentionMatches(projects, "比较示例数据科技和 ExampleTrust AI"),
+      { currentProjectId: "project-a", projectIntake: true }
+    ),
+    undefined
   );
 });
 

@@ -25,6 +25,9 @@ declare global {
       stopCodex: (runId: string) => Promise<{ ok: boolean; error?: string }>;
       recoverCodexThread: (threadId: string) => Promise<CodexThreadRecoveryResult>;
       bindCodexRun: (runId: string) => Promise<{ ok: boolean; error?: string }>;
+      answerCodexUserInput: (
+        request: CodexUserInputAnswerRequest
+      ) => Promise<CodexUserInputAnswerResult>;
       selectFiles: (
         workspacePath?: string,
         entityRequest?: DomiEntityMaterialsRequest
@@ -97,6 +100,11 @@ declare global {
       saveWeeklyNewsCheckpoint: (
         request: DomiWeeklyNewsCheckpointRequest
       ) => Promise<DomiWeeklyNewsCheckpointResult>;
+      listRadarSources: () => Promise<RadarSourceSnapshot>;
+      saveRadarSource: (request: RadarSourceSaveRequest) => Promise<RadarSourceMutationResult>;
+      deleteRadarSource: (request: { sourceId: string }) => Promise<RadarSourceMutationResult>;
+      syncRadarSources: (request?: RadarSourceSyncRequest) => Promise<RadarSourceSyncResult>;
+      processPodcastEpisode: (request: PodcastProcessRequest) => Promise<PodcastProcessResult>;
       listDomiTasks: (request?: DomiTaskBoardRequest) => Promise<DomiTaskBoardSnapshot>;
       updateDomiTask: (request: DomiTaskUpdateRequest) => Promise<DomiTaskUpdateResult>;
       loginPlaud: (request: DomiPlaudConnectionRequest) => Promise<DomiPlaudConnectionResult>;
@@ -503,6 +511,127 @@ export type DomiWeeklyNewsCheckpointResult = {
   error?: string;
 };
 
+export type RadarSourceKind = "news" | "wechat" | "podcast";
+export type RadarSourcePriority = "normal" | "important";
+
+export type RadarSource = {
+  id: string;
+  kind: RadarSourceKind;
+  name: string;
+  url: string;
+  enabled: boolean;
+  priority: RadarSourcePriority;
+  keywords: string[];
+  autoProcess: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastCheckedAt: number;
+  lastSuccessAt: number;
+  error: string;
+};
+
+export type RadarSourceSaveRequest = {
+  id?: string;
+  kind: RadarSourceKind;
+  name: string;
+  url?: string;
+  enabled?: boolean;
+  priority?: RadarSourcePriority;
+  keywords?: string[] | string;
+  autoProcess?: boolean;
+};
+
+export type PodcastJobStatus =
+  | "discovered"
+  | "downloading"
+  | "downloaded"
+  | "transcribing"
+  | "transcript_ready"
+  | "failed"
+  | "skipped";
+
+export type PodcastJob = {
+  id: string;
+  sourceId: string;
+  title: string;
+  description: string;
+  publishedAt: number | null;
+  durationSec: number | null;
+  episodeUrl: string;
+  mediaUrl: string;
+  podcastTitle: string;
+  sourceFormat: string;
+  status: PodcastJobStatus;
+  localAudioPath: string;
+  transcriptPath: string;
+  plaudFileId: string;
+  discoveredAt: number;
+  updatedAt: number;
+  error: string;
+};
+
+export type RadarSourceSnapshot = {
+  ok: boolean;
+  sources: RadarSource[];
+  jobs: PodcastJob[];
+  updatedAt: number;
+  error?: string;
+};
+
+export type RadarSourceMutationResult = {
+  ok: boolean;
+  source?: RadarSource;
+  sourceId?: string;
+  deleted?: boolean;
+  sources?: RadarSource[];
+  jobs?: PodcastJob[];
+  updatedAt?: number;
+  error?: string;
+};
+
+export type RadarSourceSyncRequest = {
+  sourceId?: string;
+  limit?: number;
+  fresh?: boolean;
+};
+
+export type RadarSourceSyncItem = {
+  sourceId: string;
+  ok: boolean;
+  discoveredCount: number;
+  totalCount?: number;
+  error?: string;
+};
+
+export type RadarSourceSyncResult = {
+  ok: boolean;
+  partial?: boolean;
+  sources: RadarSource[];
+  jobs: PodcastJob[];
+  results: RadarSourceSyncItem[];
+  updatedAt: number;
+  error?: string;
+};
+
+export type PodcastProcessRequest = {
+  jobId: string;
+  timeoutSec?: number;
+  pollSec?: number;
+  downloadTimeoutMs?: number;
+  maxBytes?: number;
+  keepAudio?: boolean;
+};
+
+export type PodcastProcessResult = {
+  ok: boolean;
+  reused?: boolean;
+  job?: PodcastJob;
+  transcriptPath?: string;
+  plaudFileId?: string;
+  audioRemoved?: boolean;
+  error?: string;
+};
+
 export type DomiNewsItem = {
   recordId: string;
   title: string;
@@ -791,6 +920,8 @@ export type DomiPlaudConnectionRequest = {
 export type DomiPlaudRemoteStatus =
   | "connected"
   | "auth_required"
+  | "authorization_pending"
+  | "access_denied"
   | "verification_pending"
   | "profile_locked"
   | "browser_unavailable"
@@ -1113,6 +1244,7 @@ export type RendererIssueReport = {
     | "react-boundary"
     | "section-boundary"
     | "document-operation"
+    | "codex-run"
     | "markdown-editor-boundary"
     | "markdown-editor-operation"
     | "workflow-metric";
@@ -1153,6 +1285,7 @@ export type CodexRunRequest = {
   threadId?: string;
   ephemeral?: boolean;
   background?: boolean;
+  allowUserInput?: boolean;
   workflowId?: string;
   webSearch?: boolean;
   model?: string;
@@ -1188,6 +1321,43 @@ export type CodexThreadRecoveryResult = {
   status: "running" | "completed" | "stopped" | "failed" | "unknown";
   output?: string;
   error?: string;
+  pendingUserInputRequests?: CodexUserInputRequest[];
+};
+
+export type CodexUserInputOption = {
+  label: string;
+  description: string;
+};
+
+export type CodexUserInputQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: CodexUserInputOption[] | null;
+};
+
+export type CodexUserInputRequest = {
+  requestId: string | number;
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  questions: CodexUserInputQuestion[];
+  isBlocking: boolean;
+  autoResolutionMs: number | null;
+};
+
+export type CodexUserInputAnswerRequest = {
+  runId: string;
+  requestId: string | number;
+  answers: Record<string, string[]>;
+};
+
+export type CodexUserInputAnswerResult = {
+  ok: boolean;
+  duplicate?: boolean;
+  error?: string;
 };
 
 export type CodexEventPayload = {
@@ -1202,6 +1372,8 @@ export type CodexEventPayload = {
     | "stdout"
     | "stderr"
     | "error"
+    | "user-input-request"
+    | "user-input-resolved"
     | "completed"
     | "stopped"
     | "failed";
@@ -1216,6 +1388,8 @@ export type CodexEventPayload = {
   outputPath?: string;
   stderr?: string;
   eventCount?: number;
+  request?: CodexUserInputRequest;
+  requestId?: string | number;
   event?: {
     type: string;
     item?: CodexThreadItem;

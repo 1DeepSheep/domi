@@ -142,6 +142,12 @@ class TaskQueue {
   snapshot() {
     return { activeCount: this.activeCount, pendingCount: this.pending.length };
   }
+
+  cancelPending(error = new Error("任务已取消。")) {
+    const pending = this.pending.splice(0);
+    for (const task of pending) task.reject(error);
+    return pending.length;
+  }
 }
 
 module.exports = { ServiceCoordinator, TaskQueue };
