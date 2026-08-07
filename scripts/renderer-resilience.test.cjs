@@ -22,6 +22,9 @@ const styles = read("src/styles.css");
 const workflows = read("src/workflows.ts");
 const choiceCard = read("src/AssistantChoiceCard.tsx");
 const radarSourceManager = read("src/RadarSourceManager.tsx");
+const databaseGrid = read("src/database/DatabaseGrid.tsx");
+const databaseCellEditors = read("src/database/DatabaseCellEditors.tsx");
+const databaseGridStyles = read("src/database/database-grid.css");
 
 assert.match(
   app,
@@ -347,7 +350,7 @@ assert.match(
 );
 assert.match(
   app,
-  /function renderDatabaseWorkspace\(\)[\s\S]*?database-grid-table project[\s\S]*?database-grid-table person[\s\S]*?database-grid-table news/,
+  /function renderDatabaseWorkspace\(\)[\s\S]*?<DatabaseGrid[\s\S]*?records=\{filtered as DomiProject\[\]\}[\s\S]*?records=\{filtered as DomiPerson\[\]\}[\s\S]*?records=\{filtered as DomiNewsItem\[\]\}/,
   "Projects, people, and industry information must render as spreadsheet-style database grids."
 );
 assert.match(
@@ -396,34 +399,34 @@ assert.match(
   "The main process must own classification writes instead of letting the renderer touch local files."
 );
 assert.match(
-  app,
-  /filtered\.slice\(0, databaseVisibleLimit\)[\s\S]*?setDatabaseVisibleLimit\(\(current\) => current \+ 100\)/,
-  "Large database grids must render progressively instead of mounting every record at once."
+  databaseGrid,
+  /visibleStart[\s\S]*?Math\.floor\(viewportBodyTop \/ rowHeight\) - overscan[\s\S]*?visibleRows = records\.slice/,
+  "Large database grids must virtualize rows instead of mounting every record at once."
+);
+assert.match(
+  databaseGrid,
+  /onPointerDown=\{\(event\) => \{[\s\S]*?onActivate\(position, event\.shiftKey\)[\s\S]*?onClick=\{\(\) => editable && onEdit\(position\)\}/,
+  "Only the selected database cell must enter editing with a single click."
+);
+assert.match(
+  databaseCellEditors,
+  /function LongTextEditor[\s\S]*?<FloatingSurface[\s\S]*?<textarea/,
+  "Long database text must open in a cell-anchored editor without stretching every row."
 );
 assert.match(
   app,
-  /data-database-editable[\s\S]*?handleDatabaseRowClick\(event,/,
-  "Database cells must enter editing with a single click from the grid."
+  /async function patchDatabaseGridRecord[\s\S]*?databasePatchQueuesRef[\s\S]*?updateDomiDatabaseRecordPatch/,
+  "Database edits must automatically persist as serialized field patches without a save button."
 );
 assert.match(
-  app,
-  /DATABASE_EXPANDED_TEXT_FIELDS[\s\S]*?scrollWidth[\s\S]*?setDatabaseExpandedCell[\s\S]*?database-cell-expanded-editor[\s\S]*?完整内容/,
-  "Long or truncated database cells must reliably open a readable expanded editor."
+  databaseGrid,
+  /saveStates\.values\(\)[\s\S]*?保存中[\s\S]*?部分单元格保存失败[\s\S]*?已保存/,
+  "The grid must expose quiet, retryable automatic-save state."
 );
 assert.match(
-  app,
-  /updateDatabaseDraft[\s\S]*?scheduleDatabaseAutoSave\(next\)[\s\S]*?async function flushDatabaseAutoSave[\s\S]*?已自动保存/,
-  "Database edits must debounce and automatically persist without a save button."
-);
-assert.match(
-  app,
-  /database-cell-expanded-editor[\s\S]*?输入后自动保存[\s\S]*?修改自动保存/,
-  "Expanded database cells must clearly expose automatic persistence."
-);
-assert.match(
-  styles,
-  /\.database-grid-shell[\s\S]*?overflow:\s*auto[\s\S]*?\.database-grid-table \.primary-column[\s\S]*?position:\s*sticky/,
-  "Wide database grids must scroll while keeping their primary column visible."
+  databaseGridStyles,
+  /\.database-grid-viewport[\s\S]*?overflow:\s*auto[\s\S]*?\.database-grid-row-number[\s\S]*?position:\s*sticky/,
+  "Wide database grids must scroll while keeping row identity visible."
 );
 assert.match(
   app,

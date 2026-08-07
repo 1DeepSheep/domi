@@ -1331,6 +1331,256 @@ test("local database editor updates records, managed Markdown and safe directory
   assert.match(fs.readFileSync(movedNewsPath, "utf8"), /新投资含义/);
 });
 
+test("field patches commit canonical SQLite state before background Markdown materialization", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-field-patch-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const version = 1_700_000_000_000;
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "Patch项目");
+  const projectPath = path.join(projectDirectory, "项目主页.md");
+  fs.mkdirSync(projectDirectory, { recursive: true });
+  fs.writeFileSync(
+    projectPath,
+    "<!-- domi:managed:start -->\n旧摘要\n<!-- domi:managed:end -->\n\n# 用户附注\n必须保留\n"
+  );
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_patch", "Patch项目", "patch项目", "AI", '["Agent"]', "待交流", "A", "旧摘要",
+    '["上海"]', '["IDG"]', "历史融资保持不变", 1.2,
+    version, projectPath, version, version
+  );
+
+  const patched = repository.updateDatabaseRecordPatch({
+    entityType: "project",
+    recordId: "prj_patch",
+    expectedUpdatedAt: version,
+    mutationId: "mutation-project-notes-1",
+    changes: { notes: "新的单元格摘要" }
+  });
+  assert.equal(patched.replayed, false);
+  assert.equal(patched.materialization, "pending");
+  assert.equal(patched.record.notes, "新的单元格摘要");
+  assert.equal(patched.record.name, "Patch项目");
+  assert.deepEqual(patched.record.cities, ["上海"]);
+  assert.deepEqual(patched.record.investors, ["IDG"]);
+  assert.equal(patched.record.financingHistory, "历史融资保持不变");
+  assert.equal(patched.record.latestValuationUsd100m, 1.2);
+  assert.equal(
+    repository.database.prepare("SELECT notes FROM projects WHERE id = ?").get("prj_patch").notes,
+    "新的单元格摘要"
+  );
+  assert.doesNotMatch(fs.readFileSync(projectPath, "utf8"), /新的单元格摘要/);
+  assert.equal(repository.listPendingMaterializations().length, 1);
+
+  const replayed = repository.updateDatabaseRecordPatch({
+    entityType: "project",
+    recordId: "prj_patch",
+    expectedUpdatedAt: version,
+    mutationId: "mutation-project-notes-1",
+    changes: { notes: "新的单元格摘要" }
+  });
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.record.updatedAt, patched.record.updatedAt);
+  assert.throws(
+    () => repository.updateDatabaseRecordPatch({
+      entityType: "project",
+      recordId: "prj_patch",
+      expectedUpdatedAt: patched.record.updatedAt,
+      mutationId: "mutation-project-notes-1",
+      changes: { notes: "mutationId 不可复用" }
+    }),
+    /mutationId 已用于另一项修改/
+  );
+  assert.throws(
+    () => repository.updateDatabaseRecordPatch({
+      entityType: "project",
+      recordId: "prj_patch",
+      expectedUpdatedAt: patched.record.updatedAt,
+      mutationId: "mutation-project-forbidden-1",
+      changes: { documentPath: "/tmp/escape" }
+    }),
+    /不允许通过资料库编辑器修改/
+  );
+
+  const materialized = repository.materializeDatabaseRecord("project", "prj_patch");
+  assert.equal(materialized.materialized, true);
+  assert.equal(repository.listPendingMaterializations().length, 0);
+  assert.match(fs.readFileSync(projectPath, "utf8"), /新的单元格摘要/);
+  assert.match(fs.readFileSync(projectPath, "utf8"), /必须保留/);
+
+  const renamed = repository.updateDatabaseRecordPatch({
+    entityType: "project",
+    recordId: "prj_patch",
+    expectedUpdatedAt: patched.record.updatedAt,
+    mutationId: "mutation-project-name-2",
+    changes: { name: "Patch项目新名" }
+  });
+  const renamedPath = path.join(
+    libraryDir,
+    "3.项目库",
+    "AI",
+    "Agent",
+    "Patch项目新名",
+    "项目主页.md"
+  );
+  assert.equal(renamed.record.name, "Patch项目新名");
+  assert.equal(fs.existsSync(projectPath), true);
+  assert.equal(fs.existsSync(renamedPath), false);
+  fs.mkdirSync(path.dirname(renamedPath), { recursive: true });
+  assert.throws(
+    () => repository.materializeDatabaseRecord("project", "prj_patch"),
+    /目标资料目录已存在/
+  );
+  assert.equal(repository.listPendingMaterializations()[0].attempts, 1);
+  fs.rmdirSync(path.dirname(renamedPath));
+  repository.materializeDatabaseRecord("project", "prj_patch");
+  assert.equal(fs.existsSync(projectPath), false);
+  assert.match(fs.readFileSync(renamedPath, "utf8"), /必须保留/);
+  assert.throws(
+    () => repository.updateDatabaseRecordPatch({
+      entityType: "project",
+      recordId: "prj_patch",
+      expectedUpdatedAt: patched.record.updatedAt,
+      mutationId: "mutation-project-stale-3",
+      changes: { rating: "S" }
+    }),
+    /其他流程更新/
+  );
+});
+
+test("field patches validate and merge person and news records", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-field-patch-other-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const version = 1_700_000_000_000;
+  const personDirectory = path.join(libraryDir, "4.人脉库", "Patch人物");
+  const personPath = path.join(personDirectory, "人物主页.md");
+  const newsPath = path.join(libraryDir, "2.行业动态", "2026", "07", "evt_patch.md");
+  fs.mkdirSync(personDirectory, { recursive: true });
+  fs.mkdirSync(path.dirname(newsPath), { recursive: true });
+  fs.writeFileSync(personPath, "# Patch人物\n");
+  fs.writeFileSync(newsPath, "# 行业事件\n");
+  repository.database.prepare(`
+    INSERT INTO people (
+      id, name, normalized_name, types_json, organization, status, rating,
+      last_contact_at, cities_json, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "per_patch", "Patch人物", "patch人物", '["创业者"]', "原组织", "待联系", "B",
+    null, '["北京"]', personPath, version, version
+  );
+  repository.database.prepare(`
+    INSERT INTO news_events (
+      event_id, title, domains_json, subdomains_json, types_json, published_at,
+      summary, investment_meaning, url, source, companies, institutions,
+      importance, confidence, evidence_status, action, worth_following,
+      document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "evt_patch", "行业事件", '["AI"]', '["Agent"]', '["融资"]',
+    Date.parse("2026-07-10T08:00:00+08:00"), "原摘要", "原投资含义",
+    "https://example.com/original", "原来源", "示例公司", "示例机构",
+    6, 7, "官方确认", "继续跟踪", 1, newsPath, version, version
+  );
+
+  const person = repository.updateDatabaseRecordPatch({
+    entityType: "person",
+    recordId: "per_patch",
+    expectedUpdatedAt: version,
+    mutationId: "mutation-person-org-1",
+    changes: { organization: "新组织" }
+  }).record;
+  assert.equal(person.organization, "新组织");
+  assert.equal(person.name, "Patch人物");
+  assert.deepEqual(person.types, ["创业者"]);
+  assert.deepEqual(person.cities, ["北京"]);
+  repository.materializeDatabaseRecord("person", "per_patch");
+  assert.match(fs.readFileSync(personPath, "utf8"), /新组织/);
+
+  const news = repository.updateDatabaseRecordPatch({
+    entityType: "news",
+    recordId: "evt_patch",
+    expectedUpdatedAt: version,
+    mutationId: "mutation-news-summary-1",
+    changes: { summary: "新摘要", importance: 9 }
+  }).record;
+  assert.equal(news.summary, "新摘要");
+  assert.equal(news.importance, 9);
+  assert.equal(news.investmentMeaning, "原投资含义");
+  assert.equal(news.source, "原来源");
+  repository.materializeDatabaseRecord("news", "evt_patch");
+  assert.match(fs.readFileSync(newsPath, "utf8"), /新摘要/);
+});
+
+test("integration returns a field patch before queued Markdown materialization finishes", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-field-patch-queue-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "异步项目");
+  const projectPath = path.join(projectDirectory, "项目主页.md");
+  const version = 1_700_000_000_000;
+  fs.mkdirSync(projectDirectory, { recursive: true });
+  fs.writeFileSync(
+    projectPath,
+    "<!-- domi:managed:start -->\n旧内容\n<!-- domi:managed:end -->\n"
+  );
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_async_patch", "异步项目", "异步项目", "AI", '["Agent"]', "待交流", "", "旧内容",
+    "[]", "[]", "", null, version, projectPath, version, version
+  );
+  repository.close();
+
+  const stateStore = {
+    loadCache: () => null,
+    saveCache: () => undefined
+  };
+  const integration = new DomiIntegration({
+    stateStore,
+    plaudOutputDir: path.join(root, "plaud"),
+    configProvider: () => ({
+      storageBackend: "local",
+      localRepositoryDir: libraryDir,
+      localDatabasePath: databasePath
+    }),
+    sleep: () => Promise.resolve()
+  });
+  const result = await integration.updateDatabaseRecordPatch({
+    entityType: "project",
+    recordId: "prj_async_patch",
+    expectedUpdatedAt: version,
+    mutationId: "mutation-integration-async-1",
+    changes: { notes: "后台落盘的新内容" }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.record.notes, "后台落盘的新内容");
+  assert.equal(result.materialization, "pending");
+  assert.doesNotMatch(fs.readFileSync(projectPath, "utf8"), /后台落盘的新内容/);
+  await Promise.all([...integration.databaseMaterializationQueues.values()]);
+  assert.match(fs.readFileSync(projectPath, "utf8"), /后台落盘的新内容/);
+  const reopened = new LocalDomiRepository({ databasePath, libraryDir });
+  assert.equal(reopened.listPendingMaterializations().length, 0);
+  reopened.close();
+});
+
 test("local database preview selects the richest document and row deletion preserves files", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-delete-preview-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
