@@ -17,7 +17,7 @@
   <a href="https://github.com/1DeepSheep/domi/issues">反馈问题</a>
 </p>
 
-> 当前公开版仅提供 Apple Silicon Mac 安装包。安装包内置经过 SHA-256 校验的 OpenAI Codex CLI 基线，首次启动可离线完成运行时准备，再进行连接测试。
+> 当前公开版同时提供 Apple Silicon（arm64）和 Intel（x64）Mac 安装包，支持 macOS 12 Monterey 及以上版本。两种安装包都内置经过 SHA-256 校验、与本机架构匹配的 OpenAI Codex CLI 和 FFmpeg 基线，首次启动可离线完成运行时准备，再进行连接测试。
 
 ## 一眼看懂 domi 能做什么
 
@@ -36,13 +36,13 @@
 ### 1. 下载 domi
 
 1. 打开 [domi Releases](https://github.com/1DeepSheep/domi/releases/latest)。
-2. 下载名称以 `arm64.dmg` 结尾的安装包。
+2. M 系列芯片下载名称以 `arm64.dmg` 结尾的安装包；Intel 芯片下载名称以 `x64.dmg` 结尾的安装包。
 3. 打开 DMG，把「domi」拖入“应用程序”文件夹。
 4. 启动 domi。公开安装包已经 Developer ID 签名、Apple 公证并附加公证票据。
 
 ### 2. 安装并连接 Codex
 
-首次启动时，domi 会检测可用的 Codex CLI；如果尚未安装，会自动校验并解压安装包内置的 OpenAI 官方独立发行版，无需打开终端，也不依赖当时能否连接 GitHub。运行时保存在 Codex 官方的 `~/.codex/packages/standalone` 目录，并在 `~/.local/bin` 建立用户级链接，不修改系统目录。版本、来源与校验值记录在 [`resources/codex-runtime.json`](resources/codex-runtime.json)，第三方说明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+首次启动时，domi 会检测可用的 Codex CLI；如果尚未安装，会自动校验并解压安装包内置的 OpenAI 官方独立发行版，无需打开终端，也不依赖当时能否连接 GitHub。运行时保存在 Codex 官方的 `~/.codex/packages/standalone` 目录，并在 `~/.local/bin` 建立用户级链接，不修改系统目录。Apple Silicon 与 Intel 的版本、来源和校验值分别记录在 [`resources/codex-runtime.json`](resources/codex-runtime.json) 与 [`resources/codex-runtime-x64.json`](resources/codex-runtime-x64.json)，第三方说明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 随后选择一种身份方式：
 

@@ -8,6 +8,7 @@ const {
   CodexRuntimeManager,
   assertSafeArchiveList,
   atomicSymlink,
+  expectedTargetForArch,
   resolveLink
 } = require("../electron/codex-runtime.cjs");
 
@@ -21,6 +22,16 @@ function writeExecutable(filePath, version) {
 }
 
 async function run() {
+  assert.deepEqual(expectedTargetForArch("arm64"), {
+    target: "aarch64-apple-darwin",
+    assetName: "codex-package-aarch64-apple-darwin.tar.gz"
+  });
+  assert.deepEqual(expectedTargetForArch("x64"), {
+    target: "x86_64-apple-darwin",
+    assetName: "codex-package-x86_64-apple-darwin.tar.gz"
+  });
+  assert.throws(() => expectedTargetForArch("ia32"), /不支持当前 Codex Runtime 架构/);
+
   assert.doesNotThrow(() => assertSafeArchiveList("bin/\nbin/codex\n"));
   assert.throws(
     () => assertSafeArchiveList("../outside"),
@@ -52,7 +63,8 @@ async function run() {
       homeDir,
       archivePath,
       manifestPath,
-      minimumArchiveSize: 1
+      minimumArchiveSize: 1,
+      arch: "arm64"
     });
     const installed = await runtime.installBundled();
     assert.equal(installed.ok, true);
@@ -77,6 +89,40 @@ async function run() {
     const rolledBack = await runtime.rollback();
     assert.match(rolledBack.version, /0\.145\.0/);
     assert.equal(rolledBack.rollbackAvailable, true);
+
+    const x64ManifestPath = path.join(temporaryRoot, "manifest-x64.json");
+    fs.writeFileSync(x64ManifestPath, `${JSON.stringify({
+      schemaVersion: 1,
+      version: "0.145.0",
+      tag: "rust-v0.145.0",
+      target: "x86_64-apple-darwin",
+      assetName: "codex-package-x86_64-apple-darwin.tar.gz",
+      assetUrl: "https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-package-x86_64-apple-darwin.tar.gz",
+      sha256: sha256(archivePath),
+      size: archiveSize
+    })}\n`);
+    const x64Runtime = new CodexRuntimeManager({
+      homeDir,
+      archivePath,
+      manifestPath: x64ManifestPath,
+      minimumArchiveSize: 1,
+      arch: "x64"
+    });
+    const mismatched = await x64Runtime.snapshot();
+    assert.equal(mismatched.ok, false);
+    assert.equal(mismatched.architectureMismatch, true);
+    assert.match(mismatched.error, /架构与当前 Mac 不匹配/);
+
+    const x64Installed = await x64Runtime.installBundled();
+    assert.equal(x64Installed.ok, true);
+    assert.equal(
+      resolveLink(x64Runtime.currentLink()),
+      path.join(x64Runtime.releasesRoot(), "0.145.0-x86_64-apple-darwin")
+    );
+    const x64Snapshot = await x64Runtime.snapshot();
+    assert.equal(x64Snapshot.ok, true);
+    assert.equal(x64Snapshot.architectureMismatch, false);
+    assert.equal(x64Snapshot.rollbackAvailable, false);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }

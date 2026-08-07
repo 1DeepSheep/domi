@@ -7,7 +7,27 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 const RUNTIME_STATE_VERSION = 1;
-const EXPECTED_TARGET = "aarch64-apple-darwin";
+const RUNTIME_TARGETS = Object.freeze({
+  arm64: Object.freeze({
+    target: "aarch64-apple-darwin",
+    assetName: "codex-package-aarch64-apple-darwin.tar.gz"
+  }),
+  x64: Object.freeze({
+    target: "x86_64-apple-darwin",
+    assetName: "codex-package-x86_64-apple-darwin.tar.gz"
+  })
+});
+
+function expectedTargetForArch(arch = process.arch) {
+  const normalized = String(arch || "").trim();
+  const expected = RUNTIME_TARGETS[normalized];
+  if (!expected) {
+    throw new Error(`domi 不支持当前 Codex Runtime 架构：${normalized || "unknown"}。`);
+  }
+  return expected;
+}
+
+const EXPECTED_TARGET = expectedTargetForArch().target;
 
 function sha256File(filePath) {
   const hash = crypto.createHash("sha256");
@@ -25,12 +45,16 @@ function sha256File(filePath) {
   return hash.digest("hex");
 }
 
-function validateManifest(manifest, { minimumSize = 50 * 1024 * 1024 } = {}) {
+function validateManifest(manifest, {
+  minimumSize = 50 * 1024 * 1024,
+  arch = process.arch
+} = {}) {
+  const expected = expectedTargetForArch(arch);
   if (
     manifest?.schemaVersion !== 1
     || !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(String(manifest.version || ""))
-    || manifest.target !== EXPECTED_TARGET
-    || manifest.assetName !== "codex-package-aarch64-apple-darwin.tar.gz"
+    || manifest.target !== expected.target
+    || manifest.assetName !== expected.assetName
     || !/^[a-f0-9]{64}$/.test(String(manifest.sha256 || ""))
     || !Number.isSafeInteger(manifest.size)
     || manifest.size < minimumSize
@@ -101,13 +125,16 @@ class CodexRuntimeManager {
     archivePath,
     manifestPath,
     exec = execFileAsync,
-    minimumArchiveSize = 50 * 1024 * 1024
+    minimumArchiveSize = 50 * 1024 * 1024,
+    arch = process.arch
   } = {}) {
     this.homeDir = homeDir;
     this.archivePath = archivePath;
     this.manifestPath = manifestPath;
     this.exec = exec;
     this.minimumArchiveSize = minimumArchiveSize;
+    this.arch = arch;
+    this.expectedRuntime = expectedTargetForArch(arch);
   }
 
   packageRoot() {
@@ -127,7 +154,16 @@ class CodexRuntimeManager {
   }
 
   bundledManifest() {
-    return readManifest(this.manifestPath, { minimumSize: this.minimumArchiveSize });
+    return readManifest(this.manifestPath, {
+      minimumSize: this.minimumArchiveSize,
+      arch: this.arch
+    });
+  }
+
+  targetMatchesCurrentArch(targetPath) {
+    const resolved = String(targetPath || "").trim();
+    return Boolean(resolved)
+      && path.basename(resolved).endsWith(`-${this.expectedRuntime.target}`);
   }
 
   readState() {
@@ -165,20 +201,26 @@ class CodexRuntimeManager {
   async snapshot() {
     const currentTarget = resolveLink(this.currentLink());
     const binaryPath = currentTarget ? path.join(currentTarget, "bin", "codex") : "";
+    const architectureMismatch = Boolean(
+      currentTarget && !this.targetMatchesCurrentArch(currentTarget)
+    );
     let version = "";
     let ok = false;
-    try {
-      fs.accessSync(binaryPath, fs.constants.X_OK);
-      version = await this.binaryVersion(binaryPath);
-      ok = Boolean(version);
-    } catch {
-      // A missing managed runtime is a valid pre-install state.
+    if (!architectureMismatch) {
+      try {
+        fs.accessSync(binaryPath, fs.constants.X_OK);
+        version = await this.binaryVersion(binaryPath);
+        ok = Boolean(version);
+      } catch {
+        // A missing managed runtime is a valid pre-install state.
+      }
     }
     const state = this.readState();
     const rollbackTarget = String(state.previousTarget || "");
     const rollbackAvailable = Boolean(
       rollbackTarget
       && rollbackTarget !== currentTarget
+      && this.targetMatchesCurrentArch(rollbackTarget)
       && fs.existsSync(path.join(rollbackTarget, "bin", "codex"))
     );
     let bundledVersion = "";
@@ -194,9 +236,14 @@ class CodexRuntimeManager {
       version,
       bundledVersion,
       currentTarget,
+      architectureMismatch,
       rollbackAvailable,
       rollbackVersion: String(state.previousVersion || ""),
-      error: ok ? "" : "尚未安装 domi 管理的 Codex Runtime。"
+      error: ok
+        ? ""
+        : architectureMismatch
+          ? `已安装的 Codex Runtime 架构与当前 Mac 不匹配，需要安装 ${this.arch} 版本。`
+          : "尚未安装 domi 管理的 Codex Runtime。"
     };
   }
 
@@ -290,7 +337,11 @@ class CodexRuntimeManager {
 
   restoreCaptured(previous) {
     const target = String(previous?.target || "");
-    if (!target || !fs.existsSync(path.join(target, "bin", "codex"))) return false;
+    if (
+      !target
+      || !this.targetMatchesCurrentArch(target)
+      || !fs.existsSync(path.join(target, "bin", "codex"))
+    ) return false;
     atomicSymlink(target, this.currentLink());
     return true;
   }
@@ -323,7 +374,11 @@ class CodexRuntimeManager {
     const state = this.readState();
     const previousTarget = String(state.previousTarget || "");
     const previousBinary = path.join(previousTarget, "bin", "codex");
-    if (!previousTarget || !fs.existsSync(previousBinary)) {
+    if (
+      !previousTarget
+      || !this.targetMatchesCurrentArch(previousTarget)
+      || !fs.existsSync(previousBinary)
+    ) {
       throw new Error("没有可恢复的 Codex Runtime 版本。");
     }
     const currentTarget = resolveLink(this.currentLink());
@@ -346,9 +401,11 @@ class CodexRuntimeManager {
 module.exports = {
   CodexRuntimeManager,
   EXPECTED_TARGET,
+  RUNTIME_TARGETS,
   RUNTIME_STATE_VERSION,
   assertSafeArchiveList,
   atomicSymlink,
+  expectedTargetForArch,
   readManifest,
   resolveLink,
   sha256File,
