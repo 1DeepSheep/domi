@@ -167,9 +167,10 @@ verify_packaged_app() {
 
 verify_release_signature() {
   local app_path="$1"
+  local signature_details
   /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path"
-  if ! /usr/bin/codesign -d --verbose=4 "$app_path" 2>&1 \
-    | grep -q '^Authority=Developer ID Application:'; then
+  signature_details="$(/usr/bin/codesign -d --verbose=4 "$app_path" 2>&1)"
+  if ! grep -F 'Authority=Developer ID Application:' <<<"$signature_details" >/dev/null; then
     echo "Developer ID Application signature is missing: $app_path" >&2
     exit 1
   fi
