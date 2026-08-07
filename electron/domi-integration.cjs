@@ -11,6 +11,8 @@ const {
 const { LocalDomiRepository, resolveHomePath } = require("./local-domi-repository.cjs");
 const { LocalToFeishuMigration } = require("./local-to-feishu-migration.cjs");
 const { resolveMediaRuntime } = require("./media-runtime.cjs");
+const { PlaudSessionBroker } = require("./plaud-browser-broker.cjs");
+const { RadarSourceService } = require("./radar-sources.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
 const { TaskQueue } = require("./service-coordinator.cjs");
 
@@ -88,11 +90,17 @@ function plaudFailureStatus(error) {
   if (/singleton|profile.*(?:lock|use)|already in use|ebusy|process.*running/.test(normalized)) {
     return "profile_locked";
   }
-  if (/plaud_auth_required|(?:http|status)\s*(?:401|403)|unauthori|登录已失效|请[^。；\n]*重新登录|需要重新登录|需要登录/.test(normalized)) {
+  if (/plaud_rate_limited|(?:http|status)\s*429|too many requests|rate.?limit|请求过于频繁|服务暂时限流/.test(normalized)) {
+    return "rate_limited";
+  }
+  if (/plaud_access_denied|(?:http|status)\s*403|暂时拒绝本次访问/.test(normalized)) {
+    return "access_denied";
+  }
+  if (/plaud_auth_required|account sign-in is required|登录已失效/.test(normalized)) {
     return "auth_required";
   }
-  if (/(?:http|status)\s*429|too many requests|rate.?limit|请求过于频繁|服务暂时限流/.test(normalized)) {
-    return "rate_limited";
+  if (/plaud_unauthorized|(?:http|status)\s*401|unauthori|授权未完成自动续期/.test(normalized)) {
+    return "authorization_pending";
   }
   if (/plaud_session_probe_incomplete|authorization request was not observed|会话验证未完成|登录数据仍在/.test(normalized)) {
     return "verification_pending";
@@ -100,7 +108,7 @@ function plaudFailureStatus(error) {
   if (/econnrefused|devtools|connectovercdp|browser.*(?:closed|launch)|executable|找不到.*浏览器|专用浏览器.*(?:本机连接|未能建立|启动)|not attached to an active page|target page, context or browser has been closed|execution context was destroyed|protocol error.*(?:page|target)|后台页面.*中断/.test(normalized)) {
     return "browser_unavailable";
   }
-  if (/enotfound|enetunreach|network|fetch failed|etimedout|timed?\s*out|timeout|超时|网络|err_(?:network_changed|timed_out|name_not_resolved)|socket hang up/.test(normalized)) {
+  if (/plaud_network_timeout|enotfound|enetunreach|network|fetch failed|etimedout|timed?\s*out|timeout|超时|网络|err_(?:network_changed|timed_out|name_not_resolved)|socket hang up/.test(normalized)) {
     return "network_error";
   }
   if (/(?:http|status)\s*5\d\d|service unavailable|bad gateway|gateway timeout|服务暂时不可用/.test(normalized)) {
@@ -113,6 +121,8 @@ function plaudFailureStatus(error) {
 function isRetryablePlaudReadFailure(error) {
   return new Set([
     "verification_pending",
+    "authorization_pending",
+    "access_denied",
     "browser_unavailable",
     "network_error",
     "rate_limited",
@@ -129,6 +139,10 @@ function classifyPlaudConnectionFailure(error, browser) {
     guidance = "PLAUD 专用浏览器 Profile 正被另一个 domi 实例占用，请关闭重复实例后重试。";
   } else if (status === "verification_pending") {
     guidance = "PLAUD 登录数据仍在，但本轮未及时完成会话验证；domi 会自动恢复并重试，无需重新登录。";
+  } else if (status === "authorization_pending") {
+    guidance = "PLAUD 本轮授权未完成自动续期；请重试。只有确认进入登录页时，domi 才会要求重新登录。";
+  } else if (status === "access_denied") {
+    guidance = "PLAUD 暂时拒绝本次访问；请稍后重试。domi 不会把 403 直接解释为登录失效。";
   } else if (status === "auth_required") {
     guidance = `请点击“登录并验证”，在 domi 专用 ${plaudBrowserLabel(browser)} 窗口中登录自己的 PLAUD 账号。`;
   } else if (status === "browser_unavailable") {
@@ -723,6 +737,9 @@ class DomiIntegration {
     domiConfigPath,
     playwrightNodeModules,
     mediaRuntime,
+    plaudBroker,
+    podcastCacheDir,
+    radarSourceService,
     sleep
   }) {
     this.stateStore = stateStore;
@@ -741,6 +758,11 @@ class DomiIntegration {
     this.intakeFieldsPromiseKey = "";
     this.plaudCommandQueue = new TaskQueue(1);
     this.plaudRemoteHealth = null;
+    this.plaudChildProcesses = new Set();
+    this.podcastProcessPromises = new Map();
+    this.plaudShuttingDown = false;
+    this.plaudConfigFingerprint = "";
+    this.plaudConfigGeneration = 0;
     this.taskDocumentSources = new Map();
     this.plaudOutputDir = path.resolve(plaudOutputDir || path.join(os.homedir(), "Documents", "domi", "work", "domi", "plaud"));
     this.plaudStateFile = path.join(
@@ -751,6 +773,17 @@ class DomiIntegration {
     this.domiConfigPath = String(domiConfigPath || process.env.DOMI_CONFIG_PATH || "").trim();
     this.playwrightNodeModules = playwrightNodeModules || resolvePlaywrightNodeModules();
     this.mediaRuntime = mediaRuntime || resolveMediaRuntime();
+    this.radarSourceService = radarSourceService || new RadarSourceService({
+      stateStore: this.stateStore,
+      cacheDir: podcastCacheDir
+    });
+    this.plaudBroker = plaudBroker || new PlaudSessionBroker({
+      executable: process.execPath,
+      workerPath: this.plaudWorker,
+      envProvider: () => this.plaudRuntimeEnv(),
+      requestTimeoutMs: 90_000,
+      shutdownTimeoutMs: 40_000
+    });
   }
 
   async buildMaterialIndex(rootPath) {
@@ -1100,19 +1133,25 @@ class DomiIntegration {
 
   async runJson(binary, args, options = {}) {
     const execute = async () => {
+      if (options.queue === "plaud" && this.plaudShuttingDown) {
+        throw new Error("domi 正在退出，已取消尚未开始的 PLAUD 操作。");
+      }
       let stdout;
       try {
-        ({ stdout } = await execFileAsync(binary, args, {
-        cwd: options.cwd || os.homedir(),
-        timeout: options.timeout || 60000,
-        maxBuffer: 24 * 1024 * 1024,
-        env: {
-          ...process.env,
-          LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
-          LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
-          ...(options.env || {})
-        }
-        }));
+        const commandOptions = {
+          cwd: options.cwd || os.homedir(),
+          timeout: options.timeout || 60000,
+          maxBuffer: 24 * 1024 * 1024,
+          env: {
+            ...process.env,
+            LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
+            LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
+            ...(options.env || {})
+          }
+        };
+        ({ stdout } = options.queue === "plaud"
+          ? await this.execTrackedPlaudFile(binary, args, commandOptions)
+          : await execFileAsync(binary, args, commandOptions));
       } catch (error) {
         throw new Error(commandErrorMessage(error, binary, options));
       }
@@ -1126,6 +1165,46 @@ class DomiIntegration {
     if (options.queue === "lark") return this.larkCommandQueue.run(execute);
     if (options.queue === "plaud") return this.plaudCommandQueue.run(execute);
     return execute();
+  }
+
+  execTrackedPlaudFile(binary, args, options = {}) {
+    return new Promise((resolve, reject) => {
+      let timeoutTimer = null;
+      let forceTimer = null;
+      let timedOut = false;
+      const child = execFile(binary, args, {
+        cwd: options.cwd,
+        maxBuffer: options.maxBuffer,
+        env: options.env
+      }, (error, stdout, stderr) => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        if (forceTimer) clearTimeout(forceTimer);
+        this.plaudChildProcesses.delete(child);
+        if (error || timedOut) {
+          const failure = error || new Error("PLAUD command timed out");
+          failure.stdout = stdout;
+          failure.stderr = stderr;
+          if (timedOut) {
+            failure.killed = true;
+            failure.code = "ETIMEDOUT";
+          }
+          reject(failure);
+          return;
+        }
+        resolve({ stdout, stderr });
+      });
+      this.plaudChildProcesses.add(child);
+      const timeoutMs = Math.max(1_000, Number(options.timeout) || 60_000);
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        forceTimer = setTimeout(() => {
+          if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
+        }, 40_000);
+        forceTimer.unref?.();
+      }, timeoutMs);
+      timeoutTimer.unref?.();
+    });
   }
 
   plaudPaths(pluginInput) {
@@ -1158,19 +1237,199 @@ class DomiIntegration {
     return this.configProvider().plaudConnectionMode !== "disabled";
   }
 
+  listRadarSources() {
+    return this.radarSourceService.list();
+  }
+
+  saveRadarSource(request = {}) {
+    return this.radarSourceService.save(request);
+  }
+
+  deleteRadarSource(request = {}) {
+    return this.radarSourceService.delete(request.sourceId || request.id || request);
+  }
+
+  async syncRadarSources(request = {}) {
+    return this.radarSourceService.sync(request);
+  }
+
+  async processPodcastEpisode(request = {}) {
+    const jobId = String(request.jobId || "").trim();
+    if (!jobId) throw new Error("缺少要处理的播客任务 ID。");
+    const existing = this.podcastProcessPromises.get(jobId);
+    if (existing) return existing;
+    const pending = this.processPodcastEpisodeOnce(jobId, request)
+      .finally(() => this.podcastProcessPromises.delete(jobId));
+    this.podcastProcessPromises.set(jobId, pending);
+    return pending;
+  }
+
+  async processPodcastEpisodeOnce(jobId, request = {}) {
+    if (!this.plaudEnabled()) {
+      throw new Error("PLAUD 未启用。请先在 domi 设置的“录音转写”中连接自己的 PLAUD 账号。");
+    }
+    const job = this.radarSourceService.getJob(jobId);
+    if (job.status === "transcript_ready" && job.transcriptPath && fs.existsSync(job.transcriptPath)) {
+      return {
+        ok: true,
+        reused: true,
+        job,
+        transcriptPath: job.transcriptPath,
+        plaudFileId: job.plaudFileId || "",
+        audioRemoved: !job.localAudioPath
+      };
+    }
+
+    let audioPath = job.localAudioPath;
+    try {
+      if (!audioPath || !fs.existsSync(audioPath)) {
+        const downloaded = await this.radarSourceService.download(job.id, {
+          maxBytes: request.maxBytes,
+          timeoutMs: request.downloadTimeoutMs
+        });
+        audioPath = downloaded.path;
+      }
+      this.radarSourceService.updateJob(job.id, {
+        status: "transcribing",
+        localAudioPath: audioPath,
+        error: ""
+      });
+
+      // `transcribe-local` is the PLAUD upload workflow: it uploads this
+      // downloaded public episode to the user's own PLAUD account, asks PLAUD
+      // to generate the transcript, then downloads the result. It does not run
+      // a local ASR model despite the historical command name.
+      await this.stopPlaudBackgroundSession("podcast-transcription");
+      const { script } = this.plaudPaths();
+      const timeoutSec = Math.min(Math.max(Number(request.timeoutSec) || 1800, 60), 7200);
+      const pollSec = Math.min(Math.max(Number(request.pollSec) || 8, 3), 300);
+      const outputDir = path.join(this.plaudOutputDir, "podcasts", job.sourceId, job.id);
+      const result = await this.runJson(process.execPath, [
+        script,
+        "transcribe-local",
+        audioPath,
+        outputDir,
+        String(timeoutSec),
+        String(pollSec),
+        job.title
+      ], {
+        timeout: (timeoutSec + 180) * 1000,
+        label: "播客上传 PLAUD 并生成文字稿",
+        queue: "plaud",
+        env: this.plaudRuntimeEnv()
+      });
+      const transcriptPath = String(result.transcriptPath || "");
+      if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+        throw new Error("PLAUD 已完成处理，但没有返回可读取的文字稿文件。");
+      }
+      let audioRemoved = false;
+      if (request.keepAudio !== true) {
+        audioRemoved = await this.radarSourceService.removeAudio(audioPath);
+      }
+      const updated = this.radarSourceService.updateJob(job.id, {
+        status: "transcript_ready",
+        localAudioPath: audioRemoved ? "" : audioPath,
+        transcriptPath,
+        plaudFileId: String(result.fileId || ""),
+        error: ""
+      }).job;
+      return {
+        ok: true,
+        reused: Boolean(result.reused),
+        job: updated,
+        transcriptPath,
+        plaudFileId: updated.plaudFileId,
+        audioRemoved
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const updated = this.radarSourceService.updateJob(job.id, {
+        status: "failed",
+        localAudioPath: audioPath && fs.existsSync(audioPath) ? audioPath : "",
+        error: message
+      }).job;
+      return { ok: false, job: updated, error: message };
+    }
+  }
+
+  plaudBrokerSessionKey(plugin, browser, settings = this.configProvider()) {
+    const fingerprint = [
+      String(settings.plaudConnectionMode || ""),
+      String(browser || ""),
+      String(this.domiConfigPath || "")
+    ].join("\u0000");
+    if (fingerprint !== this.plaudConfigFingerprint) {
+      this.plaudConfigFingerprint = fingerprint;
+      this.plaudConfigGeneration += 1;
+    }
+    return [plugin.root, browser, this.plaudConfigGeneration].join("\u0000");
+  }
+
   async runPlaudWorker(command, args = [], pluginInput) {
     if (!this.plaudEnabled()) {
       throw new Error("PLAUD 未启用。请先在 domi 设置的“录音转写”中开启。");
     }
     const { plugin } = this.plaudPaths(pluginInput);
-    return this.runJson(process.execPath, [this.plaudWorker, command, plugin.root, ...args], {
-      // Leave a few seconds inside the 90-second user-facing deadline for the
-      // worker's SIGTERM cleanup to close the private browser and release its lock.
-      timeout: 85_000,
-      label: command === "list" ? "PLAUD 最近录音读取" : "PLAUD 操作",
-      queue: "plaud",
-      env: this.plaudRuntimeEnv()
+    const settings = this.configProvider();
+    const browser = this.normalizePlaudBrowser(settings.plaudBrowser);
+    const sessionKey = this.plaudBrokerSessionKey(plugin, browser, settings);
+    return this.plaudCommandQueue.run(() => {
+      if (this.plaudShuttingDown) {
+        throw new Error("domi 正在退出，已取消尚未开始的 PLAUD 操作。");
+      }
+      return this.plaudBroker.request(
+        command,
+        args,
+        plugin.root,
+        {
+          timeoutMs: 90_000,
+          sessionKey
+        }
+      );
     });
+  }
+
+  async stopPlaudBackgroundSession(reason = "app-request") {
+    await this.plaudBroker.stop(reason);
+  }
+
+  async shutdownAllPlaudOperations(reason = "app-quit") {
+    this.plaudShuttingDown = true;
+    this.plaudCommandQueue.cancelPending(
+      new Error("domi 正在退出，已取消尚未开始的 PLAUD 操作。")
+    );
+    await this.stopPlaudBackgroundSession(reason);
+    const children = [...this.plaudChildProcesses];
+    if (children.length) await Promise.all(children.map((child) => new Promise((resolve) => {
+      if (child.exitCode != null || child.signalCode != null) {
+        resolve();
+        return;
+      }
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(forceKillTimer);
+        clearTimeout(hardDeadlineTimer);
+        resolve();
+      };
+      const forceKillTimer = setTimeout(() => {
+        if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
+      }, 40_000);
+      forceKillTimer.unref?.();
+      // SIGKILL is only the fallback; normally resolve on the real close event.
+      // Keep a final bound so app shutdown can never hang forever on a broken OS handle.
+      const hardDeadlineTimer = setTimeout(finish, 45_000);
+      hardDeadlineTimer.unref?.();
+      child.once("close", finish);
+      child.kill("SIGTERM");
+    })));
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      const queue = this.plaudCommandQueue.snapshot();
+      if (queue.activeCount === 0 && queue.pendingCount === 0 && this.plaudChildProcesses.size === 0) break;
+      await this.sleep(10);
+    }
   }
 
   async ensureIntakeTimeFields(pluginInput) {
@@ -1235,13 +1494,16 @@ class DomiIntegration {
     const browser = this.normalizePlaudBrowser(
       requestedBrowser || this.configProvider().plaudBrowser
     );
+    if (command === "connection") {
+      return this.runPlaudWorker("connection");
+    }
+    if (command === "login" || command === "logout") {
+      await this.stopPlaudBackgroundSession(command);
+    }
     return this.runJson(process.execPath, [script, command, browser], {
         timeout: command === "login"
           ? 11 * 60 * 1000
-          : command === "connection"
-            // The child reserves up to four seconds for private-profile cleanup.
-            ? 85_000
-            : 180_000,
+          : 180_000,
         label: command === "login"
           ? "PLAUD 浏览器登录"
           : command === "doctor"
@@ -1511,6 +1773,10 @@ class DomiIntegration {
       return { ok: false, requiresConfirmation: true, pendingCount: current.pendingCount, snapshot: current };
     }
 
+    // The plugin CLI uses the same dedicated Profile for generation/download.
+    // Release the long-lived headless reader first so one Profile never has two
+    // owners. The final snapshot lazily starts a fresh broker again.
+    await this.stopPlaudBackgroundSession("sync-workflow");
     const { script } = this.plaudPaths();
     const runName = new Date().toISOString().replace(/[:.]/g, "-");
     const outputDir = path.join(this.plaudOutputDir, runName);

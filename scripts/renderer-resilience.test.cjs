@@ -20,6 +20,49 @@ const taxonomy = read("src/investmentTaxonomy.ts");
 const canonicalTaxonomy = JSON.parse(read("shared/investment-taxonomy.json"));
 const styles = read("src/styles.css");
 const workflows = read("src/workflows.ts");
+const choiceCard = read("src/AssistantChoiceCard.tsx");
+const radarSourceManager = read("src/RadarSourceManager.tsx");
+
+assert.match(
+  app,
+  /payload\.type === "user-input-request"[\s\S]*?<AssistantChoiceCard/,
+  "Codex request_user_input events must render as in-message choice cards."
+);
+assert.match(
+  choiceCard,
+  /questions\.length === 1[\s\S]*?void submit\(nextSelected, otherValues\)/,
+  "A single model choice must continue immediately without requiring typed confirmation."
+);
+assert.match(
+  choiceCard,
+  /question\.isSecret[\s\S]*?type=\{question\.isSecret \? "password" : "text"\}/,
+  "Secret choice answers must use protected transient inputs."
+);
+assert.match(
+  app,
+  /信源管理[\s\S]*?<RadarSourceManager/,
+  "Industry news must expose the local source manager without changing sidebar navigation."
+);
+assert.match(
+  radarSourceManager,
+  /processPodcastEpisode[\s\S]*?公开 RSS、小宇宙公开节目页或单集页/,
+  "Podcast source management must discover public episodes and hand audio to the PLAUD processor."
+);
+assert.match(
+  app,
+  /async function archivePodcastTranscript[\s\S]*?ephemeral: true[\s\S]*?background: true/,
+  "Podcast notes must archive in the background instead of creating another task workspace."
+);
+assert.match(
+  app,
+  /ephemeral: true,[\s\S]{0,120}?background: true,[\s\S]{0,120}?allowUserInput: false/,
+  "Non-conversational background workflows must never stall on an invisible choice card."
+);
+assert.match(
+  main,
+  /run\.allowUserInput === false[\s\S]*?question\.options\?\.\[0\]\?\.label[\s\S]*?标记待审核/,
+  "A non-interactive run must safely resolve model questions instead of hanging forever."
+);
 
 assert.match(
   editor,
@@ -45,6 +88,26 @@ assert.match(
   editor,
   /TiptapImage[\s\S]*?saveMarkdownImage[\s\S]*?handlePaste/,
   "Markdown image paste must use a real image node and persist clipboard files."
+);
+assert.match(
+  editor,
+  /ImagePlus[\s\S]*?插入图片（支持多选）[\s\S]*?type="file"[\s\S]*?multiple/,
+  "Markdown images must also be insertable through a discoverable multi-file picker."
+);
+assert.match(
+  editor,
+  /handleDrop[\s\S]*?dataTransfer[\s\S]*?insertImageFiles/,
+  "Finder image drops must share the protected Markdown image persistence path."
+);
+assert.match(
+  editor,
+  /insertContent\(content\)\.run\(\)[\s\S]*?publishEditorMarkdown\(current\)/,
+  "Inserted images must publish immediately so document autosave can persist the relative asset links."
+);
+assert.match(
+  app,
+  /missingImageCount[\s\S]*?张本地图片未找到；其余图片已随文档复制/,
+  "Copying a Markdown document must report missing images instead of silently omitting them."
 );
 assert.match(
   editor,
@@ -184,8 +247,8 @@ assert.match(
 );
 assert.match(
   app,
-  /projectMentionMatches[\s\S]*?chooseMentionedProject[\s\S]*?bindThreadToMentionedProject/,
-  "Explicit project candidates must be resolved before a task binds and archives attachments."
+  /projectMentionMatches[\s\S]*?automaticallyRoutedProject[\s\S]*?bindThreadToMentionedProject/,
+  "Explicit project candidates must be resolved deterministically before a task binds and archives attachments."
 );
 assert.match(
   app,
@@ -194,8 +257,28 @@ assert.match(
 );
 assert.match(
   app,
-  /当前对话归属于[\s\S]*?是否切换到[\s\S]*?较短或含数字[\s\S]*?多个项目[\s\S]*?本次消息尚未发送/,
-  "Cross-project and ambiguous messages must ask before changing the canonical archive target."
+  /automaticallyRoutedProject\(candidates[\s\S]*?currentProjectId:[\s\S]*?projectIntake: workflow\?\.id === "project-intake"/,
+  "Project routing must keep established project context and only auto-route a unique high-confidence match."
+);
+assert.doesNotMatch(
+  app,
+  /requestComposerChoice|ComposerChoiceDialog|window\.prompt/,
+  "Internal project routing must not interrupt sending with a project-choice prompt or dialog."
+);
+assert.match(
+  app,
+  /needsNeutralTarget[\s\S]*?workflow\?\.id === "project-intake"[\s\S]*?prepareNeutralProjectTarget[\s\S]*?commitAttachmentsToEntity/,
+  "A new project intake must run through neutral staging automatically and bind after a verified result."
+);
+assert.doesNotMatch(
+  app,
+  /当前任务已经归属于[\s\S]*?window\.confirm/,
+  "A completed background task must not suddenly prompt to switch an established entity binding."
+);
+assert.match(
+  app,
+  /submitToCodex\(selectedWorkflow, input\)[\s\S]*?\.catch\(\(error\)[\s\S]*?本次消息未能发送/,
+  "Unexpected submission preflight failures must be visible and retryable instead of becoming unhandled rejections."
 );
 assert.match(
   app,
@@ -352,10 +435,20 @@ assert.match(
   /const plaudEnabled = appSettings\?\.plaudConnectionMode === "enabled"[\s\S]*?workflow\.requiresPlaud \|\| plaudEnabled/,
   "PLAUD-dependent quick starts must remain hidden until the user enables PLAUD."
 );
+assert.doesNotMatch(
+  app,
+  /window\.setTimeout\(\(\) => \{[\s\S]{0,200}?refreshPlaudQueue\(\)[\s\S]{0,100}?1_200/,
+  "PLAUD startup must not open a remote browser session before the user asks to read recordings."
+);
 assert.match(
   app,
-  /if \(!weeklyNewsAutomationReady\) return;[\s\S]*?window\.setTimeout\(\(\) => \{[\s\S]*?void refreshPlaudQueue\(\);[\s\S]*?\}, 1_200\)[\s\S]*?\[plaudEnabled, appSettings\?\.plaudBrowser, weeklyNewsAutomationReady\]/,
-  "PLAUD startup must wait for core integrations and remain isolated from unrelated settings saves."
+  /function toggleSection[\s\S]*?section === "domi"[\s\S]*?opening[\s\S]*?void refreshPlaudQueue\(\)/,
+  "Opening a previously collapsed PLAUD area may lazily refresh its recordings."
+);
+assert.match(
+  app,
+  /aria-label="刷新 PLAUD 最近录音"[\s\S]*?refreshPlaudQueue\(\{ fresh: true \}\)/,
+  "The recording panel must expose an explicit read-only refresh action."
 );
 assert.doesNotMatch(
   app,
@@ -873,6 +966,16 @@ assert.match(
   /loginPlaud\(\)[\s\S]*?workbench\.loginPlaud\(\{ browser \}\)[\s\S]*?只读验证/,
   "PLAUD login must use the dedicated browser flow and verify the remote account."
 );
+assert.match(
+  setupCenter,
+  /本连接助手禁止运行 login \$\{browser\}[\s\S]*?只报告“请用户主动点击登录并验证”/,
+  "The diagnostic assistant must never open the visible PLAUD login window on its own."
+);
+assert.match(
+  main,
+  /shutdownAllPlaudOperations\("app-quit"\)/,
+  "App quit must gracefully stop both the persistent reader and direct PLAUD CLI children."
+);
 assert.doesNotMatch(
   setupCenter,
   /openResource\("\/Applications\/Tabbit\.app"\)/,
@@ -1015,8 +1118,8 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /prepareNeutralProjectTarget[\s\S]*?workflow\?\.id === "project-intake" && thread\.externalType === "project"[\s\S]*?作为新项目暂存[\s\S]*?prepareNeutralProjectTarget/,
-  "A new project launched from an existing project must use a neutral staging thread instead of polluting the old project."
+  /prepareNeutralProjectTarget[\s\S]*?needsNeutralTarget[\s\S]*?workflow\?\.id === "project-intake"[\s\S]*?Boolean\(thread\.externalType\)[\s\S]*?prepareNeutralProjectTarget/,
+  "A new project intake launched from an existing entity must automatically use neutral staging instead of prompting or polluting the old entity."
 );
 assert.match(
   app,

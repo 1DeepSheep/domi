@@ -67,3 +67,31 @@ test("task queue enforces its concurrency limit", async () => {
   assert.equal(maximumActive, 2);
   assert.deepEqual(queue.snapshot(), { activeCount: 0, pendingCount: 0 });
 });
+
+test("task queue cancels pending work without restarting it after active work exits", async () => {
+  const queue = new TaskQueue(1);
+  let releaseActive;
+  const blocker = new Promise((resolve) => {
+    releaseActive = resolve;
+  });
+  const active = queue.run(() => blocker);
+  let pendingStarted = false;
+  const pending = queue.run(async () => {
+    pendingStarted = true;
+  });
+  const pendingResult = pending.then(
+    () => ({ ok: true }),
+    (error) => ({ ok: false, error })
+  );
+
+  assert.deepEqual(queue.snapshot(), { activeCount: 1, pendingCount: 1 });
+  assert.equal(queue.cancelPending(new Error("shutdown")), 1);
+  releaseActive();
+  await active;
+  const result = await pendingResult;
+
+  assert.equal(result.ok, false);
+  assert.match(result.error.message, /shutdown/);
+  assert.equal(pendingStarted, false);
+  assert.deepEqual(queue.snapshot(), { activeCount: 0, pendingCount: 0 });
+});

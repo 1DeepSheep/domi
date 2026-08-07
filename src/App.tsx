@@ -71,14 +71,15 @@ import { hasNativeWorkbench, workbench } from "./bridge";
 import { filesFromClipboardData } from "./clipboard-files";
 import { isLocalPdfResource } from "./document-resources";
 import {
+  automaticallyRoutedProject,
   DomiEntityResult,
   normalizedEntityMention,
   parseDomiEntityResult,
-  ProjectMentionMatch,
   projectMentionMatches
 } from "./entity-routing";
 import MarkdownEditorErrorBoundary from "./MarkdownEditorErrorBoundary";
 import SectionErrorBoundary, { RenderRegion } from "./SectionErrorBoundary";
+import AssistantChoiceCard from "./AssistantChoiceCard";
 import {
   AppSettings,
   AppSettingsSaveRequest,
@@ -88,6 +89,7 @@ import {
   CodexCheckResult,
   CodexEventPayload,
   CodexEventItem,
+  CodexUserInputRequest,
   CodexUsage,
   DomiPerson,
   DomiClassificationReview,
@@ -109,6 +111,9 @@ import {
   LocalAttachment,
   MarkdownDocument,
   PdfDocument,
+  PodcastJob,
+  PodcastProcessResult,
+  RadarSourceSnapshot,
   UpdateStatus
 } from "./env";
 import { sidebarUpdateEntry } from "./update-entry";
@@ -132,6 +137,7 @@ import {
 const RichMarkdownEditor = lazy(() => import("./RichMarkdownEditor"));
 const SetupCenter = lazy(() => import("./SetupCenter"));
 const MessageContent = lazy(() => import("./MessageContent"));
+const RadarSourceManager = lazy(() => import("./RadarSourceManager"));
 
 type Role = "user" | "assistant" | "system";
 type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents";
@@ -904,6 +910,14 @@ type RunContext = {
   knownProjectIds?: string[];
   knownPersonIds?: string[];
   queuedSubmission?: QueuedSubmission;
+};
+
+type AssistantInteraction = {
+  key: string;
+  runId: string;
+  messageId: string;
+  request: CodexUserInputRequest;
+  status: "pending" | "resolved";
 };
 
 type ComposerDraft = {
@@ -1840,6 +1854,9 @@ function App() {
   const [weeklyNewsAutomation, setWeeklyNewsAutomation] = useState<WeeklyNewsAutomationState>(
     readWeeklyNewsAutomationState
   );
+  const [radarSourceManagerOpen, setRadarSourceManagerOpen] = useState(false);
+  const [radarSourceSnapshot, setRadarSourceSnapshot] = useState<RadarSourceSnapshot | null>(null);
+  const [assistantInteractions, setAssistantInteractions] = useState<AssistantInteraction[]>([]);
   const [domiTaskBoard, setDomiTaskBoard] = useState<DomiTaskBoardSnapshot | null>(null);
   const [domiTaskLoading, setDomiTaskLoading] = useState(false);
   const [domiTaskMutationId, setDomiTaskMutationId] = useState<string | null>(null);
@@ -1974,6 +1991,8 @@ function App() {
   const weeklyNewsAutomationOperationRef = useRef(false);
   const weeklyNewsAutoRefreshActionRef = useRef<(() => Promise<boolean>) | null>(null);
   const weeklyNewsAutoScanActionRef = useRef<(() => Promise<WeeklyNewsScanOutcome>) | null>(null);
+  const podcastSourceAutomationRef = useRef(false);
+  const podcastArchiveRunIdsRef = useRef(new Set<string>());
   const appSettingsRef = useRef(appSettings);
   const localSearchRefreshAtRef = useRef(0);
   const documentSearchRefreshAtRef = useRef(0);
@@ -2800,6 +2819,16 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
+    void workbench.listRadarSources().then((snapshot) => {
+      if (!cancelled && snapshot.ok) setRadarSourceSnapshot(snapshot);
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     let receivedLiveStatus = false;
     const unsubscribe = workbench.onUpdateStatus((status) => {
       if (cancelled) return;
@@ -2878,22 +2907,14 @@ function App() {
   }, [workspaceView, domiTaskBoard, domiTaskLoading]);
 
   useEffect(() => {
-    if (!appSettings) return;
-    if (!plaudEnabled) {
-      setPlaudSnapshot(null);
-      setPlaudError("");
-      setPlaudNotice("");
-      setPlaudLoading(false);
-      setPlaudLoadingMore(false);
-      setPlaudSyncing(false);
-      return;
-    }
-    if (!weeklyNewsAutomationReady) return;
-    const timer = window.setTimeout(() => {
-      void refreshPlaudQueue();
-    }, 1_200);
-    return () => window.clearTimeout(timer);
-  }, [plaudEnabled, appSettings?.plaudBrowser, weeklyNewsAutomationReady]);
+    if (!appSettings || plaudEnabled) return;
+    setPlaudSnapshot(null);
+    setPlaudError("");
+    setPlaudNotice("");
+    setPlaudLoading(false);
+    setPlaudLoadingMore(false);
+    setPlaudSyncing(false);
+  }, [plaudEnabled, appSettings]);
 
   useEffect(() => {
     if (!selectedWorkflow?.requiresPlaud || plaudEnabled) return;
@@ -4466,9 +4487,20 @@ function App() {
     const lastRadarCheckpoint = Number(currentWeeklyNews?.radarCheckedThrough || 0);
     const { discoveryFrom, checkedAfter } = radarDiscoveryWindow(now, lastRadarCheckpoint);
     const priorityPeopleContext = radarPriorityPeopleContext(domiSnapshot?.people || []);
+    const configuredSourceLines = (radarSourceSnapshot?.sources || [])
+      .filter((source) => source.enabled && source.kind !== "podcast")
+      .map((source) => {
+        const typeLabel = source.kind === "wechat" ? "重点公众号" : "优先新闻源";
+        const keywords = source.keywords.length ? `；关注：${source.keywords.join("、")}` : "";
+        const address = source.url ? `；${source.url}` : "";
+        return `- ${typeLabel}：${source.name}${address}${keywords}`;
+      });
     const requestText = [
       radarWorkflow.defaultPrompt,
       FOLLOWED_PROJECT_TAXONOMY_PROMPT,
+      configuredSourceLines.length
+        ? `用户在本机配置了以下重点信源。本轮优先检查并交叉核验，但仍需遵守来源可信度、时效性和去重规则：\n${configuredSourceLines.join("\n")}`
+        : "用户尚未配置自定义重点信源，按默认公开来源执行。",
       `本轮发现窗口起点：${new Date(discoveryFrom).toISOString()}；上次成功检查水位：${checkedAfter ? new Date(checkedAfter).toISOString() : "无"}；本轮检查截止：${new Date(now).toISOString()}。`,
       "发现窗口包含重叠回看：窗口内水位之前发布但此前未收录的迟索引事件仍可新增；必须靠事件ID、规范标题、主体和关键事实去重，不能只按发布时间过滤。",
       "如果整个发现窗口没有达到收录标准的新事件，直接返回 added=0，不要为了凑数量扩大到更早日期，也不要重复扫描全部重点对象。"
@@ -4516,6 +4548,7 @@ function App() {
         requestText,
         ephemeral: true,
         background: automatic,
+        allowUserInput: false,
         workflowId: radarWorkflow.id,
         webSearch: true,
         model,
@@ -4606,6 +4639,79 @@ function App() {
       if (weeklyNewsRunIdRef.current === runId) weeklyNewsRunIdRef.current = null;
       weeklyNewsScanningRef.current = false;
       setWeeklyNewsScanning(false);
+    }
+  }
+
+  async function archivePodcastTranscript(
+    job: PodcastJob,
+    result: PodcastProcessResult
+  ) {
+    const transcriptPath = result.transcriptPath || result.job?.transcriptPath || job.transcriptPath;
+    if (!transcriptPath) throw new Error("PLAUD 已完成，但没有返回可读取的文字稿路径。");
+    if (podcastArchiveRunIdsRef.current.has(job.id)) return;
+    const routerWorkflow = workflows.find((workflow) => workflow.id === "domi-router");
+    if (!routerWorkflow) throw new Error("未找到 domi 播客归档工作流。");
+
+    const normalizedEpisodeText = `${job.title} ${job.description}`
+      .toLocaleLowerCase("zh-CN")
+      .replace(/\s+/g, "");
+    const matchedProjects = (domiSnapshotRef.current?.projects || []).filter((project) => {
+      const normalizedName = project.name.toLocaleLowerCase("zh-CN").replace(/\s+/g, "");
+      return normalizedName.length >= 2 && normalizedEpisodeText.includes(normalizedName);
+    });
+    const projectHint = matchedProjects.length === 1 ? matchedProjects[0] : null;
+    const primaryArchiveHint = projectHint ? "project_dominant" : "industry_dominant";
+    const canonicalDocumentId = `podcast:${job.sourceFormat || "public"}:${job.id}`;
+    const requestText = [
+      "处理一条已经由用户自己的 PLAUD 完成转写的公开播客。不要调用本地 ASR，不要重新下载音频，也不要创建临时任务工作区或 outputs 目录。",
+      `sourceKind=podcast`,
+      `transcriptProvider=plaud`,
+      `transcriptPath=${transcriptPath}`,
+      `sourceId=${job.sourceId}`,
+      `provider=${job.sourceFormat || "public-web-page"}`,
+      `episodeId=${job.id}`,
+      `episodeUrl=${job.episodeUrl}`,
+      `podcastName=${job.podcastTitle || ""}`,
+      `episodeTitle=${job.title}`,
+      `publishedAt=${job.publishedAt ? new Date(job.publishedAt).toISOString() : ""}`,
+      `description=${job.description || ""}`,
+      `canonicalDocumentId=${canonicalDocumentId}`,
+      `primaryArchiveHint=${primaryArchiveHint}`,
+      projectHint
+        ? `唯一明确项目匹配：${projectHint.name}（recordId=${projectHint.recordId}）。若正文证据一致，将主文档归入该项目的“纪要”，原始 PLAUD 文字稿归入“原始材料”。`
+        : "标题和简介未唯一匹配项目库中的单一公司；按行业趋势材料归档到对应行业研究/播客目录。若正文明确由唯一公司创始人或高管主讲，再按规则校正。",
+      "先用 asr-notes 把转写错误校正为准确结果，删去校验过程和低信息量废话；再用 investment-mgmt 完成唯一主归档。其他相关项目、人脉和行业入口仅保存 URI 与摘要引用，不复制第二份正文。",
+      "若正文证据与 primaryArchiveHint 冲突且仍无法确定，不要猜测写入错误目录：进入分类待审核，并在最终结果中明确返回待审核原因。"
+    ].join("\n");
+
+    podcastArchiveRunIdsRef.current.add(job.id);
+    try {
+      const archiveRunId = createId("podcast-archive");
+      const archiveResult = await workbench.runCodex({
+        runId: archiveRunId,
+        prompt: workflowPrompt(routerWorkflow, requestText, "播客处理必须使用 PLAUD 文字稿，并遵守唯一主归档规则。", true),
+        requestText,
+        ephemeral: true,
+        background: true,
+        allowUserInput: false,
+        workflowId: routerWorkflow.id,
+        webSearch: true,
+        model,
+        reasoningEffort,
+        serviceTier,
+        workspacePath: appSettingsRef.current?.localRepositoryDir
+          || codexStatus?.workspacePath
+          || activeThread.workspacePath
+      });
+      if (!archiveResult.ok) {
+        throw new Error(archiveResult.error || "播客纪要整理或归档失败。");
+      }
+      await Promise.all([
+        refreshDomi(),
+        refreshDocumentLibrary({ silent: true, force: true })
+      ]);
+    } finally {
+      podcastArchiveRunIdsRef.current.delete(job.id);
     }
   }
 
@@ -4759,6 +4865,72 @@ function App() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [weeklyNewsAutomationReady, appSettings?.onboardingComplete]);
+
+  useEffect(() => {
+    if (
+      !hasNativeWorkbench
+      || !appSettings?.onboardingComplete
+      || appSettings.plaudConnectionMode !== "enabled"
+    ) return;
+    let disposed = false;
+
+    const runPodcastSourceTick = async () => {
+      if (
+        disposed
+        || podcastSourceAutomationRef.current
+        || runContextRef.current.size > 0
+      ) return;
+      podcastSourceAutomationRef.current = true;
+      try {
+        const synced = await workbench.syncRadarSources({ limit: 10 });
+        if (disposed || (!synced.ok && !synced.partial)) return;
+        const nextSnapshot: RadarSourceSnapshot = {
+          ok: true,
+          sources: synced.sources,
+          jobs: synced.jobs,
+          updatedAt: synced.updatedAt,
+          error: synced.error
+        };
+        setRadarSourceSnapshot(nextSnapshot);
+        const sourcesById = new Map(synced.sources.map((source) => [source.id, source] as const));
+        const nextJob = [...synced.jobs]
+          .filter((job) => {
+            const source = sourcesById.get(job.sourceId);
+            if (!source?.enabled || !source.autoProcess || job.status !== "discovered") return false;
+            if (!source.keywords.length) return true;
+            const haystack = `${job.title} ${job.description}`.toLocaleLowerCase("zh-CN");
+            return source.keywords.some((keyword) => haystack.includes(keyword.toLocaleLowerCase("zh-CN")));
+          })
+          .sort((left, right) => (right.publishedAt || right.discoveredAt) - (left.publishedAt || left.discoveredAt))[0];
+        if (!nextJob) return;
+
+        const processed = await workbench.processPodcastEpisode({ jobId: nextJob.id });
+        if (!processed.ok || !processed.job) {
+          setPlaudError(processed.error || `“${nextJob.title}”没有成功交给 PLAUD。`);
+          return;
+        }
+        await archivePodcastTranscript(processed.job, processed);
+        if (!document.hasFocus()) {
+          await workbench.showNotification({
+            title: "domi 已整理一条播客",
+            body: processed.job.title
+          });
+        }
+      } catch (automationError) {
+        setPlaudError(automationError instanceof Error ? automationError.message : String(automationError));
+      } finally {
+        podcastSourceAutomationRef.current = false;
+      }
+    };
+
+    const startupTimer = window.setTimeout(() => void runPodcastSourceTick(), 30_000);
+    const interval = window.setInterval(() => void runPodcastSourceTick(), 30 * 60_000);
+    return () => {
+      disposed = true;
+      window.clearTimeout(startupTimer);
+      window.clearInterval(interval);
+    };
+  }, [appSettings?.onboardingComplete, appSettings?.plaudConnectionMode]);
 
   async function openWeeklyNews(item: DomiNewsItem) {
     if (!item.url) return;
@@ -5450,6 +5622,7 @@ function App() {
           requestText,
           ephemeral: true,
           background: true,
+          allowUserInput: false,
           workflowId: todoWorkflow.id,
           model,
           reasoningEffort,
@@ -5899,13 +6072,10 @@ function App() {
       && thread.externalRecordId
       && (thread.externalType !== result.entityType || thread.externalRecordId !== result.recordId)
     ) {
-      const confirmed = window.confirm(
-        `当前任务已经归属于“${thread.title}”，本轮回执指向“${entity.name}”。\n\n是否切换归属并仅把本轮附件归入“${entity.name}”？`
+      failBinding(
+        `本轮回执指向“${entity.name}”，但当前任务已归属于“${thread.title}”；为避免后台静默改错归属，已保持当前任务和附件位置不变。`
       );
-      if (!confirmed) {
-        failBinding("用户取消了实体归属切换；原任务归属和本轮暂存附件均保持不变。");
-        return;
-      }
+      return;
     }
 
     let workspace;
@@ -6049,6 +6219,40 @@ function App() {
       return;
     }
 
+    if (payload.type === "user-input-request" && payload.request) {
+      const interactionKey = `${payload.runId}:${typeof payload.request.requestId}:${String(payload.request.requestId)}`;
+      setAssistantInteractions((current) => {
+        const next: AssistantInteraction = {
+          key: interactionKey,
+          runId: payload.runId,
+          messageId: context.assistantMessageId,
+          request: payload.request!,
+          status: "pending"
+        };
+        const existingIndex = current.findIndex((interaction) => interaction.key === interactionKey);
+        if (existingIndex < 0) return [...current, next];
+        return current.map((interaction, index) => index === existingIndex ? next : interaction);
+      });
+      addTimeline(context.threadId, {
+        runId: payload.runId,
+        title: "等待你的选择",
+        detail: payload.request.questions.map((question) => question.header).filter(Boolean).join(" · "),
+        kind: "event",
+        status: "running"
+      });
+      return;
+    }
+
+    if (payload.type === "user-input-resolved") {
+      const interactionKey = `${payload.runId}:${typeof payload.requestId}:${String(payload.requestId)}`;
+      setAssistantInteractions((current) => current.map((interaction) =>
+        interaction.key === interactionKey
+          ? { ...interaction, status: "resolved" }
+          : interaction
+      ));
+      return;
+    }
+
     if (payload.type === "thread" && payload.threadId) {
       patchThread(context.threadId, { codexThreadId: payload.threadId });
       addTimeline(context.threadId, {
@@ -6140,6 +6344,11 @@ function App() {
     if (payload.type === "completed" || payload.type === "stopped" || payload.type === "failed") {
       if (completedRunIdsRef.current.has(payload.runId)) return;
       completedRunIdsRef.current.add(payload.runId);
+      setAssistantInteractions((current) => current.map((interaction) =>
+        interaction.runId === payload.runId
+          ? { ...interaction, status: "resolved" }
+          : interaction
+      ));
       discardAssistantDelta(payload.runId);
       const runCompletedAt = Date.now();
 
@@ -6210,6 +6419,25 @@ function App() {
     }
   }
 
+  async function answerAssistantInteraction(
+    interaction: AssistantInteraction,
+    answers: Record<string, string[]>
+  ) {
+    const result = await workbench.answerCodexUserInput({
+      runId: interaction.runId,
+      requestId: interaction.request.requestId,
+      answers
+    });
+    if (result.ok) {
+      setAssistantInteractions((current) => current.map((candidate) =>
+        candidate.key === interaction.key
+          ? { ...candidate, status: "resolved" }
+          : candidate
+      ));
+    }
+    return result;
+  }
+
   async function commitAttachmentsToEntity(
     thread: Thread,
     selectedAttachments: LocalAttachment[]
@@ -6263,50 +6491,6 @@ function App() {
       ok: true,
       attachments: selectedAttachments.map((attachment) => replacements.get(attachment.path) || attachment)
     };
-  }
-
-  function chooseMentionedProject(
-    thread: Thread,
-    candidates: ProjectMentionMatch<DomiProject>[]
-  ): DomiProject | null | undefined {
-    if (!candidates.length) return undefined;
-    if (candidates.length === 1) {
-      const { project, confidence } = candidates[0];
-      const switchingEntity = Boolean(
-        thread.externalType
-        && thread.externalRecordId
-        && (thread.externalType !== "project" || thread.externalRecordId !== project.recordId)
-      );
-      if (switchingEntity || confidence === "low") {
-        const current = domiSnapshotRef.current?.projects.find(
-          (item) => item.recordId === thread.externalRecordId
-        );
-        const confirmed = window.confirm(
-          switchingEntity
-            ? `当前对话归属于“${current?.name || thread.title}”，本次消息命中“${project.name}”。\n\n是否切换到“${project.name}”并把本轮材料归入它的固定目录？`
-            : `本次只通过较短或含数字的名称命中“${project.name}”，存在同名或误匹配风险。\n\n确认本轮项目就是“${project.name}”吗？`
-        );
-        return confirmed ? project : null;
-      }
-      return project;
-    }
-
-    const options = candidates.map(({ project, confidence }, index) =>
-      `${index + 1}. ${project.name}${confidence === "low" ? "（需确认）" : ""}`
-    ).join("\n");
-    const answer = window.prompt(
-      `本次消息命中了多个项目，请输入要归档的项目序号；取消则不发送，避免材料归错目录。\n\n${options}`,
-      thread.externalType === "project"
-        ? String(Math.max(1, candidates.findIndex((item) => item.project.recordId === thread.externalRecordId) + 1))
-        : "1"
-    );
-    if (answer === null) return null;
-    const index = Number.parseInt(answer.trim(), 10) - 1;
-    if (!Number.isInteger(index) || !candidates[index]) {
-      window.alert("没有识别到有效序号，本次消息尚未发送。");
-      return null;
-    }
-    return candidates[index].project;
   }
 
   async function prepareNeutralProjectTarget(
@@ -6393,51 +6577,25 @@ function App() {
         [thread.title, thread.project].join("\n")
       );
     }
-    const project = chooseMentionedProject(thread, candidates);
-    if (project === null) {
-      return { thread, attachments: selectedAttachments, canceled: true };
-    }
+    const project = automaticallyRoutedProject(candidates, {
+      currentProjectId: thread.externalType === "project" ? thread.externalRecordId : undefined,
+      projectIntake: workflow?.id === "project-intake"
+    });
     if (!project) {
       const unresolvedProjectTarget = Boolean(
         workflow
         && PROJECT_TARGET_WORKFLOW_IDS.has(workflow.id)
         && workflow.id !== "investment-mgmt"
       );
-      if (unresolvedProjectTarget && workflow?.id === "project-intake" && thread.externalType === "project") {
-        const currentProject = projectSnapshot.projects.find(
-          (item) => item.recordId === thread.externalRecordId
-        );
-        const answer = window.prompt(
-          `尚未在项目库中唯一匹配到本轮项目。请选择：\n\n1. 继续更新当前项目“${currentProject?.name || thread.title}”\n2. 作为新项目暂存，入库验证后再归入新项目\n\n取消则不发送。`,
-          "2"
-        );
-        if (answer === null) return { thread, attachments: selectedAttachments, canceled: true };
-        if (answer.trim() === "2") {
-          const neutral = await prepareNeutralProjectTarget(thread, workflow);
-          return neutral
-            ? { thread: neutral, attachments: selectedAttachments }
-            : { thread, attachments: selectedAttachments, canceled: true };
-        }
-        if (answer.trim() !== "1") {
-          window.alert("没有识别到有效序号，本次消息尚未发送。");
-          return { thread, attachments: selectedAttachments, canceled: true };
-        }
-      } else if (unresolvedProjectTarget && thread.externalType === "person") {
-        const confirmed = window.confirm(
-          `本轮没有唯一匹配到已有项目，不能在人物“${thread.title}”的目录中运行项目任务。\n\n是否改用中立暂存区执行，并在项目入库验证后再归档？`
-        );
-        if (!confirmed) return { thread, attachments: selectedAttachments, canceled: true };
+      const needsNeutralTarget = unresolvedProjectTarget && (
+        thread.externalType === "person"
+        || (workflow?.id === "project-intake" && Boolean(thread.externalType))
+      );
+      if (needsNeutralTarget) {
         const neutral = await prepareNeutralProjectTarget(thread, workflow);
         return neutral
           ? { thread: neutral, attachments: selectedAttachments }
           : { thread, attachments: selectedAttachments, canceled: true };
-      } else if (unresolvedProjectTarget && thread.externalType !== "project") {
-        const confirmed = window.confirm(
-          workflow?.id === "project-intake"
-            ? `尚未在项目库中唯一匹配到本轮项目。\n\n继续后将先作为临时任务运行；完成入库并验证后，domi 会回绑新项目并归档本轮附件。是否继续？`
-            : `尚未在项目库中唯一匹配到本轮项目。\n\n继续后将作为临时任务运行，本轮附件先保留在暂存区，不会静默归入其他项目。是否继续？`
-        );
-        if (!confirmed) return { thread, attachments: selectedAttachments, canceled: true };
       }
       const committed = await commitAttachmentsToEntity(thread, selectedAttachments);
       if (!committed.ok) {
@@ -6674,24 +6832,40 @@ function App() {
           .map((file) => `- ${JSON.stringify(file.path)}`)
           .join("\n")}`
       : basePrompt;
-    const result = await workbench.runCodex({
-      runId,
-      prompt,
-      requestText: messageText,
-      threadId: targetThread.codexThreadId,
-      workflowId: workflow?.id || (useDomiPlugin ? "domi-analyst" : undefined),
-      webSearch: Boolean(workflow?.webSearch),
-      model: options.model ?? model,
-      reasoningEffort: options.reasoningEffort ?? reasoningEffort,
-      serviceTier: options.serviceTier ?? serviceTier,
-      background: options.background,
-      workspacePath: targetThread.workspacePath,
-      externalType: targetThread.externalType,
-      externalRecordId: targetThread.externalRecordId,
-      entityUpdatedAt: targetThread.externalType === "project"
-        ? effectiveDomiSnapshot?.projects.find((project) => project.recordId === targetThread.externalRecordId)?.updatedAt
-        : effectiveDomiSnapshot?.people.find((person) => person.recordId === targetThread.externalRecordId)?.updatedAt
-    });
+    let result: Awaited<ReturnType<typeof workbench.runCodex>>;
+    try {
+      result = await workbench.runCodex({
+        runId,
+        prompt,
+        requestText: messageText,
+        threadId: targetThread.codexThreadId,
+        workflowId: workflow?.id || (useDomiPlugin ? "domi-analyst" : undefined),
+        webSearch: Boolean(workflow?.webSearch),
+        model: options.model ?? model,
+        reasoningEffort: options.reasoningEffort ?? reasoningEffort,
+        serviceTier: options.serviceTier ?? serviceTier,
+        background: options.background,
+        workspacePath: targetThread.workspacePath,
+        externalType: targetThread.externalType,
+        externalRecordId: targetThread.externalRecordId,
+        entityUpdatedAt: targetThread.externalType === "project"
+          ? effectiveDomiSnapshot?.projects.find((project) => project.recordId === targetThread.externalRecordId)?.updatedAt
+          : effectiveDomiSnapshot?.people.find((person) => person.recordId === targetThread.externalRecordId)?.updatedAt
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      workbench.reportRendererIssue({
+        kind: "codex-run",
+        message: `启动 Codex 失败：${message}`
+      });
+      result = {
+        ok: false,
+        runId,
+        output: "",
+        workspacePath: targetThread.workspacePath || "",
+        error: `无法启动任务：${message}`
+      };
+    }
 
     if (result.threadId) {
       patchThread(targetThread.id, { codexThreadId: result.threadId });
@@ -6764,9 +6938,18 @@ function App() {
     }
     if (submissionStartingThreadIdsRef.current.has(activeThread.id)) return;
     submissionStartingThreadIdsRef.current.add(activeThread.id);
-    void submitToCodex(selectedWorkflow, input).finally(() => {
-      submissionStartingThreadIdsRef.current.delete(activeThread.id);
-    });
+    void submitToCodex(selectedWorkflow, input)
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setAttachmentError(`本次消息未能发送：${message}`);
+        workbench.reportRendererIssue({
+          kind: "codex-run",
+          message: `发送前处理失败：${message}`
+        });
+      })
+      .finally(() => {
+        submissionStartingThreadIdsRef.current.delete(activeThread.id);
+      });
   }
 
   function enqueueSubmission(workflow?: Workflow, overrideInput?: string) {
@@ -7200,7 +7383,11 @@ function App() {
   }
 
   function toggleSection(section: keyof typeof openSections) {
+    const opening = !openSections[section];
     setOpenSections((current) => ({ ...current, [section]: !current[section] }));
+    if (section === "domi" && opening && plaudEnabled && !plaudSnapshot) {
+      void refreshPlaudQueue();
+    }
   }
 
   async function refreshDocumentLibrary(options: { silent?: boolean; force?: boolean } = {}) {
@@ -8767,6 +8954,14 @@ function App() {
             </div>
           </div>
           <div className="weekly-news-actions">
+            <button
+              className="weekly-news-source"
+              type="button"
+              onClick={() => setRadarSourceManagerOpen(true)}
+              title="添加新闻源、重点公众号或播客"
+            >
+              <Settings size={13} />信源管理
+            </button>
             {weeklyNews?.sourceUrl && (
               <button
                 className="weekly-news-source"
@@ -10840,6 +11035,12 @@ function App() {
                       const showRunSummary = message.role === "assistant"
                         && message.status !== "running"
                         && Boolean(message.content);
+                      const messageInteractions = message.role === "assistant"
+                        ? assistantInteractions.filter((interaction) => interaction.messageId === message.id)
+                        : [];
+                      const hasPendingInteraction = messageInteractions.some(
+                        (interaction) => interaction.status === "pending"
+                      );
                       return (
                         <article key={message.id} className={`message ${message.role} ${message.status || ""}`}>
                           {message.role === "assistant" && (message.status === "running" || message.status === "error") && (
@@ -10873,7 +11074,7 @@ function App() {
                                 {message.status === "running" && (
                                   <i className="running-label">
                                     <b />
-                                    正在执行
+                                    {hasPendingInteraction ? "等待你选择" : "正在执行"}
                                   </i>
                                 )}
                                 {message.status === "error" && <i className="error">执行失败</i>}
@@ -10915,8 +11116,14 @@ function App() {
                                   </SectionErrorBoundary>
                                 )}
                                 <div className="agent-working">
-                                  <span>{message.content ? "Codex 仍在执行" : workflow ? `正在运行 ${workflow.title}` : "正在处理任务"}</span>
-                                  <i><b /><b /><b /></i>
+                                  <span>{hasPendingInteraction
+                                    ? "选择后将在当前任务中继续"
+                                    : message.content
+                                      ? "Codex 仍在执行"
+                                      : workflow
+                                        ? `正在运行 ${workflow.title}`
+                                        : "正在处理任务"}</span>
+                                  {!hasPendingInteraction && <i><b /><b /><b /></i>}
                                 </div>
                               </>
                             ) : (
@@ -10930,6 +11137,14 @@ function App() {
                                 </Suspense>
                               </SectionErrorBoundary>
                             )}
+                            {messageInteractions.map((interaction) => (
+                              <AssistantChoiceCard
+                                key={interaction.key}
+                                request={interaction.request}
+                                resolved={interaction.status === "resolved"}
+                                onSubmit={(answers) => answerAssistantInteraction(interaction, answers)}
+                              />
+                            ))}
                           </div>
                         </article>
                       );
@@ -11073,13 +11288,24 @@ function App() {
                     {plaudNotice && <div className="plaud-inline-notice">{plaudNotice}</div>}
                     <div className="plaud-queue-header">
                       <strong>最近录音</strong>
-                      <small>
-                        {plaudLoading
-                          ? "正在读取"
-                          : plaudSnapshot?.syncedAt
-                            ? new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(plaudSnapshot.syncedAt)
-                            : "等待同步"}
-                      </small>
+                      <span>
+                        <small>
+                          {plaudLoading
+                            ? "正在读取"
+                            : plaudSnapshot?.syncedAt
+                              ? new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(plaudSnapshot.syncedAt)
+                              : "按刷新读取"}
+                        </small>
+                        <button
+                          type="button"
+                          title="刷新 PLAUD 最近录音"
+                          aria-label="刷新 PLAUD 最近录音"
+                          disabled={plaudLoading || plaudLoadingMore || plaudSyncing}
+                          onClick={() => void refreshPlaudQueue({ fresh: true })}
+                        >
+                          <RefreshCw className={plaudLoading ? "spinning" : ""} size={13} />
+                        </button>
+                      </span>
                     </div>
                     <div
                       className="plaud-queue-list"
@@ -11336,6 +11562,16 @@ function App() {
           onSave={saveAppSettings}
           onLogin={startChatGPTLogin}
           onRefresh={refreshCodex}
+        />
+      </Suspense>
+    )}
+    {radarSourceManagerOpen && (
+      <Suspense fallback={<div className="lazy-overlay"><RefreshCw className="spinning" size={20} />正在加载信源管理</div>}>
+        <RadarSourceManager
+          open
+          onClose={() => setRadarSourceManagerOpen(false)}
+          onSnapshot={setRadarSourceSnapshot}
+          onPodcastTranscript={archivePodcastTranscript}
         />
       </Suspense>
     )}
