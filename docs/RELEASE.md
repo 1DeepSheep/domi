@@ -24,9 +24,9 @@
 
 1. 先提交并推送 domi 插件改动，且每次插件内容变化都必须提升 `.codex-plugin/plugin.json` 的 `version`。
 2. 在插件仓库运行 `node scripts/public-release-check.cjs --history`；在客户端仓库运行 `npm run privacy:history` 和 `npm run check`。源码、完整历史、类型检查和主进程语法检查必须全部通过。
-3. 运行 `npm run dist:mac`。该命令会从官方公开插件仓库拉取最新 `main`，记录提交和内容哈希，并把该快照封装进客户端；Fork 可通过 `DOMI_PLUGIN_REPOSITORY` 覆盖仓库地址。拉取或校验失败会直接终止发布。
-4. 验证签名、公证和 stapling；失败时不得创建 Release。
-5. 确认 DMG 最终内容扫描通过，只上传 `release/<version>/` 中这一版本的文件。禁止把整个历史 `release/` 目录批量上传。
+3. 运行 `npm run dist:mac`。该命令会准备 arm64 和 x64 两套 Codex/FFmpeg Runtime，从官方公开插件仓库拉取最新 `main`，记录提交和内容哈希，并把同一插件快照封装进两个架构的客户端；Fork 可通过 `DOMI_PLUGIN_REPOSITORY` 覆盖仓库地址。拉取或校验失败会直接终止发布。
+4. 分别验证 arm64 与 x64 `.app` 的架构、签名、公证和 stapling；任一架构失败时不得创建 Release。
+5. 确认两个 DMG 的最终内容扫描都通过。`release/<version>/` 必须包含两个架构各自的 DMG、ZIP 和两份 blockmap，以及一个同时列出 arm64/x64 文件的 `latest-mac.yml`，共九个文件；禁止把整个历史 `release/` 目录批量上传。
 
 打包使用的是 GitHub 已提交版本，不会读取 `~/plugins/domi` 中尚未提交的工作区改动。这样正式安装包可复现，也不会意外发布半成品。`npm run pack:mac` 仅用于本机测试，会读取本机插件工作区。
 
@@ -46,7 +46,7 @@ Release 前必须确认保护检查成功。不要绕过失败检查手工上传
 
 `dist:mac:resume` 不会重新拉取插件，因为它必须继续处理已经签名并提交公证的同一份 `.app`。如果 domi 在公证等待期间又更新，应提升客户端版本并重新执行一次完整的 `npm run dist:mac`，不能把新插件塞进已提交公证的产物。
 
-`npm run dist:mac` 会先生成 Developer ID 签名的 `.app`，再使用 `APPLE_KEYCHAIN_PROFILE`（未设置时为 `domi-notary`）提交 Apple 公证并等待成功、贴票和验证，最后才从这份已贴票的 `.app` 生成 DMG、ZIP、blockmap 与更新清单。缺少公证凭据或公证失败时命令必须失败，不能上传未公证产物。
+`npm run dist:mac` 会分别生成 Developer ID 签名的 arm64 与 x64 `.app`，再使用 `APPLE_KEYCHAIN_PROFILE`（未设置时为 `domi-notary`）逐个提交 Apple 公证并等待成功、贴票和验证，最后才从两份已贴票的 `.app` 生成各自的 DMG、ZIP、blockmap，并合并生成单一更新清单。缺少公证凭据、架构校验失败或任一公证失败时命令必须失败，不能上传不完整或未公证产物。
 
 ## 升级数据保护
 

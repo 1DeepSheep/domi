@@ -3,10 +3,17 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { expectedTargetForArch } = require("../electron/codex-runtime.cjs");
 
 const root = path.resolve(__dirname, "..");
-const manifestPath = path.join(root, "resources", "codex-runtime.json");
-const outputRoot = path.join(root, "build", "codex-runtime");
+const targetArch = String(process.env.DOMI_TARGET_ARCH || process.arch).trim();
+const expectedRuntime = expectedTargetForArch(targetArch);
+const manifestPath = path.join(
+  root,
+  "resources",
+  targetArch === "x64" ? "codex-runtime-x64.json" : "codex-runtime.json"
+);
+const outputRoot = path.join(root, "build", `codex-runtime-${targetArch}`);
 const upstreamArchive = path.join(outputRoot, "upstream-codex-package.tar.gz");
 const outputArchive = path.join(outputRoot, "codex-package.tar.gz");
 const outputManifest = path.join(outputRoot, "manifest.json");
@@ -37,8 +44,8 @@ function validateManifest(value) {
   if (
     value?.schemaVersion !== 1
     || !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(String(value.version || ""))
-    || value.target !== "aarch64-apple-darwin"
-    || value.assetName !== "codex-package-aarch64-apple-darwin.tar.gz"
+    || value.target !== expectedRuntime.target
+    || value.assetName !== expectedRuntime.assetName
     || !String(value.assetUrl || "").startsWith(
       `https://github.com/openai/codex/releases/download/${value.tag}/`
     )
@@ -241,7 +248,7 @@ function main() {
   };
   fs.writeFileSync(outputManifest, `${JSON.stringify(packagedManifest, null, 2)}\n`, "utf8");
   console.log(
-    `Prepared Codex runtime ${manifest.version} (${manifest.target}, ${stat.size} bytes, `
+    `Prepared Codex runtime ${manifest.version} (${targetArch}/${manifest.target}, ${stat.size} bytes, `
     + `${releaseMode ? "notarization-ready" : "upstream"}).`
   );
 }
