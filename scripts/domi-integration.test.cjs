@@ -44,7 +44,15 @@ test("PLAUD connection errors request login only for confirmed authentication fa
     "browser_unavailable"
   );
   assert.equal(isRetryablePlaudReadFailure(new Error("HTTP 429: too many requests")), true);
-  assert.equal(isRetryablePlaudReadFailure(new Error("HTTP 401: unauthorized")), false);
+  assert.equal(isRetryablePlaudReadFailure(new Error("HTTP 401: unauthorized")), true);
+  assert.equal(
+    classifyPlaudConnectionFailure(new Error("HTTP 401: unauthorized"), "tabbit").status,
+    "authorization_pending"
+  );
+  assert.equal(
+    classifyPlaudConnectionFailure(new Error("HTTP 403: forbidden"), "tabbit").status,
+    "access_denied"
+  );
   assert.equal(
     classifyPlaudConnectionFailure(
       new Error("PLAUD 登录已失效，请在设置中重新登录并验证。"),
@@ -1990,32 +1998,53 @@ test("PLAUD workers receive the app Playwright runtime through NODE_PATH", async
     ffmpegPath: "/tmp/domi-runtime/bin/ffmpeg",
     ffprobePath: "/tmp/domi-runtime/bin/ffprobe"
   };
+  let receivedRequest;
+  const plaudBroker = {
+    request: async (command, args, pluginRoot, options) => {
+      receivedRequest = { command, args, pluginRoot, options };
+      return { ok: true, items: [] };
+    },
+    stop: async () => undefined
+  };
   const integration = new DomiIntegration({
     stateStore,
     plaudOutputDir: "/tmp/domi-test",
     domiConfigPath,
     playwrightNodeModules,
-    mediaRuntime
+    mediaRuntime,
+    plaudBroker
   });
   integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
 
-  let receivedOptions;
-  integration.runJson = async (_binary, _args, options) => {
-    receivedOptions = options;
-    return { ok: true, items: [] };
-  };
-
   await integration.runPlaudWorker("list", ["50"]);
 
-  assert.equal(receivedOptions.env.ELECTRON_RUN_AS_NODE, "1");
-  assert.equal(receivedOptions.env.DOMI_CONFIG_PATH, domiConfigPath);
-  assert.equal(receivedOptions.env.DOMI_FFMPEG_PATH, mediaRuntime.ffmpegPath);
-  assert.equal(receivedOptions.env.DOMI_FFPROBE_PATH, mediaRuntime.ffprobePath);
-  assert.equal(receivedOptions.env.NODE_PATH.split(path.delimiter)[0], playwrightNodeModules);
-  assert.equal(receivedOptions.timeout, 85_000);
+  const runtimeEnv = integration.plaudRuntimeEnv();
+  assert.equal(runtimeEnv.ELECTRON_RUN_AS_NODE, "1");
+  assert.equal(runtimeEnv.DOMI_CONFIG_PATH, domiConfigPath);
+  assert.equal(runtimeEnv.DOMI_FFMPEG_PATH, mediaRuntime.ffmpegPath);
+  assert.equal(runtimeEnv.DOMI_FFPROBE_PATH, mediaRuntime.ffprobePath);
+  assert.equal(runtimeEnv.NODE_PATH.split(path.delimiter)[0], playwrightNodeModules);
+  assert.deepEqual(receivedRequest, {
+    command: "list",
+    args: ["50"],
+    pluginRoot: "/tmp/domi-plugin",
+    options: {
+      timeoutMs: 90_000,
+      sessionKey: "/tmp/domi-plugin\u0000chrome\u00001"
+    }
+  });
 });
 
 test("PLAUD connection uses the selected private browser profile command", async () => {
+  let selectedBrowser = "chrome";
+  const brokerCalls = [];
+  const plaudBroker = {
+    request: async (command, args, pluginRoot, options) => {
+      brokerCalls.push({ command, args, pluginRoot, options });
+      return { ok: true, connected: true, browserLabel: "Tabbit" };
+    },
+    stop: async (reason) => brokerCalls.push({ stop: reason })
+  };
   const integration = new DomiIntegration({
     stateStore: {
       loadCache: () => null,
@@ -2024,8 +2053,9 @@ test("PLAUD connection uses the selected private browser profile command", async
     plaudOutputDir: "/tmp/domi-test",
     configProvider: () => ({
       plaudConnectionMode: "enabled",
-      plaudBrowser: "chrome"
-    })
+      plaudBrowser: selectedBrowser
+    }),
+    plaudBroker
   });
   integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
   const calls = [];
@@ -2033,63 +2063,82 @@ test("PLAUD connection uses the selected private browser profile command", async
     calls.push({ binary, args, options });
     return {
       ok: true,
-      connected: args[1] === "login" || args[1] === "connection",
+      connected: args[1] === "login",
       browser: args[2],
       browserLabel: args[2] === "tabbit" ? "Tabbit" : "Google Chrome"
     };
   };
 
   const login = await integration.loginPlaud({ browser: "chrome" });
+  selectedBrowser = "tabbit";
   const check = await integration.plaudConnection({ browser: "tabbit" });
 
   assert.equal(login.connected, true);
   assert.deepEqual(calls[0].args.slice(-2), ["doctor", "chrome"]);
   assert.deepEqual(calls[1].args.slice(-2), ["login", "chrome"]);
   assert.deepEqual(calls[2].args.slice(-2), ["doctor", "tabbit"]);
-  assert.deepEqual(calls[3].args.slice(-2), ["connection", "tabbit"]);
   assert.equal(calls[1].options.queue, "plaud");
   assert.equal(calls[1].options.timeout, 11 * 60 * 1000);
-  assert.equal(calls[3].options.timeout, 85_000);
+  assert.deepEqual(brokerCalls, [
+    { stop: "login" },
+    {
+      command: "connection",
+      args: [],
+      pluginRoot: "/tmp/domi-plugin",
+      options: {
+        timeoutMs: 90_000,
+        sessionKey: "/tmp/domi-plugin\u0000tabbit\u00001"
+      }
+    }
+  ]);
   assert.equal(check.browserLabel, "Tabbit");
 });
 
 test("PLAUD connection leaves transient rebuild to the plugin under one bounded command", async () => {
+  let attempts = 0;
+  let receivedTimeout = 0;
+  const plaudBroker = {
+    request: async (_command, _args, _root, options) => {
+      attempts += 1;
+      receivedTimeout = options.timeoutMs;
+      throw new Error("page.reload: Protocol error (Page.reload): Not attached to an active page");
+    },
+    stop: async () => undefined
+  };
   const integration = new DomiIntegration({
     stateStore: { loadCache: () => null, saveCache: () => undefined },
     plaudOutputDir: "/tmp/domi-test",
     configProvider: () => ({ plaudConnectionMode: "enabled", plaudBrowser: "tabbit" }),
-    sleep: async () => undefined
+    sleep: async () => undefined,
+    plaudBroker
   });
   integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
-  let attempts = 0;
-  let receivedTimeout = 0;
-  integration.runJson = async (_binary, _args, options) => {
-    attempts += 1;
-    receivedTimeout = options.timeout;
-    throw new Error("page.reload: Protocol error (Page.reload): Not attached to an active page");
-  };
 
   await assert.rejects(
     integration.runPlaudConnectionCommand("connection", "tabbit"),
     /Not attached to an active page/
   );
   assert.equal(attempts, 1);
-  assert.equal(receivedTimeout, 85_000);
+  assert.equal(receivedTimeout, 90_000);
 });
 
 test("PLAUD connection does not retry a confirmed logout", async () => {
+  let attempts = 0;
+  const plaudBroker = {
+    request: async () => {
+      attempts += 1;
+      throw new Error("PLAUD_AUTH_REQUIRED: account sign-in is required");
+    },
+    stop: async () => undefined
+  };
   const integration = new DomiIntegration({
     stateStore: { loadCache: () => null, saveCache: () => undefined },
     plaudOutputDir: "/tmp/domi-test",
     configProvider: () => ({ plaudConnectionMode: "enabled", plaudBrowser: "tabbit" }),
-    sleep: async () => undefined
+    sleep: async () => undefined,
+    plaudBroker
   });
   integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
-  let attempts = 0;
-  integration.runJson = async () => {
-    attempts += 1;
-    throw new Error("PLAUD_AUTH_REQUIRED: account sign-in is required");
-  };
 
   await assert.rejects(
     integration.runPlaudConnectionCommand("connection", "tabbit"),

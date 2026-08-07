@@ -220,6 +220,10 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "浏览器预览模式不能绑定本地 Codex 任务。"
   }),
+  answerCodexUserInput: async () => ({
+    ok: false,
+    error: "浏览器预览模式不能提交 Codex 选择。"
+  }),
   selectFiles: async () => ({
     ok: false,
     canceled: false,
@@ -340,6 +344,32 @@ const browserFallback: Window["workbench"] = {
   saveWeeklyNewsCheckpoint: async () => ({
     ok: false,
     error: "浏览器预览模式不能保存 domi 行业雷达水位。"
+  }),
+  listRadarSources: async () => ({
+    ok: true,
+    sources: [],
+    jobs: [],
+    updatedAt: Date.now()
+  }),
+  saveRadarSource: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中保存本地信源。"
+  }),
+  deleteRadarSource: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中删除本地信源。"
+  }),
+  syncRadarSources: async () => ({
+    ok: false,
+    sources: [],
+    jobs: [],
+    results: [],
+    updatedAt: Date.now(),
+    error: "请在 Electron 窗口中同步行业信源。"
+  }),
+  processPodcastEpisode: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中通过 PLAUD 处理播客。"
   }),
   listDomiTasks: async () => ({
     ok: false,

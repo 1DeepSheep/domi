@@ -93,6 +93,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 const activeRuns = new Map();
 const liveCodexThreads = new Map();
+const resolvedCodexUserInputs = new Map();
 const pendingRunPostProcessing = new Set();
 let researchCacheWriteQueue = Promise.resolve();
 const NON_ARCHIVED_WORKFLOWS = new Set([
@@ -230,7 +231,8 @@ function getDomiIntegration() {
       stateStore: getStateStore(),
       configProvider: () => getAppSettings().load().settings,
       domiConfigPath: path.join(app.getPath("userData"), "domi-plugin-config.json"),
-      plaudOutputDir: path.join(demoWorkspace, "work", "domi", "plaud")
+      plaudOutputDir: path.join(demoWorkspace, "work", "domi", "plaud"),
+      podcastCacheDir: path.join(app.getPath("userData"), "Cache", "podcasts")
     });
   }
   return domiIntegration;
@@ -1387,6 +1389,92 @@ function publishCodexEvent(sender, runId, payload) {
   }
 }
 
+function codexUserInputRequestKey(id) {
+  return `${typeof id}:${String(id)}`;
+}
+
+function rememberResolvedCodexUserInput(id, runId) {
+  const key = codexUserInputRequestKey(id);
+  resolvedCodexUserInputs.set(key, runId);
+  if (resolvedCodexUserInputs.size <= 250) return;
+  const oldest = resolvedCodexUserInputs.keys().next().value;
+  if (oldest !== undefined) resolvedCodexUserInputs.delete(oldest);
+}
+
+function publicCodexUserInputRequest(id, params) {
+  return {
+    requestId: id,
+    threadId: params.threadId,
+    turnId: params.turnId,
+    itemId: params.itemId,
+    questions: params.questions.map((question) => ({
+      id: question.id,
+      header: question.header,
+      question: question.question,
+      isOther: question.isOther,
+      isSecret: question.isSecret,
+      options: question.options
+        ? question.options.map((option) => ({ ...option }))
+        : null
+    })),
+    isBlocking: params.isBlocking,
+    autoResolutionMs: params.autoResolutionMs
+  };
+}
+
+function publishCodexUserInputRequest(run, request) {
+  publishCodexEvent(run.sender, run.runId, {
+    type: "user-input-request",
+    threadId: request.threadId,
+    turnId: request.turnId,
+    request
+  });
+}
+
+function handleCodexUserInputRequest({ id, params }) {
+  const run = findActiveRun(params);
+  if (!run || run.finished) {
+    codexClient?.cancelUserInput(id, "对应的 domi 任务已经结束。");
+    return;
+  }
+  if (run.allowUserInput === false) {
+    const answers = Object.fromEntries(params.questions.map((question) => [
+      question.id,
+      [question.options?.[0]?.label
+        || "请按当前证据做安全、可逆的最佳判断；无法判断时跳过写入并标记待审核。"]
+    ]));
+    const answered = codexClient?.answerUserInput(id, answers);
+    if (!answered?.ok) {
+      codexClient?.cancelUserInput(id, answered?.error || "后台任务不能等待交互选择。");
+    }
+    return;
+  }
+  const request = publicCodexUserInputRequest(id, params);
+  run.pendingUserInputs.set(codexUserInputRequestKey(id), request);
+  clearTimeout(run.idleTimer);
+  run.idleTimer = null;
+  publishCodexUserInputRequest(run, request);
+}
+
+function handleCodexUserInputRequestClosed({ id, params, reason }) {
+  const key = codexUserInputRequestKey(id);
+  const run = findActiveRun(params);
+  if (!run) return;
+  run.pendingUserInputs.delete(key);
+  rememberResolvedCodexUserInput(id, run.runId);
+  if (reason === "answered") {
+    publishCodexEvent(run.sender, run.runId, {
+      type: "user-input-resolved",
+      threadId: params.threadId,
+      turnId: params.turnId,
+      requestId: id
+    });
+  }
+  if (!run.finished && run.pendingUserInputs.size === 0) {
+    armRunIdleTimeout(run);
+  }
+}
+
 function findActiveRun(params) {
   for (const run of activeRuns.values()) {
     if (params.turnId && run.turnId === params.turnId) {
@@ -1481,6 +1569,10 @@ function usageFromNotification(params) {
 
 function armRunIdleTimeout(run) {
   clearTimeout(run.idleTimer);
+  if (run.pendingUserInputs?.size > 0) {
+    run.idleTimer = null;
+    return;
+  }
   run.idleTimer = setTimeout(() => {
     if (run.finished || activeRuns.get(run.runId) !== run) return;
     const error = "Codex 任务长时间没有返回事件，已停止等待。可以在当前对话中继续执行。";
@@ -1568,6 +1660,10 @@ function finishRun(run, type, details = {}) {
   }
   run.finished = true;
   clearTimeout(run.idleTimer);
+  for (const request of run.pendingUserInputs.values()) {
+    codexClient?.cancelUserInput(request.requestId, "对应的 domi 任务已经结束。");
+  }
+  run.pendingUserInputs.clear();
   activeRuns.delete(run.runId);
 
   const stopped = type === "stopped";
@@ -1709,7 +1805,9 @@ function handleCodexNotification(method, params) {
   if (method === "turn/completed") {
     run.turnId = params.turn?.id || run.turnId;
     const status = classifyCodexTurnStatus(params.turn?.status);
-    if (status === "completed") {
+    if (run.stopRequested) {
+      finishRun(run, "stopped");
+    } else if (status === "completed") {
       finishRun(run, "completed");
     } else if (status === "stopped") {
       finishRun(run, "stopped");
@@ -1734,6 +1832,8 @@ function getCodexClient() {
       version: app.getVersion(),
       runtimeProvider: getCodexRuntime,
       onNotification: handleCodexNotification,
+      onUserInputRequest: handleCodexUserInputRequest,
+      onUserInputRequestClosed: handleCodexUserInputRequestClosed,
       onLog: (text) => {
         if (process.env.NODE_ENV !== "production") {
           process.stderr.write(`[codex app-server] ${text}`);
@@ -1754,6 +1854,7 @@ function resetCodexClient() {
   codexClient?.close();
   codexClient = null;
   liveCodexThreads.clear();
+  resolvedCodexUserInputs.clear();
   serviceCoordinator.invalidate("codex:check");
 }
 
@@ -2446,6 +2547,14 @@ async function runCodex(sender, payload) {
         workspacePath
       };
     }
+    if (
+      ["domi-router", "quick-discussion", "plaud-connection-assist"].includes(String(payload?.workflowId || ""))
+      || /\bPLAUD\b/i.test(prompt)
+    ) {
+      // Codex PLAUD skills own the same private Profile. Release the renderer's
+      // hidden read session first so the task never sees a false profile lock.
+      await getDomiIntegration().stopPlaudBackgroundSession("codex-plaud-workflow");
+    }
     const client = getCodexClient();
     const researchCacheScope = projectResearchCacheScope(payload, workspacePath);
     const researchCachePromise = prepareProjectResearchCache({
@@ -2498,12 +2607,15 @@ async function runCodex(sender, payload) {
         externalType: payload?.externalType || "",
         externalRecordId: payload?.externalRecordId || "",
         workflowId: payload?.workflowId || "",
+        allowUserInput: payload?.allowUserInput !== false,
         workspaceIdentity: directoryIdentity(workspacePath),
         finished: false,
         acceptedAt,
         threadReadyAt,
         turnAcceptedAt: null,
         researchCache,
+        pendingUserInputs: new Map(),
+        stopRequested: false,
         resolve
       };
       activeRuns.set(runId, run);
@@ -2588,7 +2700,13 @@ async function stopCodex(runId) {
     return { ok: false, error: "Codex 启动超时，尚未取得可停止的运行标识。" };
   }
 
+  run.stopRequested = true;
+  for (const request of [...run.pendingUserInputs.values()]) {
+    getCodexClient().cancelUserInput(request.requestId, "用户已停止当前任务。");
+  }
+
   for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (!activeRuns.has(runId)) return { ok: true };
     try {
       await getCodexClient().request("turn/interrupt", {
         threadId: run.threadId,
@@ -2602,6 +2720,7 @@ async function stopCodex(runId) {
       if (unfinished) finishRun(unfinished, "stopped");
       return { ok: true };
     } catch (error) {
+      if (!activeRuns.has(runId)) return { ok: true };
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes("no active turn") || attempt === 4) {
         return { ok: false, error: message };
@@ -2646,7 +2765,10 @@ async function recoverCodexThread(threadId) {
       output: latestMessage?.text || activeRun?.output || "",
       error: status === "failed"
         ? lastTurn?.error?.message || `Codex turn 状态：${turnStatus || "unknown"}`
-        : ""
+        : "",
+      pendingUserInputRequests: activeRun
+        ? [...activeRun.pendingUserInputs.values()]
+        : []
     };
   } catch (error) {
     // A reopened renderer can safely rebind a run still owned by this main
@@ -2661,7 +2783,8 @@ async function recoverCodexThread(threadId) {
         turnId: activeRun.turnId || "",
         status: "running",
         output: activeRun.output || "",
-        error: ""
+        error: "",
+        pendingUserInputRequests: [...activeRun.pendingUserInputs.values()]
       };
     }
     return {
@@ -2681,7 +2804,38 @@ function bindCodexRun(runId, sender) {
   // The renderer installs its run context before invoking this handshake. From this point
   // onward no live delta can be delivered to a window that has not registered the run yet.
   run.sender = sender;
+  for (const request of run.pendingUserInputs.values()) {
+    publishCodexUserInputRequest(run, request);
+  }
   return { ok: true };
+}
+
+function answerCodexUserInput(sender, request = {}) {
+  const runId = String(request.runId || "").trim();
+  const requestId = request.requestId;
+  if (!runId || !["string", "number"].includes(typeof requestId)) {
+    return { ok: false, error: "用户选择请求缺少有效标识。" };
+  }
+  const key = codexUserInputRequestKey(requestId);
+  const run = activeRuns.get(runId);
+  if (!run) {
+    return resolvedCodexUserInputs.get(key) === runId
+      ? { ok: true, duplicate: true }
+      : { ok: false, error: "该任务已经结束。" };
+  }
+  if (!sender || sender.isDestroyed() || run.sender?.id !== sender.id) {
+    return { ok: false, error: "当前窗口不能回答该任务的选择请求。" };
+  }
+  const pending = run.pendingUserInputs.get(key);
+  if (!pending) {
+    return resolvedCodexUserInputs.get(key) === runId
+      ? { ok: true, duplicate: true }
+      : { ok: false, error: "该选择请求已结束或不存在。" };
+  }
+  const result = getCodexClient().answerUserInput(requestId, request.answers);
+  return result.ok
+    ? result
+    : { ok: false, error: result.error || "无法提交当前选择。" };
 }
 
 if (hasSingleInstanceLock) app.whenReady().then(() => {
@@ -2779,6 +2933,7 @@ app.on("before-quit", (event) => {
 
     const remaining = await drainRunPostProcessing();
     appendRuntimeLog("app-postprocess-drained", { remaining });
+    await domiIntegration?.shutdownAllPlaudOperations("app-quit");
     updateService?.stop();
     codexClient?.close();
     if (remaining === 0) stateStore?.close();
@@ -2800,6 +2955,7 @@ ipcMain.on("app:renderer-report", (_event, payload) => {
     "react-boundary",
     "section-boundary",
     "document-operation",
+    "codex-run",
     "markdown-editor-boundary",
     "markdown-editor-operation",
     "workflow-metric"
@@ -2844,6 +3000,9 @@ ipcMain.handle("codex:run", (event, payload) => runCodex(event.sender, payload))
 ipcMain.handle("codex:stop", (_event, runId) => stopCodex(runId));
 ipcMain.handle("codex:recover-thread", (_event, threadId) => recoverCodexThread(threadId));
 ipcMain.handle("codex:bind-run", (event, runId) => bindCodexRun(runId, event.sender));
+ipcMain.handle("codex:answer-user-input", (event, request) =>
+  answerCodexUserInput(event.sender, request)
+);
 ipcMain.handle("settings:load", () => ({ ok: true, ...getAppSettings().load() }));
 ipcMain.handle("settings:save", (_event, request) => saveRuntimeSettings(request));
 ipcMain.handle("settings:select-directory", (event, currentPath) =>
@@ -3048,6 +3207,58 @@ ipcMain.handle("domi:weekly-news-checkpoint", (_event, request) => {
   const result = getDomiIntegration().recordWeeklyNewsRadarCheckpoint(request);
   if (result.ok) serviceCoordinator.invalidate("domi:weekly-news:");
   return result;
+});
+ipcMain.handle("domi:radar-source-list", () => {
+  try {
+    return getDomiIntegration().listRadarSources();
+  } catch (error) {
+    return { ok: false, sources: [], jobs: [], updatedAt: Date.now(), error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:radar-source-save", (_event, request) => {
+  try {
+    const result = getDomiIntegration().saveRadarSource(request);
+    serviceCoordinator.invalidate("domi:radar-source-sync:");
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:radar-source-delete", (_event, request) => {
+  try {
+    const result = getDomiIntegration().deleteRadarSource(request);
+    serviceCoordinator.invalidate("domi:radar-source-sync:");
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:radar-source-sync", async (_event, request) => {
+  try {
+    const sourceId = String(request?.sourceId || "");
+    return await serviceCoordinator.run(
+      `domi:radar-source-sync:${sourceId || "all"}`,
+      () => getDomiIntegration().syncRadarSources(request),
+      { force: request?.fresh === true, ttlMs: 30_000, retries: 0, allowStale: false }
+    );
+  } catch (error) {
+    return { ok: false, sources: [], jobs: [], results: [], updatedAt: Date.now(), error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:podcast-process", async (_event, request) => {
+  try {
+    const jobId = String(request?.jobId || "");
+    const result = await serviceCoordinator.run(
+      `domi:podcast-process:${jobId}`,
+      () => getDomiIntegration().processPodcastEpisode(request),
+      { force: true, retries: 0, allowStale: false }
+    );
+    serviceCoordinator.invalidate("domi:plaud-list");
+    serviceCoordinator.invalidate("domi:radar-source-sync:");
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });
 ipcMain.handle("domi:task-list", async (_event, request) => {
   try {
