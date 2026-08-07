@@ -566,6 +566,33 @@ const browserFallback: Window["workbench"] = {
       }
     };
   },
+  updateDomiDatabaseRecordPatch: async (request) => {
+    const updatedAt = Date.now();
+    const current = request.entityType === "project"
+      ? browserFallback.listDomiDatabase().then((snapshot) =>
+          snapshot.projects.find((record) => record.recordId === request.recordId)
+        )
+      : request.entityType === "person"
+        ? browserFallback.listDomiDatabase().then((snapshot) =>
+            snapshot.people.find((record) => record.recordId === request.recordId)
+          )
+        : browserFallback.listDomiDatabase().then((snapshot) =>
+            snapshot.news.find((record) => record.recordId === request.recordId)
+          );
+    const record = await current;
+    return {
+      ok: Boolean(record),
+      entityType: request.entityType,
+      updatedAt,
+      mutationId: request.mutationId,
+      replayed: false,
+      materialization: "complete",
+      record: record
+        ? { ...record, ...request.changes, updatedAt }
+        : undefined,
+      error: record ? undefined : "浏览器预览找不到要修改的资料库记录。"
+    } as Awaited<ReturnType<Window["workbench"]["updateDomiDatabaseRecordPatch"]>>;
+  },
   previewDomiDatabaseRecord: async (request) => ({
     ok: false,
     entityType: request.entityType,

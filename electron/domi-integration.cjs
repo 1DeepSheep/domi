@@ -747,6 +747,7 @@ class DomiIntegration {
     this.sleep = sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.larkCli = this.resolveLarkCli();
     this.materialIndexCache = new Map();
+    this.databaseMaterializationQueues = new Map();
     this.larkCommandQueue = new TaskQueue(2);
     this.larkStatusCache = {
       value: null,
@@ -3006,7 +3007,7 @@ class DomiIntegration {
         error: "客户端内直接编辑数据库目前仅支持本地资料库；飞书资料库请继续通过同步工作流维护。"
       };
     }
-    return this.withLocalRepository(source, (repository) => {
+    const snapshot = this.withLocalRepository(source, (repository) => {
       repository.cleanupStructuralGhostProjects();
       return {
         ok: true,
@@ -3020,6 +3021,13 @@ class DomiIntegration {
         classificationReviews: repository.listClassificationReviews()
       };
     });
+    const pending = this.withLocalRepository(source, (repository) =>
+      repository.listPendingMaterializations()
+    );
+    for (const item of pending) {
+      this.scheduleDatabaseMaterialization(source, item.entityType, item.recordId);
+    }
+    return snapshot;
   }
 
   previewDatabaseRecord(request = {}) {
@@ -3122,6 +3130,90 @@ class DomiIntegration {
       record,
       snapshot,
       updatedAt: Date.now()
+    };
+  }
+
+  scheduleDatabaseMaterialization(source, entityType, recordId) {
+    const key = `${source.localDatabasePath}:${entityType}:${recordId}`;
+    const previous = this.databaseMaterializationQueues.get(key) || Promise.resolve();
+    let task;
+    task = previous
+      .catch(() => undefined)
+      .then(() => new Promise((resolve) => setImmediate(resolve)))
+      .then(async () => {
+        let lastError;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            return this.withLocalRepository(source, (repository) =>
+              repository.materializeDatabaseRecord(entityType, recordId)
+            );
+          } catch (error) {
+            lastError = error;
+            if (attempt < 2) await this.sleep(25 * (attempt + 1));
+          }
+        }
+        throw lastError;
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (this.databaseMaterializationQueues.get(key) === task) {
+          this.databaseMaterializationQueues.delete(key);
+        }
+      });
+    this.databaseMaterializationQueues.set(key, task);
+    return task;
+  }
+
+  async updateDatabaseRecordPatch(request = {}) {
+    const source = this.readProjectConfig();
+    if (source.backend !== "local") {
+      return {
+        ok: false,
+        error: "客户端内直接编辑数据库目前仅支持本地资料库。"
+      };
+    }
+    const entityType = String(request.entityType || "");
+    const result = this.withLocalRepository(source, (repository) =>
+      repository.updateDatabaseRecordPatch(request)
+    );
+    const record = result.record;
+    this.materialIndexCache.clear();
+    let snapshot;
+    if (record && (entityType === "project" || entityType === "person")) {
+      const cached = this.stateStore.loadCache(CACHE_KEY)?.value;
+      if (cached?.backend === "local") {
+        const collectionKey = entityType === "project" ? "projects" : "people";
+        const currentItems = Array.isArray(cached[collectionKey]) ? cached[collectionKey] : [];
+        const nextItems = currentItems.some((item) => item.recordId === record.recordId)
+          ? currentItems.map((item) => item.recordId === record.recordId ? record : item)
+          : [record, ...currentItems];
+        snapshot = {
+          ...cached,
+          syncedAt: Date.now(),
+          [collectionKey]: nextItems,
+          sources: {
+            ...(cached.sources || {}),
+            [collectionKey]: {
+              ...(cached.sources?.[collectionKey] || {}),
+              total: nextItems.length
+            }
+          }
+        };
+        this.stateStore.saveCache(CACHE_KEY, snapshot);
+      }
+    }
+    if (result.materialization === "pending") {
+      this.scheduleDatabaseMaterialization(source, entityType, request.recordId);
+    }
+    return {
+      ok: true,
+      entityType,
+      record,
+      snapshot,
+      mutationId: result.mutationId,
+      replayed: Boolean(result.replayed),
+      materialization: result.materialization,
+      updatedAt: Number(record?.updatedAt) || Date.now()
     };
   }
 

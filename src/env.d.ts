@@ -86,6 +86,9 @@ declare global {
       updateDomiDatabaseRecord: (
         request: DomiDatabaseUpdateRequest
       ) => Promise<DomiDatabaseUpdateResult>;
+      updateDomiDatabaseRecordPatch: (
+        request: DomiDatabasePatchRequest
+      ) => Promise<DomiDatabaseUpdateResult>;
       previewDomiDatabaseRecord: (
         request: DomiDatabasePreviewRequest
       ) => Promise<DomiDatabasePreviewResult>;
@@ -776,12 +779,38 @@ export type DomiDatabaseUpdateRequest =
   | { entityType: "person"; record: DomiPersonDatabaseUpdate }
   | { entityType: "news"; record: DomiNewsDatabaseUpdate };
 
+export type DomiDatabasePatchRequest =
+  | {
+      entityType: "project";
+      recordId: string;
+      expectedUpdatedAt: number;
+      mutationId: string;
+      changes: Partial<Omit<DomiProjectDatabaseUpdate, "recordId" | "expectedUpdatedAt">>;
+    }
+  | {
+      entityType: "person";
+      recordId: string;
+      expectedUpdatedAt: number;
+      mutationId: string;
+      changes: Partial<Omit<DomiPersonDatabaseUpdate, "recordId" | "expectedUpdatedAt">>;
+    }
+  | {
+      entityType: "news";
+      recordId: string;
+      expectedUpdatedAt: number;
+      mutationId: string;
+      changes: Partial<Omit<DomiNewsDatabaseUpdate, "recordId" | "expectedUpdatedAt">>;
+    };
+
 export type DomiDatabaseUpdateResult = {
   ok: boolean;
   entityType?: "project" | "person" | "news";
   record?: DomiProject | DomiPerson | DomiNewsItem;
   snapshot?: DomiSnapshot;
   updatedAt?: number;
+  mutationId?: string;
+  replayed?: boolean;
+  materialization?: "pending" | "complete";
   error?: string;
 };
 
