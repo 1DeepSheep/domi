@@ -6,7 +6,53 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const specificationPath = path.join(root, "resources", "media-runtime.json");
-const outputRoot = path.join(root, "build", "media-runtime");
+const SUPPORTED_TARGET_ARCHITECTURES = new Set(["arm64", "x64"]);
+const REQUIRED_DEPLOYMENT_TARGET = "12.0";
+
+function resolveTargetArchitecture(value = process.env.DOMI_TARGET_ARCH || process.arch) {
+  const targetArch = String(value || process.arch).trim().toLowerCase();
+  if (!SUPPORTED_TARGET_ARCHITECTURES.has(targetArch)) {
+    throw new Error(
+      `Unsupported media runtime architecture: ${targetArch || "empty"}. `
+      + "Expected DOMI_TARGET_ARCH=arm64 or DOMI_TARGET_ARCH=x64."
+    );
+  }
+  return targetArch;
+}
+
+function outputRootForArchitecture(targetArch) {
+  return path.join(root, "build", `media-runtime-${resolveTargetArchitecture(targetArch)}`);
+}
+
+function expectedMachOArchitecture(specification) {
+  return specification.targetArch === "x64" ? "x86_64" : "arm64";
+}
+
+function deriveSpecification(baseSpecification, targetArch) {
+  const normalizedArch = resolveTargetArchitecture(targetArch);
+  const flags = Array.isArray(baseSpecification?.configureFlags)
+    ? [...baseSpecification.configureFlags]
+    : [];
+  if (normalizedArch === "arm64") {
+    return {
+      ...baseSpecification,
+      targetArch: "arm64",
+      configureFlags: flags
+    };
+  }
+
+  const x64Flags = flags.map((flag) => {
+    if (flag === "--arch=arm64") return "--arch=x86_64";
+    if (flag === "--cc=/usr/bin/clang") return "--cc=/usr/bin/clang -arch x86_64";
+    return flag;
+  });
+  if (!x64Flags.includes("--disable-x86asm")) x64Flags.push("--disable-x86asm");
+  return {
+    ...baseSpecification,
+    targetArch: "x64",
+    configureFlags: x64Flags
+  };
+}
 
 function sha256File(filePath) {
   const hash = crypto.createHash("sha256");
@@ -26,12 +72,19 @@ function sha256File(filePath) {
 
 function validateSpecification(value) {
   const flags = Array.isArray(value?.configureFlags) ? value.configureFlags : [];
+  const expectedArchitectureFlag = value?.targetArch === "x64"
+    ? "--arch=x86_64"
+    : "--arch=arm64";
+  const expectedCompilerFlag = value?.targetArch === "x64"
+    ? "--cc=/usr/bin/clang -arch x86_64"
+    : "--cc=/usr/bin/clang";
   if (
     value?.schemaVersion !== 1
     || value.name !== "FFmpeg"
     || !/^\d+\.\d+\.\d+$/.test(String(value.version || ""))
     || value.targetPlatform !== "darwin"
-    || value.targetArch !== "arm64"
+    || !SUPPORTED_TARGET_ARCHITECTURES.has(value.targetArch)
+    || value.deploymentTarget !== REQUIRED_DEPLOYMENT_TARGET
     || value.sourceUrl !== `https://ffmpeg.org/releases/ffmpeg-${value.version}.tar.xz`
     || !/^[a-f0-9]{64}$/.test(String(value.sourceSha256 || ""))
     || !Number.isSafeInteger(value.sourceSize)
@@ -46,6 +99,11 @@ function validateSpecification(value) {
     || !flags.includes("--enable-ffmpeg")
     || !flags.includes("--enable-ffprobe")
     || !flags.includes("--enable-encoder=opus")
+    || !flags.includes(expectedArchitectureFlag)
+    || !flags.includes(expectedCompilerFlag)
+    || !flags.includes(`--extra-cflags=-mmacosx-version-min=${value.deploymentTarget}`)
+    || !flags.includes(`--extra-ldflags=-mmacosx-version-min=${value.deploymentTarget}`)
+    || (value.targetArch === "x64" && !flags.includes("--disable-x86asm"))
     || flags.some((flag) => /--enable-(?:gpl|nonfree)\b/.test(flag))
   ) {
     throw new Error("Media runtime specification is invalid or not redistributable.");
@@ -90,10 +148,60 @@ function commandOutput(binary, args) {
   });
 }
 
-function validateBinary(binaryPath, name, specification) {
+function inspectMachOArchitectures(binaryPath) {
+  const output = commandOutput("/usr/bin/lipo", ["-archs", binaryPath]).trim();
+  const architectures = output.split(/\s+/).filter(Boolean);
+  if (!architectures.length) {
+    throw new Error(`Prepared binary is not a readable Mach-O file: ${binaryPath}`);
+  }
+  return architectures;
+}
+
+function compareVersions(left, right) {
+  const leftParts = String(left || "").split(".").map((part) => Number(part) || 0);
+  const rightParts = String(right || "").split(".").map((part) => Number(part) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+function inspectMacOSMinimumVersion(binaryPath) {
+  const output = commandOutput("/usr/bin/otool", ["-l", binaryPath]);
+  const versions = [];
+  let loadCommand = "";
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const commandMatch = line.match(/^cmd\s+(LC_[A-Z0-9_]+)$/);
+    if (commandMatch) {
+      loadCommand = commandMatch[1];
+      continue;
+    }
+    if (loadCommand === "LC_BUILD_VERSION") {
+      const match = line.match(/^minos\s+(\d+(?:\.\d+){1,2})$/);
+      if (match) versions.push(match[1]);
+    } else if (loadCommand === "LC_VERSION_MIN_MACOSX") {
+      const match = line.match(/^version\s+(\d+(?:\.\d+){1,2})$/);
+      if (match) versions.push(match[1]);
+    }
+  }
+  if (versions.length !== 1) {
+    throw new Error(
+      `Prepared binary must declare exactly one macOS deployment target: ${binaryPath}`
+    );
+  }
+  return versions[0];
+}
+
+function validateBinary(binaryPath, name, specification, options = {}) {
   if (!fs.existsSync(binaryPath)) throw new Error(`Prepared ${name} binary is missing.`);
   fs.chmodSync(binaryPath, 0o755);
-  const output = commandOutput(binaryPath, ["-version"]);
+  const runCommand = options.commandOutput || commandOutput;
+  const inspectArchitectures = options.inspectMachOArchitectures || inspectMachOArchitectures;
+  const inspectMinimumVersion = options.inspectMacOSMinimumVersion || inspectMacOSMinimumVersion;
+  const output = runCommand(binaryPath, ["-version"]);
   if (
     !output.startsWith(`${name} version ${specification.version}`)
     || /--enable-(?:gpl|nonfree)\b/.test(output)
@@ -102,12 +210,29 @@ function validateBinary(binaryPath, name, specification) {
   ) {
     throw new Error(`Prepared ${name} binary failed the LGPL runtime policy check.`);
   }
+  const expectedArchitecture = expectedMachOArchitecture(specification);
+  const architectures = inspectArchitectures(binaryPath);
+  if (architectures.length !== 1 || architectures[0] !== expectedArchitecture) {
+    throw new Error(
+      `Prepared ${name} binary architecture mismatch: expected ${expectedArchitecture}, `
+      + `received ${architectures.join(", ") || "unknown"}.`
+    );
+  }
+  const minimumMacOSVersion = inspectMinimumVersion(binaryPath);
+  if (compareVersions(minimumMacOSVersion, specification.deploymentTarget) > 0) {
+    throw new Error(
+      `Prepared ${name} binary requires macOS ${minimumMacOSVersion}; `
+      + `expected ${specification.deploymentTarget} or earlier.`
+    );
+  }
   const stat = fs.statSync(binaryPath);
   if (stat.size < 500_000 || stat.size > 20 * 1024 * 1024) {
     throw new Error(`Prepared ${name} binary size is outside the expected range.`);
   }
   return {
     name,
+    architecture: expectedArchitecture,
+    minimumMacOSVersion,
     sha256: sha256File(binaryPath),
     size: stat.size
   };
@@ -116,7 +241,10 @@ function validateBinary(binaryPath, name, specification) {
 function buildCacheDirectory(specification) {
   const digest = crypto
     .createHash("sha256")
-    .update(JSON.stringify(specification.configureFlags))
+    .update(JSON.stringify({
+      configureFlags: specification.configureFlags,
+      deploymentTarget: specification.deploymentTarget
+    }))
     .digest("hex")
     .slice(0, 16);
   const configured = String(process.env.DOMI_MEDIA_RUNTIME_CACHE || "").trim();
@@ -166,6 +294,13 @@ function buildBinaries(specification, archivePath, cacheDirectory) {
   }
 
   const stagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), "domi-media-runtime-"));
+  const buildEnvironment = {
+    ...process.env,
+    LC_ALL: "C",
+    SOURCE_DATE_EPOCH: "0",
+    ZERO_AR_DATE: "1",
+    MACOSX_DEPLOYMENT_TARGET: specification.deploymentTarget
+  };
   try {
     execFileSync("/usr/bin/tar", ["-xf", archivePath, "-C", stagingRoot], {
       stdio: "inherit",
@@ -174,24 +309,14 @@ function buildBinaries(specification, archivePath, cacheDirectory) {
     const sourceRoot = path.join(stagingRoot, `ffmpeg-${specification.version}`);
     execFileSync(path.join(sourceRoot, "configure"), specification.configureFlags, {
       cwd: sourceRoot,
-      env: {
-        ...process.env,
-        LC_ALL: "C",
-        SOURCE_DATE_EPOCH: "0",
-        ZERO_AR_DATE: "1"
-      },
+      env: buildEnvironment,
       stdio: "inherit",
       timeout: 5 * 60_000
     });
     const concurrency = String(Math.max(1, Math.min(os.cpus().length, 8)));
     execFileSync("/usr/bin/make", [`-j${concurrency}`, "ffmpeg", "ffprobe"], {
       cwd: sourceRoot,
-      env: {
-        ...process.env,
-        LC_ALL: "C",
-        SOURCE_DATE_EPOCH: "0",
-        ZERO_AR_DATE: "1"
-      },
+      env: buildEnvironment,
       stdio: "inherit",
       timeout: 20 * 60_000
     });
@@ -234,12 +359,20 @@ function copyLicenseFiles(specification, archivePath, destination) {
 }
 
 function main() {
-  if (process.platform !== "darwin" || process.arch !== "arm64") {
-    throw new Error("The current domi release only prepares the darwin-arm64 media runtime.");
+  if (process.platform !== "darwin") {
+    throw new Error("The domi media runtime can only be prepared on macOS.");
+  }
+  const targetArch = resolveTargetArchitecture();
+  if (targetArch === "arm64" && process.arch !== "arm64") {
+    throw new Error("The darwin-arm64 media runtime must be prepared on Apple Silicon.");
   }
   const specification = validateSpecification(
-    JSON.parse(fs.readFileSync(specificationPath, "utf8"))
+    deriveSpecification(
+      JSON.parse(fs.readFileSync(specificationPath, "utf8")),
+      targetArch
+    )
   );
+  const outputRoot = outputRootForArchitecture(targetArch);
   const { cacheRoot, cacheDirectory } = buildCacheDirectory(specification);
   const archivePath = prepareSourceArchive(specification, cacheRoot);
   const binaries = buildBinaries(specification, archivePath, cacheDirectory);
@@ -291,6 +424,12 @@ if (require.main === module) {
 module.exports = {
   archiveMatches,
   buildCacheDirectory,
+  deriveSpecification,
+  expectedMachOArchitecture,
+  inspectMacOSMinimumVersion,
+  inspectMachOArchitectures,
+  outputRootForArchitecture,
+  resolveTargetArchitecture,
   sha256File,
   validateBinary,
   validateSpecification

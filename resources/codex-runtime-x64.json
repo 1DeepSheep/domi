@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "version": "0.145.0",
+  "tag": "rust-v0.145.0",
+  "target": "x86_64-apple-darwin",
+  "assetName": "codex-package-x86_64-apple-darwin.tar.gz",
+  "assetUrl": "https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-package-x86_64-apple-darwin.tar.gz",
+  "sha256": "9d402c9ca814655fddc07b548d7086491c0afcebe1f746cdeba1045fd6f62646",
+  "size": 130237044,
+  "license": "Apache-2.0",
+  "source": "https://github.com/openai/codex"
+}
