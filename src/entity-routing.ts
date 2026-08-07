@@ -93,6 +93,25 @@ export function mentionedProjectCandidates<T extends EntityRoutingProject>(
   return projectMentionMatches(projects, text).map((match) => match.project);
 }
 
+export function automaticallyRoutedProject<T extends EntityRoutingProject>(
+  matches: Array<ProjectMentionMatch<T>>,
+  context: { currentProjectId?: string; projectIntake?: boolean } = {}
+): T | undefined {
+  const current = context.currentProjectId
+    ? matches.find((match) => match.project.recordId === context.currentProjectId)
+    : undefined;
+  // A normal task already bound to a project stays there. Other company names
+  // are usually comparisons, customers, competitors or examples—not a request
+  // to move the task and its files.
+  if (context.currentProjectId && !context.projectIntake) {
+    return current?.project;
+  }
+  // Only one strong candidate is deterministic. Weak or multi-project matches
+  // stay neutral until the workflow supplies a verified entity result.
+  const confident = matches.filter((match) => match.confidence === "high");
+  return confident.length === 1 ? confident[0].project : undefined;
+}
+
 export function parseDomiEntityResult(output: string): DomiEntityResult | null {
   const text = String(output || "");
   const marker = text.match(

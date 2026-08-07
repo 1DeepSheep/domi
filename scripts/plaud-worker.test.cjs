@@ -36,6 +36,14 @@ test("PLAUD worker does not immediately retry vendor rate limits", () => {
   assert.equal(isRetryableReadError(new Error("too many requests: rate limit")), false);
 });
 
+test("PLAUD worker never maps generic 401, 403 or 429 responses to a visible login", () => {
+  assert.match(safeError(new Error("List files failed: HTTP 401")), /PLAUD_UNAUTHORIZED/);
+  assert.match(safeError(new Error("List files failed: HTTP 403")), /PLAUD_ACCESS_DENIED/);
+  assert.match(safeError(new Error("List files failed: HTTP 429")), /服务暂时限流/);
+  assert.doesNotMatch(safeError(new Error("List files failed: HTTP 403")), /登录已失效/);
+  assert.doesNotMatch(safeError(new Error("List files failed: HTTP 429")), /登录已失效/);
+});
+
 test("PLAUD worker hides raw CDP details behind an actionable message", () => {
   const error = new Error([
     "browserType.connectOverCDP: WebSocket error: connect ECONNREFUSED 127.0.0.1:64305",
@@ -49,6 +57,18 @@ test("PLAUD worker hides raw CDP details behind an actionable message", () => {
   );
   assert.equal(message.includes("64305"), false);
   assert.equal(message.includes("devtools/browser"), false);
+});
+
+test("PLAUD background modules contain no foreground activation path", () => {
+  const sources = [
+    path.join(__dirname, "..", "electron", "plaud-worker.cjs"),
+    path.join(__dirname, "..", "electron", "plaud-browser-broker.cjs")
+  ].map((filePath) => fs.readFileSync(filePath, "utf8")).join("\n");
+  assert.doesNotMatch(
+    sources,
+    /shell\.openExternal|\/usr\/bin\/open|osascript|bringToFront|\.activate\(/i
+  );
+  assert.match(sources, /new PlaudClient\(\{ headless: true \}\)/);
 });
 
 test("PLAUD worker pages through recordings with a one-item look-ahead", async (t) => {

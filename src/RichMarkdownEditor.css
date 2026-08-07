@@ -1,0 +1,31 @@
+.rich-markdown-image-input {
+  display: none;
+}
+
+.rich-markdown-image-drop-hint {
+  position: absolute;
+  z-index: 12;
+  inset: 51px 14px 14px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 7px;
+  border: 2px dashed color-mix(in srgb, var(--accent-strong) 58%, #fff);
+  border-radius: 10px;
+  color: #8f4e39;
+  background: color-mix(in srgb, #fff 88%, var(--accent) 12%);
+  box-shadow: 0 12px 38px rgba(63, 43, 35, 0.12);
+  pointer-events: none;
+}
+
+.rich-markdown-image-drop-hint strong {
+  font-family: var(--font-cn);
+  font-size: var(--text-body);
+  font-weight: 650;
+}
+
+.rich-markdown-image-drop-hint span {
+  color: #8b7c76;
+  font-family: var(--font-cn);
+  font-size: var(--text-caption);
+}

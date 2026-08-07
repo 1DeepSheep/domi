@@ -178,3 +178,143 @@ input.on("line", (line) => {
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 });
+
+test("request_user_input waits for a validated answer and duplicate submits are idempotent", async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-user-input-test-"));
+  const fakeCodexPath = path.join(temporaryDirectory, "fake-codex");
+  fs.writeFileSync(fakeCodexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+let beginRequestId = null;
+const input = readline.createInterface({ input: process.stdin });
+input.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n");
+    return;
+  }
+  if (message.method === "begin") {
+    beginRequestId = message.id;
+    process.stdout.write(JSON.stringify({
+      id: "ask-1",
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        isBlocking: true,
+        autoResolutionMs: null,
+        questions: [{
+          id: "project",
+          header: "归档位置",
+          question: "归入哪个项目？",
+          isOther: false,
+          isSecret: false,
+          options: [
+            { label: "芯星元", description: "归入已有项目" },
+            { label: "暂不归档", description: "稍后处理" }
+          ]
+        }]
+      }
+    }) + "\\n");
+    return;
+  }
+  if (message.id === "ask-1") {
+    process.stdout.write(JSON.stringify({
+      id: beginRequestId,
+      result: { userInputResponse: message.result || null, userInputError: message.error || null }
+    }) + "\\n");
+  }
+});
+`, { mode: 0o755 });
+
+  let releaseRequest;
+  const requestReceived = new Promise((resolve) => { releaseRequest = resolve; });
+  const closed = [];
+  const server = new CodexAppServer({
+    cwd: temporaryDirectory,
+    version: "test",
+    requestTimeoutMs: 3_000,
+    runtimeProvider: () => ({ codexPath: fakeCodexPath }),
+    onUserInputRequest: releaseRequest,
+    onUserInputRequestClosed: (request) => closed.push(request)
+  });
+
+  try {
+    const resultPromise = server.request("begin");
+    const request = await requestReceived;
+    assert.equal(request.id, "ask-1");
+    assert.equal(request.params.questions[0].isSecret, false);
+    assert.equal(server.pendingUserInputRequests().length, 1);
+
+    assert.deepEqual(server.answerUserInput("ask-1", { project: ["不存在"] }), {
+      ok: false,
+      error: "“归档位置”包含无效选项。"
+    });
+    assert.equal(server.pendingUserInputRequests().length, 1);
+
+    assert.deepEqual(server.answerUserInput("ask-1", { project: ["芯星元"] }), {
+      ok: true,
+      duplicate: false
+    });
+    assert.deepEqual(server.answerUserInput("ask-1", { project: ["芯星元"] }), {
+      ok: true,
+      duplicate: true
+    });
+    assert.deepEqual(await resultPromise, {
+      userInputResponse: { answers: { project: { answers: ["芯星元"] } } },
+      userInputError: null
+    });
+    assert.equal(server.pendingUserInputRequests().length, 0);
+    assert.equal(closed.length, 1);
+    assert.equal(closed[0].reason, "answered");
+  } finally {
+    server.close();
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("approval requests remain declined and never enter the user-input queue", async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-approval-test-"));
+  const fakeCodexPath = path.join(temporaryDirectory, "fake-codex");
+  fs.writeFileSync(fakeCodexPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+let beginRequestId = null;
+const input = readline.createInterface({ input: process.stdin });
+input.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n");
+    return;
+  }
+  if (message.method === "begin") {
+    beginRequestId = message.id;
+    process.stdout.write(JSON.stringify({
+      id: "approval-1",
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "item-1" }
+    }) + "\\n");
+    return;
+  }
+  if (message.id === "approval-1") {
+    process.stdout.write(JSON.stringify({ id: beginRequestId, result: message.result }) + "\\n");
+  }
+});
+`, { mode: 0o755 });
+
+  let userInputCount = 0;
+  const server = new CodexAppServer({
+    cwd: temporaryDirectory,
+    version: "test",
+    requestTimeoutMs: 3_000,
+    runtimeProvider: () => ({ codexPath: fakeCodexPath }),
+    onUserInputRequest: () => { userInputCount += 1; }
+  });
+  try {
+    assert.deepEqual(await server.request("begin"), { decision: "decline" });
+    assert.equal(userInputCount, 0);
+    assert.equal(server.pendingUserInputRequests().length, 0);
+  } finally {
+    server.close();
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
