@@ -7,7 +7,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { ensureDocumentLibraryStructure } = require("./document-library.cjs");
 const CANONICAL_PROJECT_TAXONOMY = require("../shared/investment-taxonomy.json");
 
-const LOCAL_REPOSITORY_SCHEMA = 5;
+const LOCAL_REPOSITORY_SCHEMA = 6;
 const PROJECTS_DIRECTORY = "3.项目库";
 const PEOPLE_DIRECTORY = "4.人脉库";
 const NEWS_DIRECTORY = "2.行业动态";
@@ -31,6 +31,47 @@ const TRACKED_INVESTORS = new Set([
   "蓝驰",
   "经纬"
 ]);
+const DATABASE_PATCH_FIELDS = Object.freeze({
+  project: new Set([
+    "name",
+    "domain",
+    "subdomains",
+    "status",
+    "rating",
+    "notes",
+    "cities",
+    "investors",
+    "financingHistory",
+    "latestValuationUsd100m"
+  ]),
+  person: new Set([
+    "name",
+    "types",
+    "organization",
+    "status",
+    "rating",
+    "lastContact",
+    "cities"
+  ]),
+  news: new Set([
+    "title",
+    "domains",
+    "subdomains",
+    "types",
+    "publishedAt",
+    "summary",
+    "investmentMeaning",
+    "url",
+    "source",
+    "companies",
+    "institutions",
+    "importance",
+    "confidence",
+    "evidenceStatus",
+    "action",
+    "worthFollowing"
+  ])
+});
 const LEGACY_BULK_IMPORT_MIN = 20;
 const LEGACY_BULK_INTAKE_MIGRATION_KEY = "legacy_bulk_intake_v1";
 const CLASSIFICATION_REVIEW_STATUSES = new Set(["pending", "deferred", "confirmed"]);
@@ -101,6 +142,22 @@ function normalizedName(value) {
 
 function stableId(prefix, value) {
   return `${prefix}_${crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 16)}`;
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableJson(value[key])}`
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function patchHash(entityType, recordId, changes) {
+  return crypto.createHash("sha256")
+    .update(stableJson({ entityType, recordId, changes }))
+    .digest("hex");
 }
 
 function toEpochMs(value, fallback = null) {
@@ -436,6 +493,27 @@ function workspaceEntitiesSignature(discovered) {
 function localDocumentUrl(value) {
   const documentPath = String(value || "").trim();
   return documentPath && path.isAbsolute(documentPath) ? pathToFileURL(documentPath).href : "";
+}
+
+function rebaseLocalDocumentLinks(documents, sourceDirectory, targetDirectory) {
+  if (!sourceDirectory || sourceDirectory === targetDirectory) return documents;
+  return (documents || []).map((document) => {
+    try {
+      const parsed = new URL(String(document?.link || ""));
+      if (parsed.protocol !== "file:") return document;
+      const currentPath = decodeURIComponent(parsed.pathname);
+      if (
+        currentPath !== sourceDirectory
+        && !currentPath.startsWith(`${sourceDirectory}${path.sep}`)
+      ) return document;
+      return {
+        ...document,
+        link: localDocumentUrl(path.join(targetDirectory, path.relative(sourceDirectory, currentPath)))
+      };
+    } catch {
+      return document;
+    }
+  });
 }
 
 function safePathSegment(value, fallback = "_未分类") {
@@ -981,6 +1059,30 @@ class LocalDomiRepository {
       );
       CREATE INDEX IF NOT EXISTS idx_classification_reviews_status
         ON classification_reviews(status, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS repository_mutations (
+        mutation_id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        changes_sha256 TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_repository_mutations_record
+        ON repository_mutations(entity_type, record_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS repository_materializations (
+        entity_type TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        mutation_id TEXT NOT NULL,
+        source_path TEXT NOT NULL DEFAULT '',
+        target_path TEXT NOT NULL DEFAULT '',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
+        enqueued_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (entity_type, record_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_repository_materializations_updated
+        ON repository_materializations(updated_at ASC, entity_type, record_id);
       CREATE TABLE IF NOT EXISTS document_migrations (
         source_path TEXT NOT NULL,
         target_space_id TEXT NOT NULL,
@@ -1432,6 +1534,12 @@ class LocalDomiRepository {
     if (!id || !["project", "person"].includes(type)) {
       throw new Error("无法识别要预览的资料库记录。");
     }
+    if (this.database.prepare(`
+      SELECT 1 FROM repository_materializations
+      WHERE entity_type = ? AND record_id = ?
+    `).get(type, id)) {
+      this.materializeDatabaseRecord(type, id);
+    }
     const table = type === "project" ? "projects" : "people";
     const row = this.database.prepare(
       `SELECT id, name, document_path FROM ${table} WHERE id = ?`
@@ -1465,6 +1573,12 @@ class LocalDomiRepository {
     const recordId = String(request.recordId || "").trim();
     if (!recordId || !["project", "person", "news"].includes(entityType)) {
       throw new Error("无法识别要移出的资料库记录。");
+    }
+    if (this.database.prepare(`
+      SELECT 1 FROM repository_materializations
+      WHERE entity_type = ? AND record_id = ?
+    `).get(entityType, recordId)) {
+      this.materializeDatabaseRecord(entityType, recordId);
     }
     const definition = entityType === "project"
       ? { table: "projects", idColumn: "id", nameColumn: "name", keyColumn: "normalized_name" }
@@ -1784,8 +1898,466 @@ class LocalDomiRepository {
     return filePath;
   }
 
+  databasePatchRecord(entityType, recordId) {
+    if (entityType === "project") {
+      const row = this.database.prepare("SELECT * FROM projects WHERE id = ?").get(recordId);
+      return row ? { row, record: projectRow(row) } : null;
+    }
+    if (entityType === "person") {
+      const row = this.database.prepare("SELECT * FROM people WHERE id = ?").get(recordId);
+      if (!row) return null;
+      const documents = this.database.prepare(`
+        SELECT kind, title, path, updated_at
+        FROM documents
+        WHERE owner_type = 'person' AND owner_id = ?
+        ORDER BY updated_at DESC, path ASC
+      `).all(recordId);
+      return { row, record: personRow(row, documents) };
+    }
+    if (entityType === "news") {
+      const row = this.database.prepare("SELECT * FROM news_events WHERE event_id = ?").get(recordId);
+      return row ? { row, record: newsRow(row) } : null;
+    }
+    return null;
+  }
+
+  normalizeDatabasePatch(entityType, current, changes) {
+    const next = { ...current, ...changes };
+    if (entityType === "project") {
+      const name = String(next.name || "").trim();
+      if (!name) throw new Error("公司名称不能为空。");
+      const investors = stringList(next.investors);
+      const invalidInvestor = investors.find((item) => !TRACKED_INVESTORS.has(item));
+      if (invalidInvestor) throw new Error(`投资机构“${invalidInvestor}”不在当前关注名单中。`);
+      const valuationInput = next.latestValuationUsd100m;
+      const latestValuationUsd100m = valuationInput === null
+        || valuationInput === undefined
+        || valuationInput === ""
+        ? null
+        : Number(valuationInput);
+      if (
+        latestValuationUsd100m !== null
+        && (!Number.isFinite(latestValuationUsd100m) || latestValuationUsd100m < 0)
+      ) {
+        throw new Error("最新估值必须是非负数字，单位为亿美元。");
+      }
+      return {
+        recordId: current.recordId,
+        name,
+        domain: String(next.domain || "").trim() || "_未分类",
+        subdomains: stringList(next.subdomains),
+        status: normalizedProjectStatus(next.status),
+        rating: normalizedRating(next.rating),
+        notes: String(next.notes || "").trim(),
+        cities: stringList(next.cities),
+        investors,
+        financingHistory: String(next.financingHistory || "").trim(),
+        latestValuationUsd100m,
+        lastUpdatedAt: Date.now()
+      };
+    }
+    if (entityType === "person") {
+      const name = String(next.name || "").trim();
+      if (!name) throw new Error("人名不能为空。");
+      const lastContact = next.lastContact === null
+        || next.lastContact === undefined
+        || next.lastContact === ""
+        ? null
+        : toEpochMs(next.lastContact, NaN);
+      if (lastContact !== null && !Number.isFinite(lastContact)) {
+        throw new Error("最后联系日期格式不正确。");
+      }
+      return {
+        recordId: current.recordId,
+        name,
+        types: stringList(next.types),
+        organization: String(next.organization || "").trim(),
+        status: String(next.status || "").trim(),
+        rating: normalizedRating(next.rating),
+        lastContact,
+        cities: stringList(next.cities)
+      };
+    }
+    const title = String(next.title || "").trim();
+    if (!title) throw new Error("行业信息标题不能为空。");
+    const publishedAt = toEpochMs(next.publishedAt, NaN);
+    if (!Number.isFinite(publishedAt)) throw new Error("行业信息发布时间格式不正确。");
+    const url = String(next.url || "").trim();
+    if (url && !/^https?:\/\//i.test(url)) {
+      throw new Error("来源链接必须使用 HTTP 或 HTTPS。");
+    }
+    return {
+      recordId: current.recordId,
+      title,
+      domains: stringList(next.domains),
+      subdomains: stringList(next.subdomains),
+      types: stringList(next.types),
+      publishedAt,
+      summary: String(next.summary || "").trim(),
+      investmentMeaning: String(next.investmentMeaning || "").trim(),
+      url,
+      source: String(next.source || "").trim(),
+      companies: String(next.companies || "").trim(),
+      institutions: String(next.institutions || "").trim(),
+      importance: Math.min(Math.max(Number(next.importance) || 0, 0), 10),
+      confidence: Math.min(Math.max(Number(next.confidence) || 0, 0), 10),
+      evidenceStatus: String(next.evidenceStatus || "").trim(),
+      action: String(next.action || "").trim(),
+      worthFollowing: next.worthFollowing !== false
+    };
+  }
+
+  updateDatabaseRecordPatch(request = {}) {
+    const entityType = String(request.entityType || "").trim();
+    const recordId = String(request.recordId || "").trim();
+    const mutationId = String(request.mutationId || "").trim();
+    const changes = request.changes;
+    const allowedFields = DATABASE_PATCH_FIELDS[entityType];
+    if (!allowedFields || !recordId) throw new Error("无法识别要修改的资料库记录。");
+    if (!mutationId || mutationId.length > 200 || /[\u0000-\u001f]/.test(mutationId)) {
+      throw new Error("本次修改缺少有效的 mutationId。");
+    }
+    if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
+      throw new Error("字段修改内容格式不正确。");
+    }
+    const changedFields = Object.keys(changes);
+    if (!changedFields.length) throw new Error("本次修改没有包含任何字段。");
+    const invalidField = changedFields.find((field) => !allowedFields.has(field));
+    if (invalidField) throw new Error(`字段“${invalidField}”不允许通过资料库编辑器修改。`);
+    const changesSha256 = patchHash(entityType, recordId, changes);
+    const replay = this.database.prepare(`
+      SELECT entity_type, record_id, changes_sha256, result_json
+      FROM repository_mutations WHERE mutation_id = ?
+    `).get(mutationId);
+    if (replay) {
+      if (
+        replay.entity_type !== entityType
+        || replay.record_id !== recordId
+        || replay.changes_sha256 !== changesSha256
+      ) {
+        throw new Error("mutationId 已用于另一项修改，请重新提交。");
+      }
+      return {
+        record: JSON.parse(replay.result_json),
+        mutationId,
+        replayed: true,
+        materialization: this.database.prepare(`
+          SELECT 1 FROM repository_materializations
+          WHERE entity_type = ? AND record_id = ?
+        `).get(entityType, recordId) ? "pending" : "complete"
+      };
+    }
+
+    const loaded = this.databasePatchRecord(entityType, recordId);
+    if (!loaded) throw new Error("找不到要修改的资料库记录。");
+    const expectedUpdatedAt = Number(request.expectedUpdatedAt);
+    if (!Number.isFinite(expectedUpdatedAt) || expectedUpdatedAt !== Number(loaded.row.updated_at)) {
+      throw new Error("记录已被其他流程更新，请刷新后再保存。");
+    }
+    const normalized = this.normalizeDatabasePatch(entityType, loaded.record, changes);
+    const sourcePath = String(loaded.row.document_path || "").trim();
+    const targetPath = entityType === "project"
+      ? path.join(this.projectDirectory(normalized), PROJECT_PAGE_NAME)
+      : entityType === "person"
+        ? path.join(this.personDirectory(normalized), PERSON_PAGE_NAME)
+        : this.newsDocumentPath(normalized);
+    const root = path.join(
+      this.libraryDir,
+      entityType === "project"
+        ? PROJECTS_DIRECTORY
+        : entityType === "person"
+          ? PEOPLE_DIRECTORY
+          : NEWS_DIRECTORY
+    );
+    if (sourcePath) assertWithin(root, sourcePath);
+    assertWithin(root, targetPath);
+    if (sourcePath && sourcePath !== targetPath) {
+      const sourceContainer = entityType === "news" ? sourcePath : path.dirname(sourcePath);
+      const targetContainer = entityType === "news" ? targetPath : path.dirname(targetPath);
+      if (
+        entityType !== "news"
+        && targetContainer.startsWith(`${sourceContainer}${path.sep}`)
+      ) {
+        throw new Error("新的资料目录不能位于原资料目录内部。");
+      }
+      if (fs.existsSync(sourceContainer) && fs.existsSync(targetContainer)) {
+        throw new Error(entityType === "news" ? "目标行业信息文档已存在。" : "目标资料目录已存在，请先处理同名目录。");
+      }
+    }
+
+    const now = Math.max(Date.now(), Number(loaded.row.updated_at) + 1);
+    let resultRecord;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const fresh = this.databasePatchRecord(entityType, recordId);
+      if (!fresh || Number(fresh.row.updated_at) !== expectedUpdatedAt) {
+        throw new Error("记录已被其他流程更新，请刷新后再保存。");
+      }
+      if (entityType === "project") {
+        this.database.prepare(`
+          UPDATE projects SET
+            name = ?, normalized_name = ?, domain = ?, subdomains_json = ?,
+            status = ?, rating = ?, notes = ?, cities_json = ?, investors_json = ?,
+            financing_history = ?, latest_valuation_usd_100m = ?,
+            last_updated_at = ?, document_path = ?, updated_at = ?
+          WHERE id = ? AND updated_at = ?
+        `).run(
+          normalized.name,
+          normalizedName(normalized.name),
+          normalized.domain,
+          JSON.stringify(normalized.subdomains),
+          normalized.status,
+          normalized.rating,
+          normalized.notes,
+          JSON.stringify(normalized.cities),
+          JSON.stringify(normalized.investors),
+          normalized.financingHistory,
+          normalized.latestValuationUsd100m,
+          now,
+          targetPath,
+          now,
+          recordId,
+          expectedUpdatedAt
+        );
+      } else if (entityType === "person") {
+        this.database.prepare(`
+          UPDATE people SET
+            name = ?, normalized_name = ?, types_json = ?, organization = ?,
+            status = ?, rating = ?, last_contact_at = ?, cities_json = ?,
+            document_path = ?, updated_at = ?
+          WHERE id = ? AND updated_at = ?
+        `).run(
+          normalized.name,
+          normalizedName(normalized.name),
+          JSON.stringify(normalized.types),
+          normalized.organization,
+          normalized.status,
+          normalized.rating,
+          normalized.lastContact,
+          JSON.stringify(normalized.cities),
+          targetPath,
+          now,
+          recordId,
+          expectedUpdatedAt
+        );
+      } else {
+        this.database.prepare(`
+          UPDATE news_events SET
+            title = ?, domains_json = ?, subdomains_json = ?, types_json = ?,
+            published_at = ?, summary = ?, investment_meaning = ?, url = ?,
+            source = ?, companies = ?, institutions = ?, importance = ?,
+            confidence = ?, evidence_status = ?, action = ?, worth_following = ?,
+            document_path = ?, updated_at = ?
+          WHERE event_id = ? AND updated_at = ?
+        `).run(
+          normalized.title,
+          JSON.stringify(normalized.domains),
+          JSON.stringify(normalized.subdomains),
+          JSON.stringify(normalized.types),
+          normalized.publishedAt,
+          normalized.summary,
+          normalized.investmentMeaning,
+          normalized.url,
+          normalized.source,
+          normalized.companies,
+          normalized.institutions,
+          normalized.importance,
+          normalized.confidence,
+          normalized.evidenceStatus,
+          normalized.action,
+          normalized.worthFollowing ? 1 : 0,
+          targetPath,
+          now,
+          recordId,
+          expectedUpdatedAt
+        );
+      }
+      resultRecord = this.databasePatchRecord(entityType, recordId)?.record;
+      if (resultRecord && entityType === "person" && sourcePath && sourcePath !== targetPath) {
+        const sourceDirectory = path.dirname(sourcePath);
+        const targetDirectory = path.dirname(targetPath);
+        resultRecord = {
+          ...resultRecord,
+          documents: rebaseLocalDocumentLinks(
+            loaded.record.documents,
+            sourceDirectory,
+            targetDirectory
+          ),
+          interactionDocuments: rebaseLocalDocumentLinks(
+            loaded.record.interactionDocuments,
+            sourceDirectory,
+            targetDirectory
+          )
+        };
+      }
+      if (!resultRecord || Number(resultRecord.updatedAt) !== now) {
+        throw new Error("记录已被其他流程更新，请刷新后再保存。");
+      }
+      this.database.prepare(`
+        INSERT INTO repository_mutations (
+          mutation_id, entity_type, record_id, changes_sha256, result_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(mutationId, entityType, recordId, changesSha256, JSON.stringify(resultRecord), now);
+      this.database.prepare(`
+        INSERT INTO repository_materializations (
+          entity_type, record_id, mutation_id, source_path, target_path,
+          attempts, last_error, enqueued_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, '', ?, ?)
+        ON CONFLICT(entity_type, record_id) DO UPDATE SET
+          mutation_id = excluded.mutation_id,
+          source_path = CASE
+            WHEN repository_materializations.source_path <> ''
+              THEN repository_materializations.source_path
+            ELSE excluded.source_path
+          END,
+          target_path = excluded.target_path,
+          last_error = '',
+          updated_at = excluded.updated_at
+      `).run(entityType, recordId, mutationId, sourcePath, targetPath, now, now);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+    return {
+      record: resultRecord,
+      mutationId,
+      replayed: false,
+      materialization: "pending"
+    };
+  }
+
+  listPendingMaterializations(limit = 500) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 2_000);
+    return this.database.prepare(`
+      SELECT entity_type AS entityType, record_id AS recordId,
+        mutation_id AS mutationId, attempts, last_error AS lastError,
+        enqueued_at AS enqueuedAt, updated_at AS updatedAt
+      FROM repository_materializations
+      ORDER BY updated_at ASC, entity_type ASC, record_id ASC
+      LIMIT ?
+    `).all(safeLimit);
+  }
+
+  materializeDatabaseRecord(entityTypeInput, recordIdInput) {
+    const entityType = String(entityTypeInput || "").trim();
+    const recordId = String(recordIdInput || "").trim();
+    const pending = this.database.prepare(`
+      SELECT entity_type, record_id, mutation_id, source_path, target_path, attempts
+      FROM repository_materializations
+      WHERE entity_type = ? AND record_id = ?
+    `).get(entityType, recordId);
+    if (!pending) return { ok: true, entityType, recordId, materialized: false };
+    const loaded = this.databasePatchRecord(entityType, recordId);
+    if (!loaded) {
+      this.database.prepare(`
+        DELETE FROM repository_materializations
+        WHERE entity_type = ? AND record_id = ? AND mutation_id = ?
+      `).run(entityType, recordId, pending.mutation_id);
+      return { ok: true, entityType, recordId, materialized: false };
+    }
+    const sourcePath = String(pending.source_path || "").trim();
+    const targetPath = String(pending.target_path || "").trim();
+    if (!targetPath || String(loaded.row.document_path || "") !== targetPath) {
+      return { ok: true, entityType, recordId, materialized: false, superseded: true };
+    }
+    try {
+      if (entityType === "news") {
+        if (sourcePath && sourcePath !== targetPath && fs.existsSync(sourcePath)) {
+          fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+          if (fs.existsSync(targetPath)) throw new Error("目标行业信息文档已存在。");
+          fs.renameSync(sourcePath, targetPath);
+        }
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      } else {
+        const sourceDirectory = sourcePath ? path.dirname(sourcePath) : "";
+        const targetDirectory = path.dirname(targetPath);
+        if (
+          sourceDirectory
+          && sourceDirectory !== targetDirectory
+          && fs.existsSync(sourceDirectory)
+        ) {
+          fs.mkdirSync(path.dirname(targetDirectory), { recursive: true });
+          if (fs.existsSync(targetDirectory)) throw new Error("目标资料目录已存在，请先处理同名目录。");
+          fs.renameSync(sourceDirectory, targetDirectory);
+        }
+        fs.mkdirSync(targetDirectory, { recursive: true });
+      }
+      const previousPageContent = fs.existsSync(targetPath)
+        ? fs.readFileSync(targetPath, "utf8")
+        : "";
+      const managedBlock = entityType === "project"
+        ? renderProjectManagedBlock(loaded.record)
+        : entityType === "person"
+          ? renderPersonManagedBlock(loaded.record)
+          : renderNewsManagedBlock(loaded.record);
+      atomicWriteText(targetPath, replaceManagedBlock(previousPageContent, managedBlock));
+
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        const removed = this.database.prepare(`
+          DELETE FROM repository_materializations
+          WHERE entity_type = ? AND record_id = ? AND mutation_id = ?
+        `).run(entityType, recordId, pending.mutation_id);
+        if (Number(removed.changes) === 1 && entityType !== "news") {
+          const sourceDirectory = sourcePath ? path.dirname(sourcePath) : "";
+          const targetDirectory = path.dirname(targetPath);
+          if (sourceDirectory && sourceDirectory !== targetDirectory) {
+            const updateDocumentPath = this.database.prepare(
+              "UPDATE documents SET path = ? WHERE id = ?"
+            );
+            const documentRows = this.database.prepare(`
+              SELECT id, path FROM documents
+              WHERE owner_type = ? AND owner_id = ?
+            `).all(entityType, recordId);
+            for (const document of documentRows) {
+              const currentPath = String(document.path || "");
+              if (
+                currentPath !== sourceDirectory
+                && !currentPath.startsWith(`${sourceDirectory}${path.sep}`)
+              ) continue;
+              updateDocumentPath.run(
+                path.join(targetDirectory, path.relative(sourceDirectory, currentPath)),
+                document.id
+              );
+            }
+          }
+          if (entityType === "person") {
+            this.database.prepare(`
+              UPDATE people SET interaction_documents_json = ? WHERE id = ?
+            `).run(JSON.stringify(scanPersonDocuments(targetDirectory)), recordId);
+          }
+        } else if (Number(removed.changes) === 0 && fs.existsSync(targetPath)) {
+          this.database.prepare(`
+            UPDATE repository_materializations
+            SET source_path = ?, updated_at = ?
+            WHERE entity_type = ? AND record_id = ?
+          `).run(targetPath, Date.now(), entityType, recordId);
+        }
+        this.database.exec("COMMIT");
+      } catch (error) {
+        try { this.database.exec("ROLLBACK"); } catch {}
+        throw error;
+      }
+      return { ok: true, entityType, recordId, materialized: true, path: targetPath };
+    } catch (error) {
+      this.database.prepare(`
+        UPDATE repository_materializations
+        SET attempts = attempts + 1, last_error = ?, updated_at = ?
+        WHERE entity_type = ? AND record_id = ?
+      `).run(error instanceof Error ? error.message : String(error), Date.now(), entityType, recordId);
+      throw error;
+    }
+  }
+
   updateProject(request = {}) {
     const id = String(request.recordId || "").trim();
+    if (this.database.prepare(`
+      SELECT 1 FROM repository_materializations
+      WHERE entity_type = 'project' AND record_id = ?
+    `).get(id)) {
+      this.materializeDatabaseRecord("project", id);
+    }
     const row = this.database.prepare("SELECT * FROM projects WHERE id = ?").get(id);
     if (!row) throw new Error("找不到要修改的项目记录。");
     const expectedUpdatedAt = Number(request.expectedUpdatedAt);
@@ -1982,6 +2554,12 @@ class LocalDomiRepository {
 
   updatePerson(request = {}) {
     const id = String(request.recordId || "").trim();
+    if (this.database.prepare(`
+      SELECT 1 FROM repository_materializations
+      WHERE entity_type = 'person' AND record_id = ?
+    `).get(id)) {
+      this.materializeDatabaseRecord("person", id);
+    }
     const row = this.database.prepare("SELECT * FROM people WHERE id = ?").get(id);
     if (!row) throw new Error("找不到要修改的人脉记录。");
     const expectedUpdatedAt = Number(request.expectedUpdatedAt);
@@ -2102,6 +2680,12 @@ class LocalDomiRepository {
 
   updateNews(request = {}) {
     const id = String(request.recordId || "").trim();
+    if (this.database.prepare(`
+      SELECT 1 FROM repository_materializations
+      WHERE entity_type = 'news' AND record_id = ?
+    `).get(id)) {
+      this.materializeDatabaseRecord("news", id);
+    }
     const row = this.database.prepare("SELECT * FROM news_events WHERE event_id = ?").get(id);
     if (!row) throw new Error("找不到要修改的行业信息。");
     const expectedUpdatedAt = Number(request.expectedUpdatedAt);
