@@ -159,6 +159,7 @@ const projectsDir = path.join(demoWorkspace, "projects");
 const appIconPath = path.join(rootDir, "public", "domi-dock-icon.png");
 
 let codexClient = null;
+let codexRuntimeReadinessPromise = null;
 let stateStore = null;
 let domiIntegration = null;
 let domiPluginManager = null;
@@ -317,13 +318,47 @@ function getCodexRuntimeManager() {
   if (!codexRuntimeManager) {
     const runtimeRoot = app.isPackaged
       ? path.join(process.resourcesPath, "codex-runtime")
-      : path.join(rootDir, "build", "codex-runtime");
+      : path.join(rootDir, "build", `codex-runtime-${process.arch}`);
     codexRuntimeManager = new CodexRuntimeManager({
       archivePath: path.join(runtimeRoot, "codex-package.tar.gz"),
       manifestPath: path.join(runtimeRoot, "manifest.json")
     });
   }
   return codexRuntimeManager;
+}
+
+function ensureCodexRuntimeReady() {
+  if (codexRuntimeReadinessPromise) return codexRuntimeReadinessPromise;
+  codexRuntimeReadinessPromise = (async () => {
+    const configuredPath = getAppSettings().load().settings.codexPath;
+    let result;
+    if (app.isPackaged) {
+      result = await getCodexBootstrap().install();
+      if (!result.ok) {
+        throw new Error(result.error || "无法修复 Codex Runtime。");
+      }
+    } else {
+      result = {
+        ok: true,
+        path: resolveCodexBinary(configuredPath),
+        source: "development"
+      };
+    }
+    const canonicalPath = resolveCodexBinary(result.path || configuredPath);
+    if (canonicalPath !== configuredPath) {
+      getAppSettings().save({ codexPath: canonicalPath });
+      if (codexClient) resetCodexClient();
+    }
+    appendRuntimeLog("codex-runtime-ready", {
+      source: String(result.source || (result.managed ? "managed" : "external")),
+      repaired: result.installedNow === true
+    });
+    return { ...result, path: canonicalPath };
+  })().catch((error) => {
+    codexRuntimeReadinessPromise = null;
+    throw error;
+  });
+  return codexRuntimeReadinessPromise;
 }
 
 async function resolveCodexInstallerProxyEnvironment() {
@@ -2084,6 +2119,7 @@ function resetCodexClient() {
 
 async function runCodexCheck() {
   ensureDemoWorkspace();
+  await ensureCodexRuntimeReady();
   const loaded = getAppSettings().load();
   let detectedPath = "";
   let detectedVersion = "";
@@ -2441,6 +2477,7 @@ async function testCodexConnection() {
 
 async function startChatGptLogin() {
   try {
+    await ensureCodexRuntimeReady();
     const restored = getCodexBootstrap().restoreChatGPTConfig();
     if (!restored.ok) {
       return { ok: false, error: restored.error || "无法恢复 ChatGPT Codex 配置。" };
@@ -2777,6 +2814,7 @@ async function runCodex(sender, payload) {
   }
 
   try {
+    await ensureCodexRuntimeReady();
     const larkRequired = needsLarkAccess(payload);
     const execution = await confirmExternalDomiRun(sender, payload);
     if (!execution.allowed) {
@@ -3099,6 +3137,11 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   }
   createWindow();
   getUpdateService().start();
+  void ensureCodexRuntimeReady().catch((error) => {
+    appendRuntimeLog("codex-runtime-repair-failed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

@@ -401,6 +401,32 @@ class CodexBootstrapService {
   }
 
   async install() {
+    if (this.installBundled && this.runtimeManager) {
+      const managed = await this.runtimeManager.snapshot();
+      if (managed.ok) {
+        return { ...managed, installedNow: false, source: "bundled" };
+      }
+      try {
+        const installed = await this.installBundled();
+        await this.sleep(100);
+        const status = await this.status(installed.path);
+        if (!status.ok) {
+          throw new Error(status.error || "内置 Codex Runtime 已安装，但没有找到可执行文件。");
+        }
+        return { ...status, installedNow: true, source: "bundled" };
+      } catch (error) {
+        return {
+          ok: false,
+          installed: false,
+          installedNow: false,
+          path: "",
+          version: "",
+          credentialStored: false,
+          error: userFacingError(error)
+        };
+      }
+    }
+
     const existing = await this.status();
     if (existing.ok) return { ...existing, installedNow: false };
 

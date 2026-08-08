@@ -3,8 +3,55 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { CodexAppServer } = require("../electron/codex-app-server.cjs");
+const {
+  CodexAppServer,
+  canonicalCodexRuntime,
+  resolveCodexBinary
+} = require("../electron/codex-app-server.cjs");
 const { isSelectedCodexConnectionReady } = require("../electron/codex-protocol.cjs");
+
+function writeFakeCodex(binaryPath, source) {
+  fs.writeFileSync(binaryPath, source, { mode: 0o755 });
+  fs.writeFileSync(
+    path.join(path.dirname(binaryPath), "codex-code-mode-host"),
+    "#!/bin/sh\nexit 0\n",
+    { mode: 0o755 }
+  );
+}
+
+test("Codex symlinks resolve to the real runtime directory containing the command host", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-symlink-test-"));
+  try {
+    const runtimeDirectory = path.join(root, "runtime");
+    const shimDirectory = path.join(root, "shims");
+    fs.mkdirSync(runtimeDirectory, { recursive: true });
+    fs.mkdirSync(shimDirectory, { recursive: true });
+    const realBinary = path.join(runtimeDirectory, "codex");
+    writeFakeCodex(realBinary, "#!/bin/sh\nexit 0\n");
+    const shim = path.join(shimDirectory, "codex");
+    fs.symlinkSync(realBinary, shim);
+
+    const canonicalBinary = fs.realpathSync.native(realBinary);
+    assert.equal(resolveCodexBinary(shim), canonicalBinary);
+    assert.equal(
+      canonicalCodexRuntime(shim)?.hostPath,
+      path.join(path.dirname(canonicalBinary), "codex-code-mode-host")
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an executable without codex-code-mode-host is not a complete runtime", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-incomplete-test-"));
+  try {
+    const binary = path.join(root, "codex");
+    fs.writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    assert.equal(canonicalCodexRuntime(binary), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("ChatGPT and Responses relay are independent connection choices", () => {
   assert.equal(isSelectedCodexConnectionReady({
@@ -36,7 +83,7 @@ test("ChatGPT and Responses relay are independent connection choices", () => {
 test("concurrent requests wait for Codex App Server initialization", async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-init-test-"));
   const fakeCodexPath = path.join(temporaryDirectory, "fake-codex");
-  fs.writeFileSync(fakeCodexPath, `#!/usr/bin/env node
+  writeFakeCodex(fakeCodexPath, `#!/usr/bin/env node
 const readline = require("node:readline");
 let initialized = false;
 let initializeCapabilities = null;
@@ -69,7 +116,7 @@ input.on("line", (line) => {
     }) + "\\n");
   }
 });
-`, { mode: 0o755 });
+`);
 
   const server = new CodexAppServer({
     cwd: temporaryDirectory,
@@ -97,7 +144,7 @@ input.on("line", (line) => {
 test("unsupported experimental capability falls back during initialization", async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-capability-test-"));
   const fakeCodexPath = path.join(temporaryDirectory, "fake-codex");
-  fs.writeFileSync(fakeCodexPath, `#!/usr/bin/env node
+  writeFakeCodex(fakeCodexPath, `#!/usr/bin/env node
 const readline = require("node:readline");
 let initializeAttempts = 0;
 const input = readline.createInterface({ input: process.stdin });
@@ -122,7 +169,7 @@ input.on("line", (line) => {
     }) + "\\n");
   }
 });
-`, { mode: 0o755 });
+`);
 
   const logs = [];
   const server = new CodexAppServer({
@@ -147,7 +194,7 @@ input.on("line", (line) => {
 test("Codex App Server requests time out without poisoning later requests", async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-server-test-"));
   const fakeCodexPath = path.join(temporaryDirectory, "fake-codex");
-  fs.writeFileSync(fakeCodexPath, `#!/usr/bin/env node
+  writeFakeCodex(fakeCodexPath, `#!/usr/bin/env node
 const readline = require("node:readline");
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
@@ -156,7 +203,7 @@ input.on("line", (line) => {
     process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n");
   }
 });
-`, { mode: 0o755 });
+`);
 
   const server = new CodexAppServer({
     cwd: temporaryDirectory,
@@ -182,7 +229,7 @@ input.on("line", (line) => {
 test("request_user_input waits for a validated answer and duplicate submits are idempotent", async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-user-input-test-"));
   const fakeCodexPath = path.join(temporaryDirectory, "fake-codex");
-  fs.writeFileSync(fakeCodexPath, `#!/usr/bin/env node
+  writeFakeCodex(fakeCodexPath, `#!/usr/bin/env node
 const readline = require("node:readline");
 let beginRequestId = null;
 const input = readline.createInterface({ input: process.stdin });
@@ -225,7 +272,7 @@ input.on("line", (line) => {
     }) + "\\n");
   }
 });
-`, { mode: 0o755 });
+`);
 
   let releaseRequest;
   const requestReceived = new Promise((resolve) => { releaseRequest = resolve; });
@@ -276,7 +323,7 @@ input.on("line", (line) => {
 test("approval requests remain declined and never enter the user-input queue", async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-approval-test-"));
   const fakeCodexPath = path.join(temporaryDirectory, "fake-codex");
-  fs.writeFileSync(fakeCodexPath, `#!/usr/bin/env node
+  writeFakeCodex(fakeCodexPath, `#!/usr/bin/env node
 const readline = require("node:readline");
 let beginRequestId = null;
 const input = readline.createInterface({ input: process.stdin });
@@ -299,7 +346,7 @@ input.on("line", (line) => {
     process.stdout.write(JSON.stringify({ id: beginRequestId, result: message.result }) + "\\n");
   }
 });
-`, { mode: 0o755 });
+`);
 
   let userInputCount = 0;
   const server = new CodexAppServer({
