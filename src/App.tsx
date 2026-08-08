@@ -80,6 +80,7 @@ import {
 import MarkdownEditorErrorBoundary from "./MarkdownEditorErrorBoundary";
 import SectionErrorBoundary, { RenderRegion } from "./SectionErrorBoundary";
 import AssistantChoiceCard from "./AssistantChoiceCard";
+import { useAppConfirm } from "./AppConfirmDialog";
 import {
   DatabaseGrid,
   type DatabaseCellOption,
@@ -1815,6 +1816,7 @@ const workflowIconMap: Record<string, typeof FileText> = {
 const NEW_TASK_QUOTE = "We (the whole industry, not just OpenAI) are building a brain for the world.";
 
 function App() {
+  const { confirm: requestConfirmation, confirmDialog: appConfirmDialog } = useAppConfirm();
   const [threads, setThreads] = useState<Thread[]>(initialThreads);
   const [activeThreadId, setActiveThreadId] = useState(initialThreads[0].id);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("conversation");
@@ -5207,7 +5209,12 @@ function App() {
         let result = await workbench.syncPlaud({ confirmed });
         if (result.requiresConfirmation) {
           const count = result.pendingCount || 0;
-          const approved = window.confirm(`PLAUD 中有 ${count} 条录音尚未生成文字稿，是否全部提交生成？`);
+          const approved = await requestConfirmation({
+            title: "生成全部 PLAUD 文字稿？",
+            message: `PLAUD 中有 ${count} 条录音尚未生成文字稿。`,
+            detail: "继续后会把这些录音一次性提交给 PLAUD 生成，现有本地纪要不会受影响。",
+            confirmLabel: "全部生成"
+          });
           if (!approved) return result;
           result = await workbench.syncPlaud({ confirmed: true });
         }
@@ -5377,9 +5384,13 @@ function App() {
       || plaudMutationIdsRef.current.size > 0
       || launchingPlaudIdsRef.current.has(item.fileId)
     ) return;
-    const approved = window.confirm(
-      `确定将 PLAUD 录音“${item.fileName}”移入回收站吗？\n\ndomi 本地已生成的文字稿和纪要不会删除。`
-    );
+    const approved = await requestConfirmation({
+      title: "将这条 PLAUD 录音移入回收站？",
+      message: `“${item.fileName}”将从 PLAUD 最近录音列表中移除。`,
+      detail: "domi 本地已生成的文字稿和纪要不会删除。",
+      confirmLabel: "移入回收站",
+      tone: "danger"
+    });
     if (!approved) return;
 
     plaudMutationIdsRef.current.add(item.fileId);
@@ -7142,16 +7153,19 @@ function App() {
     });
   }
 
-  function retryQueuedSubmission(queuedId: string) {
+  async function retryQueuedSubmission(queuedId: string) {
     const located = Object.values(queuedSubmissionsByThreadRef.current)
       .flat()
       .find((item) => item.id === queuedId);
     if (!located || !appSettingsRef.current) return;
     const currentIdentity = queueRepositoryIdentity(appSettingsRef.current);
     if (!located.repositoryIdentity || located.repositoryIdentity !== currentIdentity) {
-      const confirmed = window.confirm(
-        "这项任务来自另一个或无法确认的资料库配置。\n\n继续会使用当前资料库重新执行；取消则保持暂停，你也可以直接从队列删除。是否继续？"
-      );
+      const confirmed = await requestConfirmation({
+        title: "使用当前资料库重新执行？",
+        message: "这项任务来自另一个或无法确认的资料库配置。",
+        detail: "继续会改用当前资料库；取消后任务保持暂停，你也可以直接从队列删除。",
+        confirmLabel: "使用当前资料库"
+      });
       if (!confirmed) return;
       setQueuedSubmissionsByThread((current) => {
         const next = Object.fromEntries(Object.entries(current).map(([threadId, items]) => [
@@ -7475,11 +7489,17 @@ function App() {
     setThreadMenuId(null);
   }
 
-  function deleteThread(thread: Thread) {
+  async function deleteThread(thread: Thread) {
     if (threads.length <= 1 || Boolean(activeRunsByThread[thread.id])) {
       return;
     }
-    const confirmed = window.confirm(`删除对话“${thread.title}”？\n项目目录和材料不会被删除。`);
+    const confirmed = await requestConfirmation({
+      title: "删除这段对话？",
+      message: `“${thread.title}”将从最近对话中移除。`,
+      detail: "项目目录、研究文档和其他材料不会被删除。",
+      confirmLabel: "删除对话",
+      tone: "danger"
+    });
     if (!confirmed) {
       return;
     }
@@ -8949,7 +8969,7 @@ function App() {
                     </button>
                     <div className="task-card-actions end-aligned">
                       {thread && pausedQueuedSubmissionIds.has(submission.id) && (
-                        <button type="button" onClick={() => retryQueuedSubmission(submission.id)} title="重试">
+                        <button type="button" onClick={() => void retryQueuedSubmission(submission.id)} title="重试">
                           <RefreshCw size={14} />
                         </button>
                       )}
@@ -9084,10 +9104,12 @@ function App() {
           </div>
           <div className="weekly-news-actions">
             <button
-              className="weekly-news-source"
+              className="weekly-news-source weekly-news-source-manager"
               type="button"
               onClick={() => setRadarSourceManagerOpen(true)}
               title="添加新闻源、重点公众号或播客"
+              aria-haspopup="dialog"
+              aria-controls="radar-source-panel"
             >
               <Settings size={13} />信源管理
             </button>
@@ -10668,7 +10690,7 @@ function App() {
                   {pausedQueuedSubmissionIds.has(queued.id) && (
                     <button
                       type="button"
-                      onClick={() => retryQueuedSubmission(queued.id)}
+                      onClick={() => void retryQueuedSubmission(queued.id)}
                       title="重试这条消息"
                       aria-label="重试这条消息"
                     >
@@ -11246,7 +11268,7 @@ function App() {
                     <button
                       className="danger"
                       type="button"
-                      onClick={() => deleteThread(thread)}
+                      onClick={() => void deleteThread(thread)}
                       disabled={threads.length <= 1 || Boolean(activeRunsByThread[thread.id])}
                     >
                       <Trash2 size={13} />
@@ -11993,6 +12015,7 @@ function App() {
         />
       </Suspense>
     )}
+    {appConfirmDialog}
     </>
   );
 }
