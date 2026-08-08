@@ -274,7 +274,17 @@ class CodexRuntimeManager {
     }
 
     const releaseHost = path.join(releasePath, "bin", "codex-code-mode-host");
-    if (!fs.existsSync(releaseBinary) || !fs.existsSync(releaseHost)) {
+    let releaseUsable = false;
+    try {
+      fs.accessSync(releaseBinary, fs.constants.X_OK);
+      fs.accessSync(releaseHost, fs.constants.X_OK);
+      const reportedVersion = await this.binaryVersion(releaseBinary);
+      releaseUsable = reportedVersion.includes(manifest.version);
+    } catch {
+      // A partially extracted, permission-damaged or otherwise unusable
+      // managed release must be rebuilt from the verified bundled archive.
+    }
+    if (!releaseUsable) {
       const stagingRoot = fs.mkdtempSync(path.join(this.releasesRoot(), ".domi-install-"));
       try {
         const { stdout: archiveList } = await this.exec("/usr/bin/tar", ["-tzf", this.archivePath], {
