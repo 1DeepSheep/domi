@@ -27,6 +27,30 @@ function codexEnvironment(extra = {}) {
   };
 }
 
+function executableExists(candidate) {
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function canonicalCodexRuntime(candidate) {
+  const requestedPath = String(candidate || "").trim();
+  if (!requestedPath || !executableExists(requestedPath)) return null;
+  let binaryPath;
+  try {
+    binaryPath = fs.realpathSync.native(requestedPath);
+  } catch {
+    return null;
+  }
+  if (!executableExists(binaryPath)) return null;
+  const hostPath = path.join(path.dirname(binaryPath), "codex-code-mode-host");
+  if (!executableExists(hostPath)) return null;
+  return { binaryPath, hostPath, requestedPath };
+}
+
 function resolveCodexBinary(preferredPath = "") {
   const home = os.homedir();
   const candidates = [
@@ -40,20 +64,19 @@ function resolveCodexBinary(preferredPath = "") {
     "/usr/bin/codex"
   ].filter(Boolean);
 
-  const binary = candidates.find((candidate) => {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  });
+  const runtime = candidates
+    .map(canonicalCodexRuntime)
+    .find(Boolean);
 
-  if (!binary) {
-    throw new Error("没有找到 Codex。请先安装 Codex，或通过 DOMI_CODEX_PATH 指定可执行文件。");
+  if (!runtime) {
+    throw new Error(
+      "没有找到完整的 Codex Runtime（缺少命令宿主）。请在 domi 设置中修复 Codex Runtime，或重新安装 domi。"
+    );
   }
 
-  return binary;
+  // Codex locates codex-code-mode-host relative to argv[0]. Always spawn the
+  // canonical executable instead of a package-manager or app symlink.
+  return runtime.binaryPath;
 }
 
 class CodexAppServer {
@@ -505,6 +528,7 @@ class CodexAppServer {
 
 module.exports = {
   CodexAppServer,
+  canonicalCodexRuntime,
   codexEnvironment,
   resolveCodexBinary
 };

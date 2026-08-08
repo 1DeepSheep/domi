@@ -78,9 +78,26 @@ async function run() {
       path.join(homeDir, ".codex", "packages", "standalone", "current", "bin", "codex")
     );
 
+    const installedHost = path.join(
+      homeDir,
+      ".codex",
+      "packages",
+      "standalone",
+      "releases",
+      "0.145.0-aarch64-apple-darwin",
+      "bin",
+      "codex-code-mode-host"
+    );
+    fs.rmSync(installedHost);
+    assert.equal((await runtime.snapshot()).ok, false);
+    const repaired = await runtime.installBundled();
+    assert.equal(repaired.ok, true);
+    assert.equal(fs.existsSync(installedHost), true);
+
     const previous = runtime.captureCurrent();
     const newerTarget = path.join(runtime.releasesRoot(), "0.146.0-aarch64-apple-darwin");
     writeExecutable(path.join(newerTarget, "bin", "codex"), "0.146.0");
+    writeExecutable(path.join(newerTarget, "bin", "codex-code-mode-host"), "0.146.0");
     atomicSymlink(newerTarget, runtime.currentLink());
     const updated = await runtime.recordExternalUpdate(previous);
     assert.match(updated.version, /0\.146\.0/);

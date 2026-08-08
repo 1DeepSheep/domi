@@ -201,6 +201,9 @@ class CodexRuntimeManager {
   async snapshot() {
     const currentTarget = resolveLink(this.currentLink());
     const binaryPath = currentTarget ? path.join(currentTarget, "bin", "codex") : "";
+    const hostPath = currentTarget
+      ? path.join(currentTarget, "bin", "codex-code-mode-host")
+      : "";
     const architectureMismatch = Boolean(
       currentTarget && !this.targetMatchesCurrentArch(currentTarget)
     );
@@ -209,6 +212,7 @@ class CodexRuntimeManager {
     if (!architectureMismatch) {
       try {
         fs.accessSync(binaryPath, fs.constants.X_OK);
+        fs.accessSync(hostPath, fs.constants.X_OK);
         version = await this.binaryVersion(binaryPath);
         ok = Boolean(version);
       } catch {
@@ -222,6 +226,7 @@ class CodexRuntimeManager {
       && rollbackTarget !== currentTarget
       && this.targetMatchesCurrentArch(rollbackTarget)
       && fs.existsSync(path.join(rollbackTarget, "bin", "codex"))
+      && fs.existsSync(path.join(rollbackTarget, "bin", "codex-code-mode-host"))
     );
     let bundledVersion = "";
     try {
@@ -268,7 +273,8 @@ class CodexRuntimeManager {
       }
     }
 
-    if (!fs.existsSync(releaseBinary)) {
+    const releaseHost = path.join(releasePath, "bin", "codex-code-mode-host");
+    if (!fs.existsSync(releaseBinary) || !fs.existsSync(releaseHost)) {
       const stagingRoot = fs.mkdtempSync(path.join(this.releasesRoot(), ".domi-install-"));
       try {
         const { stdout: archiveList } = await this.exec("/usr/bin/tar", ["-tzf", this.archivePath], {
@@ -294,7 +300,10 @@ class CodexRuntimeManager {
         }
         fs.chmodSync(path.join(packagePath, "bin", "codex"), 0o755);
         const hostBinary = path.join(packagePath, "bin", "codex-code-mode-host");
-        if (fs.existsSync(hostBinary)) fs.chmodSync(hostBinary, 0o755);
+        if (!fs.existsSync(hostBinary)) {
+          throw new Error("内置 Codex Runtime 缺少命令宿主，请重新下载安装 domi。");
+        }
+        fs.chmodSync(hostBinary, 0o755);
         const reportedVersion = await this.binaryVersion(path.join(packagePath, "bin", "codex"));
         if (!reportedVersion.includes(manifest.version)) {
           throw new Error("内置 Codex Runtime 版本校验失败。");
@@ -311,12 +320,11 @@ class CodexRuntimeManager {
     const visibleBin = path.join(this.homeDir, ".local", "bin");
     atomicSymlink(path.join(this.currentLink(), "bin", "codex"), path.join(visibleBin, "codex"));
     const hostBinary = path.join(releasePath, "bin", "codex-code-mode-host");
-    if (fs.existsSync(hostBinary)) {
-      atomicSymlink(
-        path.join(this.currentLink(), "bin", "codex-code-mode-host"),
-        path.join(visibleBin, "codex-code-mode-host")
-      );
-    }
+    fs.accessSync(hostBinary, fs.constants.X_OK);
+    atomicSymlink(
+      path.join(this.currentLink(), "bin", "codex-code-mode-host"),
+      path.join(visibleBin, "codex-code-mode-host")
+    );
     this.writeState({
       bundledVersion: manifest.version,
       currentTarget: releasePath,
@@ -341,6 +349,7 @@ class CodexRuntimeManager {
       !target
       || !this.targetMatchesCurrentArch(target)
       || !fs.existsSync(path.join(target, "bin", "codex"))
+      || !fs.existsSync(path.join(target, "bin", "codex-code-mode-host"))
     ) return false;
     atomicSymlink(target, this.currentLink());
     return true;
@@ -350,6 +359,8 @@ class CodexRuntimeManager {
     const currentTarget = resolveLink(this.currentLink());
     if (!currentTarget) throw new Error("Codex 更新完成，但没有找到新的运行时。");
     const binaryPath = path.join(currentTarget, "bin", "codex");
+    const hostPath = path.join(currentTarget, "bin", "codex-code-mode-host");
+    fs.accessSync(hostPath, fs.constants.X_OK);
     const version = await this.binaryVersion(binaryPath);
     const previousTarget = String(previous?.target || "");
     let previousVersion = "";
@@ -374,10 +385,12 @@ class CodexRuntimeManager {
     const state = this.readState();
     const previousTarget = String(state.previousTarget || "");
     const previousBinary = path.join(previousTarget, "bin", "codex");
+    const previousHost = path.join(previousTarget, "bin", "codex-code-mode-host");
     if (
       !previousTarget
       || !this.targetMatchesCurrentArch(previousTarget)
       || !fs.existsSync(previousBinary)
+      || !fs.existsSync(previousHost)
     ) {
       throw new Error("没有可恢复的 Codex Runtime 版本。");
     }
