@@ -94,6 +94,12 @@ async function run() {
     assert.equal(repaired.ok, true);
     assert.equal(fs.existsSync(installedHost), true);
 
+    fs.chmodSync(installedHost, 0o644);
+    assert.equal((await runtime.snapshot()).ok, false);
+    const permissionRepaired = await runtime.installBundled();
+    assert.equal(permissionRepaired.ok, true);
+    fs.accessSync(installedHost, fs.constants.X_OK);
+
     const previous = runtime.captureCurrent();
     const newerTarget = path.join(runtime.releasesRoot(), "0.146.0-aarch64-apple-darwin");
     writeExecutable(path.join(newerTarget, "bin", "codex"), "0.146.0");
