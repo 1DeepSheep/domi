@@ -82,6 +82,8 @@ export type GridVirtualRange = {
 
 export type GridCellGeneration = number;
 
+export type GridCellClickIntent = "select" | "expand" | "edit";
+
 export const GRID_ROW_HEIGHTS: Readonly<Record<GridRowDensity, number>> = {
   compact: 32,
   standard: 40,
@@ -95,6 +97,20 @@ export const DEFAULT_GRID_VIEW_PREFERENCES: GridViewPreferences = {
   columnWidths: {},
   rowDensity: "standard"
 };
+
+/**
+ * Mirrors spreadsheet interaction: a click selects a normal cell, while a
+ * long-text cell gets a read-only expansion. Editing is always an explicit
+ * double click (or a keyboard command handled by the React layer).
+ */
+export function gridCellClickIntent(
+  kind: string,
+  clickCount: number,
+  editable: boolean
+): GridCellClickIntent {
+  if (clickCount >= 2) return editable ? "edit" : kind === "longtext" ? "expand" : "select";
+  return kind === "longtext" ? "expand" : "select";
+}
 
 const DEFAULT_COLUMN_WIDTH = 160;
 const MIN_COLUMN_WIDTH = 56;

@@ -31,7 +31,8 @@ import {
   CodexRuntimeStatus,
   DiagnosticCheck,
   DiagnosticReport,
-  StorageMigrationPreview,
+  FeishuSetupAuthStartResult,
+  FeishuSetupStatus,
   UpdateStatus
 } from "./env";
 
@@ -99,6 +100,53 @@ function plaudStatusLabel(status: string) {
   }[status] || "";
 }
 
+type FeishuAssistPhase = "connection" | "configuration" | "authorization";
+
+const FEISHU_ASSIST_PHASE_LABELS: Record<FeishuAssistPhase, string> = {
+  connection: "连接检查",
+  configuration: "首次应用配置",
+  authorization: "账号授权"
+};
+
+function sanitizedFeishuAssistError(value: unknown) {
+  const input = String(value || "飞书连接尚未完成").trim().slice(0, 1600);
+  const normalized = input
+    .replace(/https?:\/\/\S+/gi, "[链接已隐藏]")
+    .replace(/\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/gi, "[账号已隐藏]")
+    .replace(/\/Users\/[^/\s]+/g, "/Users/[本机用户]")
+    .replace(/\b[A-Z0-9]{4}(?:-[A-Z0-9]{4})+\b/gi, "[验证码已隐藏]")
+    .replace(
+      /\b(?:app|base|table|wiki|space|node|device|user|access|refresh)[_\s-]*(?:token|id|code)\b\s*[:=]?\s*[A-Za-z0-9_-]*/gi,
+      "[标识已隐藏]"
+    )
+    .replace(/\b(?:bas|tbl|wik|doc|dox|nod)[A-Za-z0-9_-]{6,}\b/gi, "[标识已隐藏]")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (/network|timeout|timed out|socket|econn|网络|超时/i.test(normalized)) {
+    return "网络或飞书服务暂时不可用。";
+  }
+  if (/admin|approval|policy|管理员|企业策略|批准|审批/i.test(normalized)) {
+    return "当前企业策略需要管理员批准，必须由用户联系管理员完成。";
+  }
+  if (/auth|login|unauthor|forbidden|401|403|授权|登录/i.test(normalized)) {
+    return "账号授权尚未完成、已失效，或当前企业需要额外批准。";
+  }
+  if (/ambiguous|duplicate|同名|多个/i.test(normalized)) {
+    return "发现多个同名资源，需要用户确认要保留或使用哪一个。";
+  }
+  if (/schema|field|option|字段|选项|结构/i.test(normalized)) {
+    return "现有飞书资料库结构与 domi 预期不一致，需要先确认兼容处理方式。";
+  }
+  if (/runtime|cli|component|binary|组件|运行时|程序/i.test(normalized)) {
+    return "domi 内置连接组件暂时不可用或不完整。";
+  }
+  if (/config|initialize|setup|配置|初始化/i.test(normalized)) {
+    return "首次应用配置尚未完成，或配置状态未能通过检查。";
+  }
+  return "连接流程返回了未识别的错误，需要重新检查当前步骤。";
+}
+
 export default function SetupCenter({
   initialTab = "connection",
   settings,
@@ -133,16 +181,21 @@ export default function SetupCenter({
   const [updateBusy, setUpdateBusy] = useState(false);
   const [codexRuntime, setCodexRuntime] = useState<CodexRuntimeStatus | null>(null);
   const [codexRuntimeBusy, setCodexRuntimeBusy] = useState(false);
-  const [migrateLocalDocuments, setMigrateLocalDocuments] = useState(true);
-  const [migrationPreview, setMigrationPreview] = useState<StorageMigrationPreview | null>(null);
-  const [migrationPreviewBusy, setMigrationPreviewBusy] = useState(false);
   const [outlookProfileBusy, setOutlookProfileBusy] = useState(false);
+  const [feishuStatus, setFeishuStatus] = useState<FeishuSetupStatus | null>(null);
+  const [feishuStatusBusy, setFeishuStatusBusy] = useState(false);
+  const [feishuAuth, setFeishuAuth] = useState<FeishuSetupAuthStartResult | null>(null);
+  const [feishuAuthBusy, setFeishuAuthBusy] = useState(false);
+  const [feishuAssistBusy, setFeishuAssistBusy] = useState(false);
+  const [feishuAssistMessage, setFeishuAssistMessage] = useState("");
+  const [feishuAssistIssue, setFeishuAssistIssue] = useState<{
+    phase: FeishuAssistPhase;
+    error: string;
+  } | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const onDirtyChangeRef = useRef(onDirtyChange);
   onDirtyChangeRef.current = onDirtyChange;
-  const switchingLocalToFeishu = settings.storageBackend === "local"
-    && draft.storageBackend === "feishu";
   const hasUnsavedChanges = JSON.stringify(draft) !== JSON.stringify(settings)
     || Boolean(relayApiKey.trim());
 
@@ -153,23 +206,185 @@ export default function SetupCenter({
   }, [hasUnsavedChanges]);
   useEffect(() => () => onDirtyChangeRef.current?.(false), []);
 
+
+  async function refreshFeishuStatus(force = false) {
+    setFeishuStatusBusy(true);
+    try {
+      const status = await workbench.getFeishuSetupStatus({ force });
+      setFeishuStatus(status);
+      if (!status.connected && status.error) {
+        setFeishuAssistIssue((current) => current && current.phase !== "connection"
+          ? current
+          : { phase: "connection", error: status.error || "飞书连接尚未完成" });
+      } else if (status.connected) {
+        setFeishuAssistIssue(null);
+      }
+      return status;
+    } catch (statusError) {
+      const statusMessage = statusError instanceof Error ? statusError.message : String(statusError);
+      const status: FeishuSetupStatus = {
+        ok: false,
+        connected: false,
+        configured: false,
+        cliAvailable: false,
+        userName: "",
+        error: statusMessage
+      };
+      setFeishuStatus(status);
+      setFeishuAssistIssue({ phase: "connection", error: statusMessage });
+      return status;
+    } finally {
+      setFeishuStatusBusy(false);
+    }
+  }
+
   useEffect(() => {
-    if (!switchingLocalToFeishu) {
-      setMigrationPreview(null);
-      setMigrationPreviewBusy(false);
+    if (tab !== "data") return;
+    void refreshFeishuStatus(false);
+  }, [tab]);
+
+  async function startFeishuAuth() {
+    setFeishuAuthBusy(true);
+    setFeishuAssistMessage("");
+    setError("");
+    setNotice("");
+    try {
+      const result = await workbench.startFeishuSetupAuth();
+      if (!result.ok) {
+        const resultError = result.error || "无法启动飞书授权，请重试。";
+        setFeishuAssistIssue({
+          phase: feishuAuth?.flow === "authorization" ? "authorization" : "configuration",
+          error: resultError
+        });
+        setError(resultError);
+        return;
+      }
+      setFeishuAuth(result);
+      setFeishuAssistIssue(null);
+      if (result.flow === "configuration") {
+        setNotice(result.verificationOpened
+          ? "已在浏览器打开首次飞书应用配置页；完成后回到 domi，点击“应用已配置，继续”。"
+          : "请先在浏览器完成首次飞书应用配置，再回到 domi 继续授权。");
+      } else {
+        setNotice(result.verificationOpened
+          ? "已在浏览器打开飞书授权页；完成授权后回到 domi 继续。"
+          : "请在浏览器完成飞书授权后回到 domi 继续。");
+      }
+    } catch (authError) {
+      const authMessage = authError instanceof Error ? authError.message : String(authError);
+      setFeishuAssistIssue({
+        phase: feishuAuth?.flow === "authorization" ? "authorization" : "configuration",
+        error: authMessage
+      });
+      setError(authMessage);
+    } finally {
+      setFeishuAuthBusy(false);
+    }
+  }
+
+  async function completeFeishuAuth() {
+    const deviceCode = String(feishuAuth?.deviceCode || "").trim();
+    if (!deviceCode) {
+      await startFeishuAuth();
       return;
     }
-    let cancelled = false;
-    setMigrationPreviewBusy(true);
-    workbench.previewStorageMigration().then((preview) => {
-      if (!cancelled) setMigrationPreview(preview);
-    }).finally(() => {
-      if (!cancelled) setMigrationPreviewBusy(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [switchingLocalToFeishu]);
+    setFeishuAuthBusy(true);
+    setError("");
+    setNotice("正在确认飞书授权…");
+    try {
+      const status = await workbench.completeFeishuSetupAuth({ deviceCode });
+      setFeishuStatus(status);
+      if (!status.ok || !status.connected) {
+        const statusError = status.error || "飞书授权尚未完成，请在浏览器完成后重试。";
+        setNotice("");
+        setFeishuAssistIssue({ phase: "authorization", error: statusError });
+        setError(statusError);
+        return;
+      }
+      setFeishuAuth(null);
+      setFeishuAssistIssue(null);
+      setFeishuAssistMessage("");
+      setNotice(`飞书已连接${status.userName ? ` · ${status.userName}` : ""}。本地资料库不会因此迁移或改变。`);
+    } catch (authError) {
+      const authMessage = authError instanceof Error ? authError.message : String(authError);
+      setNotice("");
+      setFeishuAssistIssue({ phase: "authorization", error: authMessage });
+      setError(authMessage);
+    } finally {
+      setFeishuAuthBusy(false);
+    }
+  }
+
+  async function assistFeishuConnection() {
+    if (!codexStatus?.ok) {
+      setError("Codex 尚未就绪，请先完成 Codex 连接。");
+      return;
+    }
+
+    const phase: FeishuAssistPhase = feishuAssistIssue?.phase
+      || (feishuAuth?.flow === "configuration"
+        ? "configuration"
+          : feishuAuth?.flow === "authorization"
+            ? "authorization"
+            : "connection");
+    const safeError = sanitizedFeishuAssistError(
+      feishuAssistIssue?.error
+      || feishuStatus?.error
+      || "飞书连接尚未完成"
+    );
+
+    setFeishuAssistBusy(true);
+    setFeishuAssistMessage("");
+    setError("");
+    setNotice("");
+    try {
+      const result = await workbench.runCodex({
+        runId: `connection-guidance-${Date.now()}`,
+        prompt: [
+          "你是 domi 的连接引导助手。只根据下面两项脱敏信息，向普通用户解释当前问题和下一步：",
+          `当前阶段：${FEISHU_ASSIST_PHASE_LABELS[phase]}`,
+          `脱敏错误：${safeError}`,
+          "",
+          "严格限制：",
+          "1. 只做诊断说明和操作引导；不得调用任何工具、终端、浏览器、网络或本地文件。",
+          "2. 不得启动或代替用户完成应用初始化、登录、验证码、账号授权、企业管理员批准或资源写入。",
+          "3. 不得要求或猜测 App ID、App Secret、Base Token、Table ID、Wiki Space ID、设备码、验证码、用户名或任何凭据。",
+          "4. 如果涉及企业策略或管理员批准，明确告诉用户需要联系管理员；如果存在多个同名资源，只能让用户选择，不能替用户决定。",
+          "5. 不得建议切换资料库模式、迁移资料，或清除已有配置。",
+          "6. 优先引导用户继续使用当前页面已有按钮；不要让用户输入命令。",
+          "",
+          "最终用不超过三条简短中文说明：发生了什么、现在点哪里、什么情况必须由用户或管理员完成。"
+        ].join("\n"),
+        // 该字符串和 workflow 都刻意不包含外部数据关键词。助手只解释已脱敏状态，
+        // 不应触发外部访问授权的系统模态框。
+        requestText: "诊断当前连接引导",
+        ephemeral: true,
+        background: false,
+        allowUserInput: false,
+        privateOutput: true,
+        webSearch: false,
+        workflowId: "connection-guidance",
+        workspacePath: codexStatus.workspacePath
+      });
+      if (!result.ok) {
+        setError(result.error || "Codex 暂时无法给出连接建议，请重试。");
+        return;
+      }
+      setFeishuAssistMessage(
+        String(result.output || "请按当前页面提示继续连接；登录、验证码和管理员批准必须由你本人完成。")
+          .trim()
+          .slice(0, 2400)
+      );
+    } catch (assistError) {
+      setError(assistError instanceof Error ? assistError.message : String(assistError));
+    } finally {
+      const refreshed = await refreshFeishuStatus(true);
+      if (refreshed.connected) {
+        setFeishuAssistIssue(null);
+      }
+      setFeishuAssistBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -210,20 +425,17 @@ export default function SetupCenter({
     try {
       const result = await onSave({
         ...draft,
-        storageMigration: switchingLocalToFeishu && migrateLocalDocuments
-          ? "local-to-feishu"
-          : "none",
+        storageBackend: "local",
+        storageMigration: "none",
         onboardingComplete: complete || settings.onboardingComplete
       });
       if (!result.ok) {
         setError(result.error || "保存设置失败。");
         return false;
       }
-      setNotice(result.migration?.ok
-        ? `已迁移 ${result.migration.migratedProjectCount} 个项目、${result.migration.migratedPeopleCount} 位人脉、${result.migration.migratedNewsCount} 条行业动态、${result.migration.documentCount} 篇文档和 ${result.migration.assetCount} 张图片，并切换到飞书资料库。`
-        : result.codex?.ok
+      setNotice(result.warning || (result.codex?.ok
           ? "连接已保存并验证。"
-          : "设置已保存，资料同步将在后台继续。");
+          : "设置已保存；本地资料库继续作为唯一主资料库。"));
       if (complete) onClose();
       return true;
     } catch (saveError) {
@@ -616,7 +828,7 @@ export default function SetupCenter({
 
   async function chooseLocalLibraryDirectory() {
     setError("");
-    const targetField = draft.storageBackend === "local" ? "localRepositoryDir" : "localLibraryDir";
+    const targetField = "localRepositoryDir";
     const result = await workbench.selectDirectory(draft[targetField]);
     if (!result.ok) {
       setError(result.error || "无法选择本地资料库目录。");
@@ -752,6 +964,13 @@ export default function SetupCenter({
     }
   }
 
+  const downloadedUpdateLabel = updateStatus?.installing
+    ? "正在安装，domi 将自动重启"
+    : updateStatus?.error
+      ? "更新重启未完成，可重试"
+      : updateStatus?.restartPending && Number(updateStatus.busyTaskCount || 0) > 0
+        ? "更新已下载，任务完成后自动重启"
+        : "更新已下载，正在安全保存并重启";
   const updateStateLabel = updateStatus
     ? {
         disabled: "开发版不执行安装更新",
@@ -760,7 +979,7 @@ export default function SetupCenter({
         available: `发现 ${updateStatus.availableVersion || "新版本"}`,
         "up-to-date": "当前已是最新版本",
         downloading: `正在下载 ${Math.round(updateStatus.percent)}%`,
-        downloaded: `${updateStatus.availableVersion || "新版本"} 已准备好`,
+        downloaded: downloadedUpdateLabel,
         error: "更新检查失败"
       }[updateStatus.state]
     : "正在读取版本信息";
@@ -851,7 +1070,7 @@ export default function SetupCenter({
               <p>{tab === "connection"
                 ? "domi 会自动准备 Codex CLI；你只需选择 ChatGPT 账号或 Responses 中转站。"
                 : tab === "data"
-                  ? "选择飞书协作资料库或完全本地的 SQLite + Markdown 资料库；配置仅保存在这台 Mac。"
+                  ? "domi 默认使用本地 SQLite + Markdown；飞书可选连接，作为外部参考资料库和发布平台。配置仅保存在这台 Mac。"
                 : tab === "plaud"
                   ? "PLAUD 仅用于把录音转成文字稿。现在不用可以直接跳过，domi 不会连接或读取录音。"
                 : tab === "updates"
@@ -1063,125 +1282,114 @@ export default function SetupCenter({
             </div>
           ) : tab === "data" ? (
             <div className="setup-form data-connection-form">
-              <div className="storage-backend-options" role="radiogroup" aria-label="资料库模式">
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={draft.storageBackend === "local"}
-                  className={draft.storageBackend === "local" ? "selected" : ""}
-                  onClick={() => setDraft((current) => ({ ...current, storageBackend: "local" }))}
-                >
+              <div className="storage-backend-options local-only" aria-label="本地主资料库">
+                <div className="selected">
                   <HardDrive size={19} />
                   <span>
-                    <strong>本地资料库</strong>
-                    <small>SQLite 管理结构化数据，Markdown 保存文档，附件全部留在所选文件夹。</small>
+                    <strong>{settings.storageBackend === "feishu"
+                      ? "本地资料库 · 目标架构"
+                      : "本地资料库 · 默认基础"}</strong>
+                    <small>{settings.storageBackend === "feishu"
+                      ? "旧版飞书主库尚未导入；下方只是准备本地工作区，不代表已经完成迁移或切换。"
+                      : "SQLite 管理结构化数据，Markdown 保存文档和图片；项目、人脉、行业动态均以本机内容为准。"}</small>
                   </span>
-                  <i>{draft.storageBackend === "local" ? <CheckCircle2 size={17} /> : null}</i>
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={draft.storageBackend === "feishu"}
-                  className={draft.storageBackend === "feishu" ? "selected" : ""}
-                  onClick={() => setDraft((current) => ({ ...current, storageBackend: "feishu" }))}
-                >
-                  <Cloud size={19} />
-                  <span>
-                    <strong>飞书资料库</strong>
-                    <small>Base 管理项目、人脉与行业动态，Wiki 保存项目文档，本地目录归档材料。</small>
-                  </span>
-                  <i>{draft.storageBackend === "feishu" ? <CheckCircle2 size={17} /> : null}</i>
-                </button>
+                  <i><CheckCircle2 size={17} /></i>
+                </div>
               </div>
+              {settings.storageBackend === "feishu" ? (
+                <div className="setup-feedback success legacy-feishu-compatibility" role="status">
+                  <strong>旧版飞书主库仍按原模式运行</strong>
+                  <span>为避免现有项目和人脉突然消失，domi 不会静默切到空的本地库。当前读写与文档连接可继续使用；待你明确完成“安全导入本地”并逐项核验后，才会切换主资料库，且不会删除飞书内容。</span>
+                </div>
+              ) : null}
+              <section className={`feishu-connection-card ${feishuStatus?.connected ? "connected" : ""}`}>
+                <span className="feishu-connection-icon">
+                  {feishuStatus?.connected ? <BadgeCheck size={21} /> : <Cloud size={21} />}
+                </span>
+                <span className="feishu-connection-copy">
+                  <strong>{feishuStatusBusy && !feishuStatus
+                    ? "正在检查飞书连接"
+                    : feishuStatus?.connected
+                      ? `飞书已连接${feishuStatus.userName ? ` · ${feishuStatus.userName}` : ""}`
+                      : "连接飞书（可选）"}</strong>
+                  <small>{feishuStatus?.connected
+                    ? settings.storageBackend === "feishu"
+                      ? "旧版飞书主库继续按原模式安全运行；完整飞书权限和既有资料连接都会保留，本地安全导入完成后才接管管理。"
+                      : "可按你的指令访问飞书资料、联系人和消息，或创建、编辑、发布文档；本地资料库始终是管理基础。"
+                    : feishuStatus?.error && !feishuStatusBusy
+                      ? feishuStatus.error
+                      : "连接后保留此前完整的飞书业务能力；不会自动创建或接管 Base，也不会改变、迁移本地资料。"}</small>
+                  <small className="feishu-permission-scope">授权范围：多维表格、知识库、云文档、云盘、消息与通讯录；仅在你的明确指令或已启用工作流需要时使用。</small>
+                </span>
+                <span className="feishu-connection-actions">
+                  {feishuStatus?.connected ? (
+                    <button type="button" onClick={() => void refreshFeishuStatus(true)} disabled={feishuStatusBusy}>
+                      {feishuStatusBusy ? <LoaderCircle className="spinning" size={14} /> : <RefreshCw size={14} />}
+                      检查连接
+                    </button>
+                  ) : feishuAuth?.flow === "configuration" ? (
+                    <button type="button" onClick={startFeishuAuth} disabled={feishuAuthBusy}>
+                      {feishuAuthBusy ? <LoaderCircle className="spinning" size={14} /> : <CheckCircle2 size={14} />}
+                      应用已配置，继续
+                    </button>
+                  ) : feishuAuth?.deviceCode ? (
+                    <button type="button" onClick={completeFeishuAuth} disabled={feishuAuthBusy}>
+                      {feishuAuthBusy ? <LoaderCircle className="spinning" size={14} /> : <CheckCircle2 size={14} />}
+                      我已完成授权
+                    </button>
+                  ) : (
+                    <button type="button" onClick={startFeishuAuth} disabled={feishuAuthBusy || feishuStatusBusy}>
+                      {feishuAuthBusy ? <LoaderCircle className="spinning" size={14} /> : <LogIn size={14} />}
+                      连接飞书
+                    </button>
+                  )}
+                  {codexStatus?.ok
+                    && (Boolean(feishuAssistIssue) || Boolean(feishuStatus && !feishuStatus.connected)) ? (
+                    <button
+                      type="button"
+                      onClick={assistFeishuConnection}
+                      disabled={feishuAssistBusy || feishuAuthBusy}
+                    >
+                      {feishuAssistBusy
+                        ? <LoaderCircle className="spinning" size={14} />
+                        : <Sparkles size={14} />}
+                      {feishuAssistBusy ? "Codex 正在判断" : "让 Codex 帮我"}
+                    </button>
+                  ) : null}
+                </span>
+                {feishuAuth?.verificationUrl ? (
+                  <span className="feishu-auth-progress">
+                    <ExternalLink size={15} />
+                    <span>
+                      <strong>{feishuAuth.flow === "configuration"
+                        ? "第 1 步：初始化飞书应用"
+                        : "第 2 步：授权飞书账号"}</strong>
+                      <small>{feishuAuth.flow === "configuration"
+                        ? "应用凭据只会保存在 macOS 钥匙串；完成后回到这里继续账号授权。"
+                        : `${feishuAuth.userCode ? `验证码：${feishuAuth.userCode} · ` : ""}授权完成后回到这里继续。`}</small>
+                    </span>
+                    <button type="button" onClick={startFeishuAuth} disabled={feishuAuthBusy}>重新打开</button>
+                  </span>
+                ) : null}
+                {feishuAssistBusy || feishuAssistMessage ? (
+                  <span className="feishu-assist-result" aria-live="polite">
+                    <strong>{feishuAssistBusy ? "Codex 正在分析当前步骤" : "Codex 连接建议"}</strong>
+                    <small>{feishuAssistBusy
+                      ? "只会读取脱敏后的阶段和错误，不会打开浏览器或代替你登录、授权。"
+                      : feishuAssistMessage}</small>
+                  </span>
+                ) : null}
+              </section>
               <div className="data-privacy-note">
                 <ShieldCheck size={19} />
                 <span>
-                  <strong>{draft.storageBackend === "local" ? "数据完全保存在本机" : "插件与个人数据分离"}</strong>
-                  <small>{draft.storageBackend === "local"
-                    ? "不需要飞书授权。domi 只在所选目录和本机 Application Support 数据库中读写。"
-                    : "飞书标识写入本机 Application Support，权限限制为当前用户；不会进入 domi 插件、Git、DMG 或诊断报告。"}</small>
+                  <strong>{settings.storageBackend === "feishu" ? "兼容期不会丢失旧资料" : "本地是唯一主资料库"}</strong>
+                  <small>{settings.storageBackend === "feishu"
+                    ? "当前旧飞书主库继续按原模式运行；不会自动切换、导入、覆盖或删除。新用户和完成安全导入后的用户均以本地为准。"
+                    : "飞书是可选的外部参考资料库和发布平台。未经你的明确指令，domi 不会把本地记录发布到飞书，也不会用飞书内容覆盖本地数据。"}</small>
                 </span>
               </div>
-              {draft.storageBackend === "feishu" ? (
-                <>
-                  {switchingLocalToFeishu && (
-                    <div className="storage-migration-card">
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={migrateLocalDocuments}
-                        className={migrateLocalDocuments ? "enabled" : ""}
-                        onClick={() => setMigrateLocalDocuments((current) => !current)}
-                      >
-                        <span className="storage-migration-icon"><Cloud size={19} /></span>
-                        <span>
-                          <strong>先迁移本地资料，再切换到飞书</strong>
-                          <small>{migrationPreviewBusy
-                            ? "正在统计本地资料库…"
-                            : migrationPreview?.ok
-                              ? `将处理 ${migrationPreview.projectCount || 0} 个项目、${migrationPreview.peopleCount || 0} 位人脉、${migrationPreview.newsCount || 0} 条行业动态和 ${migrationPreview.documentCount || 0} 篇 Markdown 文档。`
-                              : migrationPreview?.error || "保存时会先检查本地资料库。"}</small>
-                        </span>
-                        <i aria-hidden="true"><b /></i>
-                      </button>
-                      <p>
-                        项目文档按领域和子领域写入 Wiki；项目、人脉和行业动态写入各自多维表格，并按业务键去重、回读校验。
-                        原始 PDF、录音和其他附件继续保留在本地；迁移失败不会切换后端，也不会删除本地文件。
-                      </p>
-                    </div>
-                  )}
-                  <div className="data-connection-grid">
-                    <section>
-                      <h3>项目库</h3>
-                      <label>
-                        <span>Base Token</span>
-                        <input value={draft.projectBaseToken} onChange={(event) => setDraft((current) => ({ ...current, projectBaseToken: event.target.value }))} placeholder="项目 Watching List 的 Base Token" spellCheck={false} />
-                      </label>
-                      <label>
-                        <span>Table ID</span>
-                        <input value={draft.projectTableId} onChange={(event) => setDraft((current) => ({ ...current, projectTableId: event.target.value }))} placeholder="项目表 Table ID" spellCheck={false} />
-                      </label>
-                    </section>
-                    <section>
-                      <h3>人脉库</h3>
-                      <label>
-                        <span>Base Token</span>
-                        <input value={draft.peopleBaseToken} onChange={(event) => setDraft((current) => ({ ...current, peopleBaseToken: event.target.value }))} placeholder="People Base Token" spellCheck={false} />
-                      </label>
-                      <label>
-                        <span>Table ID</span>
-                        <input value={draft.peopleTableId} onChange={(event) => setDraft((current) => ({ ...current, peopleTableId: event.target.value }))} placeholder="人脉表 Table ID" spellCheck={false} />
-                      </label>
-                    </section>
-                    <section>
-                      <h3>行业动态</h3>
-                      <label>
-                        <span>Base Token</span>
-                        <input value={draft.radarBaseToken} onChange={(event) => setDraft((current) => ({ ...current, radarBaseToken: event.target.value }))} placeholder="行业信息追踪 Base Token" spellCheck={false} />
-                      </label>
-                      <label>
-                        <span>Table ID</span>
-                        <input value={draft.radarTableId} onChange={(event) => setDraft((current) => ({ ...current, radarTableId: event.target.value }))} placeholder="新闻表 Table ID" spellCheck={false} />
-                      </label>
-                    </section>
-                    <section>
-                      <h3>文档与材料</h3>
-                      <label>
-                        <span>Wiki Space ID</span>
-                        <input value={draft.wikiSpaceId} onChange={(event) => setDraft((current) => ({ ...current, wikiSpaceId: event.target.value }))} placeholder="团队 Wiki Space ID" spellCheck={false} />
-                      </label>
-                      <label className="local-library-setting">
-                        <span>本地材料目录</span>
-                        <div className="directory-picker">
-                          <input value={draft.localLibraryDir} onChange={(event) => setDraft((current) => ({ ...current, localLibraryDir: event.target.value }))} placeholder="请选择本地材料目录" spellCheck={false} />
-                          <button type="button" onClick={chooseLocalLibraryDirectory} title="选择本地材料目录" aria-label="选择本地材料目录"><FolderOpen size={16} /></button>
-                        </div>
-                      </label>
-                    </section>
-                  </div>
-                </>
-              ) : (
-                <div className="local-storage-panel">
+              <div className="local-storage-panel">
                   <div className="local-storage-summary">
                     <Database size={20} />
                     <span>
@@ -1210,14 +1418,14 @@ export default function SetupCenter({
                     <small>数据库保存在 Application Support，不放入同步盘，Markdown 和附件仍可选择 iCloud、OneDrive 或普通文件夹。</small>
                   </div>
                 </div>
-              )}
               <section className="task-calendar-settings">
                 <div className="task-calendar-settings-heading">
                   <CalendarDays size={20} />
                   <span>
                     <strong>待办事项与日历</strong>
-                    <small>{draft.storageBackend === "feishu"
-                      ? "domi 自动维护飞书文档库中的“1.待办事项”；日程邀请由当前 Outlook 账号的默认日历发出。"
+                    {required ? <em>可稍后设置</em> : null}
+                    <small>{required
+                      ? "这部分不影响完成资料库配置；可以先跳过，之后再连接 Outlook 和添加常用参会人。"
                       : "domi 使用工作区根目录的“0.待办事项.md”；日程邀请由当前 Outlook 账号的默认日历发出。"}</small>
                   </span>
                 </div>
@@ -1504,11 +1712,17 @@ export default function SetupCenter({
               <div className="update-actions">
                 {updateStatus?.state === "available" ? (
                   <button type="button" onClick={downloadAvailableUpdate} disabled={updateBusy}>
-                    <Download size={16} />下载 {updateStatus.availableVersion}
+                    <Download size={16} />更新到 {updateStatus.availableVersion}
                   </button>
                 ) : updateStatus?.state === "downloaded" ? (
-                  <button className="primary" type="button" onClick={installDownloadedUpdate} disabled={updateBusy}>
-                    <RefreshCw size={16} />重启并安装
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={installDownloadedUpdate}
+                    disabled={updateBusy || Boolean(updateStatus.installing) || Boolean(updateStatus.restartPending && !updateStatus.error)}
+                  >
+                    <RefreshCw className={updateStatus.installing || updateStatus.restartPending ? "spinning" : ""} size={16} />
+                    {updateStatus.error ? "重试安全重启" : "等待安全重启"}
                   </button>
                 ) : (
                   <button type="button" onClick={checkUpdates} disabled={updateBusy || !updateStatus?.supported}>
@@ -1528,7 +1742,7 @@ export default function SetupCenter({
                 </span>
               </div>
               {(error || notice || updateStatus?.error) && (
-                <div className={`setup-feedback ${error || updateStatus?.state === "error" ? "error" : "success"}`}>
+                <div className={`setup-feedback ${error || updateStatus?.error || updateStatus?.state === "error" ? "error" : "success"}`}>
                   {error || updateStatus?.error || notice}
                 </div>
               )}
@@ -1589,15 +1803,18 @@ export default function SetupCenter({
               </button>
             )}
             {tab === "data" && (
-              <button className="setup-primary" type="button" onClick={required ? saveDataAndContinue : () => save(false)} disabled={saving}>
-                {saving && <LoaderCircle className="spinning" size={16} />}
-                {saving && switchingLocalToFeishu && migrateLocalDocuments
-                  ? "正在迁移并切换…"
+              <button
+                className="setup-primary"
+                type="button"
+                onClick={required ? saveDataAndContinue : () => save(false)}
+                disabled={saving || feishuAuthBusy}
+              >
+                {(saving || feishuAuthBusy) && <LoaderCircle className="spinning" size={16} />}
+                {feishuAuthBusy
+                  ? "正在连接飞书…"
                   : required
                     ? "下一步：录音转写"
-                    : switchingLocalToFeishu && migrateLocalDocuments
-                      ? "迁移并切换到飞书"
-                      : "保存资料连接"}
+                    : "保存资料连接"}
               </button>
             )}
             {tab === "plaud" && (

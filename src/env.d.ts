@@ -81,6 +81,12 @@ declare global {
       openWorkspace: (workspacePath?: string) => Promise<{ ok: boolean; error?: string; workspacePath: string }>;
       loadDomiCache: () => Promise<DomiSyncResult>;
       checkDomi: () => Promise<DomiStatusResult>;
+      getFeishuSetupStatus: (request?: { force?: boolean }) => Promise<FeishuSetupStatus>;
+      startFeishuSetupAuth: () => Promise<FeishuSetupAuthStartResult>;
+      completeFeishuSetupAuth: (
+        request: FeishuSetupAuthCompleteRequest
+      ) => Promise<FeishuSetupStatus>;
+      provisionFeishuSetup: () => Promise<FeishuSetupProvisionResult>;
       syncDomi: () => Promise<DomiSyncResult>;
       listDomiDatabase: () => Promise<DomiDatabaseSnapshot>;
       updateDomiDatabaseRecord: (
@@ -494,6 +500,65 @@ export type StorageMigrationResult = {
 export type DomiStatusResult = {
   ok: boolean;
   health?: DomiHealth;
+  error?: string;
+};
+
+export type FeishuSetupResourceNames = {
+  baseName: string;
+  wikiName: string;
+  projectTableName: string;
+  peopleTableName: string;
+  radarTableName: string;
+};
+
+export type FeishuSetupStatus = {
+  ok: boolean;
+  connected: boolean;
+  configured: boolean;
+  cliAvailable: boolean;
+  userName: string;
+  tokenStatus?: string;
+  resources?: FeishuSetupResourceNames;
+  error?: string;
+};
+
+export type FeishuSetupAuthStartResult = {
+  ok: boolean;
+  flow?: "configuration" | "authorization";
+  verificationUrl?: string;
+  verificationOpened?: boolean;
+  userCode?: string;
+  deviceCode?: string;
+  expiresAt?: number;
+  error?: string;
+};
+
+export type FeishuSetupAuthCompleteRequest = {
+  deviceCode: string;
+};
+
+export type FeishuSetupMapping = {
+  projectBaseToken: string;
+  projectTableId: string;
+  peopleBaseToken: string;
+  peopleTableId: string;
+  radarBaseToken: string;
+  radarTableId: string;
+  wikiSpaceId: string;
+};
+
+export type FeishuSetupProvisionResult = {
+  ok: boolean;
+  mapping?: FeishuSetupMapping;
+  resources?: {
+    base: { name: string; created: boolean };
+    tables: {
+      project: { name: string; created: boolean };
+      people: { name: string; created: boolean };
+      radar: { name: string; created: boolean };
+    };
+    wiki: { name: string; created: boolean };
+  };
   error?: string;
 };
 
@@ -1148,6 +1213,7 @@ export type AppSettingsSaveRequest = Partial<AppSettings> & {
 export type AppSettingsSaveResult = AppSettingsResult & {
   codex?: CodexCheckResult;
   migration?: StorageMigrationResult;
+  warning?: string;
 };
 
 export type CodexInstallResult = {
@@ -1221,6 +1287,9 @@ export type UpdateStatus = {
   transferred: number;
   total: number;
   releaseDate: string;
+  restartPending?: boolean;
+  busyTaskCount?: number;
+  installing?: boolean;
   error: string;
 };
 
@@ -1311,6 +1380,12 @@ export type CodexRunRequest = {
   runId: string;
   prompt: string;
   requestText?: string;
+  /**
+   * Host-selected local document context. The main process still validates
+   * real paths and the user's original write intent before any Feishu write.
+   */
+  activeDocumentPath?: string;
+  attachmentPaths?: string[];
   threadId?: string;
   ephemeral?: boolean;
   background?: boolean;

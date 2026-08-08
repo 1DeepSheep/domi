@@ -10,11 +10,14 @@ const {
 } = require("./document-library.cjs");
 const { LocalDomiRepository, resolveHomePath } = require("./local-domi-repository.cjs");
 const { LocalToFeishuMigration } = require("./local-to-feishu-migration.cjs");
+const { FeishuMarkdownPublisher } = require("./feishu-markdown-publisher.cjs");
+const { resolveBundledLarkRuntime } = require("./lark-runtime.cjs");
 const { resolveMediaRuntime } = require("./media-runtime.cjs");
 const { PlaudSessionBroker } = require("./plaud-browser-broker.cjs");
 const { RadarSourceService } = require("./radar-sources.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
 const { TaskQueue } = require("./service-coordinator.cjs");
+const CANONICAL_PROJECT_TAXONOMY = require("../shared/investment-taxonomy.json");
 
 const execFileAsync = promisify(execFile);
 const CACHE_KEY = "snapshot-v1";
@@ -45,6 +48,187 @@ const LEGACY_TASK_BOARD_CATEGORIES = new Map([
 const FEISHU_RECORD_PAGE_SIZE = 200;
 const FEISHU_RECORD_MAX_PAGES = 25;
 const FEISHU_READ_RETRY_DELAYS_MS = [350, 900, 1800];
+// Feishu stays an external reference and publishing surface, but connecting it
+// keeps the complete business-domain authorization used by existing workflows.
+// Local SQLite + Markdown remains authoritative regardless of these grants.
+const FEISHU_EXTERNAL_SERVICE_DOMAINS = Object.freeze([
+  "base",
+  "wiki",
+  "docs",
+  "drive",
+  "im",
+  "contact"
+]);
+const FEISHU_SETUP_BASE_NAME = "domi资料库";
+const FEISHU_SETUP_WIKI_NAME = "domi文档库";
+const FEISHU_SETUP_PROJECT_DOMAINS = Object.freeze(Object.keys(CANONICAL_PROJECT_TAXONOMY));
+const FEISHU_SETUP_PROJECT_SUBDOMAINS = Object.freeze([
+  ...new Set(Object.values(CANONICAL_PROJECT_TAXONOMY).flat())
+]);
+const FEISHU_SETUP_PROJECT_STATUSES = Object.freeze([
+  "待交流",
+  "已交流",
+  "深度跟踪",
+  "已投",
+  "Miss",
+  "放弃"
+]);
+const FEISHU_SETUP_RATINGS = Object.freeze(["S", "A", "B", "C"]);
+const FEISHU_SETUP_TRACKED_INVESTORS = Object.freeze([
+  "红杉",
+  "高瓴",
+  "IDG",
+  "锦秋",
+  "Monolith/励思资本",
+  "五源",
+  "蓝驰",
+  "经纬"
+]);
+const FEISHU_SETUP_IMPORTANCE_LEVELS = Object.freeze([
+  "P0-立即关注",
+  "P1-重点关注",
+  "P2-日常跟踪",
+  "P3-仅归档"
+]);
+const FEISHU_SETUP_EVIDENCE_STATUSES = Object.freeze([
+  "独立核实",
+  "公司／机构口径",
+  "可观察动作",
+  "二手报道",
+  "传闻／待核验"
+]);
+const FEISHU_SETUP_SUGGESTED_ACTIONS = Object.freeze([
+  "立即关注",
+  "继续跟踪",
+  "进入深研",
+  "加入候选池",
+  "仅归档"
+]);
+
+function feishuSetupOptions(names) {
+  const hues = ["Blue", "Wathet", "Turquoise", "Green", "Lime", "Yellow", "Orange", "Carmine", "Purple", "Gray"];
+  return names.map((name, index) => ({
+    name,
+    hue: hues[index % hues.length],
+    lightness: "Lighter"
+  }));
+}
+
+function feishuSetupText(name, description = "") {
+  return { type: "text", name, ...(description ? { description } : {}) };
+}
+
+function feishuSetupSelect(name, multiple, options = [], description = "") {
+  return {
+    type: "select",
+    name,
+    multiple,
+    ...(options.length ? { options: feishuSetupOptions(options), requiredOptions: options } : {}),
+    ...(description ? { description } : {})
+  };
+}
+
+function feishuSetupDateTime(name, description = "") {
+  return {
+    type: "datetime",
+    name,
+    style: { format: "yyyy-MM-dd HH:mm" },
+    ...(description ? { description } : {})
+  };
+}
+
+function feishuSetupSystemTime(type, name, description = "") {
+  return {
+    type,
+    name,
+    style: { format: "yyyy-MM-dd HH:mm" },
+    ...(description ? { description } : {})
+  };
+}
+
+function feishuSetupFieldPayload(definition) {
+  const { requiredOptions: _requiredOptions, ...payload } = definition;
+  return payload;
+}
+
+const FEISHU_SETUP_TABLES = Object.freeze({
+  project: Object.freeze({
+    name: "项目库",
+    primaryField: "公司名称",
+    fields: Object.freeze([
+      feishuSetupText("公司名称", "项目或公司规范名称。"),
+      feishuSetupText("Notes", "项目核心摘要。"),
+      feishuSetupSelect("领域", false, FEISHU_SETUP_PROJECT_DOMAINS),
+      feishuSetupSelect("子领域", true, FEISHU_SETUP_PROJECT_SUBDOMAINS),
+      feishuSetupSelect("进展状态", false, FEISHU_SETUP_PROJECT_STATUSES),
+      feishuSetupSelect("项目评级", false, FEISHU_SETUP_RATINGS),
+      feishuSetupSelect("城市", true),
+      feishuSetupSystemTime("created_at", "入库时间", "系统自动记录首次入库时间，只读。"),
+      feishuSetupDateTime("最后更新时间", "项目资料最近一次实质更新的时间。"),
+      feishuSetupText("链接", "项目在 domi 文档库中的主文档链接。"),
+      feishuSetupSelect("是否完成后续融资", false),
+      feishuSetupText("历史融资", "按时间记录融资轮次、估值与股东出资情况。"),
+      {
+        type: "number",
+        name: "最新估值",
+        description: "最新已完成轮次投后估值，单位：亿美元。",
+        style: { type: "plain", precision: 3, percentage: false, thousands_separator: true }
+      },
+      feishuSetupSelect("投资机构", true, FEISHU_SETUP_TRACKED_INVESTORS)
+    ])
+  }),
+  people: Object.freeze({
+    name: "人脉库",
+    primaryField: "人名",
+    fields: Object.freeze([
+      feishuSetupText("人名", "人物规范姓名。"),
+      feishuSetupSelect("类型", true),
+      feishuSetupText("所属组织&身份"),
+      feishuSetupSelect("进展状态", false),
+      feishuSetupSelect("评级", false, FEISHU_SETUP_RATINGS),
+      feishuSetupSystemTime("created_at", "入库时间", "系统自动记录首次入库时间，只读。"),
+      feishuSetupDateTime("最后联系日期"),
+      feishuSetupSelect("城市", true),
+      feishuSetupText("交流文档", "与该人物相关的交流纪要链接，可保存多个。"),
+      feishuSetupText("链接", "人物主档或最有信息量文档的链接。")
+    ])
+  }),
+  radar: Object.freeze({
+    name: "行业动态",
+    primaryField: "新闻标题",
+    fields: Object.freeze([
+      feishuSetupText("新闻标题"),
+      feishuSetupSelect("领域", true, FEISHU_SETUP_PROJECT_DOMAINS),
+      feishuSetupSelect("子领域", true, FEISHU_SETUP_PROJECT_SUBDOMAINS),
+      feishuSetupSelect("信息类型", true),
+      feishuSetupDateTime("信息发布时间"),
+      feishuSetupText("新闻核心内容"),
+      feishuSetupText("投资含义"),
+      feishuSetupText("原文链接"),
+      feishuSetupText("来源名称"),
+      feishuSetupText("涉及公司"),
+      feishuSetupText("涉及机构"),
+      {
+        type: "number",
+        name: "重要性评分",
+        style: { type: "rating", icon: "number", min: 1, max: 10 }
+      },
+      feishuSetupSelect("重要性等级", false, FEISHU_SETUP_IMPORTANCE_LEVELS),
+      {
+        type: "number",
+        name: "可信度",
+        style: { type: "rating", icon: "number", min: 1, max: 10 }
+      },
+      feishuSetupSelect("证据状态", false, FEISHU_SETUP_EVIDENCE_STATUSES),
+      { type: "checkbox", name: "是否值得关注" },
+      feishuSetupSelect("建议动作", false, FEISHU_SETUP_SUGGESTED_ACTIONS),
+      feishuSetupText("事件ID", "跨扫描批次稳定不变的事件业务键。"),
+      feishuSetupText("扫描批次"),
+      feishuSetupSystemTime("created_at", "收录时间", "系统自动记录首次收录时间，只读。"),
+      feishuSetupSystemTime("updated_at", "最后更新时间", "系统自动记录最近更新时间，只读。")
+    ])
+  })
+});
 const PLAUD_FINAL_WORKFLOW_STAGES = new Set([
   "notes_non_project",
   "managed",
@@ -421,6 +605,198 @@ function larkResponseItems(response) {
   return data?.nodes || data?.items || data?.records || [];
 }
 
+function normalizedFeishuSetupName(value) {
+  return String(value || "").normalize("NFKC").trim();
+}
+
+function nestedFeishuSetupObjects(value, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return [];
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => nestedFeishuSetupObjects(item, seen));
+  }
+  return [value, ...Object.values(value).flatMap((item) => nestedFeishuSetupObjects(item, seen))];
+}
+
+function feishuSetupToken(value, keys) {
+  for (const key of keys) {
+    const token = String(value?.[key] || "").trim();
+    if (token) return token;
+  }
+  return "";
+}
+
+function exactFeishuSetupResources(response, exactName, options = {}) {
+  const nameKeys = options.nameKeys || ["name", "title"];
+  const tokenKeys = options.tokenKeys || ["base_token", "app_token", "token"];
+  const expected = normalizedFeishuSetupName(exactName);
+  const unique = new Map();
+  for (const item of nestedFeishuSetupObjects(larkResponseData(response))) {
+    const name = nameKeys
+      .map((key) => normalizedFeishuSetupName(item?.[key]))
+      .find(Boolean) || "";
+    if (name !== expected) continue;
+    const token = feishuSetupToken(item, tokenKeys);
+    if (!token) continue;
+    unique.set(token, { name, token, raw: item });
+  }
+  return [...unique.values()];
+}
+
+function feishuSetupCreatedToken(response, tokenKeys) {
+  for (const item of nestedFeishuSetupObjects(larkResponseData(response))) {
+    const token = feishuSetupToken(item, tokenKeys);
+    if (token) return token;
+  }
+  return "";
+}
+
+function feishuSetupFieldName(field) {
+  return String(field?.field_name || field?.fieldName || field?.name || "").trim();
+}
+
+function feishuSetupFieldType(field) {
+  const raw = String(field?.ui_type || field?.type_name || field?.field_type || field?.type || "")
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/[\s_-]+/g, "");
+  const numericType = Number(field?.type);
+  if (numericType === 1) return "text";
+  if (numericType === 2) return "number";
+  if (numericType === 3) return "select";
+  if (numericType === 4) return "multiselect";
+  if (numericType === 5) return "datetime";
+  if (numericType === 7) return "checkbox";
+  if (numericType === 1001) return "createdat";
+  if (numericType === 1002) return "updatedat";
+  if (["text", "singletext", "multilinetext", "url", "phone", "email"].includes(raw)) return "text";
+  if (["number", "rating", "currency", "progress"].includes(raw)) return "number";
+  if (["singleselect", "select"].includes(raw)) {
+    const multiple = field?.multiple ?? field?.property?.multiple;
+    if (multiple === true) return "multiselect";
+    return "select";
+  }
+  if (["multiselect", "multipleselect"].includes(raw)) return "multiselect";
+  if (["datetime", "date", "dateandtime"].includes(raw)) return "datetime";
+  if (["checkbox", "check"].includes(raw)) return "checkbox";
+  if (["createdat", "createdtime"].includes(raw)) return "createdat";
+  if (["updatedat", "modifiedtime", "lastupdatedtime"].includes(raw)) return "updatedat";
+  return raw;
+}
+
+function feishuSetupExpectedFieldType(definition) {
+  if (definition.type === "select") return definition.multiple ? "multiselect" : "select";
+  return String(definition.type || "").replace(/_/g, "");
+}
+
+function feishuSetupFieldOptions(field) {
+  const options = field?.property?.options
+    || field?.property?.multiple?.options
+    || field?.options
+    || [];
+  return Array.isArray(options)
+    ? options.map((option) => normalizedFeishuSetupName(
+        option?.name || option?.text || option?.value || option
+      )).filter(Boolean)
+    : [];
+}
+
+function feishuSetupFieldItems(response) {
+  const data = larkResponseData(response);
+  if (Array.isArray(data)) return data;
+  return data?.items || data?.fields || [];
+}
+
+function inspectFeishuSetupSchema(table, fields) {
+  const byName = new Map();
+  for (const field of fields) {
+    const name = feishuSetupFieldName(field);
+    if (!name) continue;
+    if (!byName.has(name)) byName.set(name, []);
+    byName.get(name).push(field);
+  }
+  const missing = [];
+  for (const definition of table.fields) {
+    const matches = byName.get(definition.name) || [];
+    if (matches.length > 1) {
+      return { ok: false, fieldName: definition.name, reason: "duplicate" };
+    }
+    if (!matches.length) {
+      missing.push(definition);
+      continue;
+    }
+    const actualType = feishuSetupFieldType(matches[0]);
+    const expectedType = feishuSetupExpectedFieldType(definition);
+    if (actualType !== expectedType) {
+      return {
+        ok: false,
+        fieldName: definition.name,
+        reason: "type",
+        actualType,
+        expectedType
+      };
+    }
+    const requiredOptions = definition.requiredOptions || [];
+    if (requiredOptions.length) {
+      const existingOptions = new Set(feishuSetupFieldOptions(matches[0]));
+      const missingOptions = requiredOptions.filter((name) =>
+        !existingOptions.has(normalizedFeishuSetupName(name))
+      );
+      if (missingOptions.length) {
+        return {
+          ok: false,
+          fieldName: definition.name,
+          reason: "options",
+          missingOptions
+        };
+      }
+    }
+  }
+  return { ok: true, missing };
+}
+
+function missingFeishuSetupLookup(error) {
+  return /(?:not found|no (?:exact )?match|zero candidates?|0 candidates?|未找到|无匹配|没有找到)/i.test(
+    error instanceof Error ? error.message : String(error)
+  );
+}
+
+function ambiguousFeishuSetupLookup(error) {
+  return /(?:ambiguous|multiple|more than one|several candidates?|多个同名|多条匹配|需要消歧义)/i.test(
+    error instanceof Error ? error.message : String(error)
+  );
+}
+
+function feishuSetupPublicError(error) {
+  const code = String(error?.code || "");
+  if (code === "FEISHU_SETUP_AMBIGUOUS_BASE") {
+    return `找到多个同名“${FEISHU_SETUP_BASE_NAME}”，为了避免写错资料库，domi 没有自动选择。请先在飞书中重命名后重试。`;
+  }
+  if (code === "FEISHU_SETUP_AMBIGUOUS_WIKI") {
+    return `找到多个同名“${FEISHU_SETUP_WIKI_NAME}”，为了避免写错文档库，domi 没有自动选择。请先在飞书中重命名后重试。`;
+  }
+  if (code === "FEISHU_SETUP_AMBIGUOUS_TABLE") {
+    return `“${String(error?.resourceName || "资料表")}”存在多个同名表，domi 没有自动猜测。请先在飞书中重命名后重试。`;
+  }
+  if (code === "FEISHU_SETUP_SCHEMA_CONFLICT") {
+    const tableName = String(error?.resourceName || "资料表");
+    const fieldName = String(error?.fieldName || "字段");
+    const detail = error?.reason === "duplicate"
+      ? "存在多个同名字段"
+      : error?.reason === "options"
+        ? "缺少 domi 必需的选项"
+        : "字段类型与 domi 不兼容";
+    return `“${tableName}”的“${fieldName}”${detail}。为了避免破坏已有数据，domi 没有修改该表；请先在飞书中修正该字段，或在“高级设置”中选择另一张表。`;
+  }
+  if (code === "FEISHU_SETUP_SCHEMA_VERIFY_FAILED") {
+    return `“${String(error?.resourceName || "资料表")}”的字段创建后回读验证未通过。domi 已停止继续写入，请检查飞书权限和表结构后重试。`;
+  }
+  if (code === "FEISHU_SETUP_AUTH_REQUIRED") {
+    return "飞书用户授权尚未完成，请先点击“连接飞书”并完成授权。";
+  }
+  return "自动配置飞书资料库未完成。已有连接不会被覆盖，请重试；若持续失败，可在“高级设置”中选择已有资料库。";
+}
+
 function taskWikiNodeToken(node) {
   return String(node?.node_token || node?.nodeToken || node?.token || "");
 }
@@ -644,6 +1020,26 @@ function isRetryableFeishuReadError(error) {
   return /\b(?:EOF|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|ENOTFOUND)\b|unexpected end of (?:json|input)|unterminated json|socket hang up|network(?: is)? unreachable|timed?\s*out|执行超时|temporar(?:y|ily)|too many requests|\b429\b|\b50[234]\b/i.test(detail);
 }
 
+function isLarkCliNotConfiguredError(error) {
+  const detail = [
+    error?.code,
+    error?.message,
+    error?.stderr,
+    error?.stdout
+  ].filter(Boolean).join(" ");
+  return /\bnot[_\s-]*configured\b|\bconfig\s+init\b/i.test(detail);
+}
+
+function larkCliNotConfiguredMessage() {
+  return "这台 Mac 尚未完成首次飞书连接。点击“连接飞书”后，domi 会在浏览器初始化专属飞书应用；应用凭据只保存在 macOS 钥匙串，不会写入安装包、GitHub 或诊断报告。Base Token、Table ID 和 Wiki Space ID 均不需要手工填写。";
+}
+
+function feishuConfigurationVerificationUrl(value) {
+  const text = String(value || "");
+  const match = text.match(/https:\/\/[^\s\u001b"'<>\\]+/i);
+  return match ? match[0] : "";
+}
+
 function describeFeishuSyncError(error, { hasCache = false } = {}) {
   const detail = String(error?.message || error || "").trim();
   const cacheNote = hasCache ? "已继续使用上次同步的数据。" : "请稍后重新同步。";
@@ -740,11 +1136,13 @@ class DomiIntegration {
     plaudBroker,
     podcastCacheDir,
     radarSourceService,
+    execFileFactory,
     sleep
   }) {
     this.stateStore = stateStore;
     this.configProvider = configProvider || (() => ({}));
     this.sleep = sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.execFileFactory = execFileFactory || execFile;
     this.larkCli = this.resolveLarkCli();
     this.materialIndexCache = new Map();
     this.databaseMaterializationQueues = new Map();
@@ -754,6 +1152,8 @@ class DomiIntegration {
       expiresAt: 0,
       inFlight: null
     };
+    this.feishuAppConfiguration = null;
+    this.feishuSetupProvisionPromise = null;
     this.intakeFieldsReadyKey = "";
     this.intakeFieldsPromise = null;
     this.intakeFieldsPromiseKey = "";
@@ -998,6 +1398,13 @@ class DomiIntegration {
   }
 
   resolveLarkCli() {
+    const bundledRuntime = resolveBundledLarkRuntime({
+      appRoot: path.join(__dirname, ".."),
+      resourcesPath: process.resourcesPath,
+      targetArch: process.arch
+    });
+    if (bundledRuntime.ok) return bundledRuntime.cliPath;
+
     const candidates = [
       process.env.LARK_CLI_PATH,
       path.join(os.homedir(), ".npm-global", "bin", "lark-cli"),
@@ -1009,7 +1416,7 @@ class DomiIntegration {
       const executable = resolveLarkCliExecutable(candidate);
       if (executable) return executable;
     }
-    return "lark-cli";
+    return "";
   }
 
   findPlugin() {
@@ -1060,7 +1467,12 @@ class DomiIntegration {
     const appToken = String(settings.projectBaseToken || "").trim();
     const tableId = String(settings.projectTableId || "").trim();
     const wikiSpaceId = String(settings.wikiSpaceId || "").trim();
-    const localLibraryRaw = String(settings.localLibraryDir || settings.oneDriveProjectDir || "").trim();
+    const localLibraryRaw = String(
+      settings.localLibraryDir
+      || settings.oneDriveProjectDir
+      || settings.localRepositoryDir
+      || (this.domiConfigPath ? path.join(path.dirname(this.domiConfigPath), "materials") : "")
+    ).trim();
     const localRepositoryRaw = String(settings.localRepositoryDir || "").trim();
     const localDatabaseRaw = String(settings.localDatabasePath || "").trim();
     if (backend === "local") {
@@ -1076,8 +1488,8 @@ class DomiIntegration {
         localDatabasePath: resolveHomePath(localDatabaseRaw)
       };
     }
-    if (!appToken || !tableId || !wikiSpaceId || !localLibraryRaw) {
-      throw new Error("domi 项目库连接尚未配置。请在 domi 设置的“资料连接”中填写项目 Base、Wiki 和本地资料库目录。 ");
+    if (!appToken || !tableId || !wikiSpaceId) {
+      throw new Error("domi 项目库连接尚未配置。请在 domi 设置的“资料连接”中连接飞书并自动设置资料库。 ");
     }
     return {
       backend,
@@ -1394,11 +1806,51 @@ class DomiIntegration {
     await this.plaudBroker.stop(reason);
   }
 
+  criticalOperationSnapshot() {
+    const plaudQueue = this.plaudCommandQueue.snapshot();
+    const larkQueue = this.larkCommandQueue.snapshot();
+    const snapshot = {
+      plaud: plaudQueue.activeCount + plaudQueue.pendingCount + this.plaudChildProcesses.size,
+      lark: larkQueue.activeCount
+        + larkQueue.pendingCount
+        + (this.feishuAppConfiguration && !this.feishuAppConfiguration.settled ? 1 : 0),
+      podcasts: this.podcastProcessPromises.size,
+      databaseWrites: this.databaseMaterializationQueues.size
+    };
+    return {
+      ...snapshot,
+      total: Object.values(snapshot).reduce((sum, count) => sum + count, 0)
+    };
+  }
+
   async shutdownAllPlaudOperations(reason = "app-quit") {
     this.plaudShuttingDown = true;
     this.plaudCommandQueue.cancelPending(
       new Error("domi 正在退出，已取消尚未开始的 PLAUD 操作。")
     );
+    const feishuConfigurationChild = this.feishuAppConfiguration?.child;
+    if (
+      feishuConfigurationChild
+      && feishuConfigurationChild.exitCode == null
+      && feishuConfigurationChild.signalCode == null
+    ) {
+      await new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(deadlineTimer);
+          resolve();
+        };
+        const deadlineTimer = setTimeout(() => {
+          feishuConfigurationChild.kill?.("SIGKILL");
+          finish();
+        }, 3_000);
+        deadlineTimer.unref?.();
+        feishuConfigurationChild.once?.("close", finish);
+        feishuConfigurationChild.kill?.("SIGTERM");
+      });
+    }
     await this.stopPlaudBackgroundSession(reason);
     const children = [...this.plaudChildProcesses];
     if (children.length) await Promise.all(children.map((child) => new Promise((resolve) => {
@@ -1978,6 +2430,602 @@ class DomiIntegration {
     });
 
     return this.larkStatusCache.inFlight;
+  }
+
+  feishuSetupConfigured(settings = this.configProvider()) {
+    return [
+      settings.projectBaseToken,
+      settings.projectTableId,
+      settings.peopleBaseToken,
+      settings.peopleTableId,
+      settings.radarBaseToken,
+      settings.radarTableId,
+      settings.wikiSpaceId
+    ].every((value) => Boolean(String(value || "").trim()));
+  }
+
+  async feishuSetupStatus(options = {}) {
+    const cliAvailable = Boolean(this.larkCli && fs.existsSync(this.larkCli));
+    const health = cliAvailable
+      ? await this.larkStatus({ force: options.force === true })
+      : { ok: false, userName: "", tokenStatus: "" };
+    return {
+      ok: cliAvailable,
+      connected: Boolean(health?.ok),
+      configured: this.feishuSetupConfigured(),
+      cliAvailable,
+      userName: health?.userName || "",
+      tokenStatus: health?.tokenStatus || "",
+      resources: {
+        baseName: FEISHU_SETUP_BASE_NAME,
+        wikiName: FEISHU_SETUP_WIKI_NAME,
+        projectTableName: FEISHU_SETUP_TABLES.project.name,
+        peopleTableName: FEISHU_SETUP_TABLES.people.name,
+        radarTableName: FEISHU_SETUP_TABLES.radar.name
+      },
+      error: cliAvailable
+        ? health?.ok
+          ? ""
+          : isLarkCliNotConfiguredError(health?.error)
+            ? larkCliNotConfiguredMessage()
+            : "飞书尚未授权，或当前登录已过期。"
+        : "未找到 domi 内置的飞书连接组件。"
+    };
+  }
+
+  async startFeishuAppConfiguration() {
+    const current = this.feishuAppConfiguration;
+    if (current) {
+      if (!current.settled) {
+        if (current.publicResult) return current.publicResult;
+        return new Promise((resolve) => current.startWaiters.push(resolve));
+      }
+      this.feishuAppConfiguration = null;
+      if (current.ok) return { ok: true, completed: true };
+      return {
+        ok: false,
+        error: current.error
+          || "首次飞书应用初始化未完成，请重试；如果企业策略禁止创建自建应用，请联系飞书管理员开通权限。"
+      };
+    }
+
+    return new Promise((resolve) => {
+      let startResolved = false;
+      let state = null;
+      const resolveStart = (value) => {
+        if (startResolved) return;
+        startResolved = true;
+        resolve(value);
+        for (const waiter of state?.startWaiters.splice(0) || []) waiter(value);
+      };
+      let child;
+      try {
+        child = this.execFileFactory(
+          this.larkCli,
+          ["config", "init", "--new", "--lang", "zh_cn"],
+          {
+            cwd: os.homedir(),
+            windowsHide: true,
+            env: {
+              ...process.env,
+              LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
+              LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1"
+            }
+          }
+        );
+      } catch {
+        resolveStart({
+          ok: false,
+          error: "无法启动首次飞书应用初始化，请重启 domi 后重试。"
+        });
+        return;
+      }
+
+      state = {
+        child,
+        output: "",
+        settled: false,
+        ok: false,
+        error: "",
+        publicResult: null,
+        startWaiters: [],
+        urlTimer: null,
+        lifetimeTimer: null
+      };
+      this.feishuAppConfiguration = state;
+
+      const finish = (code, signal) => {
+        if (state.settled) return;
+        state.settled = true;
+        clearTimeout(state.urlTimer);
+        clearTimeout(state.lifetimeTimer);
+        state.ok = code === 0;
+        if (!state.ok && !state.error) {
+          state.error = signal
+            ? "首次飞书应用初始化已取消，请重新连接。"
+            : "首次飞书应用初始化未完成，请重试；如果企业策略禁止创建自建应用，请联系飞书管理员开通权限。";
+        }
+        if (!startResolved) {
+          resolveStart(state.ok
+            ? { ok: true, completed: true }
+            : { ok: false, error: state.error });
+        }
+      };
+
+      const appendOutput = (chunk) => {
+        if (state.publicResult) return;
+        state.output = `${state.output}${String(chunk || "")}`.slice(-64 * 1024);
+        const verificationUrl = feishuConfigurationVerificationUrl(state.output);
+        if (!verificationUrl) return;
+        state.publicResult = {
+          ok: true,
+          flow: "configuration",
+          verificationUrl,
+          expiresAt: Date.now() + 15 * 60 * 1000
+        };
+        clearTimeout(state.urlTimer);
+        resolveStart(state.publicResult);
+      };
+
+      child.stdout?.on?.("data", appendOutput);
+      child.stderr?.on?.("data", appendOutput);
+      child.once?.("error", () => {
+        state.error = "无法启动首次飞书应用初始化，请重启 domi 后重试。";
+      });
+      child.once?.("close", finish);
+      child.stdin?.end?.();
+
+      state.urlTimer = setTimeout(() => {
+        if (state.publicResult || state.settled) return;
+        state.error = "首次飞书应用初始化没有返回登录页面，请检查网络后重试。";
+        child.kill?.("SIGTERM");
+      }, 30_000);
+      state.urlTimer.unref?.();
+      state.lifetimeTimer = setTimeout(() => {
+        if (state.settled) return;
+        state.error = "首次飞书应用初始化已超时，请重新连接。";
+        child.kill?.("SIGTERM");
+      }, 15 * 60 * 1000);
+      state.lifetimeTimer.unref?.();
+    });
+  }
+
+  async startFeishuSetupAuth() {
+    if (!this.larkCli || !fs.existsSync(this.larkCli)) {
+      return { ok: false, error: "未找到 domi 内置的飞书连接组件。" };
+    }
+    if (this.feishuAppConfiguration) {
+      const configuration = await this.startFeishuAppConfiguration();
+      if (!configuration.completed) return configuration;
+    }
+    try {
+      const response = await this.runJson(this.larkCli, [
+        "auth",
+        "login",
+        ...FEISHU_EXTERNAL_SERVICE_DOMAINS.flatMap((domain) => ["--domain", domain]),
+        "--no-wait",
+        "--json"
+      ], {
+        label: "飞书授权启动",
+        queue: "lark",
+        timeout: 60000
+      });
+      const objects = nestedFeishuSetupObjects(larkResponseData(response));
+      const read = (...keys) => {
+        for (const object of objects) {
+          const value = keys.map((key) => object?.[key]).find((item) => item !== undefined && item !== null);
+          if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+        }
+        return "";
+      };
+      const verificationUrl = read("verification_url", "verificationUrl", "verification_uri_complete", "verificationUriComplete");
+      const deviceCode = read("device_code", "deviceCode");
+      const userCode = read("user_code", "userCode");
+      const expiresIn = Number(read("expires_in", "expiresIn")) || 600;
+      if (!/^https:\/\//i.test(verificationUrl) || !deviceCode) {
+        return { ok: false, error: "飞书授权服务未返回可用的登录链接，请重试。" };
+      }
+      this.larkStatusCache.value = null;
+      this.larkStatusCache.expiresAt = 0;
+      return {
+        ok: true,
+        flow: "authorization",
+        verificationUrl,
+        userCode,
+        deviceCode,
+        expiresAt: Date.now() + Math.max(60, expiresIn) * 1000
+      };
+    } catch (error) {
+      if (isLarkCliNotConfiguredError(error)) {
+        const configuration = await this.startFeishuAppConfiguration();
+        if (configuration.completed) return this.startFeishuSetupAuth();
+        return configuration;
+      }
+      return { ok: false, error: "无法启动飞书授权。请检查网络后重试。" };
+    }
+  }
+
+  async completeFeishuSetupAuth(request = {}) {
+    const deviceCode = String(request.deviceCode || "").trim();
+    if (!deviceCode) {
+      return {
+        ok: false,
+        connected: false,
+        configured: this.feishuSetupConfigured(),
+        cliAvailable: Boolean(this.larkCli),
+        userName: "",
+        error: "本次飞书授权已过期，请重新点击“连接飞书”。"
+      };
+    }
+    try {
+      await this.runJson(this.larkCli, [
+        "auth",
+        "login",
+        "--device-code",
+        deviceCode,
+        "--json"
+      ], {
+        label: "飞书授权完成",
+        queue: "lark",
+        timeout: 180000
+      });
+      this.larkStatusCache.value = null;
+      this.larkStatusCache.expiresAt = 0;
+      return this.feishuSetupStatus({ force: true });
+    } catch {
+      return {
+        ok: false,
+        connected: false,
+        configured: this.feishuSetupConfigured(),
+        cliAvailable: Boolean(this.larkCli),
+        userName: "",
+        error: "飞书授权尚未完成或已过期，请完成授权后重试。"
+      };
+    }
+  }
+
+  feishuSetupAmbiguity(code, resourceName = "") {
+    const error = new Error(code);
+    error.code = code;
+    error.resourceName = resourceName;
+    return error;
+  }
+
+  feishuSetupSchemaFailure(code, resourceName, inspection = {}) {
+    const error = this.feishuSetupAmbiguity(code, resourceName);
+    error.fieldName = inspection.fieldName || "";
+    error.reason = inspection.reason || "";
+    return error;
+  }
+
+  async findFeishuSetupBase() {
+    let response;
+    try {
+      response = await this.lark([
+        "base",
+        "+title-resolve",
+        "--title",
+        FEISHU_SETUP_BASE_NAME,
+        "--format",
+        "json"
+      ], {
+        label: "飞书资料库定位",
+        timeout: 90000
+      });
+    } catch (error) {
+      if (ambiguousFeishuSetupLookup(error)) {
+        throw this.feishuSetupAmbiguity("FEISHU_SETUP_AMBIGUOUS_BASE");
+      }
+      if (missingFeishuSetupLookup(error)) return null;
+      throw error;
+    }
+    const matches = exactFeishuSetupResources(response, FEISHU_SETUP_BASE_NAME, {
+      nameKeys: ["name", "title", "file_name"],
+      tokenKeys: ["base_token", "app_token", "token", "file_token"]
+    });
+    if (matches.length > 1) {
+      throw this.feishuSetupAmbiguity("FEISHU_SETUP_AMBIGUOUS_BASE");
+    }
+    return matches[0] || null;
+  }
+
+  async findFeishuSetupWiki() {
+    const response = await this.lark([
+      "wiki",
+      "+space-list",
+      "--page-all",
+      "--page-limit",
+      "0",
+      "--format",
+      "json"
+    ], {
+      label: "飞书文档库定位",
+      timeout: 120000
+    });
+    const matches = exactFeishuSetupResources(response, FEISHU_SETUP_WIKI_NAME, {
+      nameKeys: ["name"],
+      tokenKeys: ["space_id", "spaceId"]
+    });
+    if (matches.length > 1) {
+      throw this.feishuSetupAmbiguity("FEISHU_SETUP_AMBIGUOUS_WIKI");
+    }
+    return matches[0] || null;
+  }
+
+  async createFeishuSetupBase() {
+    const table = FEISHU_SETUP_TABLES.project;
+    const response = await this.lark([
+      "base",
+      "+base-create",
+      "--name",
+      FEISHU_SETUP_BASE_NAME,
+      "--table-name",
+      table.name,
+      "--fields",
+      JSON.stringify(table.fields.map(feishuSetupFieldPayload)),
+      "--time-zone",
+      "Asia/Shanghai",
+      "--format",
+      "json"
+    ], {
+      label: "飞书资料库创建",
+      timeout: 120000
+    });
+    const token = feishuSetupCreatedToken(response, [
+      "created_base_token",
+      "base_token",
+      "app_token"
+    ]);
+    if (!token) throw new Error("FEISHU_SETUP_BASE_CREATE_INCOMPLETE");
+    const defaultTableToken = feishuSetupCreatedToken(response, [
+      "renamed_default_table_id",
+      "default_table_id"
+    ]);
+    return {
+      name: FEISHU_SETUP_BASE_NAME,
+      token,
+      defaultTableToken,
+      raw: larkResponseData(response)
+    };
+  }
+
+  async ensureFeishuSetupTables(baseToken, seedTables = []) {
+    const response = await this.lark([
+      "base",
+      "+table-list",
+      "--base-token",
+      baseToken,
+      "--limit",
+      "100",
+      "--format",
+      "json"
+    ], {
+      label: "飞书资料表检查",
+      timeout: 90000
+    });
+    const existing = [...seedTables, ...nestedFeishuSetupObjects(larkResponseData(response))
+      .map((item) => ({
+        name: normalizedFeishuSetupName(item?.name || item?.table_name),
+        token: feishuSetupToken(item, ["table_id", "tableId"]),
+        created: false
+      }))
+      .filter((item) => item.name && item.token)];
+    const tables = {};
+    for (const [key, table] of Object.entries(FEISHU_SETUP_TABLES)) {
+      const exact = [...new Map(existing
+        .filter((item) => item.name === normalizedFeishuSetupName(table.name))
+        .map((item) => [item.token, item])).values()];
+      if (exact.length > 1) {
+        throw this.feishuSetupAmbiguity("FEISHU_SETUP_AMBIGUOUS_TABLE", table.name);
+      }
+      if (exact.length === 1) {
+        tables[key] = {
+          name: table.name,
+          token: exact[0].token,
+          created: Boolean(exact[0].created),
+          schemaCreated: 0
+        };
+        continue;
+      }
+      tables[key] = null;
+    }
+
+    // Validate every existing same-name table before the first schema write.
+    // An incompatible same-name field is never converted or renamed because
+    // that could silently corrupt records which predate domi setup.
+    const inspections = {};
+    for (const [key, table] of Object.entries(FEISHU_SETUP_TABLES)) {
+      if (!tables[key]) continue;
+      const fieldsResponse = await this.lark([
+        "base",
+        "+field-list",
+        "--base-token",
+        baseToken,
+        "--table-id",
+        tables[key].token,
+        "--limit",
+        "200",
+        "--format",
+        "json"
+      ], {
+        label: `${table.name}字段检查`,
+        timeout: 90000
+      });
+      const inspection = inspectFeishuSetupSchema(table, feishuSetupFieldItems(fieldsResponse));
+      if (!inspection.ok) {
+        throw this.feishuSetupSchemaFailure("FEISHU_SETUP_SCHEMA_CONFLICT", table.name, inspection);
+      }
+      inspections[key] = inspection;
+    }
+
+    // Create missing tables with the complete contract in one request.
+    for (const [key, table] of Object.entries(FEISHU_SETUP_TABLES)) {
+      if (tables[key]) continue;
+      const created = await this.lark([
+        "base",
+        "+table-create",
+        "--base-token",
+        baseToken,
+        "--name",
+        table.name,
+        "--fields",
+        JSON.stringify(table.fields.map(feishuSetupFieldPayload)),
+        "--format",
+        "json"
+      ], {
+        label: `${table.name}创建`,
+        timeout: 120000
+      });
+      const token = feishuSetupCreatedToken(created, ["table_id", "tableId"]);
+      if (!token) throw new Error("FEISHU_SETUP_TABLE_CREATE_INCOMPLETE");
+      tables[key] = {
+        name: table.name,
+        token,
+        created: true,
+        schemaCreated: table.fields.length
+      };
+    }
+
+    // Add only fields which are genuinely absent from compatible existing
+    // tables. Updates, type conversion, renames and deletion are deliberately
+    // out of scope for automatic onboarding.
+    for (const [key, table] of Object.entries(FEISHU_SETUP_TABLES)) {
+      const missing = inspections[key]?.missing || [];
+      for (const definition of missing) {
+        await this.lark([
+          "base",
+          "+field-create",
+          "--base-token",
+          baseToken,
+          "--table-id",
+          tables[key].token,
+          "--json",
+          JSON.stringify(feishuSetupFieldPayload(definition)),
+          "--format",
+          "json"
+        ], {
+          label: `${table.name}字段创建`,
+          timeout: 120000
+        });
+        tables[key].schemaCreated += 1;
+      }
+    }
+
+    // Read back every table before returning a mapping. A partial or timed-out
+    // run can then be retried safely without saving an incomplete repository.
+    for (const [key, table] of Object.entries(FEISHU_SETUP_TABLES)) {
+      const fieldsResponse = await this.lark([
+        "base",
+        "+field-list",
+        "--base-token",
+        baseToken,
+        "--table-id",
+        tables[key].token,
+        "--limit",
+        "200",
+        "--format",
+        "json"
+      ], {
+        label: `${table.name}字段回读`,
+        timeout: 90000
+      });
+      const verified = inspectFeishuSetupSchema(table, feishuSetupFieldItems(fieldsResponse));
+      if (!verified.ok || verified.missing.length) {
+        throw this.feishuSetupSchemaFailure("FEISHU_SETUP_SCHEMA_VERIFY_FAILED", table.name, verified);
+      }
+    }
+    return tables;
+  }
+
+  async createFeishuSetupWiki() {
+    const response = await this.lark([
+      "wiki",
+      "+space-create",
+      "--name",
+      FEISHU_SETUP_WIKI_NAME,
+      "--description",
+      "domi 项目文档与投资研究归档",
+      "--format",
+      "json"
+    ], {
+      label: "飞书文档库创建",
+      timeout: 120000
+    });
+    const token = feishuSetupCreatedToken(response, ["space_id", "spaceId"]);
+    if (!token) throw new Error("FEISHU_SETUP_WIKI_CREATE_INCOMPLETE");
+    return { name: FEISHU_SETUP_WIKI_NAME, token, raw: larkResponseData(response) };
+  }
+
+  async provisionFeishuSetup() {
+    if (this.feishuSetupProvisionPromise) return this.feishuSetupProvisionPromise;
+    this.feishuSetupProvisionPromise = (async () => {
+      try {
+        const status = await this.feishuSetupStatus({ force: true });
+        if (!status.connected) {
+          throw this.feishuSetupAmbiguity("FEISHU_SETUP_AUTH_REQUIRED");
+        }
+
+        // Resolve both resource roots before any write. If either title is
+        // ambiguous we stop without creating a second, equally ambiguous root.
+        let [base, wiki] = await Promise.all([
+          this.findFeishuSetupBase(),
+          this.findFeishuSetupWiki()
+        ]);
+        const baseCreated = !base;
+        const wikiCreated = !wiki;
+        if (!base) base = await this.createFeishuSetupBase();
+        const tables = await this.ensureFeishuSetupTables(base.token, base.defaultTableToken
+          ? [{
+              name: FEISHU_SETUP_TABLES.project.name,
+              token: base.defaultTableToken,
+              created: true
+            }]
+          : []);
+        // Only create the Wiki after every existing Base table has passed the
+        // schema preflight. A conflicting legacy table therefore causes zero
+        // additional Wiki or field writes.
+        if (!wiki) wiki = await this.createFeishuSetupWiki();
+
+        return {
+          ok: true,
+          mapping: {
+            projectBaseToken: base.token,
+            projectTableId: tables.project.token,
+            peopleBaseToken: base.token,
+            peopleTableId: tables.people.token,
+            radarBaseToken: base.token,
+            radarTableId: tables.radar.token,
+            wikiSpaceId: wiki.token
+          },
+          resources: {
+            base: { name: FEISHU_SETUP_BASE_NAME, created: baseCreated },
+            tables: {
+              project: {
+                name: tables.project.name,
+                created: tables.project.created,
+                schemaCreated: tables.project.schemaCreated
+              },
+              people: {
+                name: tables.people.name,
+                created: tables.people.created,
+                schemaCreated: tables.people.schemaCreated
+              },
+              radar: {
+                name: tables.radar.name,
+                created: tables.radar.created,
+                schemaCreated: tables.radar.schemaCreated
+              }
+            },
+            wiki: { name: FEISHU_SETUP_WIKI_NAME, created: wikiCreated }
+          }
+        };
+      } catch (error) {
+        return { ok: false, error: feishuSetupPublicError(error) };
+      }
+    })().finally(() => {
+      this.feishuSetupProvisionPromise = null;
+    });
+    return this.feishuSetupProvisionPromise;
   }
 
   resolvePeopleBase() {
@@ -2991,6 +4039,51 @@ class DomiIntegration {
     });
   }
 
+  async publishLocalMarkdownToFeishu(request = {}) {
+    const settings = this.configProvider();
+    const libraryRoot = resolveHomePath(settings.localRepositoryDir);
+    if (!libraryRoot) {
+      return {
+        ok: false,
+        stage: "preflight",
+        remoteWrite: false,
+        error: "本地资料库尚未配置，无法发布飞书文档副本。"
+      };
+    }
+    if (!this.domiConfigPath) {
+      return {
+        ok: false,
+        stage: "preflight",
+        remoteWrite: false,
+        error: "domi 的 Application Support 私有状态目录尚未就绪，无法安全保存飞书发布清单。"
+      };
+    }
+    const health = await this.larkStatus();
+    if (!health.ok) {
+      return {
+        ok: false,
+        stage: "connection",
+        remoteWrite: false,
+        error: health.error || "飞书用户身份未就绪，请先连接飞书。"
+      };
+    }
+    const publisher = new FeishuMarkdownPublisher({
+      runLark: (args, options) => this.lark(args, {
+        label: "本地 Markdown 发布到飞书",
+        ...options
+      })
+    });
+    return publisher.publish({
+      sourcePath: request.sourcePath,
+      libraryRoot,
+      stateRoot: path.join(path.dirname(path.resolve(this.domiConfigPath)), "feishu-markdown-manifests"),
+      title: request.title,
+      parentToken: request.parentToken,
+      documentId: request.documentId,
+      documentUrl: request.documentUrl
+    });
+  }
+
   databaseSnapshot() {
     const source = this.readProjectConfig();
     if (source.backend !== "local") {
@@ -3353,6 +4446,7 @@ class DomiIntegration {
 
 module.exports = {
   DomiIntegration,
+  FEISHU_EXTERNAL_SERVICE_DOMAINS,
   classifyPlaudConnectionFailure,
   describeFeishuSyncError,
   isRetryablePlaudReadFailure,

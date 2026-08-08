@@ -19,12 +19,16 @@ const {
 const { CodexRuntimeManager } = require("./codex-runtime.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
+const { resolveLarkCliForChild } = require("./lark-runtime.cjs");
+const {
+  classifyFeishuDocumentIntent,
+  feishuMarkdownSourceCandidates,
+  safeFeishuExportContext
+} = require("./feishu-document-intent.cjs");
 const { DomiPluginManager } = require("./domi-plugin-manager.cjs");
 const {
   AppSettingsService,
-  normalizeSettings,
-  parseCalendarRecipients,
-  validateDomiConfig
+  parseCalendarRecipients
 } = require("./app-settings.cjs");
 const { UpdateService } = require("./update-service.cjs");
 const { ServiceCoordinator } = require("./service-coordinator.cjs");
@@ -258,7 +262,20 @@ function getDomiPluginManager() {
 }
 
 function getCodexRuntime() {
-  return withMediaRuntimeEnvironment(getAppSettings().runtime());
+  const runtime = withMediaRuntimeEnvironment(getAppSettings().runtime());
+  const larkCliPath = resolveLarkCliForChild({
+    appRoot: rootDir,
+    resourcesPath: process.resourcesPath,
+    targetArch: process.arch,
+    fallbackPath: getDomiIntegration().larkCli
+  });
+  return {
+    ...runtime,
+    env: {
+      ...(runtime.env || {}),
+      ...(larkCliPath ? { LARK_CLI_PATH: larkCliPath } : {})
+    }
+  };
 }
 
 function getAppSettings() {
@@ -1222,6 +1239,206 @@ ipcMain.on("app:prepare-close-result", (event, result = {}) => {
 
 let applicationQuitFlushComplete = false;
 let applicationQuitFlushStarted = false;
+let updateInstallRequested = false;
+let updateInstallAttempt = null;
+let updateInstallTimer = null;
+let updateRestartPreparing = false;
+const UPDATE_INSTALL_IDLE_POLL_MS = 1_000;
+
+function criticalUpdateActivity() {
+  const domiOperations = domiIntegration?.criticalOperationSnapshot?.() || { total: 0 };
+  const coordinatedOperations = serviceCoordinator.snapshot()
+    .filter((entry) => entry.inFlight).length;
+  const counts = {
+    codex: activeRuns.size,
+    postProcessing: pendingRunPostProcessing.size,
+    coordinated: coordinatedOperations,
+    domi: Number(domiOperations.total || 0)
+  };
+  return {
+    counts,
+    total: Object.values(counts).reduce((sum, count) => sum + count, 0)
+  };
+}
+
+function clearUpdateInstallTimer() {
+  if (updateInstallTimer !== null) clearTimeout(updateInstallTimer);
+  updateInstallTimer = null;
+}
+
+function scheduleUpdateInstallAttempt(delayMs = 0) {
+  if (!updateInstallRequested || updateInstallTimer !== null || updateInstallAttempt) return;
+  updateInstallTimer = setTimeout(() => {
+    updateInstallTimer = null;
+    void attemptSafeUpdateInstall();
+  }, Math.max(0, delayMs));
+  updateInstallTimer.unref?.();
+}
+
+function deferUpdateInstall(service, activity) {
+  service.markRestartWaiting(activity.total);
+  scheduleUpdateInstallAttempt(UPDATE_INSTALL_IDLE_POLL_MS);
+}
+
+async function attemptSafeUpdateInstall() {
+  if (!updateInstallRequested || updateInstallAttempt || updateRestartPreparing) return;
+  const service = getUpdateService();
+  if (service.snapshot().state !== "downloaded") {
+    updateInstallRequested = false;
+    return;
+  }
+
+  updateInstallAttempt = (async () => {
+    const beforeFlush = criticalUpdateActivity();
+    if (beforeFlush.total > 0) {
+      deferUpdateInstall(service, beforeFlush);
+      return;
+    }
+
+    service.markRestartWaiting(0);
+    const windows = BrowserWindow.getAllWindows().filter((candidate) => !candidate.isDestroyed());
+    const flushResults = await Promise.all(
+      windows.map((win) => requestRendererFlush(win, "update-install"))
+    );
+    const failed = flushResults.find((result) => !result.ok);
+    if (failed) {
+      updateInstallRequested = false;
+      service.markInstallFailure(
+        failed.error || "更新前未能安全保存当前内容，请点击重试。"
+      );
+      return;
+    }
+
+    const afterFlush = criticalUpdateActivity();
+    if (afterFlush.total > 0) {
+      deferUpdateInstall(service, afterFlush);
+      return;
+    }
+
+    updateRestartPreparing = true;
+    try {
+      // Seal the task-start gate for one event-loop turn, then check once more
+      // so an IPC request that arrived alongside the update click can finish
+      // registering before we commit to a restart.
+      await new Promise((resolve) => setImmediate(resolve));
+      const sealedActivity = criticalUpdateActivity();
+      if (sealedActivity.total > 0) {
+        updateRestartPreparing = false;
+        deferUpdateInstall(service, sealedActivity);
+        return;
+      }
+
+      // No operation is cancelled here: reaching this point means every queue
+      // is already idle. Stop only the idle PLAUD broker, not the integration
+      // itself, so a failed installer can recover without relaunching domi.
+      try {
+        await domiIntegration?.stopPlaudBackgroundSession("update-install");
+      } catch (error) {
+        appendRuntimeLog("update-plaud-shutdown-failed", {
+          message: boundedRuntimeText(error?.message || error, 2_000)
+        });
+      }
+
+      // stopPlaudBackgroundSession is asynchronous. Check the queues once more
+      // after it resolves, then arm and commit without another event-loop yield.
+      const finalActivity = criticalUpdateActivity();
+      if (finalActivity.total > 0) {
+        updateRestartPreparing = false;
+        deferUpdateInstall(service, finalActivity);
+        return;
+      }
+
+      const prepared = service.armInstall();
+      if (!prepared.ok) {
+        updateRestartPreparing = false;
+        updateInstallRequested = false;
+        service.markInstallFailure(prepared.error || "更新尚未准备完成。");
+        return;
+      }
+
+      let installQuitWatchdog = null;
+      const closeUpdateResources = () => {
+        if (installQuitWatchdog !== null) clearTimeout(installQuitWatchdog);
+        installQuitWatchdog = null;
+        updateService?.stop();
+        try {
+          codexClient?.close();
+        } catch (error) {
+          appendRuntimeLog("update-codex-close-failed", {
+            message: boundedRuntimeText(error?.message || error, 2_000)
+          });
+        }
+        try {
+          stateStore?.close();
+        } catch (error) {
+          appendRuntimeLog("update-state-close-failed", {
+            message: boundedRuntimeText(error?.message || error, 2_000)
+          });
+        }
+      };
+      const restoreAfterInstallFailure = (error) => {
+        if (installQuitWatchdog !== null) clearTimeout(installQuitWatchdog);
+        installQuitWatchdog = null;
+        app.removeListener("will-quit", closeUpdateResources);
+        updateRestartPreparing = false;
+        updateInstallRequested = false;
+        applicationQuitFlushStarted = false;
+        applicationQuitFlushComplete = false;
+        service.markInstallFailure(error || "无法启动更新安装器。");
+      };
+
+      // The renderer is flushed and every critical queue is idle. Mark this as
+      // a dedicated update quit before the installer runs so before-quit never
+      // opens the ordinary task-interruption confirmation. Resource shutdown is
+      // delayed until Electron actually emits will-quit; a launcher failure
+      // therefore leaves the current app fully operational and retryable.
+      applicationQuitFlushStarted = true;
+      applicationQuitFlushComplete = true;
+      app.once("will-quit", closeUpdateResources);
+      const committed = service.commitInstall(prepared.candidate, {
+        onFailure: restoreAfterInstallFailure
+      });
+      if (!committed.ok) {
+        restoreAfterInstallFailure(committed.error || "无法启动更新安装器。");
+        return;
+      }
+
+      // commitInstall schedules quitAndInstall on setImmediate. Keep services
+      // alive until will-quit proves that Electron accepted the restart.
+      updateInstallRequested = false;
+      clearUpdateInstallTimer();
+      installQuitWatchdog = setTimeout(() => {
+        restoreAfterInstallFailure("更新安装器未能启动，domi 已继续运行；请点击重试。");
+      }, 15_000);
+      installQuitWatchdog.unref?.();
+    } catch (error) {
+      updateRestartPreparing = false;
+      updateInstallRequested = false;
+      applicationQuitFlushStarted = false;
+      applicationQuitFlushComplete = false;
+      service.markInstallFailure(error);
+    }
+  })().finally(() => {
+    updateInstallAttempt = null;
+    if (updateInstallRequested && !updateRestartPreparing) {
+      scheduleUpdateInstallAttempt(UPDATE_INSTALL_IDLE_POLL_MS);
+    }
+  });
+  return updateInstallAttempt;
+}
+
+function requestSafeUpdateInstall() {
+  const service = getUpdateService();
+  const status = service.snapshot();
+  if (status.state !== "downloaded") {
+    return { ok: false, status, error: "更新尚未下载完成。" };
+  }
+  updateInstallRequested = true;
+  const activity = criticalUpdateActivity();
+  service.markRestartWaiting(activity.total);
+  scheduleUpdateInstallAttempt(activity.total > 0 ? UPDATE_INSTALL_IDLE_POLL_MS : 0);
+  return { ok: true, deferred: activity.total > 0, status: service.snapshot() };
+}
 
 function createWindow() {
   const appIcon = nativeImage.createFromPath(appIconPath);
@@ -2042,7 +2259,7 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
     serviceName: "domi",
     ...threadPersistenceOptions(payload),
     config: {
-      web_search: "live",
+      web_search: payload.webSearch === false ? "disabled" : "live",
       ...(effort ? { model_reasoning_effort: effort } : {})
     }
   });
@@ -2056,11 +2273,24 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
 }
 
 async function saveRuntimeSettings(request) {
+  if (updateRestartPreparing) {
+    return {
+      ok: false,
+      error: "domi 正在安全重启以完成更新，暂不修改运行设置。"
+    };
+  }
   const current = getAppSettings().load().settings;
   const {
     storageMigration = "none",
     ...settingsRequest
   } = request || {};
+  // Local SQLite + Markdown is the only backend available to new users. Keep
+  // an existing Feishu-primary installation in its original mode until its
+  // records have been explicitly imported; never make them appear missing by
+  // silently switching that user to an empty local database.
+  settingsRequest.storageBackend = current.storageBackend === "feishu"
+    ? "feishu"
+    : "local";
   const codexConnectionChanged = [
     "codexPath",
     "authMode",
@@ -2084,22 +2314,6 @@ async function saveRuntimeSettings(request) {
   ].some((key) => Object.prototype.hasOwnProperty.call(settingsRequest, key)
     && settingsRequest[key] !== current[key]);
   const connectionChanged = codexConnectionChanged || dataConnectionChanged;
-  const targetStorageBackend = Object.prototype.hasOwnProperty.call(settingsRequest, "storageBackend")
-    ? settingsRequest.storageBackend
-    : current.storageBackend;
-  const targetWikiSpaceId = Object.prototype.hasOwnProperty.call(settingsRequest, "wikiSpaceId")
-    ? String(settingsRequest.wikiSpaceId || "").trim()
-    : String(current.wikiSpaceId || "").trim();
-  const targetOnboardingComplete = Object.prototype.hasOwnProperty.call(settingsRequest, "onboardingComplete")
-    ? Boolean(settingsRequest.onboardingComplete)
-    : Boolean(current.onboardingComplete);
-  const shouldInitializeTaskDocument = targetStorageBackend === "feishu"
-    && Boolean(targetWikiSpaceId)
-    && (
-      current.storageBackend !== "feishu"
-      || String(current.wikiSpaceId || "").trim() !== targetWikiSpaceId
-      || (!current.onboardingComplete && targetOnboardingComplete)
-    );
   if (connectionChanged) {
     const maintenance = prepareCodexConnectionMaintenance(
       "请先停止正在执行的用户任务，再修改 Codex 或资料库连接。"
@@ -2107,30 +2321,10 @@ async function saveRuntimeSettings(request) {
     if (!maintenance.ok) return maintenance;
   }
   try {
-    let migration;
     if (settingsRequest.authMode === "chatgpt" && current.authMode === "relay") {
       const restored = getCodexBootstrap().restoreChatGPTConfig();
       if (!restored.ok) {
         return { ok: false, error: restored.error || "无法恢复 ChatGPT Codex 配置。" };
-      }
-    }
-    const migratesLocalToFeishu = current.storageBackend === "local"
-      && settingsRequest.storageBackend === "feishu"
-      && storageMigration === "local-to-feishu";
-    if (migratesLocalToFeishu) {
-      const targetSettings = normalizeSettings({ ...current, ...settingsRequest });
-      validateDomiConfig(targetSettings);
-      migration = await getDomiIntegration().migrateLocalToFeishu({
-        sourceSettings: current,
-        targetSettings
-      });
-      if (!migration.ok) {
-        return {
-          ok: false,
-          settings: current,
-          migration,
-          error: migration.error || "本地文档迁移到飞书失败，资料库仍保持本地模式。"
-        };
       }
     }
     const result = getAppSettings().save(settingsRequest);
@@ -2138,23 +2332,15 @@ async function saveRuntimeSettings(request) {
       serviceCoordinator.invalidate("domi:lark-status");
     }
     getUpdateService().configureChannel(result.settings.updateChannel);
-    let taskDocument;
-    if (shouldInitializeTaskDocument) {
-      try {
-        taskDocument = await getDomiIntegration().ensureTaskDocument();
-      } catch (error) {
-        return {
-          ok: false,
-          ...result,
-          migration,
-          error: `资料库设置已保存，但无法自动准备“1.待办事项”：${error instanceof Error ? error.message : String(error)}`
-        };
-      }
-    }
-    if (!codexConnectionChanged) return { ok: true, ...result, migration, taskDocument };
+    const warning = current.storageBackend === "feishu"
+      ? "旧版飞书主库仍按原模式运行；在安全导入本地完成前不会静默切换，现有读写和文档连接都会保留。"
+      : storageMigration === "local-to-feishu"
+        ? "已保留飞书连接；domi 不再迁移或切换主资料库，本地 SQLite + Markdown 继续作为唯一数据源。"
+        : "";
+    if (!codexConnectionChanged) return { ok: true, ...result, warning };
     resetCodexClient();
     const codex = await runCodexCheck();
-    return { ok: true, ...result, codex, migration, taskDocument };
+    return { ok: true, ...result, codex, warning };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -2388,8 +2574,10 @@ async function exportSystemDiagnostics(sender, report) {
 function needsLarkAccess(payload) {
   const requestText = String(payload?.requestText || "");
   const backend = getAppSettings().load().settings.storageBackend;
-  if (backend === "local") return false;
+  // 飞书消息、一次性文档和显式 Wiki 请求是“交付渠道”，并不等于把
+  // 项目/人脉/行业资料库切换成飞书。即使主资料库仍在本地也要预检飞书身份。
   if (explicitFeishuRequestPattern.test(requestText)) return true;
+  if (backend === "local") return false;
   if (payload?.workflowId === "schedule") return larkRequestPattern.test(requestText);
   if (payload?.workflowId === "domi-analyst") {
     return larkRequestPattern.test(requestText);
@@ -2415,12 +2603,18 @@ function repositoryRuntimeContext(payload) {
     ].join("\n");
   }
   if (settings.storageBackend === "local") {
+    const explicitFeishuDelivery = explicitFeishuRequestPattern.test(
+      String(payload?.requestText || "")
+    );
     return [
       "domi 本轮资料库事实：",
       "- 后端：local。",
       `- SQLite：${settings.localDatabasePath}`,
       `- Markdown 与资料目录：${settings.localRepositoryDir}。`,
-      "- 使用 domi:investment-mgmt 本地后端；本轮不调用飞书 Wiki/Base。"
+      "- 使用 domi:investment-mgmt 本地后端；不得把权威资料库静默切换到飞书。",
+      explicitFeishuDelivery
+        ? "- 用户本轮明确要求飞书交付：可以创建飞书文档或发送飞书消息副本；这不要求项目库、人脉库、行业动态 Base，也不改变本地后端。"
+        : "- 未明确要求飞书交付时，不调用飞书 Wiki/Base。"
     ].join("\n");
   }
   return [
@@ -2453,11 +2647,44 @@ async function larkRuntimeContext(required) {
     "domi 本轮飞书连接事实：",
     `- lark-cli 预检失败；路径：${status.cliPath}。`,
     `- 实际错误：${status.error || "未返回错误详情"}。`,
-    "- 请基于该错误处理，不推测其他授权原因。"
+    "- 请基于该错误处理，不推测其他授权原因。",
+    "- 不要要求用户填写 Base Token、Table ID、Wiki Space ID，也不要要求用户把本地资料库切换成飞书。",
+    "- 如果本轮只是创建飞书文档或发送飞书消息，请引导用户前往“设置 → 资料连接 → 连接飞书”；连接完成后继续原请求。"
   ].join("\n");
 }
 
+async function feishuDocumentWriteContext(payload) {
+  const intent = classifyFeishuDocumentIntent(payload?.requestText);
+  if (!intent) return "";
+  const candidates = feishuMarkdownSourceCandidates(payload);
+  if (intent.action !== "publish-copy" || candidates.length !== 1) {
+    return safeFeishuExportContext({ intent, candidates });
+  }
+  let result;
+  try {
+    result = await getDomiIntegration().publishLocalMarkdownToFeishu({
+      sourcePath: candidates[0],
+      title: path.basename(candidates[0], path.extname(candidates[0]))
+    });
+  } catch (error) {
+    result = {
+      ok: false,
+      remoteWrite: false,
+      stage: "host",
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+  return safeFeishuExportContext({ intent, candidates, result });
+}
+
 async function confirmExternalDomiRun(sender, payload) {
+  // The setup guidance assistant receives only a fixed phase and a locally
+  // classified error. Keep it read-only and offline even when the user has
+  // globally enabled external access; it must never inspect credentials or
+  // perform login, authorization, administrator or resource-write actions.
+  if (payload?.workflowId === "connection-guidance") {
+    return { allowed: true, sandbox: "read-only" };
+  }
   const accessMode = getAppSettings().load().settings.externalAccessMode;
   if (accessMode === "always") {
     return { allowed: true, sandbox: "danger-full-access" };
@@ -2489,6 +2716,13 @@ async function confirmExternalDomiRun(sender, payload) {
 }
 
 async function runCodex(sender, payload) {
+  if (updateRestartPreparing) {
+    return {
+      ok: false,
+      runId: payload?.runId || "",
+      error: "domi 正在安全重启以完成更新，重启后会恢复当前对话。"
+    };
+  }
   ensureDemoWorkspace();
   const settings = getAppSettings().load().settings;
   const localEntityRequest = settings.storageBackend === "local"
@@ -2581,13 +2815,15 @@ async function runCodex(sender, payload) {
     }));
     const repositoryContextPromise = Promise.resolve(repositoryRuntimeContext(payload));
     const larkContextPromise = larkRuntimeContext(larkRequired);
+    const feishuWriteContextPromise = feishuDocumentWriteContext(payload);
     const threadPromise = client.start().then(() =>
       resolveThread(client, payload, workspacePath, execution.sandbox)
     );
-    const [threadId, repositoryContext, larkContext, preparedResearchCache] = await Promise.all([
+    const [threadId, repositoryContext, larkContext, feishuWriteContext, preparedResearchCache] = await Promise.all([
       threadPromise,
       repositoryContextPromise,
       larkContextPromise,
+      feishuWriteContextPromise,
       researchCachePromise
     ]);
     const actualCacheContext = preparedProjectResearchCacheContext(
@@ -2595,7 +2831,7 @@ async function runCodex(sender, payload) {
       threadId
     );
     const researchCache = { ...preparedResearchCache, ...actualCacheContext };
-    const runtimeContext = [repositoryContext, larkContext, researchCache.context]
+    const runtimeContext = [repositoryContext, larkContext, feishuWriteContext, researchCache.context]
       .filter(Boolean)
       .join("\n\n");
     const threadReadyAt = Date.now();
@@ -2845,7 +3081,7 @@ function answerCodexUserInput(sender, request = {}) {
     : { ok: false, error: result.error || "无法提交当前选择。" };
 }
 
-if (hasSingleInstanceLock) app.whenReady().then(() => {
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
   appendRuntimeLog("app-ready", {
     version: app.getVersion(),
     packaged: app.isPackaged,
@@ -3028,8 +3264,12 @@ ipcMain.handle("settings:export-diagnostics", (event, report) =>
 );
 ipcMain.handle("update:status", () => getUpdateService().snapshot());
 ipcMain.handle("update:check", () => getUpdateService().check());
-ipcMain.handle("update:download", () => getUpdateService().download());
-ipcMain.handle("update:install", () => getUpdateService().install());
+ipcMain.handle("update:download", async () => {
+  const status = await getUpdateService().download();
+  if (status.state === "downloaded") requestSafeUpdateInstall();
+  return getUpdateService().snapshot();
+});
+ipcMain.handle("update:install", () => requestSafeUpdateInstall());
 ipcMain.handle("files:select", (event, workspacePath, entityRequest) =>
   selectLocalFiles(event.sender, workspacePath, entityRequest)
 );
@@ -3200,6 +3440,50 @@ ipcMain.handle("domi:status", async () => {
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+});
+ipcMain.handle("domi:feishu-setup-status", async (_event, request) => {
+  try {
+    return await getDomiIntegration().feishuSetupStatus(request);
+  } catch {
+    return {
+      ok: false,
+      connected: false,
+      configured: false,
+      cliAvailable: false,
+      userName: "",
+      error: "无法检查飞书连接状态，请重试。"
+    };
+  }
+});
+ipcMain.handle("domi:feishu-setup-start-auth", async () => {
+  try {
+    const result = await getDomiIntegration().startFeishuSetupAuth();
+    if (!result.ok || !/^https:\/\//i.test(String(result.verificationUrl || ""))) return result;
+    await shell.openExternal(result.verificationUrl);
+    return { ...result, verificationOpened: true };
+  } catch {
+    return { ok: false, error: "无法打开飞书授权页，请检查默认浏览器后重试。" };
+  }
+});
+ipcMain.handle("domi:feishu-setup-complete-auth", async (_event, request) => {
+  try {
+    return await getDomiIntegration().completeFeishuSetupAuth(request);
+  } catch {
+    return {
+      ok: false,
+      connected: false,
+      configured: false,
+      cliAvailable: true,
+      userName: "",
+      error: "飞书授权尚未完成或已过期，请重新连接。"
+    };
+  }
+});
+ipcMain.handle("domi:feishu-setup-provision", async () => {
+  return {
+    ok: false,
+    error: "飞书现在是可选知识外挂，不再创建 Base 或切换主资料库。连接账号后可按指令搜索知识库、创建或编辑飞书文档。"
+  };
 });
 ipcMain.handle("domi:weekly-news", async (_event, request) => {
   try {
@@ -3405,9 +3689,8 @@ ipcMain.handle("domi:sync", async () => {
   }
 });
 ipcMain.handle("domi:migration-preview", async () => {
-  try {
-    return getDomiIntegration().previewLocalToFeishu();
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
+  return {
+    ok: false,
+    error: "domi 不再把本地资料迁移为飞书主库；本地 SQLite + Markdown 始终是管理基础。"
+  };
 });

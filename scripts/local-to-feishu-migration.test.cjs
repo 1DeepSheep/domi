@@ -14,6 +14,11 @@ const {
   prepareMarkdownDocument,
   projectDocuments
 } = require("../electron/local-to-feishu-migration.cjs");
+const {
+  markdownFeatureCounts,
+  prepareMarkdownForFeishu,
+  verifyFeishuMarkdownImport
+} = require("../electron/markdown-feishu-fidelity.cjs");
 
 const PROJECT_BASE = "projects";
 const PEOPLE_BASE = "people";
@@ -71,9 +76,167 @@ project_id: prj_demo
     title: "示例项目"
   }, root);
   assert.doesNotMatch(prepared.content, /project_id/);
-  assert.match(prepared.content, /domi迁移图片1/);
-  assert.equal(prepared.assets[0].path, imagePath);
+  assert.match(prepared.content, /domi飞书图片1/);
+  assert.equal(prepared.assets[0].path, fs.realpathSync.native(imagePath));
   assert.equal(prepared.sourceSha256.length, 64);
+  assert.equal(prepared.fidelity.status, "ready");
+  assert.equal(prepared.fidelity.degradations[0].code, "frontmatter-not-rendered");
+});
+
+test("Markdown to Feishu preparation preserves core formatting and uploads every local image form", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-feishu-fidelity-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const assetsDir = path.join(root, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  for (const name of ["inline.png", "reference.jpg", "html.webp"]) {
+    fs.writeFileSync(path.join(assetsDir, name), Buffer.from(name));
+  }
+  const sourcePath = path.join(root, "report.md");
+  const markdown = `# 一级标题
+
+普通段落包含 **粗体**、*斜体*、~~删除线~~、[外部链接](https://example.com) 和 \`行内代码\`。
+
+- 无序列表
+1. 有序列表
+- [x] 已完成 **核验**
+- [ ] 待处理 [来源](https://example.com/source)
+
+> 引用内容
+
+\`\`\`js
+console.log("code");
+\`\`\`
+
+| 公司 | 评级 |
+|---|---|
+| 示例 | A |
+
+---
+
+![行内图](assets/inline.png)
+![引用图][architecture]
+<img src="assets/html.webp" alt="HTML 图">
+
+[architecture]: assets/reference.jpg
+`;
+  fs.writeFileSync(sourcePath, markdown);
+  const prepared = prepareMarkdownForFeishu({
+    markdown,
+    sourcePath,
+    libraryRoot: root,
+    title: "格式核验"
+  });
+  assert.equal(prepared.fidelity.status, "ready");
+  assert.equal(prepared.assets.length, 3);
+  assert.match(prepared.content, /<checkbox done="true">已完成 <b>核验<\/b><\/checkbox>/);
+  assert.match(prepared.content, /<checkbox done="false">待处理 <a href="https:\/\/example\.com\/source">来源<\/a><\/checkbox>/);
+  assert.match(prepared.content, /\| 公司 \| 评级 \|/);
+  assert.match(prepared.content, /```js/);
+  assert.match(prepared.content, /~~删除线~~/);
+  assert.deepEqual(markdownFeatureCounts(markdown), prepared.fidelity.featureCounts);
+  assert.deepEqual(
+    prepared.assets.map((asset) => path.basename(asset.path)).sort(),
+    ["html.webp", "inline.png", "reference.jpg"]
+  );
+  let importedContent = prepared.content;
+  for (const asset of prepared.assets) {
+    importedContent = importedContent.replace(
+      new RegExp(`${asset.marker} · [^\\n]+`),
+      `![${asset.caption}](https://example.com/${path.basename(asset.path)})`
+    );
+  }
+  const verified = verifyFeishuMarkdownImport({ prepared, fetchedMarkdown: importedContent });
+  assert.equal(verified.status, "passed");
+  assert.equal(verified.textCoverage, 1);
+});
+
+test("unsupported Markdown is explicitly degraded and missing local images block a lossy import", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-feishu-degrade-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, "unsupported.md");
+  fs.mkdirSync(path.join(root, "assets"), { recursive: true });
+  fs.writeFileSync(path.join(root, "assets", "vector.svg"), "<svg></svg>");
+  const markdown = `# 报告
+
+  - [ ] 嵌套任务
+
+\`\`\`mermaid
+flowchart LR
+A --> B
+\`\`\`
+
+<details><summary>更多</summary>正文</details>
+
+![缺失图](assets/missing.png)
+
+![矢量图](assets/vector.svg)
+
+[本地纪要](notes/meeting.md)
+
+脚注[^1]
+
+[^1]: 脚注正文
+`;
+  const prepared = prepareMarkdownForFeishu({ markdown, sourcePath, libraryRoot: root, title: "报告" });
+  assert.equal(prepared.fidelity.status, "blocked");
+  assert.match(prepared.content, /图片未导入：缺失图/);
+  assert.match(prepared.content, /\\<details>/);
+  const codes = new Set(prepared.fidelity.degradations.map((item) => item.code));
+  assert.ok(codes.has("nested-task-list-visual-fallback"));
+  assert.match(prepared.content, /^  - ☐ 嵌套任务$/m);
+  assert.ok(codes.has("mermaid-kept-as-code"));
+  assert.ok(codes.has("unsupported-html-visible-text"));
+  assert.ok(codes.has("local-image-unavailable"));
+  assert.ok(codes.has("local-image-format-unsupported"));
+  assert.ok(codes.has("relative-links-require-target-map"));
+  assert.ok(codes.has("footnotes-kept-as-text"));
+});
+
+test("post-import verification detects reordered content, link target changes, and task state loss", () => {
+  const sourcePath = path.join(os.tmpdir(), "domi-verification-example.md");
+  const prepared = prepareMarkdownForFeishu({
+    markdown: `# 核验
+
+第一段关键结论。
+
+- [x] 已完成
+- [ ] 待处理
+
+[原始来源](https://example.com/original)
+
+第二段最终判断。
+`,
+    sourcePath,
+    libraryRoot: os.tmpdir(),
+    title: "核验"
+  });
+  const changed = `# 核验
+
+第二段最终判断。
+
+<checkbox done="false">已完成</checkbox>
+<checkbox done="false">待处理</checkbox>
+
+[原始来源](https://example.com/changed)
+
+第一段关键结论。
+`;
+  const verified = verifyFeishuMarkdownImport({ prepared, fetchedMarkdown: changed });
+  assert.equal(verified.status, "failed");
+  assert.ok(verified.tokenOrderCoverage < 0.98);
+  assert.equal(verified.missingFeatureCounts.checkedTasks, 1);
+  assert.equal(verified.missingLinkSignatures.length, 1);
+});
+
+test("post-import verification refuses silent text loss", () => {
+  const prepared = {
+    content: "# 标题\n\n这是必须完整保留的正文和关键数字 12345。\n",
+    fidelity: { featureCounts: { headings: 1, paragraphs: 1 } }
+  };
+  const verified = verifyFeishuMarkdownImport({ prepared, fetchedMarkdown: "# 标题\n\n这是正文。\n" });
+  assert.equal(verified.status, "failed");
+  assert.ok(verified.textCoverage < 0.9);
+  assert.ok(verified.missingTextSamples.length > 0);
 });
 
 test("migration scanning never escapes the configured local library", (t) => {
@@ -218,6 +381,11 @@ project_id: prj_demo
   let createCount = 0;
   let mediaCount = 0;
   const createParents = [];
+  const createdDocumentContent = new Map();
+  const markerByBlock = new Map();
+  const imageByBlock = new Map();
+  const movedImageByAnchor = new Map();
+  let nextBlockId = 1;
   const fieldNamesByBase = {
     projects: [
       "公司名称", "领域", "子领域", "进展状态", "链接", "Notes", "项目评级", "城市", "投资机构"
@@ -239,7 +407,7 @@ project_id: prj_demo
     people: 0,
     news: 0
   };
-  const runLark = async (args) => {
+  const runLark = async (args, options = {}) => {
     const command = `${args[0]} ${args[1]}`;
     const baseIndex = args.indexOf("--base-token");
     const targetBase = baseIndex >= 0 ? args[baseIndex + 1] : "";
@@ -285,6 +453,13 @@ project_id: prj_demo
       createParents.push(args[parentIndex + 1]);
       const documentId = `docx_${createCount}`;
       const nodeToken = createCount === 1 ? "n3" : "n4";
+      const contentArgument = args[args.indexOf("--content") + 1];
+      if (String(contentArgument).startsWith("@")) {
+        createdDocumentContent.set(
+          documentId,
+          fs.readFileSync(path.join(options.cwd, String(contentArgument).slice(1)), "utf8")
+        );
+      }
       return {
         data: {
           document: {
@@ -296,11 +471,44 @@ project_id: prj_demo
       };
     }
     if (command === "docs +fetch") {
-      return { data: { document: { document_id: args[args.indexOf("--doc") + 1], content: "# ok" } } };
+      const documentId = args[args.indexOf("--doc") + 1];
+      if (args.includes("--scope")) {
+        const marker = args[args.indexOf("--keyword") + 1];
+        const blockId = `marker-block-${nextBlockId++}`;
+        markerByBlock.set(blockId, { documentId, marker });
+        return { data: { document: { document_id: documentId, content: `<fragment><p id="${blockId}">${marker} · 图</p></fragment>` } } };
+      }
+      return { data: { document: { document_id: documentId, content: createdDocumentContent.get(documentId) } } };
     }
     if (command === "docs +media-insert") {
       mediaCount += 1;
-      return { data: { document_id: "docx_1" } };
+      const caption = args[args.indexOf("--caption") + 1];
+      const blockId = `image-block-${nextBlockId++}`;
+      imageByBlock.set(blockId, { caption, url: `https://docs.example.com/media/${mediaCount}.png` });
+      return { data: { block_id: blockId } };
+    }
+    if (command === "docs +update") {
+      const updateCommand = args[args.indexOf("--command") + 1];
+      if (updateCommand === "block_move_after") {
+        movedImageByAnchor.set(
+          args[args.indexOf("--block-id") + 1],
+          args[args.indexOf("--src-block-ids") + 1]
+        );
+        return { data: {} };
+      }
+      if (updateCommand === "block_delete") {
+        const anchor = args[args.indexOf("--block-id") + 1];
+        const marker = markerByBlock.get(anchor);
+        const image = imageByBlock.get(movedImageByAnchor.get(anchor));
+        createdDocumentContent.set(
+          marker.documentId,
+          String(createdDocumentContent.get(marker.documentId) || "").replace(
+            new RegExp(`${marker.marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} · [^\\n]+`),
+            `![${image.caption}](${image.url})`
+          )
+        );
+        return { data: {} };
+      }
     }
     if (command === "base +record-upsert") {
       const fields = JSON.parse(args[args.indexOf("--json") + 1]);
@@ -335,6 +543,9 @@ project_id: prj_demo
   assert.equal(result.migratedNewsCount, 1);
   assert.equal(result.documentCount, 2);
   assert.equal(result.assetCount, 1);
+  assert.equal(result.fidelityReport.documentCount, 2);
+  assert.equal(result.fidelityReport.verifiedCount, 2);
+  assert.equal(result.fidelityReport.documents[0].verification.status, "passed");
   assert.deepEqual(createParents, ["n2", "n3"]);
   assert.equal(mediaCount, 1);
   assert.equal(recordsByBase.projects[0].fields["链接"], "https://docs.example.com/wiki/n3");
