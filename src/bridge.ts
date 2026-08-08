@@ -336,6 +336,30 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "浏览器预览模式不能检查本地 domi 插件。"
   }),
+  getFeishuSetupStatus: async () => ({
+    ok: false,
+    connected: false,
+    configured: false,
+    cliAvailable: false,
+    userName: "",
+    error: "请在 Electron 窗口中连接飞书。"
+  }),
+  startFeishuSetupAuth: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中连接飞书。"
+  }),
+  completeFeishuSetupAuth: async () => ({
+    ok: false,
+    connected: false,
+    configured: false,
+    cliAvailable: false,
+    userName: "",
+    error: "请在 Electron 窗口中完成飞书授权。"
+  }),
+  provisionFeishuSetup: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中创建飞书资料库。"
+  }),
   listWeeklyNews: async () => ({
     ok: false,
     items: [],

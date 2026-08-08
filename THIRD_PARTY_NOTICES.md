@@ -21,6 +21,22 @@ package's bundled `rg` and `zsh` helper executables. The Codex and
 The packaged manifest records both the original upstream digest and the digest
 of the notarization-ready archive.
 
+## Lark CLI
+
+domi includes the official standalone Lark CLI so each installation can
+connect to the current user's Feishu/Lark account without requiring Node.js,
+Homebrew, or a separately installed command-line tool.
+
+- Source: https://github.com/larksuite/cli
+- Version: 1.0.60
+- License: MIT
+- Copyright: Copyright (c) 2026 Lark Technologies Pte. Ltd.
+
+The official release URL and SHA-256 digest for each supported macOS
+architecture are pinned in `resources/lark-runtime.json`. The complete MIT
+license text is included beside the executable under
+`Contents/Resources/lark-runtime/LICENSE`.
+
 ## FFmpeg and ffprobe
 
 domi includes separate `ffmpeg` and `ffprobe` command-line executables for

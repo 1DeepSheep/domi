@@ -24,12 +24,14 @@ import { createPortal } from "react-dom";
 import type { DomiNewsItem, DomiPerson, DomiProject } from "../env";
 import {
   DatabaseCellEditor,
+  DatabaseLongTextViewer,
   type DatabaseCellEditorProps,
   type DatabaseCellKind,
   type DatabaseCellNavigation,
   type DatabaseCellOption
 } from "./DatabaseCellEditors";
 import {
+  gridCellClickIntent,
   isCurrentGridCellGeneration,
   nextGridCellGeneration,
   parseTsv,
@@ -283,13 +285,15 @@ type GridCellProps<T extends DatabaseRecord> = {
   active: boolean;
   selected: boolean;
   editing: boolean;
+  expanded: boolean;
   editable: boolean;
   saveState?: SaveState;
   error?: string;
   onActivate: (position: CellPosition, extend: boolean) => void;
   onExtend: (position: CellPosition) => void;
+  onExpand: (position: CellPosition) => void;
+  onCollapse: () => void;
   onEdit: (position: CellPosition) => void;
-  onReference: (element: HTMLElement | null) => void;
   onCommit: (position: CellPosition, value: unknown) => void;
   onCancel: () => void;
   onNavigate: (direction: DatabaseCellNavigation) => void;
@@ -307,26 +311,35 @@ const GridCell = memo(function GridCell<T extends DatabaseRecord>({
   active,
   selected,
   editing,
+  expanded,
   editable,
   saveState,
   error,
   onActivate,
   onExtend,
+  onExpand,
+  onCollapse,
   onEdit,
-  onReference,
   onCommit,
   onCancel,
   onNavigate,
   onPreview
 }: GridCellProps<T>) {
+  const cellRef = useRef<HTMLDivElement>(null);
+  const clickTimerRef = useRef<number | null>(null);
+  const firstClickAtRef = useRef(0);
   const position = { row: rowIndex, column: columnIndex };
   const options = typeof column.options === "function" ? column.options(record) : column.options;
   const style = { width, minWidth: width, maxWidth: width };
   const handlePreview = onPreview ? () => onPreview(record, column, value) : undefined;
 
+  useEffect(() => () => {
+    if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current);
+  }, []);
+
   return (
     <div
-      ref={editing ? onReference : undefined}
+      ref={cellRef}
       role="gridcell"
       tabIndex={active ? 0 : -1}
       data-record-id={recordId}
@@ -352,8 +365,24 @@ const GridCell = memo(function GridCell<T extends DatabaseRecord>({
       onPointerEnter={(event) => {
         if (event.buttons === 1) onExtend(position);
       }}
-      onClick={() => editable && onEdit(position)}
-      onDoubleClick={() => editable && onEdit(position)}
+      onClick={(event) => {
+        if (gridCellClickIntent(column.kind, event.detail, editable) !== "expand") return;
+        if (!plainTextValue(value, column.kind)) return;
+        firstClickAtRef.current = Date.now();
+        if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current);
+        clickTimerRef.current = window.setTimeout(() => {
+          clickTimerRef.current = null;
+          onExpand(position);
+        }, 280);
+      }}
+      onDoubleClick={(event) => {
+        event.preventDefault();
+        if (clickTimerRef.current !== null) {
+          window.clearTimeout(clickTimerRef.current);
+          clickTimerRef.current = null;
+        }
+        if (gridCellClickIntent(column.kind, event.detail, editable) === "edit") onEdit(position);
+      }}
     >
       {editing ? (
         <DatabaseCellEditor
@@ -363,15 +392,25 @@ const GridCell = memo(function GridCell<T extends DatabaseRecord>({
           options={options}
           allowCustomOptions={column.allowCustomOptions}
           placeholder={column.placeholder}
-          referenceElement={document.querySelector<HTMLElement>(
-            `[data-record-id="${CSS.escape(recordId)}"][data-column-key="${CSS.escape(column.key)}"]`
-          )}
+          referenceElement={cellRef.current}
           onCommit={(next) => onCommit(position, next)}
           onCancel={onCancel}
           onNavigate={onNavigate}
           onPreview={handlePreview ? () => handlePreview() : undefined}
         />
       ) : displayValue(value, record, column, handlePreview)}
+      {expanded && !editing ? (
+        <DatabaseLongTextViewer
+          value={value}
+          referenceElement={cellRef.current}
+          onClose={onCollapse}
+          onEdit={editable ? () => onEdit(position) : undefined}
+          onFollowUpClick={editable ? (target) => {
+            if (target.closest("a, button")) return;
+            if (Date.now() - firstClickAtRef.current <= 520) onEdit(position);
+          } : undefined}
+        />
+      ) : null}
       {saveState === "saving" ? <LoaderCircle className="database-cell-save spinning" size={11} /> : null}
       {saveState === "saved" ? <Check className="database-cell-save saved" size={11} /> : null}
       {saveState === "error" ? <span className="database-cell-error-dot" /> : null}
@@ -391,13 +430,15 @@ type GridRowProps<T extends DatabaseRecord> = {
   selection: ReturnType<typeof normalizedSelection>;
   activeCell: CellPosition | null;
   editingCell: CellIdentity | null;
+  expandedCell: CellIdentity | null;
   readOnly: boolean;
   saveStates: Map<string, SaveState>;
   errors: Map<string, string>;
   onActivate: GridCellProps<T>["onActivate"];
   onExtend: GridCellProps<T>["onExtend"];
+  onExpand: GridCellProps<T>["onExpand"];
+  onCollapse: GridCellProps<T>["onCollapse"];
   onEdit: GridCellProps<T>["onEdit"];
-  onReference: GridCellProps<T>["onReference"];
   onCommit: (identity: CellIdentity, value: unknown) => void;
   onCancel: GridCellProps<T>["onCancel"];
   onNavigate: GridCellProps<T>["onNavigate"];
@@ -417,13 +458,15 @@ const GridRow = memo(function GridRow<T extends DatabaseRecord>({
   selection,
   activeCell,
   editingCell,
+  expandedCell,
   readOnly,
   saveStates,
   errors,
   onActivate,
   onExtend,
+  onExpand,
+  onCollapse,
   onEdit,
-  onReference,
   onCommit,
   onCancel,
   onNavigate,
@@ -444,6 +487,7 @@ const GridRow = memo(function GridRow<T extends DatabaseRecord>({
       {columns.map((column, columnIndex) => {
         const active = activeCell?.row === rowIndex && activeCell.column === columnIndex;
         const editing = editingCell?.recordId === recordId && editingCell.columnKey === column.key;
+        const expanded = expandedCell?.recordId === recordId && expandedCell.columnKey === column.key;
         const selected = rowIndex >= selection.rowStart && rowIndex <= selection.rowEnd
           && columnIndex >= selection.columnStart && columnIndex <= selection.columnEnd;
         const id = cellId(recordId, column.key);
@@ -460,13 +504,15 @@ const GridRow = memo(function GridRow<T extends DatabaseRecord>({
             active={active}
             selected={selected}
             editing={editing}
+            expanded={expanded}
             editable={columnIsEditable(column, record, readOnly)}
             saveState={saveStates.get(id)}
             error={errors.get(id)}
             onActivate={onActivate}
             onExtend={onExtend}
+            onExpand={onExpand}
+            onCollapse={onCollapse}
             onEdit={onEdit}
-            onReference={onReference}
             onCommit={(_position, value) => onCommit({ recordId, columnKey: column.key }, value)}
             onCancel={onCancel}
             onNavigate={onNavigate}
@@ -512,6 +558,7 @@ export function DatabaseGrid<T extends DatabaseRecord>({
   });
   const [activeCell, setActiveCell] = useState<CellPosition | null>(records.length && columns.length ? { row: 0, column: 0 } : null);
   const [editingCell, setEditingCell] = useState<CellIdentity | null>(null);
+  const [expandedCell, setExpandedCell] = useState<CellIdentity | null>(null);
   const [selection, setSelection] = useState<SelectionRange>({
     anchor: { row: 0, column: 0 },
     focus: { row: 0, column: 0 }
@@ -520,7 +567,6 @@ export function DatabaseGrid<T extends DatabaseRecord>({
   const [optimistic, setOptimistic] = useState<Map<string, OptimisticCell>>(() => new Map());
   const [saveStates, setSaveStates] = useState<Map<string, SaveState>>(() => new Map());
   const [errors, setErrors] = useState<Map<string, string>>(() => new Map());
-  const [referenceElement, setReferenceElement] = useState<HTMLElement | null>(null);
   const [batchEditorOpen, setBatchEditorOpen] = useState(false);
   const [batchButton, setBatchButton] = useState<HTMLButtonElement | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState<T> | null>(null);
@@ -531,11 +577,13 @@ export function DatabaseGrid<T extends DatabaseRecord>({
       : null
   );
   const editingCellRef = useRef<CellIdentity | null>(editingCell);
+  const expandedCellRef = useRef<CellIdentity | null>(expandedCell);
   const saveTimersRef = useRef(new Map<string, number>());
   const cellGenerationsRef = useRef(new Map<string, number>());
 
   useEffect(() => { activeCellRef.current = activeCell; }, [activeCell]);
   useEffect(() => { editingCellRef.current = editingCell; }, [editingCell]);
+  useEffect(() => { expandedCellRef.current = expandedCell; }, [expandedCell]);
   useEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
@@ -577,6 +625,7 @@ export function DatabaseGrid<T extends DatabaseRecord>({
     if (!records.length || !columns.length) {
       setActiveCell(null);
       setEditingCell(null);
+      setExpandedCell(null);
       activeIdentityRef.current = null;
       return;
     }
@@ -608,6 +657,11 @@ export function DatabaseGrid<T extends DatabaseRecord>({
     setEditingCell((current) => current
       && records.some((record) => getRecordId(record) === current.recordId)
       && columns.some((column) => column.key === current.columnKey)
+      ? current
+      : null);
+    setExpandedCell((current) => current
+      && records.some((record) => getRecordId(record) === current.recordId)
+      && columns.some((column) => column.key === current.columnKey && column.kind === "longtext")
       ? current
       : null);
   }, [columns, getRecordId, records]);
@@ -683,6 +737,11 @@ export function DatabaseGrid<T extends DatabaseRecord>({
     setSelection((current) => extend ? { ...current, focus: next } : { anchor: next, focus: next });
     const shouldEdit = edit && columnIsEditable(columns[next.column], records[next.row], readOnly);
     setEditingCell(shouldEdit ? identity : null);
+    setExpandedCell((current) => !shouldEdit
+      && current?.recordId === identity.recordId
+      && current.columnKey === identity.columnKey
+      ? current
+      : null);
     setBatchEditorOpen(false);
     scrollCellIntoView(next);
     if (!shouldEdit) window.requestAnimationFrame(() => {
@@ -856,7 +915,6 @@ export function DatabaseGrid<T extends DatabaseRecord>({
     const record = records[row];
     const column = columns[columnIndex];
     setEditingCell(null);
-    setReferenceElement(null);
     if (!record || !column || !columnIsEditable(column, record, readOnly)) return;
     const current = valueAt(record, column);
     if (sameValue(value, current)) return;
@@ -949,6 +1007,11 @@ export function DatabaseGrid<T extends DatabaseRecord>({
 
   const handleGridKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (editingCellRef.current) return;
+    if (event.key === "Escape" && expandedCellRef.current) {
+      event.preventDefault();
+      setExpandedCell(null);
+      return;
+    }
     if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "a") {
       event.preventDefault();
       if (!records.length || !columns.length) return;
@@ -1083,7 +1146,10 @@ export function DatabaseGrid<T extends DatabaseRecord>({
         tabIndex={0}
         className="database-grid-viewport"
         style={{ height }}
-        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        onScroll={(event) => {
+          setScrollTop(event.currentTarget.scrollTop);
+          if (expandedCellRef.current) setExpandedCell(null);
+        }}
         onKeyDown={handleGridKeyDown}
         onCopy={(event) => {
           if ((event.target as HTMLElement).closest("input, textarea")) return;
@@ -1139,6 +1205,7 @@ export function DatabaseGrid<T extends DatabaseRecord>({
                 selection={normalized}
                 activeCell={activeCell}
                 editingCell={editingCell}
+                expandedCell={expandedCell}
                 readOnly={readOnly}
                 saveStates={saveStates}
                 errors={errors}
@@ -1151,13 +1218,21 @@ export function DatabaseGrid<T extends DatabaseRecord>({
                   setActiveCell(position);
                   setSelection((current) => ({ ...current, focus: position }));
                 }}
-                onEdit={(position) => focusCell(position, true)}
-                onReference={setReferenceElement}
-                onCommit={commitCell}
-                onCancel={() => {
-                  setEditingCell(null);
-                  setReferenceElement(null);
+                onExpand={(position) => {
+                  const current = activeCellRef.current;
+                  if (!current || current.row !== position.row || current.column !== position.column) return;
+                  const recordAtPosition = records[position.row];
+                  const columnAtPosition = columns[position.column];
+                  if (!recordAtPosition || columnAtPosition?.kind !== "longtext") return;
+                  setExpandedCell({
+                    recordId: getRecordId(recordAtPosition),
+                    columnKey: columnAtPosition.key
+                  });
                 }}
+                onCollapse={() => setExpandedCell(null)}
+                onEdit={(position) => focusCell(position, true)}
+                onCommit={commitCell}
+                onCancel={() => setEditingCell(null)}
                 onNavigate={navigate}
                 onPreview={onPreview}
                 onContextMenu={(target, x, y) => {
@@ -1172,7 +1247,7 @@ export function DatabaseGrid<T extends DatabaseRecord>({
       </div>
 
       <footer className="database-grid-statusbar">
-        <span>单击即可编辑 · Tab/方向键移动 · 可直接粘贴飞书或 Excel 表格</span>
+        <span>单击选择/展开 · 双击或 Enter/F2 编辑 · 可直接粘贴飞书或 Excel 表格</span>
         {saveStates.size ? (
           <span className="database-grid-save-summary">
             {[...saveStates.values()].some((state) => state === "saving")

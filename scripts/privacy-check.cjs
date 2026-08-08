@@ -71,6 +71,11 @@ function isApprovedMediaRuntimeBinary(filePath) {
   return /\/media-runtime(?:-(?:arm64|x64))?\/bin\/(?:ffmpeg|ffprobe)$/.test(normalized);
 }
 
+function isApprovedLarkRuntimeBinary(filePath) {
+  const normalized = path.resolve(filePath).split(path.sep).join("/");
+  return /\/lark-runtime(?:-(?:arm64|x64))?\/bin\/lark-cli$/.test(normalized);
+}
+
 function inspectContent(content, filePath, scanRoot, options = {}) {
   const relative = displayPath(filePath, scanRoot);
   const normalizedContent = content.toLocaleLowerCase("en-US");
@@ -152,7 +157,7 @@ function scanTree(scanRoot, options = {}) {
         fail("禁止发布运行数据或敏感文件", relative);
         continue;
       }
-      if (isApprovedMediaRuntimeBinary(target)) continue;
+      if (isApprovedMediaRuntimeBinary(target) || isApprovedLarkRuntimeBinary(target)) continue;
       if (stat.size > (options.maxTextSize || 4 * 1024 * 1024)) continue;
       inspectContent(
         fs.readFileSync(target).toString("utf8"),

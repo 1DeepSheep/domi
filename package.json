@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "0.6.21",
+  "version": "0.6.22",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -16,18 +16,19 @@
     "privacy:check": "node scripts/privacy-check.cjs",
     "privacy:history": "node scripts/privacy-check.cjs --history",
     "privacy:artifact": "node scripts/privacy-check.cjs --artifact",
-    "check": "npm run privacy:check && npm run build && node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/brand-migration.cjs && node --check electron/codex-app-server.cjs && node --check electron/codex-bootstrap.cjs && node --check electron/codex-runtime.cjs && node --check electron/codex-protocol.cjs && node --check electron/codex-run-context.cjs && node --check electron/codex-turn-status.cjs && node --check electron/app-settings.cjs && node --check electron/document-library.cjs && node --check electron/document-resource.cjs && node --check electron/domi-integration.cjs && node --check electron/local-domi-repository.cjs && node --check electron/local-to-feishu-migration.cjs && node --check electron/markdown-assets.cjs && node --check electron/media-runtime.cjs && node --check electron/radar-sources.cjs && node --check electron/research-cache.cjs && node --check electron/resource-target.cjs && node --check electron/domi-plugin-manager.cjs && node --check electron/domi-plugin-updater.cjs && node --check electron/plaud-worker.cjs && node --check electron/plaud-browser-broker.cjs && node --check electron/service-coordinator.cjs && node --check electron/state-store.cjs && node --check electron/update-service.cjs && node --check electron/workspace-boundary.cjs && node --check scripts/prepare-codex-runtime.cjs && node --check scripts/prepare-domi-plugin.cjs && node --check scripts/prepare-media-runtime.cjs && node --check scripts/merge-mac-update-info.cjs && node --experimental-strip-types scripts/clipboard-files.test.mjs && node --experimental-strip-types scripts/database-grid.test.mjs && node --experimental-strip-types scripts/entity-routing.test.mjs && node --experimental-strip-types scripts/update-entry.test.mjs && node scripts/renderer-resilience.test.cjs && node scripts/brand-contract.test.cjs && node scripts/release-contract.test.cjs && node scripts/merge-mac-update-info.test.cjs && node scripts/brand-migration.test.cjs && node scripts/app-settings.test.cjs && node scripts/codex-app-server.test.cjs && node scripts/codex-bootstrap.test.cjs && node scripts/codex-runtime.test.cjs && node scripts/codex-run-context.test.cjs && node scripts/codex-turn-status.test.cjs && node scripts/document-library.test.cjs && node scripts/document-resource.test.cjs && node scripts/domi-integration.test.cjs && node scripts/local-to-feishu-migration.test.cjs && node scripts/media-runtime.test.cjs && node scripts/plaud-worker.test.cjs && node scripts/plaud-browser-broker.test.cjs && node scripts/domi-plugin-manager.test.cjs && node scripts/domi-plugin-updater.test.cjs && node scripts/markdown-assets.test.cjs && node scripts/radar-sources.test.cjs && node scripts/research-cache.test.cjs && node scripts/resource-target.test.cjs && node scripts/radar-workflow.test.cjs && node scripts/service-coordinator.test.cjs && node scripts/state-store.test.cjs && node scripts/update-service.test.cjs && node scripts/workspace-boundary.test.cjs",
+    "check": "npm run privacy:check && npm run build && node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/brand-migration.cjs && node --check electron/codex-app-server.cjs && node --check electron/codex-bootstrap.cjs && node --check electron/codex-runtime.cjs && node --check electron/codex-protocol.cjs && node --check electron/codex-run-context.cjs && node --check electron/codex-turn-status.cjs && node --check electron/app-settings.cjs && node --check electron/document-library.cjs && node --check electron/document-resource.cjs && node --check electron/domi-integration.cjs && node --check electron/feishu-document-intent.cjs && node --check electron/feishu-markdown-publisher.cjs && node --check electron/markdown-feishu-fidelity.cjs && node --check electron/lark-runtime.cjs && node --check electron/local-domi-repository.cjs && node --check electron/local-to-feishu-migration.cjs && node --check electron/markdown-assets.cjs && node --check electron/media-runtime.cjs && node --check electron/radar-sources.cjs && node --check electron/research-cache.cjs && node --check electron/resource-target.cjs && node --check electron/domi-plugin-manager.cjs && node --check electron/domi-plugin-updater.cjs && node --check electron/plaud-worker.cjs && node --check electron/plaud-browser-broker.cjs && node --check electron/service-coordinator.cjs && node --check electron/state-store.cjs && node --check electron/update-service.cjs && node --check electron/workspace-boundary.cjs && node --check scripts/prepare-codex-runtime.cjs && node --check scripts/prepare-domi-plugin.cjs && node --check scripts/prepare-lark-runtime.cjs && node --check scripts/prepare-media-runtime.cjs && node --check scripts/merge-mac-update-info.cjs && node --experimental-strip-types scripts/clipboard-files.test.mjs && node --experimental-strip-types scripts/database-grid.test.mjs && node --experimental-strip-types scripts/entity-routing.test.mjs && node --experimental-strip-types scripts/update-entry.test.mjs && node scripts/renderer-resilience.test.cjs && node scripts/brand-contract.test.cjs && node scripts/release-contract.test.cjs && node scripts/merge-mac-update-info.test.cjs && node scripts/brand-migration.test.cjs && node scripts/app-settings.test.cjs && node scripts/codex-app-server.test.cjs && node scripts/codex-bootstrap.test.cjs && node scripts/codex-runtime.test.cjs && node scripts/codex-run-context.test.cjs && node scripts/codex-turn-status.test.cjs && node scripts/document-library.test.cjs && node scripts/document-resource.test.cjs && node scripts/domi-integration.test.cjs && node scripts/feishu-document-intent.test.cjs && node scripts/feishu-markdown-publisher.test.cjs && node scripts/markdown-feishu-fidelity.test.cjs && node scripts/lark-runtime.test.cjs && node scripts/local-to-feishu-migration.test.cjs && node scripts/media-runtime.test.cjs && node scripts/plaud-worker.test.cjs && node scripts/plaud-browser-broker.test.cjs && node scripts/domi-plugin-manager.test.cjs && node scripts/domi-plugin-updater.test.cjs && node scripts/markdown-assets.test.cjs && node scripts/radar-sources.test.cjs && node scripts/research-cache.test.cjs && node scripts/resource-target.test.cjs && node scripts/radar-workflow.test.cjs && node scripts/service-coordinator.test.cjs && node scripts/state-store.test.cjs && node scripts/update-service.test.cjs && node scripts/workspace-boundary.test.cjs",
     "test:database-grid": "node --experimental-strip-types scripts/database-grid.test.mjs",
     "test:mac-update-info": "node scripts/merge-mac-update-info.test.cjs",
     "codex:prepare": "node scripts/prepare-codex-runtime.cjs",
     "codex:prepare:release": "node scripts/prepare-codex-runtime.cjs --release",
     "media:prepare": "node scripts/prepare-media-runtime.cjs",
+    "lark:prepare": "node scripts/prepare-lark-runtime.cjs",
     "plugin:prepare": "node scripts/prepare-domi-plugin.cjs",
     "plugin:prepare:release": "node scripts/prepare-domi-plugin.cjs --release",
     "icon:mac": "bash scripts/build-mac-icon.sh",
     "preview": "npm run build && NODE_ENV=production electron .",
-    "pack:mac": "DOMI_TARGET_ARCH=${DOMI_MAC_DIR_ARCH:-$(node -p process.arch)} npm run codex:prepare && DOMI_TARGET_ARCH=${DOMI_MAC_DIR_ARCH:-$(node -p process.arch)} npm run media:prepare && npm run plugin:prepare && npm run build && npm run icon:mac && bash scripts/package-mac.sh dir",
-    "dist:mac": "DOMI_TARGET_ARCH=arm64 npm run codex:prepare:release && DOMI_TARGET_ARCH=x64 npm run codex:prepare:release && DOMI_TARGET_ARCH=arm64 npm run media:prepare && DOMI_TARGET_ARCH=x64 npm run media:prepare && npm run plugin:prepare:release && npm run privacy:check && npm run build && npm run icon:mac && bash scripts/package-mac.sh dist",
+    "pack:mac": "DOMI_TARGET_ARCH=${DOMI_MAC_DIR_ARCH:-$(node -p process.arch)} npm run codex:prepare && DOMI_TARGET_ARCH=${DOMI_MAC_DIR_ARCH:-$(node -p process.arch)} npm run media:prepare && DOMI_TARGET_ARCH=${DOMI_MAC_DIR_ARCH:-$(node -p process.arch)} npm run lark:prepare && npm run plugin:prepare && npm run build && npm run icon:mac && bash scripts/package-mac.sh dir",
+    "dist:mac": "DOMI_TARGET_ARCH=arm64 npm run codex:prepare:release && DOMI_TARGET_ARCH=x64 npm run codex:prepare:release && DOMI_TARGET_ARCH=arm64 npm run media:prepare && DOMI_TARGET_ARCH=x64 npm run media:prepare && DOMI_TARGET_ARCH=arm64 npm run lark:prepare && DOMI_TARGET_ARCH=x64 npm run lark:prepare && npm run plugin:prepare:release && npm run privacy:check && npm run build && npm run icon:mac && bash scripts/package-mac.sh dist",
     "dist:mac:resume": "npm run privacy:check && bash scripts/package-mac.sh resume"
   },
   "dependencies": {
@@ -111,6 +112,15 @@
           "bin/ffprobe",
           "licenses/**/*",
           "source/**/*",
+          "manifest.json"
+        ]
+      },
+      {
+        "from": "build/lark-runtime-${arch}",
+        "to": "lark-runtime",
+        "filter": [
+          "bin/lark-cli",
+          "LICENSE",
           "manifest.json"
         ]
       },

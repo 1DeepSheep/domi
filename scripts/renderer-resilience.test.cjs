@@ -405,13 +405,18 @@ assert.match(
 );
 assert.match(
   databaseGrid,
-  /onPointerDown=\{\(event\) => \{[\s\S]*?onActivate\(position, event\.shiftKey\)[\s\S]*?onClick=\{\(\) => editable && onEdit\(position\)\}/,
-  "Only the selected database cell must enter editing with a single click."
+  /onPointerDown=\{\(event\) => \{[\s\S]*?onActivate\(position, event\.shiftKey\)[\s\S]*?onClick=\{\(event\) => \{[\s\S]*?onExpand\(position\)[\s\S]*?onDoubleClick=\{\(event\) => \{[\s\S]*?onEdit\(position\)/,
+  "Database cells must select or expand on one click and enter editing only on double click."
 );
 assert.match(
   databaseCellEditors,
-  /function LongTextEditor[\s\S]*?<FloatingSurface[\s\S]*?<textarea/,
-  "Long database text must open in a cell-anchored editor without stretching every row."
+  /function CellOverlaySurface[\s\S]*?referenceElement\.getBoundingClientRect\(\)[\s\S]*?function DatabaseLongTextViewer[\s\S]*?<CellOverlaySurface[\s\S]*?function LongTextEditor[\s\S]*?<CellOverlaySurface[\s\S]*?<textarea/,
+  "Long database text must expand and edit from the original cell boundary without stretching every row."
+);
+assert.doesNotMatch(
+  databaseCellEditors,
+  /database-floating-editor-head[\s\S]*?完整内容/,
+  "The Feishu-style cell extension must not reintroduce a detached titled dialog."
 );
 assert.match(
   app,
@@ -541,8 +546,8 @@ assert.doesNotMatch(
 
 assert.match(
   app,
-  /const visibleUpdateEntry = sidebarUpdateEntry\(updateStatus\)[\s\S]*?sidebar-update-card[\s\S]*?setSettingsInitialTab\("updates"\)[\s\S]*?setSettingsOpen\(true\)/,
-  "An actionable software update must appear in the sidebar and open the existing update settings page."
+  /const visibleUpdateEntry = sidebarUpdateEntry\(updateStatus\)[\s\S]*?async function handleSidebarUpdate\(\)[\s\S]*?downloadUpdate\(\)[\s\S]*?installUpdate\(\)[\s\S]*?sidebar-update-card[\s\S]*?handleSidebarUpdate\(\)/,
+  "An actionable software update must appear in the sidebar and start the update directly."
 );
 assert.match(
   styles,
@@ -919,15 +924,107 @@ assert.match(
 );
 assert.match(
   setupCenter,
-  /0\.待办事项\.md[\s\S]*?<strong>待办事项与日历<\/strong>[\s\S]*?1\.待办事项[\s\S]*?0\.待办事项\.md/,
-  "Settings must describe the automatically managed Feishu and local todo documents."
+  /0\.待办事项\.md[\s\S]*?<strong>待办事项与日历<\/strong>[\s\S]*?0\.待办事项\.md/,
+  "Settings must describe the automatically managed local todo document."
 );
-const localRepositoryOptionPosition = setupCenter.indexOf("<strong>本地资料库</strong>");
-const feishuRepositoryOptionPosition = setupCenter.indexOf("<strong>飞书资料库</strong>");
-assert.ok(
-  localRepositoryOptionPosition >= 0
-    && feishuRepositoryOptionPosition > localRepositoryOptionPosition,
-  "Onboarding must place the preferred local repository option to the left of Feishu."
+assert.match(
+  setupCenter,
+  /本地资料库 · 默认基础[\s\S]*?本地是唯一主资料库/,
+  "Onboarding must present the local repository as the only management base."
+);
+assert.doesNotMatch(
+  setupCenter,
+  /role="radiogroup" aria-label="资料库模式"|<strong>飞书资料库<\/strong>/,
+  "Onboarding must not ask new users to choose Feishu as a repository backend."
+);
+assert.match(
+  setupCenter,
+  /async function startFeishuAuth[\s\S]*?workbench\.startFeishuSetupAuth[\s\S]*?连接飞书（可选）[\s\S]*?不会自动创建或接管 Base[\s\S]*?授权范围：多维表格、知识库、云文档、云盘、消息与通讯录[\s\S]*?我已完成授权/,
+  "Feishu must keep its complete external-service authorization without changing the authoritative local repository."
+);
+const feishuAssistStart = setupCenter.indexOf("async function assistFeishuConnection");
+const feishuAssistEnd = setupCenter.indexOf("\n  useEffect(() => {", feishuAssistStart);
+assert.ok(feishuAssistStart >= 0 && feishuAssistEnd > feishuAssistStart);
+const feishuAssistSource = setupCenter.slice(feishuAssistStart, feishuAssistEnd);
+assert.match(
+  feishuAssistSource,
+  /sanitizedFeishuAssistError[\s\S]*?safeError[\s\S]*?requestText: "诊断当前连接引导"[\s\S]*?allowUserInput: false[\s\S]*?privateOutput: true[\s\S]*?webSearch: false[\s\S]*?workflowId: "connection-guidance"[\s\S]*?refreshFeishuStatus\(true\)/,
+  "The Feishu connection helper must only guide from sanitized state and refresh connection status afterward."
+);
+assert.doesNotMatch(
+  feishuAssistSource,
+  /startFeishuSetupAuth|completeFeishuSetupAuth|provisionFeishuSetup|verificationUrl|userCode|deviceCode|projectBaseToken|projectTableId|peopleBaseToken|peopleTableId|radarBaseToken|radarTableId|wikiSpaceId|userName/,
+  "The Feishu connection helper must never receive or operate on private authorization or resource identifiers."
+);
+assert.match(
+  feishuAssistSource,
+  /不得启动或代替用户完成应用初始化、登录、验证码、账号授权、企业管理员批准或资源写入/,
+  "Codex must explain Feishu setup boundaries instead of performing user consent or resource writes."
+);
+const externalWorkflowMapSource = main.slice(
+  main.indexOf("const externalDomiWorkflows"),
+  main.indexOf("const larkRequestPattern")
+);
+assert.doesNotMatch(
+  externalWorkflowMapSource,
+  /connection-guidance/,
+  "Sanitized connection guidance must not trigger the native external-data permission dialog."
+);
+assert.match(
+  main,
+  /payload\?\.workflowId === "connection-guidance"[\s\S]{0,180}?allowed: true, sandbox: "read-only"/,
+  "The Feishu guidance workflow must stay read-only and bypass native access prompts even in always-allow mode."
+);
+assert.match(
+  main,
+  /web_search: payload\.webSearch === false \? "disabled" : "live"/,
+  "Diagnostic-only Codex guidance must be able to disable live web search at the thread boundary."
+);
+assert.equal(
+  /(?:飞书|lark|wiki|watching\s*list|项目库|人脉库|people|onedrive|项目文档|交流文档|线上文档|1\.\s*待办事项|1\.\s*task|待办事项|任务建议)/i
+    .test("诊断当前连接引导"),
+  false,
+  "The connection helper request label must stay outside the external-data keyword gate."
+);
+assert.doesNotMatch(
+  setupCenter,
+  /自动设置飞书资料库|手动指定飞书资源|同时迁移现有本地资料|<span>Base Token<\/span>|<span>Table ID<\/span>|<span>Wiki Space ID<\/span>/,
+  "Feishu knowledge access must not expose Base provisioning, raw identifiers, or backend migration."
+);
+assert.match(
+  setupCenter,
+  /第 1 步：初始化飞书应用[\s\S]*?第 2 步：授权飞书账号/,
+  "Optional Feishu knowledge access must keep the two explicit authorization steps."
+);
+assert.match(
+  setupCenter,
+  /旧版飞书主库仍按原模式运行[\s\S]*?不会静默切到空的本地库[\s\S]*?当前读写与文档连接可继续使用[\s\S]*?安全导入本地/,
+  "Legacy Feishu-primary users must keep the original read/write mode until a verified local import completes."
+);
+assert.match(
+  setupCenter,
+  /<strong>待办事项与日历<\/strong>[\s\S]*?required \? <em>可稍后设置<\/em>[\s\S]*?这部分不影响完成资料库配置；可以先跳过/,
+  "Outlook calendar setup must be clearly optional during first onboarding."
+);
+assert.match(
+  main,
+  /settingsRequest\.storageBackend = current\.storageBackend === "feishu"[\s\S]*?旧版飞书主库仍按原模式运行[\s\S]*?现有读写和文档连接都会保留/,
+  "New users must stay local while legacy Feishu-primary users keep their original backend until verified import."
+);
+assert.match(
+  main,
+  /domi:feishu-setup-provision[\s\S]{0,500}?飞书现在是可选知识外挂，不再创建 Base 或切换主资料库/,
+  "The main process must reject legacy attempts to provision a Feishu management backend."
+);
+assert.match(
+  main,
+  /if \(explicitFeishuRequestPattern\.test\(requestText\)\) return true;[\s\S]*?if \(backend === "local"\) return false;/,
+  "Explicit Feishu document or message delivery must be authorized even when the repository stays local."
+);
+assert.match(
+  main,
+  /不要要求用户填写 Base Token、Table ID、Wiki Space ID[\s\S]*?设置 → 资料连接 → 连接飞书/,
+  "A missing Feishu login must guide the user to account connection instead of exposing internal identifiers."
 );
 assert.match(
   main,
