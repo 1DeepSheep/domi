@@ -129,11 +129,26 @@ verify_app_update_config() {
 verify_bundled_runtime_arch() {
   local app_path="$1"
   local arch="$2"
+  local codex_archive="$app_path/Contents/Resources/codex-runtime/codex-package.tar.gz"
+  local codex_archive_entries
   local codex_manifest="$app_path/Contents/Resources/codex-runtime/manifest.json"
   local media_manifest="$app_path/Contents/Resources/media-runtime/manifest.json"
   local lark_manifest="$app_path/Contents/Resources/lark-runtime/manifest.json"
   local expected_target
   expected_target="$(expected_codex_target "$arch")"
+  if [[ ! -f "$codex_archive" ]]; then
+    echo "Packaged Codex runtime archive is missing: $codex_archive" >&2
+    exit 1
+  fi
+  codex_archive_entries="$(/usr/bin/tar -tzf "$codex_archive")"
+  if ! grep -Eq '^(\./)?bin/codex$' <<<"$codex_archive_entries"; then
+    echo "Packaged Codex runtime archive is missing bin/codex: $codex_archive" >&2
+    exit 1
+  fi
+  if ! grep -Eq '^(\./)?bin/codex-code-mode-host$' <<<"$codex_archive_entries"; then
+    echo "Packaged Codex runtime archive is missing bin/codex-code-mode-host: $codex_archive" >&2
+    exit 1
+  fi
   node - "$codex_manifest" "$expected_target" <<'NODE'
 const fs = require("node:fs");
 const [manifestPath, expectedTarget] = process.argv.slice(2);

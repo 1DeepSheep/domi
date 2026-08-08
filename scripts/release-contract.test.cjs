@@ -54,6 +54,8 @@ assert.match(source, /Using electron-builder's verified official Electron downlo
 assert.match(source, /verify_electron_dist "\$electron_dist" "\$arch"/);
 assert.match(source, /xcrun lipo -archs/);
 assert.match(source, /Codex runtime target mismatch/);
+assert.match(source, /Packaged Codex runtime archive is missing bin\/codex:/);
+assert.match(source, /Packaged Codex runtime archive is missing bin\/codex-code-mode-host:/);
 assert.match(source, /Media runtime target mismatch/);
 assert.match(source, /Lark runtime target mismatch/);
 assert.match(source, /Contents\/Resources\/lark-runtime\/bin\/lark-cli/);
