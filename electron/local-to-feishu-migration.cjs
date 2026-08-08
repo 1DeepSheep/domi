@@ -1,9 +1,12 @@
-const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const {
+  prepareMarkdownForFeishu,
+  verifyFeishuMarkdownImport
+} = require("./markdown-feishu-fidelity.cjs");
+const { placeFeishuAssetAtMarker } = require("./feishu-markdown-assets.cjs");
 
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
 const MAX_PROJECT_DOCUMENTS = 500;
 const MAX_WIKI_NODES = 5000;
@@ -216,13 +219,6 @@ function verifyFieldMap(record, expectedFields) {
   );
 }
 
-function stripFrontmatter(markdown) {
-  const normalized = String(markdown || "").replace(/^\uFEFF/, "");
-  if (!normalized.startsWith("---\n") && !normalized.startsWith("---\r\n")) return normalized;
-  const match = normalized.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
-  return match ? normalized.slice(match[0].length) : normalized;
-}
-
 function parseWikiFolderMap(markdown) {
   const bySubdomain = new Map();
   let domainHeading = "";
@@ -330,60 +326,21 @@ function projectDocuments(project, libraryRoot = "") {
       || left.relativePath.localeCompare(right.relativePath, "zh-CN"));
 }
 
-function resolveMarkdownAsset(documentPath, rawTarget, libraryRoot) {
-  const target = String(rawTarget || "").trim().replace(/^<|>$/g, "");
-  if (!target || /^(?:https?:|data:|mailto:|#)/i.test(target)) return null;
-  let decoded = target;
-  try {
-    decoded = decodeURIComponent(target);
-  } catch {
-    // Keep the literal target when it is not URI encoded.
-  }
-  const withoutAnchor = decoded.split("#")[0].split("?")[0];
-  const absolutePath = path.resolve(path.dirname(documentPath), withoutAnchor);
-  if (!isPathInside(libraryRoot, absolutePath)) {
-    return { missing: true, path: absolutePath, reason: "资料库外部路径" };
-  }
-  try {
-    const stat = fs.lstatSync(absolutePath);
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      return { missing: true, path: absolutePath, reason: "不是普通文件" };
-    }
-  } catch {
-    return { missing: true, path: absolutePath, reason: "文件不存在" };
-  }
-  return { missing: false, path: absolutePath };
-}
-
 function prepareMarkdownDocument(document, libraryRoot) {
   const stat = fs.statSync(document.path);
   if (stat.size > MAX_DOCUMENT_BYTES) {
     throw new Error(`${document.relativePath} 超过 8 MB，无法安全导入飞书在线文档。`);
   }
   const original = fs.readFileSync(document.path, "utf8");
-  const assets = [];
-  let assetIndex = 0;
-  const imagePattern = /!\[([^\]]*)\]\((<[^>]+>|[^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
-  let content = stripFrontmatter(original).replace(imagePattern, (fullMatch, altText, target) => {
-    const extension = path.extname(String(target || "").replace(/^<|>$/g, "").split(/[?#]/)[0]).toLowerCase();
-    if (!IMAGE_EXTENSIONS.has(extension) || /^(?:https?:|data:)/i.test(target)) return fullMatch;
-    const resolved = resolveMarkdownAsset(document.path, target, libraryRoot);
-    const caption = String(altText || path.basename(String(target).replace(/^<|>$/g, ""))).trim() || "图片";
-    if (!resolved || resolved.missing) return `> 本地图片未迁移：${caption}（${resolved?.reason || "无法解析"}）`;
-    assetIndex += 1;
-    const marker = `domi迁移图片${assetIndex}-${crypto.createHash("sha1").update(resolved.path).digest("hex").slice(0, 8)}`;
-    assets.push({ path: resolved.path, caption, marker, type: "image" });
-    return `> ${marker} · ${caption}`;
+  const prepared = prepareMarkdownForFeishu({
+    markdown: original,
+    sourcePath: document.path,
+    libraryRoot,
+    title: document.title
   });
-  if (!content.trim()) content = `# ${document.title}\n`;
-  if (!content.endsWith("\n")) content += "\n";
-  const hash = crypto.createHash("sha256").update(original);
-  for (const asset of assets) hash.update(fs.readFileSync(asset.path));
   return {
     ...document,
-    content,
-    assets,
-    sourceSha256: hash.digest("hex")
+    ...prepared
   };
 }
 
@@ -593,7 +550,43 @@ class LocalToFeishuMigration {
     return Boolean(document.document_id || document.documentId || document.content !== undefined);
   }
 
+  async verifyDocumentFidelity(documentId, prepared) {
+    const fetched = await this.runLark([
+      "docs",
+      "+fetch",
+      "--doc",
+      documentId,
+      "--doc-format",
+      "markdown",
+      "--format",
+      "json"
+    ], { timeout: 120000 });
+    const data = responseData(fetched);
+    const document = data.document || data;
+    if (!(document.document_id || document.documentId || document.content !== undefined)) {
+      return {
+        status: "failed",
+        textCoverage: 0,
+        missingTextSamples: [],
+        sourceFeatures: prepared.fidelity?.featureCounts || {},
+        targetFeatures: {},
+        message: "飞书未返回可识别的目标文档。"
+      };
+    }
+    return verifyFeishuMarkdownImport({
+      prepared,
+      fetchedMarkdown: typeof document.content === "string" ? document.content : undefined
+    });
+  }
+
   async writeDocumentContent({ prepared, parentToken, spaceId }) {
+    if (prepared.fidelity?.status === "blocked") {
+      const reasons = prepared.fidelity.degradations
+        .filter((item) => item.severity === "error")
+        .map((item) => item.message)
+        .join("；");
+      throw new Error(`飞书导入预检未通过：${reasons || "存在无法无损处理的本地资源。"}`);
+    }
     const previous = this.repository.getDocumentMigration(prepared.path, spaceId);
     let document = {
       documentId: String(previous?.target_document_id || ""),
@@ -606,7 +599,20 @@ class LocalToFeishuMigration {
       && document.documentId
       && await this.verifyDocument(document.documentId)
     ) {
-      return { ...document, skipped: true, assetCount: prepared.assets.length };
+      return {
+        ...document,
+        skipped: true,
+        assetCount: prepared.assets.length,
+        fidelity: prepared.fidelity,
+        verification: {
+          status: "skipped-unchanged",
+          textCoverage: 1,
+          missingTextSamples: [],
+          sourceFeatures: prepared.fidelity?.featureCounts || {},
+          targetFeatures: {},
+          message: "源文件及图片哈希未变化，沿用上次已完成的飞书副本。"
+        }
+      };
     }
     if (!document.documentId) {
       const conflict = this.childNode(parentToken, prepared.title);
@@ -671,28 +677,18 @@ class LocalToFeishuMigration {
       migratedAt: this.now()
     });
     for (const asset of prepared.assets) {
-      await this.runLark([
-        "docs",
-        "+media-insert",
-        "--doc",
-        document.documentId,
-        "--file",
-        path.basename(asset.path),
-        "--type",
-        asset.type,
-        "--selection-with-ellipsis",
-        asset.marker,
-        "--before",
-        "--caption",
-        asset.caption,
-        "--align",
-        "center",
-        "--format",
-        "json"
-      ], { cwd: path.dirname(asset.path), timeout: 180000 });
+      await placeFeishuAssetAtMarker({
+        runLark: this.runLark,
+        documentId: document.documentId,
+        asset
+      });
     }
-    if (!await this.verifyDocument(document.documentId)) {
-      throw new Error(`飞书文档《${prepared.title}》创建后回读失败。`);
+    const verification = await this.verifyDocumentFidelity(document.documentId, prepared);
+    if (verification.status === "failed") {
+      const missing = verification.missingTextSamples?.length
+        ? `；缺失样例：${verification.missingTextSamples.join("、")}`
+        : "";
+      throw new Error(`飞书文档《${prepared.title}》导入后验证失败：${verification.message}${missing}`);
     }
     this.repository.saveDocumentMigration({
       sourcePath: prepared.path,
@@ -715,7 +711,13 @@ class LocalToFeishuMigration {
       this.nodes.push(node);
       this.nodeByToken.set(node.token, node);
     }
-    return { ...document, skipped: false, assetCount: prepared.assets.length };
+    return {
+      ...document,
+      skipped: false,
+      assetCount: prepared.assets.length,
+      fidelity: prepared.fidelity,
+      verification
+    };
   }
 
   async inspectBase({ baseToken, tableId, label, requiredFields }) {
@@ -1077,7 +1079,9 @@ class LocalToFeishuMigration {
       path: homepage.path,
       url: homepageResult.url,
       skipped: homepageResult.skipped,
-      assetCount: homepageResult.assetCount
+      assetCount: homepageResult.assetCount,
+      fidelity: homepageResult.fidelity,
+      verification: homepageResult.verification
     }];
     for (const document of documents.slice(1)) {
       const prepared = prepareMarkdownDocument(document, this.libraryRoot);
@@ -1091,7 +1095,9 @@ class LocalToFeishuMigration {
         path: prepared.path,
         url: result.url,
         skipped: result.skipped,
-        assetCount: result.assetCount
+        assetCount: result.assetCount,
+        fidelity: result.fidelity,
+        verification: result.verification
       });
     }
     const record = await this.upsertProjectRecord(project, target, homepageResult.url);
@@ -1172,6 +1178,31 @@ class LocalToFeishuMigration {
         (total, item) => total + item.documents.reduce((sum, document) => sum + document.assetCount, 0),
         0
       ),
+      fidelityReport: {
+        documentCount: migratedProjects.reduce((total, item) => total + item.documents.length, 0),
+        verifiedCount: migratedProjects.reduce(
+          (total, item) => total + item.documents.filter((document) =>
+            ["passed", "skipped-unchanged"].includes(document.verification?.status)
+          ).length,
+          0
+        ),
+        warningCount: migratedProjects.reduce(
+          (total, item) => total + item.documents.filter((document) =>
+            ["warning", "unverified"].includes(document.verification?.status)
+            || document.fidelity?.status === "ready-with-warnings"
+          ).length,
+          0
+        ),
+        documents: migratedProjects.flatMap((project) => project.documents.map((document) => ({
+          projectId: project.projectId,
+          projectName: project.name,
+          title: document.title,
+          path: document.path,
+          url: document.url,
+          preparation: document.fidelity,
+          verification: document.verification
+        })))
+      },
       migrated: migratedProjects,
       migratedProjects,
       migratedPeople,

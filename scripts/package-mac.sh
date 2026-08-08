@@ -131,6 +131,7 @@ verify_bundled_runtime_arch() {
   local arch="$2"
   local codex_manifest="$app_path/Contents/Resources/codex-runtime/manifest.json"
   local media_manifest="$app_path/Contents/Resources/media-runtime/manifest.json"
+  local lark_manifest="$app_path/Contents/Resources/lark-runtime/manifest.json"
   local expected_target
   expected_target="$(expected_codex_target "$arch")"
   node - "$codex_manifest" "$expected_target" <<'NODE'
@@ -149,8 +150,17 @@ if (manifest.targetArch !== expectedArch) {
   throw new Error(`Media runtime target mismatch: expected ${expectedArch}, received ${manifest.targetArch || "missing"}.`);
 }
 NODE
+  node - "$lark_manifest" "$arch" <<'NODE'
+const fs = require("node:fs");
+const [manifestPath, expectedArch] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+if (manifest.name !== "lark-cli" || manifest.targetArch !== expectedArch) {
+  throw new Error(`Lark runtime target mismatch: expected ${expectedArch}, received ${manifest.targetArch || "missing"}.`);
+}
+NODE
   verify_macho_arch "$app_path/Contents/Resources/media-runtime/bin/ffmpeg" "$arch"
   verify_macho_arch "$app_path/Contents/Resources/media-runtime/bin/ffprobe" "$arch"
+  verify_macho_arch "$app_path/Contents/Resources/lark-runtime/bin/lark-cli" "$arch"
 }
 
 verify_packaged_app() {

@@ -45,7 +45,7 @@ function normalizeCalendarRecipients(value = "") {
 }
 
 const defaultSettings = Object.freeze({
-  version: 7,
+  version: 8,
   onboardingComplete: false,
   authMode: "chatgpt",
   apiBaseUrl: "",
@@ -141,7 +141,7 @@ function normalizeSettings(value = {}) {
       : "unconfigured";
   const authMode = version >= 5 && value.authMode === "relay" ? "relay" : "chatgpt";
   return {
-    version: 7,
+    version: 8,
     onboardingComplete: Boolean(value.onboardingComplete),
     authMode,
     apiBaseUrl: authMode === "relay" ? String(value.apiBaseUrl || "").trim() : "",
@@ -150,6 +150,9 @@ function normalizeSettings(value = {}) {
     codexPath,
     plaudConnectionMode,
     plaudBrowser: value.plaudBrowser === "tabbit" ? "tabbit" : "chrome",
+    // Feishu is retained as a legacy primary state for existing users until
+    // their explicit local import has been fully verified. New settings can
+    // no longer opt into it (see save()).
     storageBackend: value.storageBackend === "feishu" ? "feishu" : "local",
     projectBaseToken: String(value.projectBaseToken || "").trim(),
     projectTableId: String(value.projectTableId || "").trim(),
@@ -189,34 +192,15 @@ function validateDomiConfig(settings) {
   };
   const requiredKeys = settings.storageBackend === "local"
     ? ["localRepositoryDir", "localDatabasePath"]
-    : [
-        "projectBaseToken",
-        "projectTableId",
-        "peopleBaseToken",
-        "peopleTableId",
-        "radarBaseToken",
-        "radarTableId",
-        "wikiSpaceId",
-        "localLibraryDir"
-      ];
+    : [];
   const missing = requiredKeys.filter((key) => !settings[key]);
   if (missing.length) {
     throw new Error(`请补充 domi 资料连接：${missing.map((key) => labels[key]).join("、")}。`);
   }
-  if (settings.storageBackend === "feishu") {
-    for (const key of ["projectBaseToken", "projectTableId", "peopleBaseToken", "peopleTableId", "radarBaseToken", "radarTableId"]) {
-      if (!/^[A-Za-z0-9_-]{6,}$/.test(settings[key])) {
-        throw new Error(`${labels[key]} 格式不正确。`);
-      }
-    }
-    if (!/^[A-Za-z0-9_-]{6,}$/.test(settings.wikiSpaceId)) {
-      throw new Error("Wiki Space ID 格式不正确。");
-    }
-  }
-  const activeLocalDirectory = settings.storageBackend === "local"
-    ? settings.localRepositoryDir
-    : settings.localLibraryDir;
-  if (!(path.isAbsolute(activeLocalDirectory) || activeLocalDirectory.startsWith("~/"))) {
+  if (
+    settings.storageBackend === "local"
+    && !(path.isAbsolute(settings.localRepositoryDir) || settings.localRepositoryDir.startsWith("~/"))
+  ) {
     throw new Error("本地资料库目录必须是绝对路径或以 ~/ 开头。");
   }
   if (!path.isAbsolute(settings.localDatabasePath)) {
@@ -242,7 +226,7 @@ class AppSettingsService {
 
   writeDomiConfig(settings) {
     if (!this.domiConfigPath) return;
-    const config = { version: 6 };
+    const config = { version: 7 };
     for (const key of domiConfigKeys) config[key] = settings[key];
     // Older domi plugin builds read this key. Keep the alias until every
     // supported plugin version understands localLibraryDir.
@@ -352,14 +336,32 @@ class AppSettingsService {
         localDomiConfig,
         "storageBackend"
       );
-      if (stored.updatedAt && !hasStoredBackend && !hasLocalConfigBackend) {
-        storedSettings.storageBackend = "feishu";
-      }
       for (const key of domiConfigKeys) {
         const hasStoredValue = Object.prototype.hasOwnProperty.call(stored.value || {}, key);
         if ((!stored.updatedAt || !hasStoredValue || !storedSettings[key]) && localDomiConfig[key]) {
           storedSettings[key] = localDomiConfig[key];
         }
+      }
+      const hasLegacyFeishuMapping = [
+        "projectBaseToken",
+        "projectTableId",
+        "peopleBaseToken",
+        "peopleTableId",
+        "radarBaseToken",
+        "radarTableId",
+        "wikiSpaceId"
+      ].every((key) => Boolean(String(storedSettings[key] || "").trim()));
+      if (
+        stored.updatedAt
+        && !hasStoredBackend
+        && !hasLocalConfigBackend
+        && hasLegacyFeishuMapping
+        && !String(storedSettings.localRepositoryDir || "").trim()
+      ) {
+        // Very old builds predate storageBackend. A complete Base/Wiki mapping
+        // is strong evidence that Feishu held the user's real records. Keep
+        // the original primary mode instead of making those records appear missing.
+        storedSettings.storageBackend = "feishu";
       }
       if (!storedSettings.localDatabasePath) storedSettings.localDatabasePath = this.localDatabasePath;
       settings = normalizeSettings(storedSettings);
@@ -381,9 +383,13 @@ class AppSettingsService {
   save(request = {}) {
     const current = this.load();
     const settingsRequest = { ...request };
-    const requestedStorageBackend = Object.prototype.hasOwnProperty.call(settingsRequest, "storageBackend")
-      ? settingsRequest.storageBackend
-      : current.settings.storageBackend;
+    const legacyFeishuCompatibility = current.settings.storageBackend === "feishu";
+    // New users and all normal settings writes are local-only. Existing
+    // Feishu-primary users stay in their current mode until an explicit,
+    // verified import has completed; silently switching them to an empty
+    // local database would make their existing records appear to disappear.
+    settingsRequest.storageBackend = legacyFeishuCompatibility ? "feishu" : "local";
+    const requestedStorageBackend = settingsRequest.storageBackend;
     const requestedLocalRepositoryDir = String(settingsRequest.localRepositoryDir || "").trim();
     const initializesLocalWorkspace = requestedStorageBackend === "local"
       && requestedLocalRepositoryDir

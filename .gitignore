@@ -8,6 +8,8 @@ build/codex-runtime/
 build/media-runtime/
 build/codex-runtime-*/
 build/media-runtime-*/
+build/lark-runtime/
+build/lark-runtime-*/
 .release-input/
 .DS_Store
 

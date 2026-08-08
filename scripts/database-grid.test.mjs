@@ -9,6 +9,7 @@ import {
   createGridSelection,
   extendGridSelection,
   groupMutationsByRow,
+  gridCellClickIntent,
   isCurrentGridCellGeneration,
   moveActiveCell,
   nextGridCellGeneration,
@@ -55,6 +56,16 @@ const rows = [
   { name: "曼孚科技", rating: "S", system: "2026-08-06" },
   { name: "AutoTrust AI", rating: "B", system: "2026-08-05" }
 ];
+
+test("cell click intent keeps spreadsheet selection, expansion and editing distinct", () => {
+  assert.equal(gridCellClickIntent("text", 1, true), "select");
+  assert.equal(gridCellClickIntent("longtext", 1, true), "expand");
+  assert.equal(gridCellClickIntent("longtext", 1, false), "expand");
+  assert.equal(gridCellClickIntent("text", 2, true), "edit");
+  assert.equal(gridCellClickIntent("longtext", 2, true), "edit");
+  assert.equal(gridCellClickIntent("longtext", 2, false), "expand");
+  assert.equal(gridCellClickIntent("text", 2, false), "select");
+});
 
 test("keyboard navigation supports arrows, tab wrapping and grid boundaries", () => {
   const ids = ["name", "rating", "system"];

@@ -46,7 +46,7 @@ function createService(
   });
 }
 
-const completeDomiConfig = {
+const legacyFeishuConfig = {
   plaudConnectionMode: "disabled",
   storageBackend: "feishu",
   projectBaseToken: "placeholder",
@@ -58,6 +58,15 @@ const completeDomiConfig = {
   wikiSpaceId: "placeholder",
   localLibraryDir: "/tmp/domi-investment-library"
 };
+
+function completeLocalConfig(root) {
+  return {
+    ...legacyFeishuConfig,
+    storageBackend: "local",
+    localRepositoryDir: path.join(root, "资料库"),
+    localDatabasePath: path.join(root, "domi-repository.sqlite3")
+  };
+}
 
 test("new users default to the local repository", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-"));
@@ -139,17 +148,35 @@ test("development never inherits a production Feishu repository", () => {
   }
 });
 
-test("existing users without an explicit backend keep the historical Feishu default", () => {
+test("existing users without an explicit backend migrate to the local default", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-"));
   try {
     const legacySettings = {
       version: 6,
       onboardingComplete: true,
-      ...completeDomiConfig
+      ...completeLocalConfig(root)
     };
     delete legacySettings.storageBackend;
     const service = createService(root, legacySettings, Date.now());
-    assert.equal(service.load().settings.storageBackend, "feishu");
+    assert.equal(service.load().settings.storageBackend, "local");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("very old complete Feishu mappings remain in their original primary mode until explicit local import", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-legacy-feishu-"));
+  try {
+    const oldSettings = {
+      version: 6,
+      onboardingComplete: true,
+      ...legacyFeishuConfig
+    };
+    delete oldSettings.storageBackend;
+    const service = createService(root, oldSettings, Date.now());
+    const loaded = service.load().settings;
+    assert.equal(loaded.storageBackend, "feishu");
+    assert.equal(loaded.localRepositoryDir, "");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -159,20 +186,21 @@ test("domi connection settings persist outside the app bundle and survive app up
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-"));
   try {
     const service = createService(root);
-    service.save({ ...completeDomiConfig, plaudBrowser: "tabbit" });
+    const localConfig = completeLocalConfig(root);
+    service.save({ ...localConfig, plaudBrowser: "tabbit" });
 
     const configPath = path.join(root, "domi-plugin-config.json");
     const diskConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    assert.equal(diskConfig.projectBaseToken, completeDomiConfig.projectBaseToken);
-    assert.equal(diskConfig.storageBackend, "feishu");
-    assert.equal(diskConfig.localLibraryDir, completeDomiConfig.localLibraryDir);
-    assert.equal(diskConfig.oneDriveProjectDir, completeDomiConfig.localLibraryDir);
+    assert.equal(diskConfig.projectBaseToken, localConfig.projectBaseToken);
+    assert.equal(diskConfig.storageBackend, "local");
+    assert.equal(diskConfig.localLibraryDir, localConfig.localLibraryDir);
+    assert.equal(diskConfig.oneDriveProjectDir, localConfig.localLibraryDir);
     assert.equal(diskConfig.plaudBrowser, "tabbit");
     assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
 
     const migrated = createService(root).load();
-    assert.equal(migrated.settings.peopleTableId, completeDomiConfig.peopleTableId);
-    assert.equal(migrated.settings.localLibraryDir, completeDomiConfig.localLibraryDir);
+    assert.equal(migrated.settings.peopleTableId, localConfig.peopleTableId);
+    assert.equal(migrated.settings.localLibraryDir, localConfig.localLibraryDir);
     assert.equal(migrated.settings.plaudBrowser, "tabbit");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -185,7 +213,7 @@ test("legacy OneDrive settings migrate to the generic local library directory", 
     const configPath = path.join(root, "domi-plugin-config.json");
     fs.writeFileSync(configPath, JSON.stringify({
       version: 1,
-      ...completeDomiConfig,
+      ...completeLocalConfig(root),
       localLibraryDir: undefined,
       oneDriveProjectDir: "~/Library/CloudStorage/Legacy/Projects"
     }));
@@ -193,7 +221,7 @@ test("legacy OneDrive settings migrate to the generic local library directory", 
       version: 1,
       oneDriveProjectDir: "~/Library/CloudStorage/Legacy/Projects"
     }).load();
-    assert.equal(migrated.settings.version, 7);
+    assert.equal(migrated.settings.version, 8);
     assert.equal(migrated.settings.localLibraryDir, "~/Library/CloudStorage/Legacy/Projects");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -259,7 +287,7 @@ test("onboarding cannot complete before employee data connections are configured
       () => service.save({ onboardingComplete: true, plaudConnectionMode: "disabled" }),
       /请补充 domi 资料连接/
     );
-    const saved = service.save({ ...completeDomiConfig, onboardingComplete: true });
+    const saved = service.save({ ...completeLocalConfig(root), onboardingComplete: true });
     assert.equal(saved.settings.onboardingComplete, true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -273,14 +301,14 @@ test("new users must explicitly connect PLAUD or choose to skip it", () => {
     assert.equal(service.load().settings.plaudConnectionMode, "unconfigured");
     assert.throws(
       () => service.save({
-        ...completeDomiConfig,
+        ...completeLocalConfig(root),
         plaudConnectionMode: "unconfigured",
         onboardingComplete: true
       }),
       /请选择连接 PLAUD/
     );
     const saved = service.save({
-      ...completeDomiConfig,
+      ...completeLocalConfig(root),
       plaudConnectionMode: "disabled",
       onboardingComplete: true
     });
@@ -296,10 +324,10 @@ test("existing onboarded users keep PLAUD enabled after settings migration", () 
     const migrated = createService(root, {
       version: 3,
       onboardingComplete: true,
-      ...completeDomiConfig,
+      ...completeLocalConfig(root),
       plaudConnectionMode: undefined
     }).load();
-    assert.equal(migrated.settings.version, 7);
+    assert.equal(migrated.settings.version, 8);
     assert.equal(migrated.settings.plaudConnectionMode, "enabled");
     assert.equal(migrated.settings.plaudBrowser, "chrome");
   } finally {
@@ -312,7 +340,7 @@ test("task document and Outlook account hints stay in the private local config",
   try {
     const service = createService(root);
     const saved = service.save({
-      ...completeDomiConfig,
+      ...completeLocalConfig(root),
       taskDocumentUrl: "document_token",
       outlookCalendarEmail: "calendar@example.com",
       outlookCalendarEmailVerifiedAt: 1785246000000,
@@ -329,7 +357,7 @@ test("task document and Outlook account hints stay in the private local config",
 
     const configPath = path.join(root, "domi-plugin-config.json");
     const diskConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    assert.equal(diskConfig.version, 6);
+    assert.equal(diskConfig.version, 7);
     assert.equal(diskConfig.taskDocumentUrl, "document_token");
     assert.equal(diskConfig.outlookCalendarEmail, "calendar@example.com");
     assert.equal(diskConfig.outlookCalendarEmailVerifiedAt, 1785246000000);
@@ -436,17 +464,36 @@ test("existing local repositories keep their current root without forced nesting
   }
 });
 
-test("Feishu authorization failure never silently changes the selected backend", () => {
+test("legacy Feishu users keep their original primary mode when saving unrelated settings", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-"));
   try {
-    const service = createService(root);
+    const service = createService(root, {
+      version: 7,
+      onboardingComplete: true,
+      ...legacyFeishuConfig
+    }, Date.now());
     const saved = service.save({
-      ...completeDomiConfig,
-      storageBackend: "feishu",
-      onboardingComplete: true
+      outlookCalendarTimezone: "Asia/Shanghai"
     });
     assert.equal(saved.settings.storageBackend, "feishu");
     assert.equal(createService(root).load().settings.storageBackend, "feishu");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("new settings cannot select Feishu as the management backend", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-feishu-"));
+  try {
+    const service = createService(root);
+    const saved = service.save({
+      ...completeLocalConfig(root),
+      storageBackend: "feishu",
+      onboardingComplete: true
+    });
+    assert.equal(saved.settings.storageBackend, "local");
+    assert.equal(saved.settings.localRepositoryDir, path.join(root, "资料库", "domi工作区"));
+    assert.equal(saved.settings.projectBaseToken, legacyFeishuConfig.projectBaseToken);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -79,6 +79,9 @@ class UpdateService {
       transferred: 0,
       total: 0,
       releaseDate: "",
+      restartPending: false,
+      busyTaskCount: 0,
+      installing: false,
       error: app.isPackaged ? "" : "开发版不执行安装更新。正式安装版会自动检测。"
     };
   }
@@ -194,6 +197,9 @@ class UpdateService {
       percent: 0,
       transferred: 0,
       total: 0,
+      restartPending: false,
+      busyTaskCount: 0,
+      installing: false,
       error: ""
     });
     if (this.running) this.requestRecheck();
@@ -245,6 +251,9 @@ class UpdateService {
         percent: 0,
         transferred: 0,
         total: 0,
+        restartPending: false,
+        busyTaskCount: 0,
+        installing: false,
         error: ""
       });
     });
@@ -266,6 +275,9 @@ class UpdateService {
         percent: 0,
         transferred: 0,
         total: 0,
+        restartPending: false,
+        busyTaskCount: 0,
+        installing: false,
         error: ""
       });
     });
@@ -305,6 +317,9 @@ class UpdateService {
         percent: 0,
         transferred: 0,
         total: 0,
+        restartPending: false,
+        busyTaskCount: 0,
+        installing: false,
         error: safeError(error)
       });
     });
@@ -349,6 +364,9 @@ class UpdateService {
         percent: 0,
         transferred: 0,
         total: 0,
+        restartPending: false,
+        busyTaskCount: 0,
+        installing: false,
         error: ""
       });
     }
@@ -361,6 +379,9 @@ class UpdateService {
         percent: 0,
         transferred: 0,
         total: 0,
+        restartPending: false,
+        busyTaskCount: 0,
+        installing: false,
         error: ""
       });
     }
@@ -372,6 +393,9 @@ class UpdateService {
       percent: 0,
       transferred: 0,
       total: 0,
+      restartPending: false,
+      busyTaskCount: 0,
+      installing: false,
       error: "更新服务未返回检查结果，请重试。"
     });
   }
@@ -386,6 +410,9 @@ class UpdateService {
       percent: 0,
       transferred: 0,
       total: 0,
+      restartPending: false,
+      busyTaskCount: 0,
+      installing: false,
       error: safeError(error)
     });
   }
@@ -413,6 +440,9 @@ class UpdateService {
       percent: 0,
       transferred: 0,
       total: 0,
+      restartPending: false,
+      busyTaskCount: 0,
+      installing: false,
       error: ""
     });
 
@@ -467,12 +497,18 @@ class UpdateService {
     if (!this.isCurrentCandidate(operation.candidate)) return this.snapshot();
     const version = info.version || operation.candidate.version || "";
     this.downloadedCandidate = { ...operation.candidate, version };
-    this.updater.autoInstallOnAppQuit = true;
+    // A downloaded package must not be installed merely because the user quits
+    // domi. The main process enables installation only after every task is idle
+    // and the renderer has confirmed that drafts and database writes are safe.
+    this.disableAutoInstall();
     return this.publish({
       state: "downloaded",
       availableVersion: version,
       percent: 100,
       transferred: this.status.total || this.status.transferred,
+      restartPending: false,
+      busyTaskCount: 0,
+      installing: false,
       error: ""
     });
   }
@@ -496,7 +532,14 @@ class UpdateService {
     };
     this.activeDownload = operation;
     this.disableAutoInstall();
-    this.publish({ state: "downloading", percent: 0, error: "" });
+    this.publish({
+      state: "downloading",
+      percent: 0,
+      restartPending: false,
+      busyTaskCount: 0,
+      installing: false,
+      error: ""
+    });
 
     const underlying = Promise.resolve().then(() => this.updater.downloadUpdate(cancellationToken));
     const settled = underlying.then(
@@ -525,6 +568,9 @@ class UpdateService {
           percent: 0,
           transferred: 0,
           total: 0,
+          restartPending: false,
+          busyTaskCount: 0,
+          installing: false,
           error: safeError(error)
         });
       }
@@ -538,7 +584,33 @@ class UpdateService {
     return inFlight;
   }
 
-  install() {
+  markRestartWaiting(busyTaskCount = 0) {
+    if (this.status.state !== "downloaded" || !this.isCurrentCandidate(this.downloadedCandidate)) {
+      return this.snapshot();
+    }
+    this.disableAutoInstall();
+    return this.publish({
+      restartPending: true,
+      busyTaskCount: Math.max(0, Number(busyTaskCount) || 0),
+      installing: false,
+      error: ""
+    });
+  }
+
+  markInstallFailure(error) {
+    this.disableAutoInstall();
+    if (this.status.state !== "downloaded" || !this.isCurrentCandidate(this.downloadedCandidate)) {
+      return this.snapshot();
+    }
+    return this.publish({
+      restartPending: false,
+      busyTaskCount: 0,
+      installing: false,
+      error: safeError(error)
+    });
+  }
+
+  armInstall() {
     const candidate = this.downloadedCandidate;
     if (
       !this.app.isPackaged
@@ -547,16 +619,51 @@ class UpdateService {
     ) {
       return { ok: false, status: this.snapshot(), error: "更新尚未下载完成。" };
     }
+    this.updater.autoInstallOnAppQuit = true;
+    this.publish({
+      restartPending: true,
+      busyTaskCount: 0,
+      installing: true,
+      error: ""
+    });
+    return { ok: true, candidate, status: this.snapshot() };
+  }
+
+  commitInstall(candidate, { onFailure } = {}) {
+    if (
+      !candidate
+      || this.status.state !== "downloaded"
+      || this.downloadedCandidate !== candidate
+      || !this.isCurrentCandidate(candidate)
+    ) {
+      this.markInstallFailure("安装前更新状态已变化，请重试。");
+      return { ok: false, status: this.snapshot(), error: "安装前更新状态已变化，请重试。" };
+    }
     this.setImmediateFn(() => {
       if (
         this.status.state === "downloaded"
         && this.downloadedCandidate === candidate
         && this.isCurrentCandidate(candidate)
       ) {
-        this.updater.quitAndInstall(false, true);
+        try {
+          this.updater.quitAndInstall(false, true);
+        } catch (error) {
+          this.markInstallFailure(error);
+          onFailure?.(error);
+        }
+      } else {
+        const error = new Error("安装前更新状态已变化，请重试。");
+        this.markInstallFailure(error);
+        onFailure?.(error);
       }
     });
     return { ok: true, status: this.snapshot() };
+  }
+
+  install() {
+    const prepared = this.armInstall();
+    if (!prepared.ok) return prepared;
+    return this.commitInstall(prepared.candidate);
   }
 }
 

@@ -13,6 +13,10 @@ const runtimePreparationSource = fs.readFileSync(
   path.resolve(__dirname, "prepare-codex-runtime.cjs"),
   "utf8"
 );
+const larkPreparationSource = fs.readFileSync(
+  path.resolve(__dirname, "prepare-lark-runtime.cjs"),
+  "utf8"
+);
 const afterPackSource = fs.readFileSync(
   path.resolve(__dirname, "after-pack.cjs"),
   "utf8"
@@ -51,6 +55,8 @@ assert.match(source, /verify_electron_dist "\$electron_dist" "\$arch"/);
 assert.match(source, /xcrun lipo -archs/);
 assert.match(source, /Codex runtime target mismatch/);
 assert.match(source, /Media runtime target mismatch/);
+assert.match(source, /Lark runtime target mismatch/);
+assert.match(source, /Contents\/Resources\/lark-runtime\/bin\/lark-cli/);
 assert.match(source, /codesign --verify --deep --strict/);
 assert.match(source, /Authority=Developer ID Application:/);
 assert.match(source, /notarytool submit[\s\S]*--wait/);
@@ -75,11 +81,18 @@ assert.equal(packageLock.packages[""].version, packageJson.version);
 assert.equal(packageJson.build.artifactName, "domi-${version}-${arch}.${ext}");
 const codexResource = packageJson.build.extraResources.find((item) => item.to === "codex-runtime");
 const mediaResource = packageJson.build.extraResources.find((item) => item.to === "media-runtime");
+const larkResource = packageJson.build.extraResources.find((item) => item.to === "lark-runtime");
 assert.equal(codexResource.from, "build/codex-runtime-${arch}");
 assert.equal(mediaResource.from, "build/media-runtime-${arch}");
+assert.equal(larkResource.from, "build/lark-runtime-${arch}");
+assert.deepEqual(larkResource.filter, ["bin/lark-cli", "LICENSE", "manifest.json"]);
 assert.match(packageJson.scripts["dist:mac"], /DOMI_TARGET_ARCH=arm64/);
 assert.match(packageJson.scripts["dist:mac"], /DOMI_TARGET_ARCH=x64/);
+assert.match(packageJson.scripts["dist:mac"], /DOMI_TARGET_ARCH=arm64 npm run lark:prepare/);
+assert.match(packageJson.scripts["dist:mac"], /DOMI_TARGET_ARCH=x64 npm run lark:prepare/);
+assert.match(packageJson.scripts["pack:mac"], /npm run lark:prepare/);
 assert.match(packageJson.scripts.check, /merge-mac-update-info\.test\.cjs/);
+assert.match(packageJson.scripts.check, /lark-runtime\.test\.cjs/);
 
 assert.match(afterPackSource, /app-update\.yml/);
 assert.match(afterPackSource, /provider: github/);
@@ -91,5 +104,8 @@ assert.match(runtimePreparationSource, /http:\/\/timestamp\.apple\.com\/ts01/);
 assert.match(runtimePreparationSource, /`--timestamp=\$\{timestampServer\}`/);
 assert.match(runtimePreparationSource, /codesignWithTimestampRetry/);
 assert.match(runtimePreparationSource, /\[0, 2_000, 5_000, 10_000\]/);
+assert.match(larkPreparationSource, /larksuite\\\/cli\\\/releases\\\/download/);
+assert.match(larkPreparationSource, /Lark CLI archive checksum does not match/);
+assert.match(larkPreparationSource, /validateMachO/);
 
 console.log("release contract tests passed");
