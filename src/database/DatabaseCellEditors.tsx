@@ -6,7 +6,7 @@ import {
   shift,
   size
 } from "@floating-ui/dom";
-import { Check, ChevronDown, ExternalLink, Plus, Search, X } from "lucide-react";
+import { Check, ChevronDown, ExternalLink, Plus, Search } from "lucide-react";
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -63,6 +63,15 @@ type FloatingSurfaceProps = {
   className?: string;
   children: ReactNode;
   onOutside: () => void;
+};
+
+type CellOverlaySurfaceProps = {
+  referenceElement: HTMLElement | null;
+  className?: string;
+  children: ReactNode;
+  onOutside: () => void;
+  onSurfaceClick?: (target: HTMLElement) => void;
+  onDoubleClick?: (target: HTMLElement) => void;
 };
 
 function useFloatingSurface(
@@ -128,6 +137,134 @@ function FloatingSurface({ referenceElement, className = "", children, onOutside
       {children}
     </div>,
     document.body
+  );
+}
+
+/**
+ * A Feishu-style cell extension. It starts on the cell's exact boundaries and
+ * grows down over following rows instead of opening a detached popover.
+ */
+function CellOverlaySurface({
+  referenceElement,
+  className = "",
+  children,
+  onOutside,
+  onSurfaceClick,
+  onDoubleClick
+}: CellOverlaySurfaceProps) {
+  const [surface, setSurface] = useState<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!referenceElement || !surface) return;
+    const update = () => {
+      const rect = referenceElement.getBoundingClientRect();
+      const availableHeight = Math.max(rect.height, window.innerHeight - rect.top - 8);
+      Object.assign(surface.style, {
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+        width: `${rect.width}px`,
+        minHeight: `${rect.height}px`,
+        maxHeight: `${Math.max(rect.height, Math.min(420, availableHeight))}px`
+      });
+    };
+    update();
+    return autoUpdate(referenceElement, surface, update, {
+      ancestorResize: true,
+      ancestorScroll: true,
+      elementResize: true,
+      layoutShift: true
+    });
+  }, [referenceElement, surface]);
+
+  useEffect(() => {
+    if (!surface) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (surface.contains(target) || referenceElement?.contains(target)) return;
+      onOutside();
+    };
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    return () => window.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [onOutside, referenceElement, surface]);
+
+  return createPortal(
+    <div
+      ref={setSurface}
+      className={`database-cell-overlay ${className}`.trim()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation();
+        onSurfaceClick?.(event.target as HTMLElement);
+      }}
+      onDoubleClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onDoubleClick?.(event.target as HTMLElement);
+      }}
+    >
+      {children}
+    </div>,
+    document.body
+  );
+}
+
+function linkedLongText(value: string) {
+  const urlPattern = /https?:\/\/[^\s]+/g;
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  for (const match of value.matchAll(urlPattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) nodes.push(value.slice(cursor, index));
+    const raw = match[0];
+    const trailing = raw.match(/[)\]}>，。；：、！？,.!?;:]+$/)?.[0] || "";
+    const url = trailing ? raw.slice(0, -trailing.length) : raw;
+    nodes.push(
+      <a href={url} target="_blank" rel="noreferrer" key={`${index}:${url}`}>{url}</a>
+    );
+    if (trailing) nodes.push(trailing);
+    cursor = index + raw.length;
+  }
+  if (cursor < value.length) nodes.push(value.slice(cursor));
+  return nodes;
+}
+
+export function DatabaseLongTextViewer({
+  value,
+  referenceElement,
+  onClose,
+  onEdit,
+  onFollowUpClick
+}: {
+  value: unknown;
+  referenceElement: HTMLElement | null;
+  onClose: () => void;
+  onEdit?: () => void;
+  onFollowUpClick?: (target: HTMLElement) => void;
+}) {
+  const text = value == null ? "" : String(value);
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [onClose]);
+
+  return (
+    <CellOverlaySurface
+      referenceElement={referenceElement}
+      className="database-longtext-viewer"
+      onOutside={onClose}
+      onSurfaceClick={onFollowUpClick}
+      onDoubleClick={(target) => {
+        if (target.closest("a, button")) return;
+        onEdit?.();
+      }}
+    >
+      <div className="database-longtext-content">{linkedLongText(text)}</div>
+    </CellOverlaySurface>
   );
 }
 
@@ -352,29 +489,33 @@ function LongTextEditor({
   }, [onCancel]);
   useCommitOnUnmount(commit);
   useLayoutEffect(() => {
-    textareaRef.current?.focus({ preventScroll: true });
-    textareaRef.current?.setSelectionRange(draft.length, draft.length);
+    const textarea = textareaRef.current;
+    textarea?.focus({ preventScroll: true });
+    textarea?.setSelectionRange(draft.length, draft.length);
+    if (textarea) {
+      textarea.style.height = "0px";
+      textarea.style.height = `${Math.min(392, Math.max(referenceElement?.clientHeight || 40, textarea.scrollHeight))}px`;
+    }
     // Moving the cursor after every keystroke made editing feel broken.
     // The initial caret placement is all that is needed.
-  }, []);
+  }, [referenceElement]);
 
   return (
-    <FloatingSurface
+    <CellOverlaySurface
       referenceElement={referenceElement}
       className="database-longtext-editor"
       onOutside={commit}
     >
-      <div className="database-floating-editor-head">
-        <span>完整内容</span>
-        <small>自动保存</small>
-        <button type="button" aria-label="关闭" onClick={commit}><X size={14} /></button>
-      </div>
       <textarea
         ref={textareaRef}
         value={draft}
         placeholder={placeholder}
         disabled={disabled}
-        onChange={(event) => setDraft(event.target.value)}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          event.currentTarget.style.height = "0px";
+          event.currentTarget.style.height = `${Math.min(392, Math.max(referenceElement?.clientHeight || 40, event.currentTarget.scrollHeight))}px`;
+        }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.preventDefault();
@@ -390,10 +531,7 @@ function LongTextEditor({
           }
         }}
       />
-      <div className="database-floating-editor-foot">
-        <span>⌘↵ 保存并向下 · Esc 撤销</span>
-      </div>
-    </FloatingSurface>
+    </CellOverlaySurface>
   );
 }
 

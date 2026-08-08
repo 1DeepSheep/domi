@@ -1835,6 +1835,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<"connection" | "data" | "plaud" | "updates" | "diagnostics">("connection");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [sidebarUpdateBusy, setSidebarUpdateBusy] = useState(false);
   const [domiSnapshot, setDomiSnapshot] = useState<DomiSnapshot | null>(null);
   const [domiSyncing, setDomiSyncing] = useState(false);
   const [domiError, setDomiError] = useState("");
@@ -6964,6 +6965,8 @@ function App() {
         runId,
         prompt,
         requestText: messageText,
+        activeDocumentPath: selectedDocumentLibraryPath || undefined,
+        attachmentPaths: selectedAttachments.map((attachment) => attachment.path),
         threadId: targetThread.codexThreadId,
         workflowId: workflow?.id || (useDomiPlugin ? "domi-analyst" : undefined),
         webSearch: Boolean(workflow?.webSearch),
@@ -10957,6 +10960,34 @@ function App() {
 
   const visibleUpdateEntry = sidebarUpdateEntry(updateStatus);
 
+  async function handleSidebarUpdate() {
+    if (!updateStatus || sidebarUpdateBusy || updateStatus.state === "downloading") return;
+    setSidebarUpdateBusy(true);
+    try {
+      let status = updateStatus;
+      if (status.state === "error") {
+        status = await workbench.checkForUpdates();
+        setUpdateStatus(status);
+      }
+      if (status.state === "available") {
+        status = await workbench.downloadUpdate();
+        setUpdateStatus(status);
+        return;
+      }
+      if (status.state === "downloaded") {
+        const result = await workbench.installUpdate();
+        setUpdateStatus(result.status);
+      }
+    } catch (error) {
+      setUpdateStatus((current) => current ? {
+        ...current,
+        error: error instanceof Error ? error.message : String(error)
+      } : current);
+    } finally {
+      setSidebarUpdateBusy(false);
+    }
+  }
+
   return (
     <>
     <div
@@ -11237,15 +11268,13 @@ function App() {
           <button
             className={`sidebar-update-card ${visibleUpdateEntry.state}`}
             type="button"
-            onClick={() => {
-              setSettingsInitialTab("updates");
-              setSettingsOpen(true);
-            }}
-            title="打开软件更新"
+            onClick={() => void handleSidebarUpdate()}
+            disabled={sidebarUpdateBusy || visibleUpdateEntry.state === "downloading"}
+            title={visibleUpdateEntry.detail}
             aria-label={`${visibleUpdateEntry.label}，${visibleUpdateEntry.detail}`}
           >
             <span className="sidebar-update-icon" aria-hidden="true">
-              {visibleUpdateEntry.state === "downloading"
+              {visibleUpdateEntry.state === "downloading" || sidebarUpdateBusy
                 ? <RefreshCw className="spinning" size={15} />
                 : visibleUpdateEntry.state === "downloaded"
                   ? <CheckCircle2 size={15} />
@@ -11255,7 +11284,7 @@ function App() {
               <strong>{visibleUpdateEntry.label}</strong>
               <small>{visibleUpdateEntry.detail}</small>
             </span>
-            <ChevronRight size={15} aria-hidden="true" />
+            {visibleUpdateEntry.state !== "downloading" && <ChevronRight size={15} aria-hidden="true" />}
           </button>
         )}
 

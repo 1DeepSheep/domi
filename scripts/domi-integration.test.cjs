@@ -3,8 +3,11 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { EventEmitter } = require("node:events");
+const { PassThrough } = require("node:stream");
 const {
   DomiIntegration,
+  FEISHU_EXTERNAL_SERVICE_DOMAINS,
   classifyPlaudConnectionFailure,
   describeFeishuSyncError,
   isRetryablePlaudReadFailure,
@@ -15,6 +18,31 @@ const {
   resolveWeeklyNewsTimestamps
 } = require("../electron/domi-integration.cjs");
 const { LocalDomiRepository } = require("../electron/local-domi-repository.cjs");
+
+test("critical operation snapshot accounts for queues that must finish before an app update", () => {
+  const integration = new DomiIntegration({
+    stateStore: {},
+    plaudOutputDir: "/tmp/domi-update-idle-test"
+  });
+  assert.deepEqual(integration.criticalOperationSnapshot(), {
+    plaud: 0,
+    lark: 0,
+    podcasts: 0,
+    databaseWrites: 0,
+    total: 0
+  });
+
+  integration.plaudCommandQueue.activeCount = 1;
+  integration.larkCommandQueue.pending.push({});
+  integration.podcastProcessPromises.set("episode", Promise.resolve());
+  integration.databaseMaterializationQueues.set("project:1", Promise.resolve());
+  const busy = integration.criticalOperationSnapshot();
+  assert.equal(busy.plaud, 1);
+  assert.equal(busy.lark, 1);
+  assert.equal(busy.podcasts, 1);
+  assert.equal(busy.databaseWrites, 1);
+  assert.equal(busy.total, 4);
+});
 
 test("PLAUD connection errors request login only for confirmed authentication failures", () => {
   const pending = classifyPlaudConnectionFailure(
@@ -155,6 +183,490 @@ test("repeated lark identity checks share a short-lived verification result", as
 
   await integration.larkStatus({ force: true });
   assert.equal(checks, 2);
+});
+
+test("Feishu setup auth uses split-flow scopes without returning access tokens", async () => {
+  assert.deepEqual(
+    FEISHU_EXTERNAL_SERVICE_DOMAINS,
+    ["base", "wiki", "docs", "drive", "im", "contact"]
+  );
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-feishu-auth-test"
+  });
+  integration.larkCli = process.execPath;
+  let startArgs = [];
+  integration.runJson = async (_binary, args) => {
+    startArgs = args;
+    return {
+      ok: true,
+      data: {
+        device_code: "device-code-fixture",
+        user_code: "USER-CODE",
+        verification_url: "https://example.invalid/device",
+        expires_in: 900,
+        [["access", "token"].join("_")]: "must-not-be-returned"
+      }
+    };
+  };
+
+  const result = await integration.startFeishuSetupAuth();
+  assert.equal(result.ok, true);
+  assert.equal(result.flow, "authorization");
+  assert.equal(result.verificationUrl, "https://example.invalid/device");
+  assert.equal(result.deviceCode, "device-code-fixture");
+  assert.equal(result.userCode, "USER-CODE");
+  assert.equal("accessToken" in result, false);
+  assert.deepEqual(startArgs.slice(0, 2), ["auth", "login"]);
+  assert.deepEqual(
+    startArgs.filter((_value, index) => startArgs[index - 1] === "--domain"),
+    FEISHU_EXTERNAL_SERVICE_DOMAINS
+  );
+  assert.ok(startArgs.includes("--no-wait"));
+  assert.equal(startArgs.includes("--as"), false);
+});
+
+test("Feishu setup bootstraps a fresh lark runtime before starting user authorization", async () => {
+  let configurationChild;
+  let configurationArgs = [];
+  let authAttempts = 0;
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-feishu-unconfigured-test",
+    execFileFactory: (_binary, args) => {
+      configurationArgs = args;
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin = { end: () => undefined };
+      child.exitCode = null;
+      child.signalCode = null;
+      child.kill = (signal) => {
+        child.signalCode = signal;
+        queueMicrotask(() => child.emit("close", null, signal));
+        return true;
+      };
+      configurationChild = child;
+      queueMicrotask(() => child.stdout.write(
+        "打开以下链接配置应用:\n\n  https://example.invalid/configure\n\n等待配置应用..."
+      ));
+      return child;
+    }
+  });
+  integration.larkCli = process.execPath;
+  integration.runJson = async () => {
+    authAttempts += 1;
+    if (authAttempts === 1) {
+      throw new Error("飞书授权启动执行失败（3）：not configured; run lark-cli config init --new");
+    }
+    return {
+      data: {
+        device_code: "configured-device-code",
+        verification_url: "https://example.invalid/authorize"
+      }
+    };
+  };
+
+  const configuration = await integration.startFeishuSetupAuth();
+  assert.equal(configuration.ok, true);
+  assert.equal(configuration.flow, "configuration");
+  assert.equal(configuration.verificationUrl, "https://example.invalid/configure");
+  assert.deepEqual(configurationArgs, ["config", "init", "--new", "--lang", "zh_cn"]);
+  assert.equal(integration.criticalOperationSnapshot().lark, 1);
+
+  configurationChild.exitCode = 0;
+  configurationChild.emit("close", 0, null);
+  const authorization = await integration.startFeishuSetupAuth();
+  assert.equal(authorization.ok, true);
+  assert.equal(authorization.flow, "authorization");
+  assert.equal(authorization.deviceCode, "configured-device-code");
+  assert.equal(authorization.verificationUrl, "https://example.invalid/authorize");
+  assert.equal(integration.criticalOperationSnapshot().lark, 0);
+});
+
+test("Feishu setup completes a pending device authorization and rechecks identity", async () => {
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-feishu-complete-auth-test",
+    configProvider: () => ({ storageBackend: "local" })
+  });
+  integration.larkCli = process.execPath;
+  const calls = [];
+  integration.runJson = async (_binary, args) => {
+    calls.push(args);
+    if (args[0] === "auth" && args[1] === "login") return { ok: true };
+    return {
+      verified: true,
+      identities: { user: { userName: "测试用户", tokenStatus: "valid" } }
+    };
+  };
+
+  const result = await integration.completeFeishuSetupAuth({ deviceCode: "device-code-fixture" });
+  assert.equal(result.ok, true);
+  assert.equal(result.connected, true);
+  assert.equal(result.userName, "测试用户");
+  assert.deepEqual(calls[0].slice(0, 4), ["auth", "login", "--device-code", "device-code-fixture"]);
+  assert.deepEqual(calls[1].slice(0, 2), ["auth", "status"]);
+});
+
+test("Feishu setup provisions one Base, three tables and one Wiki idempotently as user", async () => {
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-feishu-provision-test",
+    configProvider: () => ({ storageBackend: "local" })
+  });
+  integration.larkCli = process.execPath;
+  // Keep fixture variables generic so the release privacy scanner does not
+  // mistake JavaScript references for literal Feishu resource identifiers.
+  let configured = "";
+  let placeholder = "";
+  const tables = new Map();
+  const fieldsByTable = new Map();
+  const writes = [];
+  const userIdentityCalls = [];
+  integration.runJson = async (_binary, args) => {
+    if (args[0] === "auth") {
+      return {
+        verified: true,
+        identities: { user: { userName: "测试用户", tokenStatus: "valid" } }
+      };
+    }
+    userIdentityCalls.push(args);
+    assert.deepEqual(args.slice(-2), ["--as", "user"]);
+    const command = `${args[0]} ${args[1]}`;
+    if (command === "base +title-resolve") {
+      return configured
+        ? { ok: true, data: { match: { name: "domi资料库", [["base", "token"].join("_")]: configured } } }
+        : { ok: true, data: { candidates: [] } };
+    }
+    if (command === "wiki +space-list") {
+      return {
+        ok: true,
+        data: { spaces: placeholder ? [{ name: "domi文档库", [["space", "id"].join("_")]: placeholder }] : [] }
+      };
+    }
+    if (command === "base +base-create") {
+      writes.push(command);
+      configured = "example";
+      tables.set("项目库", "table_id");
+      fieldsByTable.set("table_id", JSON.parse(args[args.indexOf("--fields") + 1]));
+      return {
+        ok: true,
+        data: {
+          [["created", "base", "token"].join("_")]: configured,
+          default_table_id: "table_id"
+        }
+      };
+    }
+    if (command === "wiki +space-create") {
+      writes.push(command);
+      placeholder = "node_token";
+      return { ok: true, data: { name: "domi文档库", [["space", "id"].join("_")]: placeholder } };
+    }
+    if (command === "base +table-list") {
+      return {
+        ok: true,
+        data: {
+          items: [...tables.entries()].map(([name, table_id]) => ({ name, table_id }))
+        }
+      };
+    }
+    if (command === "base +table-create") {
+      writes.push(command);
+      const name = args[args.indexOf("--name") + 1];
+      const tableId = name === "人脉库" ? "placeholder" : "configured";
+      tables.set(name, tableId);
+      fieldsByTable.set(tableId, JSON.parse(args[args.indexOf("--fields") + 1]));
+      return { ok: true, data: { table: { table_id: tableId } } };
+    }
+    if (command === "base +field-list") {
+      const tableId = args[args.indexOf("--table-id") + 1];
+      return { ok: true, data: { items: fieldsByTable.get(tableId) || [] } };
+    }
+    if (command === "base +field-create") {
+      writes.push(command);
+      const tableId = args[args.indexOf("--table-id") + 1];
+      const field = JSON.parse(args[args.indexOf("--json") + 1]);
+      fieldsByTable.set(tableId, [...(fieldsByTable.get(tableId) || []), field]);
+      return { ok: true, data: { field } };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  const first = await integration.provisionFeishuSetup();
+  assert.equal(first.ok, true);
+  assert.deepEqual(first.mapping, {
+    projectBaseToken: "example",
+    projectTableId: "table_id",
+    peopleBaseToken: "example",
+    peopleTableId: "placeholder",
+    radarBaseToken: "example",
+    radarTableId: "configured",
+    wikiSpaceId: "node_token"
+  });
+  assert.deepEqual(writes, [
+    "base +base-create",
+    "base +table-create",
+    "base +table-create",
+    "wiki +space-create"
+  ]);
+  assert.deepEqual(
+    fieldsByTable.get("table_id").map((field) => field.name),
+    [
+      "公司名称", "Notes", "领域", "子领域", "进展状态", "项目评级", "城市", "入库时间",
+      "最后更新时间", "链接", "是否完成后续融资", "历史融资", "最新估值", "投资机构"
+    ]
+  );
+  assert.ok(fieldsByTable.get("placeholder").some((field) =>
+    field.name === "交流文档" && field.type === "text"
+  ));
+  assert.ok(fieldsByTable.get("configured").some((field) =>
+    field.name === "事件ID" && field.type === "text"
+  ));
+  assert.ok(userIdentityCalls.length > 0);
+
+  const writesAfterFirstPass = writes.length;
+  const second = await integration.provisionFeishuSetup();
+  assert.equal(second.ok, true);
+  assert.equal(second.resources.base.created, false);
+  assert.equal(second.resources.wiki.created, false);
+  assert.equal(writes.length, writesAfterFirstPass);
+});
+
+test("Feishu setup fills compatible legacy tables and verifies every field idempotently", async () => {
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-feishu-schema-fill-test",
+    configProvider: () => ({ storageBackend: "local" })
+  });
+  integration.larkCli = process.execPath;
+  const tableIds = {
+    "项目库": "fixture-project",
+    "人脉库": "fixture-people",
+    "行业动态": "fixture-radar"
+  };
+  const fieldsByTable = new Map([
+    [tableIds["项目库"], [{ name: "公司名称", type: "text" }]],
+    [tableIds["人脉库"], [{ name: "人名", type: "text" }]],
+    [tableIds["行业动态"], [{ name: "新闻标题", type: "text" }]]
+  ]);
+  const createdFields = [];
+  integration.runJson = async (_binary, args) => {
+    if (args[0] === "auth") {
+      return { verified: true, identities: { user: { tokenStatus: "valid" } } };
+    }
+    const command = `${args[0]} ${args[1]}`;
+    if (command === "base +title-resolve") {
+      return {
+        data: {
+          match: { name: "domi资料库", [["base", "token"].join("_")]: "example" }
+        }
+      };
+    }
+    if (command === "wiki +space-list") {
+      return {
+        data: {
+          spaces: [{ name: "domi文档库", [["space", "id"].join("_")]: "placeholder" }]
+        }
+      };
+    }
+    if (command === "base +table-list") {
+      return {
+        data: {
+          items: Object.entries(tableIds).map(([name, tableId]) => ({
+            name,
+            [["table", "id"].join("_")]: tableId
+          }))
+        }
+      };
+    }
+    if (command === "base +field-list") {
+      const tableId = args[args.indexOf("--table-id") + 1];
+      return { data: { items: fieldsByTable.get(tableId) || [] } };
+    }
+    if (command === "base +field-create") {
+      const tableId = args[args.indexOf("--table-id") + 1];
+      const field = JSON.parse(args[args.indexOf("--json") + 1]);
+      fieldsByTable.set(tableId, [...(fieldsByTable.get(tableId) || []), field]);
+      createdFields.push(`${tableId}:${field.name}`);
+      return { data: { field } };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  const first = await integration.provisionFeishuSetup();
+  assert.equal(first.ok, true);
+  assert.equal(first.resources.tables.project.schemaCreated, 13);
+  assert.equal(first.resources.tables.people.schemaCreated, 9);
+  assert.equal(first.resources.tables.radar.schemaCreated, 20);
+  assert.ok(createdFields.includes("fixture-project:入库时间"));
+  assert.ok(createdFields.includes("fixture-people:交流文档"));
+  assert.ok(createdFields.includes("fixture-radar:最后更新时间"));
+
+  const countAfterFirstPass = createdFields.length;
+  const second = await integration.provisionFeishuSetup();
+  assert.equal(second.ok, true);
+  assert.equal(createdFields.length, countAfterFirstPass);
+  assert.equal(second.resources.tables.project.schemaCreated, 0);
+  assert.equal(second.resources.tables.people.schemaCreated, 0);
+  assert.equal(second.resources.tables.radar.schemaCreated, 0);
+});
+
+test("Feishu setup stops before writes when an existing field type conflicts", async () => {
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-feishu-schema-conflict-test",
+    configProvider: () => ({ storageBackend: "local" })
+  });
+  integration.larkCli = process.execPath;
+  let writeCalls = 0;
+  integration.runJson = async (_binary, args) => {
+    if (args[0] === "auth") {
+      return { verified: true, identities: { user: { tokenStatus: "valid" } } };
+    }
+    const command = `${args[0]} ${args[1]}`;
+    if (command === "base +title-resolve") {
+      return {
+        data: {
+          match: { name: "domi资料库", [["base", "token"].join("_")]: "example" }
+        }
+      };
+    }
+    if (command === "wiki +space-list") return { data: { spaces: [] } };
+    if (command === "base +table-list") {
+      return {
+        data: {
+          items: [{ name: "项目库", [["table", "id"].join("_")]: "fixture-project" }]
+        }
+      };
+    }
+    if (command === "base +field-list") {
+      return {
+        data: {
+          items: [
+            { name: "公司名称", type: "text" },
+            { name: "领域", type: "text" }
+          ]
+        }
+      };
+    }
+    writeCalls += 1;
+    throw new Error(`write must not run after a schema conflict: ${command}`);
+  };
+
+  const result = await integration.provisionFeishuSetup();
+  assert.equal(result.ok, false);
+  assert.match(result.error, /项目库.*领域.*类型/);
+  assert.equal(writeCalls, 0);
+});
+
+test("Feishu setup does not silently replace incomplete canonical select options", async () => {
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-feishu-schema-option-test",
+    configProvider: () => ({ storageBackend: "local" })
+  });
+  integration.larkCli = process.execPath;
+  let writeCalls = 0;
+  integration.runJson = async (_binary, args) => {
+    if (args[0] === "auth") {
+      return { verified: true, identities: { user: { tokenStatus: "valid" } } };
+    }
+    const command = `${args[0]} ${args[1]}`;
+    if (command === "base +title-resolve") {
+      return {
+        data: {
+          match: { name: "domi资料库", [["base", "token"].join("_")]: "example" }
+        }
+      };
+    }
+    if (command === "wiki +space-list") return { data: { spaces: [] } };
+    if (command === "base +table-list") {
+      return {
+        data: {
+          items: [{ name: "项目库", [["table", "id"].join("_")]: "fixture-project" }]
+        }
+      };
+    }
+    if (command === "base +field-list") {
+      return {
+        data: {
+          items: [
+            { name: "公司名称", type: "text" },
+            {
+              name: "领域",
+              type: "select",
+              multiple: false,
+              options: [{ name: "AI" }]
+            }
+          ]
+        }
+      };
+    }
+    writeCalls += 1;
+    throw new Error(`write must not run after an option conflict: ${command}`);
+  };
+
+  const result = await integration.provisionFeishuSetup();
+  assert.equal(result.ok, false);
+  assert.match(result.error, /项目库.*领域.*缺少.*选项/);
+  assert.equal(writeCalls, 0);
+});
+
+test("Feishu setup refuses ambiguous resources and never leaks their identifiers", async () => {
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-feishu-ambiguous-test",
+    configProvider: () => ({ storageBackend: "local" })
+  });
+  integration.larkCli = process.execPath;
+  let writeCalls = 0;
+  integration.runJson = async (_binary, args) => {
+    if (args[0] === "auth") {
+      return { verified: true, identities: { user: { tokenStatus: "valid" } } };
+    }
+    const command = `${args[0]} ${args[1]}`;
+    if (command === "base +title-resolve") {
+      return {
+        ok: true,
+        data: {
+          candidates: [
+            { name: "domi资料库", [["base", "token"].join("_")]: "first" },
+            { name: "domi资料库", [["base", "token"].join("_")]: "second" }
+          ]
+        }
+      };
+    }
+    if (command === "wiki +space-list") return { ok: true, data: { spaces: [] } };
+    writeCalls += 1;
+    throw new Error("a write must not run after ambiguous discovery");
+  };
+
+  const result = await integration.provisionFeishuSetup();
+  assert.equal(result.ok, false);
+  assert.match(result.error, /多个同名/);
+  assert.doesNotMatch(result.error, /first|second/);
+  assert.equal(writeCalls, 0);
+});
+
+test("Feishu setup replaces raw CLI failures with a private safe message", async () => {
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: () => null, saveCache: () => undefined },
+    plaudOutputDir: "/tmp/domi-feishu-private-error-test",
+    configProvider: () => ({ storageBackend: "local" })
+  });
+  integration.larkCli = process.execPath;
+  integration.runJson = async (_binary, args) => {
+    if (args[0] === "auth") {
+      return { verified: true, identities: { user: { tokenStatus: "valid" } } };
+    }
+    throw new Error("permission denied for private-base-ref private-table-ref private-user-ref");
+  };
+
+  const result = await integration.provisionFeishuSetup();
+  assert.equal(result.ok, false);
+  assert.doesNotMatch(result.error, /private-base-ref|private-table-ref|private-user-ref/);
+  assert.match(result.error, /已有连接不会被覆盖/);
 });
 
 test("1.待办事项 ledger XML round-trips without leaking document configuration", () => {

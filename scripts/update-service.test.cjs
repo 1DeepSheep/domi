@@ -309,7 +309,7 @@ test("check resolves to a terminal fallback when the updater emits no event", as
   assert.ok(missingResult.error);
 });
 
-test("download is single-flight and enables install-on-quit only for the accepted download", async () => {
+test("download is single-flight and keeps install-on-quit disabled until safe installation", async () => {
   const harness = createHarness();
   startListeners(harness);
   await makeAvailable(harness);
@@ -333,7 +333,7 @@ test("download is single-flight and enables install-on-quit only for the accepte
   const [firstResult, secondResult] = await Promise.all([first, second]);
   assert.equal(firstResult.state, "downloaded");
   assert.equal(secondResult.state, "downloaded");
-  assert.equal(harness.values.autoInstallOnAppQuit, true);
+  assert.equal(harness.values.autoInstallOnAppQuit, false);
 });
 
 test("download timeout cancels the token, blocks overlap, and ignores late download events", async (t) => {
@@ -381,7 +381,7 @@ test("download resolves to downloaded when the updater emits no terminal event",
   assert.equal(result.availableVersion, "9.9.0");
   assert.equal(result.percent, 100);
   assert.equal(result.error, "");
-  assert.equal(harness.values.autoInstallOnAppQuit, true);
+  assert.equal(harness.values.autoInstallOnAppQuit, false);
 });
 
 test("channel switch during a check ignores stale events and rechecks the new channel", async () => {
@@ -521,6 +521,8 @@ test("install requires a current downloaded candidate and rechecks the gate at e
   valid.updater.downloadImplementation = async () => ["/tmp/domi-update.zip"];
   await valid.service.download();
   assert.equal(valid.service.install().ok, true);
+  assert.equal(valid.values.autoInstallOnAppQuit, true);
+  assert.equal(valid.service.snapshot().installing, true);
   valid.runImmediates();
   assert.deepEqual(valid.calls.install, [[false, true]]);
 
@@ -533,4 +535,57 @@ test("install requires a current downloaded candidate and rechecks the gate at e
   switched.runImmediates();
   assert.equal(switched.calls.install.length, 0);
   assert.equal(switched.values.autoInstallOnAppQuit, false);
+});
+
+test("downloaded update can wait for active tasks and recover from a failed safe flush", async () => {
+  const harness = createHarness();
+  await makeAvailable(harness);
+  harness.updater.downloadImplementation = async () => ["/tmp/domi-update.zip"];
+  await harness.service.download();
+
+  const waiting = harness.service.markRestartWaiting(3);
+  assert.equal(waiting.state, "downloaded");
+  assert.equal(waiting.restartPending, true);
+  assert.equal(waiting.busyTaskCount, 3);
+  assert.equal(waiting.installing, false);
+  assert.equal(harness.values.autoInstallOnAppQuit, false);
+
+  const failed = harness.service.markInstallFailure("renderer save failed");
+  assert.equal(failed.state, "downloaded");
+  assert.equal(failed.restartPending, false);
+  assert.equal(failed.installing, false);
+  assert.match(failed.error, /renderer save failed/);
+  assert.equal(harness.values.autoInstallOnAppQuit, false);
+
+  const prepared = harness.service.armInstall();
+  assert.equal(prepared.ok, true);
+  assert.equal(harness.service.snapshot().installing, true);
+  assert.equal(harness.values.autoInstallOnAppQuit, true);
+  assert.equal(harness.service.commitInstall(prepared.candidate).ok, true);
+  harness.runImmediates();
+  assert.deepEqual(harness.calls.install, [[false, true]]);
+});
+
+test("installer launch failures keep the downloaded update retryable", async () => {
+  const harness = createHarness();
+  await makeAvailable(harness);
+  harness.updater.downloadImplementation = async () => ["/tmp/domi-update.zip"];
+  await harness.service.download();
+
+  const prepared = harness.service.armInstall();
+  assert.equal(prepared.ok, true);
+  harness.updater.quitAndInstall = () => {
+    throw new Error("launcher unavailable");
+  };
+  let failure = null;
+  assert.equal(harness.service.commitInstall(prepared.candidate, {
+    onFailure: (error) => { failure = error; }
+  }).ok, true);
+  harness.runImmediates();
+
+  assert.match(String(failure?.message || failure), /launcher unavailable/);
+  assert.equal(harness.service.snapshot().state, "downloaded");
+  assert.equal(harness.service.snapshot().installing, false);
+  assert.match(harness.service.snapshot().error, /launcher unavailable/);
+  assert.equal(harness.values.autoInstallOnAppQuit, false);
 });
