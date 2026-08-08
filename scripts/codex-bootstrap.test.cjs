@@ -303,6 +303,33 @@ test("official installer is idempotent and installs to the user local bin direct
   }
 });
 
+test("bundled runtime repairs a missing managed runtime even when an external Codex exists", async () => {
+  let bundledInstalls = 0;
+  const service = new CodexBootstrapService({
+    runtimeManager: {
+      snapshot: async () => ({ ok: false, managed: false, error: "missing" })
+    },
+    installBundled: async () => {
+      bundledInstalls += 1;
+      return { ok: true, path: "/tmp/managed-codex", version: "codex-cli managed" };
+    },
+    resolveBinary: (preferredPath) => preferredPath || "/tmp/external-codex",
+    exec: async (_binary, args) => {
+      if (args[0] === "--version") return { stdout: "codex-cli managed\n", stderr: "" };
+      if (_binary === "/usr/bin/security") throw new Error("not configured");
+      throw new Error("unexpected command");
+    },
+    sleep: async () => {}
+  });
+
+  const result = await service.install();
+  assert.equal(result.ok, true);
+  assert.equal(result.path, "/tmp/managed-codex");
+  assert.equal(result.installedNow, true);
+  assert.equal(result.source, "bundled");
+  assert.equal(bundledInstalls, 1);
+});
+
 test("connection test is ephemeral, read-only, non-interactive, and verifies a tool call", async () => {
   const root = createRoot();
   try {
