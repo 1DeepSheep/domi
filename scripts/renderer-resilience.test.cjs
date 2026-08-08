@@ -25,6 +25,63 @@ const radarSourceManager = read("src/RadarSourceManager.tsx");
 const databaseGrid = read("src/database/DatabaseGrid.tsx");
 const databaseCellEditors = read("src/database/DatabaseCellEditors.tsx");
 const databaseGridStyles = read("src/database/database-grid.css");
+const appConfirmDialog = read("src/AppConfirmDialog.tsx");
+
+assert.doesNotMatch(
+  `${app}\n${setupCenter}\n${radarSourceManager}`,
+  /window\.confirm\s*\(/,
+  "User decisions must use the non-blocking domi confirmation dialog instead of macOS system prompts."
+);
+assert.match(
+  appConfirmDialog,
+  /role="alertdialog"[\s\S]*?aria-modal="true"[\s\S]*?aria-labelledby=[\s\S]*?aria-describedby=/,
+  "The shared confirmation surface must expose a labelled modal alert-dialog to assistive technology."
+);
+assert.match(
+  appConfirmDialog,
+  /event\.key === "Escape"[\s\S]*?onSettle\(false\)[\s\S]*?event\.key === "Enter"[\s\S]*?closest\("button"\)[\s\S]*?onSettle\(true\)/,
+  "The shared confirmation surface must support Escape and preserve the focused button's Enter action."
+);
+assert.match(
+  appConfirmDialog,
+  /if \(pendingRef\.current\) return Promise\.resolve\(false\)/,
+  "Confirmation requests must not stack."
+);
+assert.match(
+  appConfirmDialog,
+  /opener\?\.isConnected[\s\S]*?opener\.focus/,
+  "Confirmation decisions must restore focus to their opener."
+);
+assert.match(
+  styles,
+  /\.sidebar-nav-item\.active\s*\{[\s\S]*?background:\s*var\(--hover\)[\s\S]*?box-shadow:\s*inset 2px 0 0/,
+  "The active sidebar destination must stay visibly selected."
+);
+assert.match(
+  styles,
+  /\.managed-task-setup strong\s*\{[\s\S]*?font-size:\s*var\(--text-control\)[\s\S]*?\.managed-task-setup > button\s*\{[\s\S]*?font-size:\s*var\(--text-secondary\)/,
+  "Task setup controls must use the compact domi type scale instead of browser defaults."
+);
+assert.match(
+  styles,
+  /\.lazy-overlay\s*\{[\s\S]*?font-family:\s*var\(--font-cn\)[\s\S]*?font-size:\s*var\(--text-control\)/,
+  "Lazy setup surfaces must not flash browser-default typography."
+);
+assert.match(
+  styles,
+  /\.directory-picker\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) 36px[\s\S]*?\.directory-picker button\s*\{[\s\S]*?width:\s*36px[\s\S]*?height:\s*36px/,
+  "Directory inputs and picker buttons must remain aligned."
+);
+assert.match(
+  styles,
+  /@media \(max-width: 760px\)\s*\{[\s\S]*?\.setup-window\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)[\s\S]*?\.setup-nav\s*\{[\s\S]*?flex-direction:\s*row/,
+  "Settings must remain usable in narrow or highly scaled windows."
+);
+assert.match(
+  styles,
+  /\.assistant-choice-input\s*\{[\s\S]*?font-size:\s*var\(--text-control\)[\s\S]*?\.assistant-choice-continue\s*\{[\s\S]*?font-size:\s*var\(--text-control\)[\s\S]*?\.assistant-choice-auto\s*\{[\s\S]*?font-size:\s*var\(--text-caption\)/,
+  "Assistant choices must use the same explicit control typography as the rest of domi."
+);
 
 assert.match(
   app,
@@ -45,6 +102,26 @@ assert.match(
   app,
   /信源管理[\s\S]*?<RadarSourceManager/,
   "Industry news must expose the local source manager without changing sidebar navigation."
+);
+assert.match(
+  app,
+  /weekly-news-source weekly-news-source-manager[\s\S]*?aria-haspopup="dialog"[\s\S]*?aria-controls="radar-source-panel"/,
+  "Industry news must present source management as a visible, accessible header action."
+);
+assert.match(
+  radarSourceManager,
+  /id="radar-source-panel"[\s\S]*?role="dialog"[\s\S]*?aria-labelledby="radar-source-title"/,
+  "The source-management trigger must target the labelled dialog it opens."
+);
+assert.match(
+  styles,
+  /\.weekly-news-source-manager\s*\{[\s\S]*?border-color:\s*var\(--line-strong\)[\s\S]*?background:\s*#fff/,
+  "Source management must remain visually discoverable beside the refresh control."
+);
+assert.match(
+  styles,
+  /\.radar-source-panel > header h2\s*\{[\s\S]*?font-size:\s*20px[\s\S]*?\.radar-source-row\s*\{[\s\S]*?min-height:\s*60px/,
+  "Source management must use the compact domi type scale and row density."
 );
 assert.match(
   radarSourceManager,
@@ -1113,8 +1190,8 @@ assert.match(
 );
 assert.match(
   setupCenter,
-  /hasUnsavedChanges[\s\S]*?requestClose[\s\S]*?设置尚未保存/,
-  "Closing settings must warn before discarding an edited draft."
+  /async function requestClose[\s\S]*?hasUnsavedChanges[\s\S]*?await confirm\([\s\S]*?放弃尚未保存的设置[\s\S]*?if \(!approved\) return[\s\S]*?onClose\(\)/,
+  "Closing settings must use the in-app decision surface before discarding an edited draft."
 );
 assert.match(
   app,

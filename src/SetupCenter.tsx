@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { workbench } from "./bridge";
+import { useAppConfirm } from "./AppConfirmDialog";
 import {
   AppSettings,
   AppSettingsSaveRequest,
@@ -158,6 +159,7 @@ export default function SetupCenter({
   onLogin,
   onRefresh
 }: SetupCenterProps) {
+  const { confirm, confirmDialog } = useAppConfirm();
   const [tab, setTab] = useState<"connection" | "data" | "plaud" | "updates" | "diagnostics">(initialTab);
   const [draft, setDraft] = useState(settings);
   const [saving, setSaving] = useState(false);
@@ -446,13 +448,16 @@ export default function SetupCenter({
     }
   }
 
-  function requestClose() {
+  async function requestClose() {
     if (saving) return;
-    if (
-      hasUnsavedChanges
-      && !window.confirm("设置尚未保存。关闭后会丢失本次修改，确定要关闭吗？")
-    ) {
-      return;
+    if (hasUnsavedChanges) {
+      const approved = await confirm({
+        title: "放弃尚未保存的设置？",
+        message: "关闭设置后，本次修改将不会保留。",
+        confirmLabel: "放弃修改",
+        tone: "danger"
+      });
+      if (!approved) return;
     }
     onClose();
   }
@@ -1839,6 +1844,7 @@ export default function SetupCenter({
           </footer>
         </section>
       </div>
+      {confirmDialog}
     </div>
   );
 }

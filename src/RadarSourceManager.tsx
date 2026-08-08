@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { workbench } from "./bridge";
+import { useAppConfirm } from "./AppConfirmDialog";
 import type {
   PodcastJob,
   PodcastProcessResult,
@@ -91,6 +92,7 @@ export default function RadarSourceManager({
   onSnapshot,
   onPodcastTranscript
 }: RadarSourceManagerProps) {
+  const { confirm, confirmDialog } = useAppConfirm();
   const [tab, setTab] = useState<RadarSourceKind>("news");
   const [snapshot, setSnapshot] = useState<RadarSourceSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
@@ -176,7 +178,14 @@ export default function RadarSourceManager({
   }
 
   async function remove(source: RadarSource) {
-    if (!window.confirm(`删除“${source.name}”信源？已生成的本地文档不会被删除。`)) return;
+    const approved = await confirm({
+      title: "删除这个信源？",
+      message: `“${source.name}”将不再参与后续扫描。`,
+      detail: "已生成的本地文档、纪要和行业资料不会被删除。",
+      confirmLabel: "删除信源",
+      tone: "danger"
+    });
+    if (!approved) return;
     setError("");
     const result = await workbench.deleteRadarSource({ sourceId: source.id });
     if (!result.ok) {
@@ -279,7 +288,7 @@ export default function RadarSourceManager({
     <div className="radar-source-overlay" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <section className="radar-source-panel" role="dialog" aria-modal="true" aria-labelledby="radar-source-title">
+      <section id="radar-source-panel" className="radar-source-panel" role="dialog" aria-modal="true" aria-labelledby="radar-source-title">
         <header>
           <div>
             <span>行业动态</span>
@@ -402,6 +411,7 @@ export default function RadarSourceManager({
           )}
         </div>
       </section>
+      {confirmDialog}
     </div>
   );
 }
