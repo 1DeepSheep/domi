@@ -1,73 +1,139 @@
 <p align="center">
+  <strong>简体中文</strong> · <a href="./README.en.md">English</a>
+</p>
+
+<p align="center">
   <img src="public/domi-icon.png" width="96" alt="domi 图标">
 </p>
 
 <h1 align="center">domi</h1>
 
 <p align="center">
-  面向投资研究与项目管理的 Mac 桌面智能工作台。<br>
-  在熟悉的对话界面里调用本机 Codex，把行业动态、项目研究、会议纪要和资料归档串成一条工作流。
+  <strong>懂研究、会判断、能执行的 AI 投资分析师</strong><br>
+  domi 将资料整理、研究分析、结构化入库、持续跟踪和后续行动串联成一套完整的投资工作流，并将资料沉淀在你的 Mac 上。
 </p>
 
 <p align="center">
-  <a href="https://github.com/1DeepSheep/domi/releases/latest">下载最新版</a>
+  <a href="https://github.com/1DeepSheep/domi/releases/latest"><strong>下载最新版</strong></a>
   ·
-  <a href="https://github.com/1DeepSheep/domi-plugin">domi 插件</a>
+  <a href="https://github.com/1DeepSheep/domi-plugin">查看 domi 插件</a>
   ·
   <a href="https://github.com/1DeepSheep/domi/issues">反馈问题</a>
 </p>
 
-> 当前公开版同时提供 Apple Silicon（arm64）和 Intel（x64）Mac 安装包，支持 macOS 12 Monterey 及以上版本。两种安装包都内置经过 SHA-256 校验、与本机架构匹配的 OpenAI Codex CLI 和 FFmpeg 基线，首次启动可离线完成运行时准备，再进行连接测试。
+> 当前公开版支持 Apple Silicon（arm64）和 Intel（x64）Mac，要求 macOS 12 Monterey 或更高版本。安装包已经 Developer ID 签名、Apple 公证并附加公证票据。
 
-## 一眼看懂 domi 能做什么
+## 不只是生成一份内容，而是把工作完整做下去
 
-- **行业雷达**：自动刷新行业新闻，按领域和子领域筛选，突出值得关注的新动态。
-- **项目研究**：从公司名、链接、BP、截图或已有材料出发，完成桌面研究、投资分析和项目归档。
-- **人物与机构研究**：整理创始人、团队、投资机构和关系线索，形成可继续维护的人物资料。
-- **投资工作流**：支持投资快评、IC 材料、交易谈判、结构化研究及 HTML/PDF slides 报告。
-- **会议与录音**：处理文字稿与音频，生成纪要、核心结论和跟进事项；PLAUD 为可选连接。
-- **待办事项**：把关键节点、新入库对象、重点项目／人物动态和长期未跟进事项维护到本地 `0.待办事项.md`，在客户端看板中执行或忽略；只有用户明确要求时才向飞书发布副本。
-- **Outlook 日程**：整理主题、时间和地点，向用户明确选择的一个或多个参会人发送 Outlook 日程邀请。
-- **本地主库 + 飞书外挂**：SQLite + Markdown 始终是项目、人脉、行业动态和待办事项的管理基础；可选连接用户自己的飞书账号，按明确指令搜索 Base／Wiki、读取云文档、发布或编辑文档及发送消息。
-- **连续任务执行**：对话绑定 Codex 任务，支持流式回答、停止执行、恢复上下文、文件附件和操作时间线。
+通用 AI 很擅长回答一个问题；投资工作更需要把分散的输入变成可继续推进的系统记录和行动。domi 把 Codex、投资 Skills、本地资料库和可选外部连接组织成一条可验证的执行链：
+
+> **信息采集 → 研究与判断 → 结构化归档 → 持续跟踪 → 执行动作**
+
+例如，把一次项目交流录音交给 domi 后，它可以继续完成文字稿、结构化纪要、核心观点、项目初评和跟进事项，并把结果放回对应项目，而不是只返回一段无法继续管理的文本。所有外部写入仍以用户本轮的明确指令为前提。
+
+## domi 最有价值的地方
+
+### 1. 像分析师一样推进端到端工作流
+
+在同一个任务里读取材料、调用工具、形成判断、写入资料库并给出下一步。任务保留上下文、附件、执行时间线和结果，不需要在人和多个工具之间反复复制粘贴。
+
+### 2. 为投资工作而设计，而不是通用聊天壳
+
+客户端自动安装匹配版本的 [domi 插件](https://github.com/1DeepSheep/domi-plugin)，提供项目研究、人物研究、投资快评、IC 报告、基本面与财务分析、行业扫描、会议纪要、项目入库和待办维护等投资工作流。
+
+### 3. 能把零散信息变成可积累的机构记忆
+
+项目、人脉、行业动态、纪要和待办事项以结构化索引与 Markdown 文档持续沉淀。domi 可以在用户选定的本地资料范围内查找已有材料，把新研究和历史信息关联起来，而不是每次从空白对话开始。
+
+### 4. 本地优先，数据归用户
+
+SQLite + Markdown 是唯一权威资料库，文档、图片和附件保存在用户选择的本地工作区。应用更新只替换客户端，不删除用户任务、信源清单、历史内容或连接设置；数据库升级前会保留备份。
+
+### 5. 飞书是知识外挂和发布平台，不是管理前提
+
+不连接飞书也能使用 domi 的本地资料库、文档库、行业动态和研究能力。连接自己的飞书账号后，可以按明确指令搜索 Base／Wiki／Docs／Drive、创建或编辑文档、发布本地 Markdown 副本或发送消息；飞书内容不会自动覆盖本地主库。
+
+### 6. 从单个项目扩展到一个领域的信息规模
+
+行业雷达可以维护新闻源、RSS、重点公众号和公开播客，按领域持续整理新闻、融资、技术、政策、市场与公司动态。研究任务也可以围绕某个赛道梳理项目、团队和关系线索，并把值得继续跟进的对象转成待办事项。
+
+## 可以直接交给 domi 的工作
+
+| 交给 domi 的输入 | 可以继续完成的工作 |
+| --- | --- |
+| 一段录音、音频或文字稿 | 生成文字稿或精修记录、结构化纪要、核心观点和跟进事项；项目类交流可继续做初评和入库 |
+| 公司名、链接、BP、截图或 Datapack | 桌面研究、材料核验、项目画像、基本面／财务分析、投资评级和项目资料归档 |
+| 一个赛道或研究问题 | Mapping 项目与人物、梳理技术和产业链、发现信息缺口、形成结构化研究或 slides |
+| 招股书、财务报表或项目材料 | 提取经营与财务指标、分析商业模式和关键风险、形成可追溯的判断 |
+| 一个待决策项目 | 投资快评、推进建议、IC 材料和交易谈判准备 |
+| 一组关注领域和信源 | 行业动态扫描、事件归一和去重、重要性判断、融资与公司动态追踪 |
+| 本地 Markdown 文档 | 在本地继续编辑、关联到项目；按明确指令发布为经过回读校验的飞书文档副本 |
+| 会面主题、时间、地点和参会人 | 通过可选 Outlook 连接向明确选择的参会人发送日程邀请 |
+
+这些能力由客户端、已安装的 domi 插件、Codex 及用户选择连接的服务共同完成；需要登录或外部账号的能力只有在用户完成相应连接后才可用。
+
+## 典型使用方式
+
+```text
+把这段创始人交流录音整理成纪要，给出核心判断和跟进事项，并归档到对应项目。
+
+研究这家公司：核验公开信息和已有材料，分析商业模式与财务表现，判断是否值得继续推进。
+
+Mapping 具身智能赛道的项目和关键人物，标出值得优先认识的人，并形成研究文档。
+
+追踪 AI4S 最近一周的重要行业动态，去重后只保留会影响投资判断的事件。
+
+基于 BP、Datapack 和历史交流写一份 IC 报告；所有结论标明证据和仍需核验的问题。
+
+把这篇本地 Markdown 发布到我的飞书知识库，并在发布后核对标题、列表、表格、链接和图片。
+```
+
+## 工作台包含什么
+
+- **连续任务**：流式执行、停止、恢复上下文、附件、排队与操作时间线；消息固定留在发送时的任务中。
+- **资料库**：直接查看和编辑项目、人脉及行业动态的结构化字段，自动保存到本地 SQLite 和 Markdown。
+- **文档库**：浏览、搜索和编辑本地 Markdown，预览 PDF，管理图片和附件。
+- **行业雷达**：按领域查看最新动态，维护新闻源、重点公众号和播客信源，支持重点公众号文本或 List 文件批量导入。
+- **待办事项**：把关键节点、研究缺口和下一步行动维护到本地 `0.待办事项.md` 和客户端看板。
+- **可选 PLAUD**：读取用户自己的 PLAUD 录音队列，转写后继续完成纪要、判断、归档与待办。
+- **可选飞书**：把飞书作为外部参考资料库和发布平台，保留完整的 Base、Wiki、Docs、Drive、IM 和 Contact 能力。
+- **可选 Outlook**：向用户指定的一个或多个参会人发送日程邀请。
+- **安全更新**：发现新版本后在客户端下载；等待运行中的任务结束并完成安全落盘后，再重启安装。
+
+## 本地主库与外部连接
+
+domi 只有一套权威资料库：SQLite 保存项目、人脉、行业动态、待办和运行状态；Markdown、图片及附件统一放在用户选择的 `domi工作区`。飞书、PLAUD 和 Outlook 都是可选连接。
+
+用户明确要求把某篇本地 Markdown 发布到飞书时，domi 会在写入前检查支持的内容和本地资源，上传图片，并在写入后回读校验文本与结构。无法证明兼容的内容会停止发布，不会静默丢失；远端副本也不会替代本地原件。
+
+从旧版飞书主库升级的用户，在完成显式、安全并逐条验证的本地导入前，旧 Base、Wiki 和本地材料会继续按原模式运行。domi 不会静默切换到空的本地库，也不会自动删除或覆盖旧飞书内容。
 
 ## 安装
 
-### 1. 下载 domi
+### 1. 下载适合这台 Mac 的版本
 
 1. 打开 [domi Releases](https://github.com/1DeepSheep/domi/releases/latest)。
 2. M 系列芯片下载名称以 `arm64.dmg` 结尾的安装包；Intel 芯片下载名称以 `x64.dmg` 结尾的安装包。
-3. 打开 DMG，把「domi」拖入“应用程序”文件夹。
-4. 启动 domi。公开安装包已经 Developer ID 签名、Apple 公证并附加公证票据。
+3. 打开 DMG，把「domi」拖入“应用程序”文件夹，然后启动。
 
-### 2. 安装并连接 Codex
+### 2. 连接 Codex
 
-首次启动时，domi 会检测可用的 Codex CLI；如果尚未安装，会自动校验并解压安装包内置的 OpenAI 官方独立发行版，无需打开终端，也不依赖当时能否连接 GitHub。运行时保存在 Codex 官方的 `~/.codex/packages/standalone` 目录，并在 `~/.local/bin` 建立用户级链接，不修改系统目录。Apple Silicon 与 Intel 的版本、来源和校验值分别记录在 [`resources/codex-runtime.json`](resources/codex-runtime.json) 与 [`resources/codex-runtime-x64.json`](resources/codex-runtime-x64.json)，第三方说明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+首次启动时，domi 会检测 Codex CLI；如果尚未安装，会校验并解压安装包内置的 OpenAI 官方独立发行版，无需打开终端，也不依赖当时能否连接 GitHub。运行时保存在 Codex 官方的 `~/.codex/packages/standalone`，并在 `~/.local/bin` 建立用户级链接，不修改系统目录。
 
 随后选择一种身份方式：
 
-- **ChatGPT 账号**：打开 Codex 官方登录，复用本机 ChatGPT / Codex 账号；
-- **Responses 中转站**：填写兼容 OpenAI Responses API 的地址、模型名称和 API Key。密钥只写入 macOS 钥匙串，`~/.codex/config.toml` 只保存地址、模型和读取钥匙串的命令。
+- **ChatGPT 账号**：打开 Codex 官方登录，复用本机 ChatGPT／Codex 账号；
+- **Responses 中转站**：填写兼容 OpenAI Responses API 的地址、模型名称和 API Key。密钥只写入 macOS 钥匙串。
 
-最后点击“测试完整连接”。domi 会启动一次不保存历史、只读沙箱的临时 Codex 任务，同时验证模型响应和 Shell 工具调用；两项都通过后才允许完成首次设置。普通 Chat Completions 接口不支持完整 Codex 能力，不能作为中转站使用。安装方式与配置格式分别遵循 [Codex CLI 官方文档](https://learn.chatgpt.com/docs/codex/cli) 和 [Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+点击“测试完整连接”后，domi 会用不保存历史的临时任务验证模型响应和 Shell 工具调用，两项都通过后才完成设置。普通 Chat Completions 接口不支持完整 Codex 能力。配置说明见 [Codex CLI 官方文档](https://developers.openai.com/codex/cli) 和 [Codex 配置参考](https://developers.openai.com/codex/config-reference)。
 
-### 3. 配置本地资料库和可选连接
+### 3. 建立本地工作区
 
-继续按向导完成资料库和可选连接：
+选择一个上级目录；domi 会创建或复用 `domi工作区`，初始化 SQLite、Markdown 目录和 `0.待办事项.md`。随后可以直接开始使用，也可以按需连接飞书、PLAUD 和 Outlook。新用户不需要手工填写 Base Token、Table ID 或 Wiki Space ID。
 
-1. 选择一个上级目录；domi 会在其中创建或复用 `domi工作区`，初始化本地 SQLite、Markdown 目录和 `0.待办事项.md`；
-2. 根据需要连接飞书。授权范围仍包含 Base、Wiki、Docs、Drive、IM 和 Contact，便于按明确指令搜索外部资料、读取或发布飞书文档以及发送消息；完整授权不会把飞书变成主资料库，也不会自动建 Base、迁移或覆盖本地资料；
-3. 根据需要连接 PLAUD：选择 Google Chrome 或 Tabbit，在 domi 专用浏览器 Profile 中登录自己的账号并完成只读验证；也可以直接跳过，以后再连接。安装包已经内置离线 FFmpeg/ffprobe，M4A 等本地录音无需 Homebrew 即可转换后上传；连接失败时可以在该页面调用 Codex 连接助手进行诊断和安全修复。
-
-domi 会自动安装与当前客户端匹配的 domi 插件。普通用户不需要另外安装插件。
+domi 会自动安装与当前客户端匹配的 domi 插件，普通用户不需要单独安装 Skills 或插件。
 
 ## 资料保存在哪里
-
-domi 只有一套权威资料库：SQLite 保存项目、人脉、行业动态、待办和运行状态；Markdown、图片及附件统一放在“所选目录 / domi工作区”中。飞书连接是可选的外部参考资料库和发布平台，不会改变本地主库。
-
-本地 Markdown 编辑器支持粘贴图片；复制整篇文档时也会复制可用的图片内容。用户明确要求把某篇本地 Markdown 发布到飞书时，domi 会上传本地图片、写入飞书文档并回读校验文本与结构；只有校验通过才报告成功。无法证明无损兼容的格式会在写入前停止，不会静默丢失内容。
-
-从旧版飞书主库升级的用户，在完成显式、安全并逐条验证的本地导入前，旧 Base 和 Wiki 会继续按原模式运行，避免项目、人脉和历史文档突然不可见。domi 不会静默切换到空的本地库，也不会自动删除、覆盖或迁移旧飞书内容；只有用户明确完成安全导入并核验后，本地主库才接管管理。
 
 正式版默认数据目录与应用程序分离：
 
@@ -77,32 +143,26 @@ domi 只有一套权威资料库：SQLite 保存项目、人脉、行业动态�
 ~/Documents/domi/
 ```
 
-源码开发版使用 `~/Library/Application Support/domi-dev/`，与正式版数据库、设置、日志和 PLAUD 专用浏览器 Profile 隔离。Codex Marketplace 对当前 macOS 用户全局注册，因此开发版与正式版只共享 `~/Library/Application Support/domi/runtime/domi-marketplace/` 这一份不含用户资料的插件运行目录，避免同名 Marketplace 指向两个路径。正式安装版同时限制为单实例运行，避免两个后台同步器并发写入。
+用户也可以在首次设置时选择其他本地工作区位置。覆盖安装和自动更新只替换应用程序，不会删除用户的任务、目录映射、信源清单、历史内容或连接设置。源码开发版使用 `~/Library/Application Support/domi-dev/`，与正式版数据隔离。
 
-首次安装得到的是空白工作台。覆盖安装和自动更新只替换应用程序，不会删除用户的任务、目录映射或连接设置；数据库升级前会自动保留最近三份备份。由 `0.4.x` 升级到 `0.5.0` 时，domi 会在首次启动时把旧版 Application Support 和默认文稿工作区迁移到上述新目录；如果迁移无法完成，会继续使用原目录，避免把用户显示成空白工作台。
+## 隐私与安全边界
 
-## 隐私与连接
-
-- 仓库和安装包不包含维护者的历史任务、录音、项目材料、组织名称、飞书地址或连接凭据。
-- ChatGPT/Codex 登录状态由本机 Codex 管理；中转站 API Key 只保存在 macOS 钥匙串，不写入 domi 设置、Codex 配置、日志或诊断报告。
-- 飞书、PLAUD、Outlook 上次验证的发送账号、常用参会人和目录映射由每位用户在自己的 Mac 上配置并保存在本地；飞书授权令牌由 lark-cli 与 macOS 钥匙串管理，不进入仓库、安装包或诊断报告。
-- Outlook OAuth 由 Codex 的 Outlook Calendar 连接器管理，domi 不保存其令牌。
-- PLAUD 完全可选；未连接时不会启动 PLAUD 队列或读取录音。连接时只使用 `Application Support/domi/plaud-browser` 下的专用 Profile，不读取或复制用户日常 Chrome／Tabbit Profile；断开连接可删除该专用登录数据。
-- PLAUD 本地音频转换优先使用安装包内置的无网络 LGPL FFmpeg/ffprobe，不修改系统目录，也不依赖用户安装 Homebrew；对应版本、构建参数、校验值、许可证和完整源码归档随应用分发。
+- 仓库和安装包不包含维护者或用户的历史任务、录音、项目材料、飞书标识或连接凭据。
+- ChatGPT／Codex 登录由本机 Codex 管理；中转站 API Key 只保存在 macOS 钥匙串。
+- 飞书令牌由本机飞书工具和 macOS 钥匙串管理；PLAUD 只使用 domi 专用浏览器 Profile，不读取日常浏览器 Profile。
+- 未连接 PLAUD 时，domi 不会读取录音队列；未收到明确指令时，不会把本地资料发布到飞书或发送消息。
+- 应用更新会等待任务空闲并安全落盘；数据库 schema 变更前自动保留最近三份备份。
 - Keychain、SQLite、工作区和 Codex App Server 可在“系统诊断”中进行脱敏检查。
+
+更多说明见 [PRIVACY.md](PRIVACY.md) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 更新
 
-正式版内置两类更新：
+发现 GitHub Release 新版本后，domi 会在左下角显示更新入口。用户点击后下载更新；运行中的任务会继续完成，任务和数据安全落盘后客户端才重启安装。Codex Runtime 可以在“设置 → 软件更新”中单独检查和更新，失败时继续使用当前版本。
 
-- **domi 客户端**：发现 GitHub Release 新版本后可以下载并重启安装，原有资料库、任务历史和连接设置继续保留；
-- **Codex Runtime**：在“设置 → 软件更新”中点击“检查并更新”。domi 使用系统网络设置运行 OpenAI 官方更新器，更新后保留上一版本入口；下载、校验或启动验证失败时继续使用当前版本，也可以手动恢复上一版本。
-
-也可以随时前往 [domi Releases](https://github.com/1DeepSheep/domi/releases/latest) 手动下载最新版。
+也可以随时前往 [domi Releases](https://github.com/1DeepSheep/domi/releases/latest) 手动下载安装。
 
 ## 从源码运行
-
-面向贡献者的本地开发：
 
 ```bash
 git clone https://github.com/1DeepSheep/domi.git
@@ -121,11 +181,11 @@ npm run privacy:history
 npm run check
 ```
 
-构建和签名、公证、发布流程见 [docs/RELEASE.md](docs/RELEASE.md)。
+构建、签名、公证和发布流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 相关仓库
 
-- [domi](https://github.com/1DeepSheep/domi)：桌面客户端源码、问题反馈与签名公证后的 macOS Releases
+- [domi](https://github.com/1DeepSheep/domi)：Mac 客户端源码、问题反馈与签名公证后的 Releases
 - [domi-plugin](https://github.com/1DeepSheep/domi-plugin)：投资工作流、路由和 Skills
 
 ## License
