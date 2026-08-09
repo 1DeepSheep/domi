@@ -73,14 +73,26 @@ import { isLocalPdfResource } from "./document-resources";
 import {
   automaticallyRoutedProject,
   DomiEntityResult,
+  entityCandidatesRequireIsolatedExecution,
+  entityFinalizationModeForSourceConversation,
+  entityTargetMatchesSourceConversation,
   normalizedEntityMention,
   parseDomiEntityResult,
-  projectMentionMatches
+  projectMentionMatches,
+  shouldBindProjectToSourceConversation
 } from "./entity-routing";
 import MarkdownEditorErrorBoundary from "./MarkdownEditorErrorBoundary";
 import SectionErrorBoundary, { RenderRegion } from "./SectionErrorBoundary";
 import AssistantChoiceCard from "./AssistantChoiceCard";
 import { useAppConfirm } from "./AppConfirmDialog";
+import {
+  codexThreadOwnerIds,
+  isThreadSubmissionBusy,
+  quarantineDuplicateCodexThreadOwnership,
+  reconcileCommittedAttachmentPaths,
+  recoveryCodexThreadId,
+  resumableCodexThreadId
+} from "./submission-safety";
 import {
   DatabaseGrid,
   type DatabaseCellOption,
@@ -814,11 +826,15 @@ type Message = {
   runStartedAt?: number;
   runCompletedAt?: number;
   runEventCount?: number;
+  entityFinalizationMode?: EntityFinalizationMode;
+  entityExecutionIsolated?: boolean;
+  executionCodexThreadId?: string;
 };
 
 type Thread = {
   id: string;
   codexThreadId?: string;
+  quarantinedCodexThreadIds?: string[];
   projectId: string;
   workspacePath?: string;
   title: string;
@@ -840,6 +856,8 @@ type SubmitToCodexOptions = {
   useDomiPlugin?: boolean;
   displayText?: string;
   attachments?: LocalAttachment[];
+  activeDocumentPath?: string;
+  repositoryIdentitySnapshot?: string;
   background?: boolean;
   model?: string;
   reasoningEffort?: string;
@@ -849,12 +867,30 @@ type SubmitToCodexOptions = {
   queuedSubmission?: QueuedSubmission;
 };
 
+type EntityFinalizationMode = "bind-source" | "archive-only";
+
+type SubmissionExecutionContext = {
+  workspacePath?: string;
+  externalType?: "project" | "person";
+  externalRecordId?: string;
+  entityFinalizationMode: EntityFinalizationMode;
+  isolated: boolean;
+};
+
+type ProjectBindingResult = {
+  thread: Thread;
+  attachments: LocalAttachment[];
+  execution?: SubmissionExecutionContext;
+  canceled?: boolean;
+};
+
 type QueuedSubmission = {
   id: string;
   threadId: string;
   input: string;
   workflowId?: string;
   attachments: LocalAttachment[];
+  activeDocumentPath?: string;
   useDomiPlugin: boolean;
   model: string;
   reasoningEffort: string;
@@ -865,18 +901,46 @@ type QueuedSubmission = {
 
 const QUEUED_SUBMISSIONS_STORAGE_KEY = "domi.queuedSubmissions.v1";
 const PAUSED_QUEUED_SUBMISSIONS_STORAGE_KEY = "domi.pausedQueuedSubmissions.v1";
+const DATA_CONNECTION_SETTING_KEYS = [
+  "storageBackend",
+  "projectBaseToken",
+  "projectTableId",
+  "peopleBaseToken",
+  "peopleTableId",
+  "radarBaseToken",
+  "radarTableId",
+  "wikiSpaceId",
+  "taskDocumentUrl",
+  "localLibraryDir",
+  "localRepositoryDir",
+  "localDatabasePath"
+] as const;
+
+function requestChangesDataConnection(request: AppSettingsSaveRequest) {
+  return DATA_CONNECTION_SETTING_KEYS.some((key) =>
+    Object.prototype.hasOwnProperty.call(request, key)
+  );
+}
 
 function queueRepositoryIdentity(settings: AppSettings | null | undefined) {
   if (!settings) return "";
   const backend = settings.storageBackend === "local" ? "local" : "feishu";
   const source = backend === "local"
-    ? [settings.localRepositoryDir, settings.localDatabasePath]
+    ? [
+        settings.localRepositoryDir,
+        settings.localDatabasePath,
+        settings.localLibraryDir
+      ]
     : [
         settings.projectBaseToken,
         settings.projectTableId,
         settings.peopleBaseToken,
         settings.peopleTableId,
-        settings.wikiSpaceId
+        settings.radarBaseToken,
+        settings.radarTableId,
+        settings.wikiSpaceId,
+        settings.taskDocumentUrl,
+        settings.localLibraryDir
       ];
   // Store only a non-reversible local fingerprint, never the user's private
   // Base tokens, Wiki identifiers or absolute repository paths.
@@ -903,6 +967,8 @@ function readQueuedSubmissions(): Record<string, QueuedSubmission[]> {
           && candidate.threadId === threadId
           && typeof candidate.input === "string"
           && Array.isArray(candidate.attachments)
+          && (candidate.activeDocumentPath === undefined
+            || typeof candidate.activeDocumentPath === "string")
           && typeof candidate.useDomiPlugin === "boolean"
           && typeof candidate.model === "string"
           && typeof candidate.reasoningEffort === "string"
@@ -941,6 +1007,9 @@ type RunContext = {
   knownProjectIds?: string[];
   knownPersonIds?: string[];
   queuedSubmission?: QueuedSubmission;
+  entityFinalizationMode?: EntityFinalizationMode;
+  entityExecutionIsolated?: boolean;
+  executionCodexThreadId?: string;
 };
 
 type AssistantInteraction = {
@@ -1928,6 +1997,9 @@ function App() {
   const [storageReady, setStorageReady] = useState(false);
   const [codexRecoveryReady, setCodexRecoveryReady] = useState(false);
   const [activeRunsByThread, setActiveRunsByThread] = useState<Record<string, string>>({});
+  const [submissionBusyThreadIds, setSubmissionBusyThreadIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const [queuedSubmissionsByThread, setQueuedSubmissionsByThread] = useState<
     Record<string, QueuedSubmission[]>
   >(readQueuedSubmissions);
@@ -1988,6 +2060,7 @@ function App() {
   const chatScrollPositionsRef = useRef(new Map<string, ChatScrollPosition>());
   const chatScrollRestoreFrameRef = useRef<number | null>(null);
   const chatScrollRestoreTimersRef = useRef<number[]>([]);
+  const threadSelectionIntentRef = useRef(0);
   const threadListRef = useRef<HTMLDivElement>(null);
   const activeThreadIdRef = useRef(activeThreadId);
   const workspaceViewRef = useRef<WorkspaceView>(workspaceView);
@@ -2003,6 +2076,8 @@ function App() {
   const documentPanelFocusedRef = useRef(false);
   const windowFocusedRef = useRef(true);
   const threadsRef = useRef(threads);
+  const composerDraftsByThreadRef = useRef(composerDraftsByThread);
+  const activeRunsByThreadRef = useRef(activeRunsByThread);
   const domiSnapshotRef = useRef(domiSnapshot);
   const persistedThreadsRef = useRef(new Map<string, Thread>());
   const persistenceQueueRef = useRef<Promise<unknown>>(Promise.resolve());
@@ -2082,6 +2157,8 @@ function App() {
   } | null>(null);
 
   threadsRef.current = threads;
+  composerDraftsByThreadRef.current = composerDraftsByThread;
+  activeRunsByThreadRef.current = activeRunsByThread;
   domiSnapshotRef.current = domiSnapshot;
   workspaceViewRef.current = workspaceView;
   rightPanelOpenRef.current = rightPanelOpen;
@@ -2137,6 +2214,41 @@ function App() {
   function changeAttachmentImportCount(delta: number) {
     attachmentImportCountRef.current = Math.max(0, attachmentImportCountRef.current + delta);
     setAttachmentImportCount(attachmentImportCountRef.current);
+  }
+
+  function markThreadSubmissionStart(
+    threadId: string,
+    source: "foreground" | "queue",
+    starting: boolean
+  ) {
+    const target = source === "foreground"
+      ? submissionStartingThreadIdsRef.current
+      : queueStartingThreadIdsRef.current;
+    if (starting) target.add(threadId);
+    else target.delete(threadId);
+    setSubmissionBusyThreadIds(new Set([
+      ...submissionStartingThreadIdsRef.current,
+      ...queueStartingThreadIdsRef.current
+    ]));
+  }
+
+  function threadDeletionIsBusy(threadId: string) {
+    if (!codexRecoveryReady) return true;
+    const liveRun = [...runContextRef.current.entries()].find(
+      ([, context]) => context.threadId === threadId
+    );
+    return submissionBusyThreadIds.has(threadId) || isThreadSubmissionBusy(
+      threadId,
+      activeRunsByThreadRef.current[threadId] || liveRun?.[0],
+      submissionStartingThreadIdsRef.current,
+      queueStartingThreadIdsRef.current,
+      settlingThreadIdsRef.current
+    );
+  }
+
+  function queuedSubmissionRemovalIsBusy(threadId: string, queuedId: string) {
+    return queueStartingThreadIdsRef.current.has(threadId)
+      && queuedSubmissionsByThreadRef.current[threadId]?.[0]?.id === queuedId;
   }
 
   function currentMessageContent(threadId: string, messageId: string) {
@@ -2396,6 +2508,19 @@ function App() {
     updateComposerDraft(threadId, (draft) => ({ ...draft, attachmentError: next }));
   }
 
+  function setThreadAttachmentError(threadId: string, next: string) {
+    setComposerDraftsByThread((current) => {
+      if (!current[threadId] && !next) return current;
+      return {
+        ...current,
+        [threadId]: {
+          ...(current[threadId] || EMPTY_COMPOSER_DRAFT),
+          attachmentError: next
+        }
+      };
+    });
+  }
+
   function setSelectedWorkflowId(next?: string) {
     const threadId = activeThreadId;
     updateComposerDraft(threadId, (draft) => ({ ...draft, selectedWorkflowId: next }));
@@ -2404,6 +2529,32 @@ function App() {
   function clearComposerDraft(threadId: string) {
     setComposerDraftsByThread((current) => {
       if (!current[threadId]) return current;
+      const next = { ...current };
+      delete next[threadId];
+      return next;
+    });
+  }
+
+  function clearSubmittedComposerDraft(
+    threadId: string,
+    submittedInput: string,
+    submittedAttachments: LocalAttachment[],
+    submittedWorkflowId?: string
+  ) {
+    setComposerDraftsByThread((current) => {
+      const draft = current[threadId];
+      if (!draft) return current;
+      const sameAttachments = draft.attachments.length === submittedAttachments.length
+        && draft.attachments.every((attachment, index) =>
+          attachment.path === submittedAttachments[index]?.path
+        );
+      if (
+        draft.input !== submittedInput
+        || draft.selectedWorkflowId !== submittedWorkflowId
+        || !sameAttachments
+      ) {
+        return current;
+      }
       const next = { ...current };
       delete next[threadId];
       return next;
@@ -3055,8 +3206,9 @@ function App() {
           ? state.activeThreadId
           : loadedThreads[0].id;
         persistedThreadsRef.current = new Map(state.threads.map((thread) => [thread.id, thread]));
+        threadsRef.current = loadedThreads;
         setThreads(loadedThreads);
-        setActiveThreadId(loadedActiveThreadId);
+        activateThreadNow(loadedActiveThreadId);
         setExecutionSuggestionState(state.executionSuggestionState || {});
         if (state.agentPreferences) {
           const loadedActiveThread = loadedThreads.find(
@@ -3190,17 +3342,19 @@ function App() {
     }
     codexRecoveryStartedRef.current = true;
 
-    const candidates = threadsRef.current
-      .filter((thread) => {
-        const latestAssistant = [...thread.messages]
-          .reverse()
-          .find((message) => message.role === "assistant");
-        return Boolean(
-          thread.codexThreadId
-          && latestAssistant
-          && (latestAssistant.status === "running" || latestAssistant.status === "error")
-        );
-      });
+    const allLocalThreads = threadsRef.current;
+    const candidates = allLocalThreads.filter((thread) => {
+      const latestAssistant = [...thread.messages]
+        .reverse()
+        .find((message) => message.role === "assistant");
+      // Include every unfinished local turn, even when its recovery id is
+      // missing. In particular, an isolated turn must fail closed instead of
+      // falling back to the source task's canonical Codex conversation.
+      return Boolean(
+        latestAssistant
+        && (latestAssistant.status === "running" || latestAssistant.status === "error")
+      );
+    });
 
     const pauseRecoveredThreadQueue = (threadId: string) => {
       const waiting = queuedSubmissionsByThreadRef.current[threadId] || [];
@@ -3237,10 +3391,52 @@ function App() {
         const latestAssistant = [...thread.messages]
           .reverse()
           .find((message) => message.role === "assistant");
-        if (!thread.codexThreadId || !latestAssistant) continue;
+        if (!latestAssistant) continue;
+        const recoveryThreadId = recoveryCodexThreadId(
+          thread.codexThreadId,
+          latestAssistant.executionCodexThreadId,
+          latestAssistant.entityExecutionIsolated === true
+        );
+        if (!recoveryThreadId) {
+          blockRecoveredThread(
+            thread,
+            latestAssistant,
+            latestAssistant.entityExecutionIsolated
+              ? "隔离任务缺少独立的 Codex 对话标识，已拒绝回退到原任务以避免串线。"
+              : "任务缺少可恢复的 Codex 对话标识。"
+          );
+          continue;
+        }
+        if (thread.quarantinedCodexThreadIds?.includes(recoveryThreadId)) {
+          blockRecoveredThread(
+            thread,
+            latestAssistant,
+            "该 Codex 对话已因重复归属被持久隔离，已拒绝自动恢复。"
+          );
+          continue;
+        }
+        const recoveryOwners = allLocalThreads.filter((candidate) =>
+          candidate.codexThreadId === recoveryThreadId
+          || candidate.messages.some((message) =>
+            message.role === "assistant"
+            && recoveryCodexThreadId(
+              undefined,
+              message.executionCodexThreadId,
+              true
+            ) === recoveryThreadId
+          )
+        );
+        if (recoveryOwners.length !== 1) {
+          blockRecoveredThread(
+            thread,
+            latestAssistant,
+            `检测到 ${recoveryOwners.length} 个本地任务共用同一个 Codex 对话，已拒绝自动恢复以避免串线。`
+          );
+          continue;
+        }
         let reboundRunId = "";
         try {
-          let result = await workbench.recoverCodexThread(thread.codexThreadId);
+          let result = await workbench.recoverCodexThread(recoveryThreadId);
           if (!result.ok) {
             blockRecoveredThread(thread, latestAssistant, result.error || "无法读取上一轮运行状态。");
             continue;
@@ -3254,7 +3450,10 @@ function App() {
             reboundRunId = result.runId;
             runContextRef.current.set(reboundRunId, {
               threadId: thread.id,
-              assistantMessageId: latestAssistant.id
+              assistantMessageId: latestAssistant.id,
+              entityFinalizationMode: latestAssistant.entityFinalizationMode,
+              entityExecutionIsolated: latestAssistant.entityExecutionIsolated,
+              executionCodexThreadId: recoveryThreadId
             });
             setActiveRunsByThread((current) => ({ ...current, [thread.id]: reboundRunId }));
             patchMessage(latestAssistant.id, {
@@ -3269,7 +3468,7 @@ function App() {
 
             // The run may have finished between the snapshot and bind handshake.
             // Re-read once, then accept only a terminal disposition.
-            result = await workbench.recoverCodexThread(thread.codexThreadId);
+            result = await workbench.recoverCodexThread(recoveryThreadId);
             clearRecoveredRun(thread.id, reboundRunId);
             reboundRunId = "";
             if (!result.ok || !["completed", "stopped", "failed"].includes(result.status)) {
@@ -3383,6 +3582,7 @@ function App() {
     for (const [threadId, queue] of Object.entries(queuedSubmissionsByThread)) {
       if (queue.length === 0 || activeRunsByThread[threadId]) continue;
       if (queueStartingThreadIdsRef.current.has(threadId)) continue;
+      if (submissionStartingThreadIdsRef.current.has(threadId)) continue;
       if ([...runContextRef.current.values()].some((context) => context.threadId === threadId)) continue;
 
       const targetThread = threads.find((thread) => thread.id === threadId);
@@ -3408,13 +3608,13 @@ function App() {
       }
       if (pausedQueuedSubmissionIds.has(queued.id)) continue;
       const workflow = workflows.find((item) => item.id === queued.workflowId);
-      queueStartingThreadIdsRef.current.add(threadId);
       let accepted = false;
       let acceptedSubmission = queued;
       void submitToCodex(workflow, queued.input, {
         thread: targetThread,
         useDomiPlugin: queued.useDomiPlugin,
         attachments: queued.attachments,
+        activeDocumentPath: queued.activeDocumentPath,
         model: queued.model,
         reasoningEffort: queued.reasoningEffort,
         serviceTier: queued.serviceTier,
@@ -3476,9 +3676,7 @@ function App() {
           });
         }
         setPausedQueuedSubmissionIds((current) => new Set(current).add(acceptedSubmission.id));
-      }).finally(() => {
-          queueStartingThreadIdsRef.current.delete(threadId);
-        });
+      });
     }
   }, [
     activeRunsByThread,
@@ -5286,7 +5484,17 @@ function App() {
           timeline: [],
           lastUsage: null
         };
-        setThreads((current) => [targetThread as Thread, ...current]);
+        // Programmatic submission follows immediately in this same tick. Make
+        // the new owner visible to fail-closed submission checks before React
+        // commits the state update.
+        threadsRef.current = [
+          targetThread as Thread,
+          ...threadsRef.current.filter((thread) => thread.id !== targetThread!.id)
+        ];
+        setThreads((current) => [
+          targetThread as Thread,
+          ...current.filter((thread) => thread.id !== targetThread!.id)
+        ]);
       }
 
       const targetAlreadyRunning = Boolean(activeRunsByThread[targetThread.id])
@@ -5296,12 +5504,13 @@ function App() {
         return;
       }
 
-      setActiveThreadId(targetThread.id);
+      activateThreadNow(targetThread.id);
       setDomiPluginEnabled(true);
       setPlaudNotice(`已启动“${item.fileName}”的 domi 纪要入库任务`);
       const execution = submitToCodex(workflow, plaudNotesWorkflowRequest(item), {
         thread: targetThread,
         useDomiPlugin: true,
+        activeDocumentPath: undefined,
         displayText: `生成“${item.fileName}”的纪要并按 domi 工作流入库`
       });
       handedOff = true;
@@ -5441,23 +5650,26 @@ function App() {
   }
 
   async function saveAppSettings(request: AppSettingsSaveRequest): Promise<AppSettingsSaveResult> {
+    const dataConnectionChanged = requestChangesDataConnection(request);
+    if (
+      dataConnectionChanged
+      && (
+        submissionStartingThreadIdsRef.current.size > 0
+        || queueStartingThreadIdsRef.current.size > 0
+        || runContextRef.current.size > 0
+        || settlingThreadIdsRef.current.size > 0
+        || Object.values(activeRunsByThreadRef.current).some(Boolean)
+      )
+    ) {
+      return {
+        ok: false,
+        error: "当前仍有任务正在发送、运行或归档。请等待任务完成后再修改资料连接。"
+      };
+    }
     const result = await workbench.saveSettings(request);
     if (result.ok && result.settings) {
       setAppSettings(result.settings);
       if (result.codex) setCodexStatus(result.codex);
-      const dataConnectionChanged = [
-        "storageBackend",
-        "projectBaseToken",
-        "projectTableId",
-        "peopleBaseToken",
-        "peopleTableId",
-        "radarBaseToken",
-        "radarTableId",
-        "wikiSpaceId",
-        "taskDocumentUrl",
-        "localLibraryDir",
-        "localRepositoryDir"
-      ].some((key) => Object.prototype.hasOwnProperty.call(request, key));
       const documentLibraryLocationChanged = [
         "storageBackend",
         "localLibraryDir",
@@ -5472,6 +5684,11 @@ function App() {
         if (result.settings.onboardingComplete) void refreshDocumentLibrary();
       }
       if (dataConnectionChanged && result.settings.onboardingComplete) {
+        // A snapshot is scoped to the repository that produced it. Clear both
+        // the state and synchronous ref before starting the new sync so a send
+        // in the same event loop cannot combine new settings with old records.
+        domiSnapshotRef.current = null;
+        setDomiSnapshot(null);
         void refreshAfterDataConnectionSave(result.settings);
       }
     }
@@ -5483,7 +5700,10 @@ function App() {
     setDomiError("");
     try {
       const synced = await workbench.syncDomi();
-      if (synced.snapshot) setDomiSnapshot(synced.snapshot);
+      if (synced.snapshot) {
+        domiSnapshotRef.current = synced.snapshot;
+        setDomiSnapshot(synced.snapshot);
+      }
       if (!synced.ok) setDomiError(synced.error || "资料库设置已保存，但首次同步失败。");
       if (savedSettings.storageBackend === "feishu") {
         await refreshDomiTaskBoard({ fresh: true });
@@ -5606,8 +5826,18 @@ function App() {
         messages: []
       };
 
-      setThreads((current) => [nextThread, ...current]);
-      setActiveThreadId(nextThread.id);
+      // submitToCodex runs below before React necessarily flushes setThreads.
+      // Register the source synchronously so existence checks cannot mistake
+      // this valid programmatic task for a deleted one.
+      threadsRef.current = [
+        nextThread,
+        ...threadsRef.current.filter((thread) => thread.id !== nextThread.id)
+      ];
+      setThreads((current) => [
+        nextThread,
+        ...current.filter((thread) => thread.id !== nextThread.id)
+      ]);
+      activateThreadNow(nextThread.id);
       clearComposerDraft(nextThread.id);
       setDomiPluginEnabled(true);
       setThreadMenuId(null);
@@ -5623,7 +5853,8 @@ function App() {
         thread: nextThread,
         useDomiPlugin: true,
         displayText: suggestion.title,
-        attachments: []
+        attachments: [],
+        activeDocumentPath: undefined
       });
       if (!result?.ok || result.stopped) {
         setExecutionSuggestionError(
@@ -5958,8 +6189,15 @@ function App() {
       lastUsage: null,
       messages: []
     };
-    setThreads((current) => [nextThread, ...current]);
-    setActiveThreadId(nextThread.id);
+    threadsRef.current = [
+      nextThread,
+      ...threadsRef.current.filter((thread) => thread.id !== nextThread.id)
+    ];
+    setThreads((current) => [
+      nextThread,
+      ...current.filter((thread) => thread.id !== nextThread.id)
+    ]);
+    activateThreadNow(nextThread.id);
     setDomiQuery("");
     void refreshDomiEntityOverview(nextThread.id, "project", project);
   }
@@ -5996,8 +6234,15 @@ function App() {
       lastUsage: null,
       messages: []
     };
-    setThreads((current) => [nextThread, ...current]);
-    setActiveThreadId(nextThread.id);
+    threadsRef.current = [
+      nextThread,
+      ...threadsRef.current.filter((thread) => thread.id !== nextThread.id)
+    ];
+    setThreads((current) => [
+      nextThread,
+      ...current.filter((thread) => thread.id !== nextThread.id)
+    ]);
+    activateThreadNow(nextThread.id);
     setDomiQuery("");
     void refreshDomiEntityOverview(nextThread.id, "person", person);
   }
@@ -6114,7 +6359,9 @@ function App() {
         userMessageId: userMessage?.id,
         workflowId: assistantMessage.workflowId,
         requestText: userMessage?.content,
-        attachments: userMessage?.attachments
+        attachments: userMessage?.attachments,
+        entityFinalizationMode: assistantMessage.entityFinalizationMode,
+        entityExecutionIsolated: assistantMessage.entityExecutionIsolated
       }, output);
     } catch (error) {
       workbench.reportRendererIssue({
@@ -6142,6 +6389,16 @@ function App() {
         status: "failed"
       });
     };
+
+    // An isolated intake deliberately has no canonical entity context. Only a
+    // machine-verifiable marker may release its staged files to an entity; do
+    // not infer the target from conversational text after the run completes.
+    if (!stableResult && context.entityExecutionIsolated) {
+      failBinding(
+        "隔离实体任务未返回可验证的 DOMI_ENTITY_RESULT_V1 回执；附件仍保留在本机暂存区，当前任务归属未改变。"
+      );
+      return;
+    }
 
     let synced;
     try {
@@ -6205,8 +6462,10 @@ function App() {
       failBinding(`回执名称“${result.name}”与资料库规范名称“${entity.name}”不一致，未改变任务归属。`);
       return;
     }
+    const archiveOnly = context.entityFinalizationMode === "archive-only";
     if (
-      thread.externalType
+      !archiveOnly
+      && thread.externalType
       && thread.externalRecordId
       && (thread.externalType !== result.entityType || thread.externalRecordId !== result.recordId)
     ) {
@@ -6302,15 +6561,21 @@ function App() {
       );
       return {
         ...currentThread,
-        ...patch,
+        ...(archiveOnly ? {} : patch),
         messages,
         timeline: [{
           id: createId("timeline"),
           runId: `entity-${result.recordId}`,
-          title: `已归入${result.entityType === "project" ? "项目" : "人物"}：${result.name}`,
-          detail: committed.attachments.length
-            ? `已绑定固定目录并归档 ${committed.attachments.length} 个本轮附件`
-            : "已绑定固定资料目录",
+          title: archiveOnly
+            ? `本轮资料已归入${result.entityType === "project" ? "项目" : "人物"}：${result.name}`
+            : `已归入${result.entityType === "project" ? "项目" : "人物"}：${result.name}`,
+          detail: archiveOnly
+            ? committed.attachments.length
+              ? `已归档 ${committed.attachments.length} 个本轮附件；当前对话归属保持不变`
+              : "已验证本轮实体；当前对话归属保持不变"
+            : committed.attachments.length
+              ? `已绑定固定目录并归档 ${committed.attachments.length} 个本轮附件`
+              : "已绑定固定资料目录",
           kind: "event" as const,
           status: "done"
         }, ...(currentThread.timeline || [])].slice(0, 18)
@@ -6322,23 +6587,56 @@ function App() {
   function handleCodexEvent(payload: CodexEventPayload) {
     let context = runContextRef.current.get(payload.runId);
     if (!context && payload.threadId) {
-      const recoveredThread = threadsRef.current.find(
-        (thread) => thread.codexThreadId === payload.threadId
+      const allLocalThreads = threadsRef.current;
+      const recoveryCandidates = allLocalThreads.flatMap((thread) => {
+        const message = [...thread.messages]
+          .reverse()
+          .find(
+            (candidate) =>
+              candidate.role === "assistant"
+              && (candidate.status === "running" || candidate.status === "error")
+              && !thread.quarantinedCodexThreadIds?.includes(payload.threadId!)
+              && recoveryCodexThreadId(
+                thread.codexThreadId,
+                candidate.executionCodexThreadId,
+                candidate.entityExecutionIsolated === true
+              ) === payload.threadId
+          );
+        return message ? [{ thread, message }] : [];
+      });
+      // Uniqueness is evaluated against every local task, not just unfinished
+      // candidates. A completed duplicate owner is still enough to make an
+      // otherwise plausible live event unsafe to bind.
+      const recoveryOwners = allLocalThreads.filter((thread) =>
+        thread.codexThreadId === payload.threadId
+        || thread.messages.some((message) =>
+          message.role === "assistant"
+          && recoveryCodexThreadId(
+            undefined,
+            message.executionCodexThreadId,
+            true
+          ) === payload.threadId
+        )
       );
-      const recoveredMessage = recoveredThread
-        ? [...recoveredThread.messages]
-            .reverse()
-            .find(
-              (message) =>
-                message.role === "assistant"
-                && (message.status === "running" || message.status === "error")
-            )
+      const recovered = recoveryCandidates.length === 1 && recoveryOwners.length === 1
+        ? recoveryCandidates[0]
         : undefined;
+      if (recoveryCandidates.length > 1 || recoveryOwners.length > 1) {
+        workbench.reportRendererIssue({
+          kind: "codex-run",
+          message: `检测到 ${recoveryOwners.length} 个本地任务持有同一个 Codex 对话；已拒绝自动绑定本轮事件。`
+        });
+      }
+      const recoveredThread = recovered?.thread;
+      const recoveredMessage = recovered?.message;
 
       if (recoveredThread && recoveredMessage) {
         context = {
           threadId: recoveredThread.id,
-          assistantMessageId: recoveredMessage.id
+          assistantMessageId: recoveredMessage.id,
+          entityFinalizationMode: recoveredMessage.entityFinalizationMode,
+          entityExecutionIsolated: recoveredMessage.entityExecutionIsolated,
+          executionCodexThreadId: recoveredMessage.executionCodexThreadId
         };
         runContextRef.current.set(payload.runId, context);
 
@@ -6392,7 +6690,34 @@ function App() {
     }
 
     if (payload.type === "thread" && payload.threadId) {
-      patchThread(context.threadId, { codexThreadId: payload.threadId });
+      const owner = threadsRef.current.find((thread) => thread.id === context.threadId);
+      const conflictingOwners = codexThreadOwnerIds(
+        threadsRef.current,
+        payload.threadId
+      ).filter((threadId) => threadId !== context.threadId);
+      if (owner?.quarantinedCodexThreadIds?.includes(payload.threadId)) {
+        workbench.reportRendererIssue({
+          kind: "codex-run",
+          message: "Codex 返回了已隔离的旧对话标识；已忽略该标识，当前任务归属保持不变。"
+        });
+        return;
+      }
+      if (conflictingOwners.length > 0) {
+        workbench.reportRendererIssue({
+          kind: "codex-run",
+          message: "Codex 返回了已归属于另一任务的对话标识；已拒绝重新绑定，当前任务归属保持不变。"
+        });
+        return;
+      }
+      if (context.entityExecutionIsolated) {
+        context.executionCodexThreadId = payload.threadId;
+        runContextRef.current.set(payload.runId, context);
+        patchMessage(context.assistantMessageId, {
+          executionCodexThreadId: payload.threadId
+        });
+      } else {
+        patchThread(context.threadId, { codexThreadId: payload.threadId });
+      }
       addTimeline(context.threadId, {
         runId: payload.runId,
         title: payload.summary || "Codex 对话已连接",
@@ -6625,56 +6950,57 @@ function App() {
     const replacements = new Map(
       pending.map((attachment, index) => [attachment.path, imported.files[index]] as const)
     );
+    const committedAttachments = selectedAttachments.map(
+      (attachment) => replacements.get(attachment.path) || attachment
+    );
+    // importFiles may remove a managed staging source after copying it into the
+    // canonical project directory. Reconcile only paths from this submission
+    // inside the live source draft; newer text and newly attached files survive.
+    setComposerDraftsByThread((current) => {
+      const draft = current[thread.id];
+      if (!draft) return current;
+      const reconciled = reconcileCommittedAttachmentPaths(
+        draft.attachments,
+        pending,
+        imported.files
+      );
+      if (reconciled === draft.attachments) return current;
+      return {
+        ...current,
+        [thread.id]: { ...draft, attachments: [...reconciled] }
+      };
+    });
     return {
       ok: true,
-      attachments: selectedAttachments.map((attachment) => replacements.get(attachment.path) || attachment)
+      attachments: committedAttachments
     };
   }
 
-  async function prepareNeutralProjectTarget(
-    sourceThread: Thread,
-    workflow?: Workflow
-  ): Promise<Thread | null> {
-    if (!await navigateWorkspace("conversation")) return null;
-    const reusable = threadsRef.current.find((candidate) =>
-      candidate.id !== sourceThread.id
-      && isUnusedDraftThread(candidate)
-      && !composerDraftHasContent(candidate.id)
-    );
-    const patch: Partial<Thread> = {
-      workspacePath: codexStatus?.workspacePath,
-      title: `${workflow?.title || "项目任务"}：待确认项目`,
-      project: NEW_THREAD_PROJECT,
-      updatedAt: nowLabel(),
-      lastActiveAt: Date.now(),
-      manualTitle: false,
-      externalType: undefined,
-      externalRecordId: undefined
-    };
-    let target: Thread;
-    if (reusable) {
-      target = { ...reusable, ...patch };
-      patchThread(reusable.id, patch);
-    } else {
-      target = {
-        id: createId("thread"),
-        projectId: createId("project"),
-        workspacePath: codexStatus?.workspacePath,
-        title: String(patch.title),
-        project: NEW_THREAD_PROJECT,
-        updatedAt: nowLabel(),
-        lastActiveAt: Date.now(),
-        pinned: false,
-        manualTitle: false,
-        timeline: [],
-        lastUsage: null,
-        messages: []
+  async function prepareIsolatedEntityExecution(
+    thread: Thread
+  ): Promise<{ execution?: SubmissionExecutionContext; error?: string }> {
+    try {
+      const workspace = await workbench.createProjectWorkspace({
+        projectId: createId("entity-stage"),
+        projectName: "待确认实体"
+      });
+      if (!workspace.ok || !workspace.workspacePath) {
+        return {
+          error: workspace.error || "无法创建本轮隔离工作区；附件仍保留在本机暂存区。"
+        };
+      }
+      return {
+        execution: {
+          workspacePath: workspace.workspacePath,
+          entityFinalizationMode: entityFinalizationModeForSourceConversation(thread),
+          isolated: true
+        }
       };
-      setThreads((current) => [target, ...current]);
+    } catch (error) {
+      return {
+        error: `无法创建本轮隔离工作区：${error instanceof Error ? error.message : String(error)}`
+      };
     }
-    setActiveThreadId(target.id);
-    if (target.id !== sourceThread.id) clearComposerDraft(sourceThread.id);
-    return target;
   }
 
   async function bindThreadToMentionedProject(
@@ -6684,41 +7010,123 @@ function App() {
     useDomiPlugin: boolean,
     projectSnapshot: DomiSnapshot | null,
     workflow?: Workflow
-  ): Promise<{ thread: Thread; attachments: LocalAttachment[]; canceled?: boolean }> {
+  ): Promise<ProjectBindingResult> {
+    const entityResultWorkflow = Boolean(
+      workflow?.id && ENTITY_RESULT_WORKFLOW_IDS.has(workflow.id)
+    );
+    const isolateEntityExecution = async (errorMessage: string): Promise<ProjectBindingResult> => {
+      const isolated = await prepareIsolatedEntityExecution(thread);
+      if (!isolated.execution) {
+        setThreadAttachmentError(thread.id, isolated.error || errorMessage);
+        return { thread, attachments: selectedAttachments, canceled: true };
+      }
+      return {
+        thread,
+        attachments: selectedAttachments,
+        execution: isolated.execution
+      };
+    };
+
+    // Without a current snapshot no entity-producing workflow can prove that
+    // its eventual project/person is the source conversation's canonical
+    // entity. Run neutrally and keep every attachment staged until a verified
+    // receipt identifies the destination.
+    if (entityResultWorkflow && (!useDomiPlugin || !projectSnapshot)) {
+      return isolateEntityExecution("无法准备隔离实体任务。");
+    }
     if (!useDomiPlugin || !projectSnapshot) {
       const committed = await commitAttachmentsToEntity(thread, selectedAttachments);
       if (!committed.ok) {
-        setAttachmentError(committed.error || "附件归档失败，本次消息尚未发送。");
+        setThreadAttachmentError(thread.id, committed.error || "附件归档失败，本次消息尚未发送。");
         return { thread, attachments: selectedAttachments, canceled: true };
       }
       return { thread, attachments: committed.attachments };
     }
+    const explicitText = [
+      requestText,
+      ...selectedAttachments.map((attachment) => attachment.name)
+    ].join("\n");
+    const explicitProjectCandidates = projectMentionMatches(
+      projectSnapshot.projects,
+      explicitText
+    );
+    const explicitProject = automaticallyRoutedProject(explicitProjectCandidates, {
+      projectIntake: true
+    });
+    const explicitPersonCandidates = projectMentionMatches(
+      projectSnapshot.people,
+      explicitText
+    );
+    const explicitPerson = automaticallyRoutedProject(
+      explicitPersonCandidates,
+      { projectIntake: true }
+    );
+    const rawExplicitEntityCandidates = [
+      ...explicitProjectCandidates.map((candidate) => ({
+        entityType: "project" as const,
+        recordId: candidate.project.recordId
+      })),
+      ...explicitPersonCandidates.map((candidate) => ({
+        entityType: "person" as const,
+        recordId: candidate.project.recordId
+      }))
+    ];
+    const explicitEntityTargets = [
+      ...(workflow?.id !== "people-intake" && explicitProject
+        ? [{ entityType: "project" as const, recordId: explicitProject.recordId }]
+        : []),
+      ...(workflow?.id !== "project-intake" && explicitPerson
+        ? [{ entityType: "person" as const, recordId: explicitPerson.recordId }]
+        : [])
+    ];
+    const explicitEntityTarget = explicitEntityTargets.length === 1
+      ? explicitEntityTargets[0]
+      : undefined;
+
+    // domi-router, people/project intake and investment-mgmt can all return an
+    // entity receipt. They may use a canonical workspace directly only when
+    // one explicit entity was resolved and it is exactly the source entity.
+    if (
+      entityResultWorkflow
+      && !entityTargetMatchesSourceConversation(thread, explicitEntityTarget)
+    ) {
+      return isolateEntityExecution("无法准备隔离实体任务。");
+    }
+    if (
+      !workflow
+      && entityCandidatesRequireIsolatedExecution(thread, rawExplicitEntityCandidates)
+    ) {
+      return isolateEntityExecution("无法准备隔离跨实体任务。");
+    }
+
     if (!workflowAllowsProjectRouting(workflow)) {
-      if (thread.externalType === "person" && workflow && PERSON_TARGET_WORKFLOW_IDS.has(workflow.id)) {
+      if (
+        entityResultWorkflow
+        || (thread.externalType === "person" && workflow && PERSON_TARGET_WORKFLOW_IDS.has(workflow.id))
+      ) {
         const committed = await commitAttachmentsToEntity(thread, selectedAttachments);
         if (!committed.ok) {
-          setAttachmentError(committed.error || "附件归档失败，本次消息尚未发送。");
+          setThreadAttachmentError(thread.id, committed.error || "附件归档失败，本次消息尚未发送。");
           return { thread, attachments: selectedAttachments, canceled: true };
         }
         return { thread, attachments: committed.attachments };
       }
       return { thread, attachments: selectedAttachments };
     }
-    const explicitText = [
-      requestText,
-      ...selectedAttachments.map((attachment) => attachment.name)
-    ].join("\n");
-    let candidates = projectMentionMatches(projectSnapshot.projects, explicitText);
-    if (!candidates.length && !thread.externalType) {
+
+    let candidates = explicitProjectCandidates;
+    if (!candidates.length && !thread.externalType && !entityResultWorkflow) {
       candidates = projectMentionMatches(
         projectSnapshot.projects,
         [thread.title, thread.project].join("\n")
       );
     }
-    const project = automaticallyRoutedProject(candidates, {
-      currentProjectId: thread.externalType === "project" ? thread.externalRecordId : undefined,
-      projectIntake: workflow?.id === "project-intake"
-    });
+    const project = entityResultWorkflow
+      ? explicitProject
+      : automaticallyRoutedProject(candidates, {
+          currentProjectId: thread.externalType === "project" ? thread.externalRecordId : undefined,
+          projectIntake: workflow?.id === "project-intake"
+        });
     if (!project) {
       const unresolvedProjectTarget = Boolean(
         workflow
@@ -6727,17 +7135,23 @@ function App() {
       );
       const needsNeutralTarget = unresolvedProjectTarget && (
         thread.externalType === "person"
-        || (workflow?.id === "project-intake" && Boolean(thread.externalType))
+        || candidates.length > 0
       );
       if (needsNeutralTarget) {
-        const neutral = await prepareNeutralProjectTarget(thread, workflow);
-        return neutral
-          ? { thread: neutral, attachments: selectedAttachments }
-          : { thread, attachments: selectedAttachments, canceled: true };
+        const isolated = await prepareIsolatedEntityExecution(thread);
+        if (!isolated.execution) {
+          setThreadAttachmentError(thread.id, isolated.error || "无法准备隔离项目任务。");
+          return { thread, attachments: selectedAttachments, canceled: true };
+        }
+        return {
+          thread,
+          attachments: selectedAttachments,
+          execution: isolated.execution
+        };
       }
       const committed = await commitAttachmentsToEntity(thread, selectedAttachments);
       if (!committed.ok) {
-        setAttachmentError(committed.error || "附件归档失败，本次消息尚未发送。");
+        setThreadAttachmentError(thread.id, committed.error || "附件归档失败，本次消息尚未发送。");
         return { thread, attachments: selectedAttachments, canceled: true };
       }
       return { thread, attachments: committed.attachments };
@@ -6756,58 +7170,33 @@ function App() {
       externalRecordId: project.recordId,
       project: [project.domain, project.subdomains[0], project.status].filter(Boolean).join(" · ")
     };
-    if (!thread.manualTitle) {
+    if (isUnusedDraftThread(thread)) {
       patch.title = `${workflow?.title || "项目任务"}：${project.name}`;
     }
-    let targetThread: Thread;
-    let createTargetThread = false;
-    if (isUnusedDraftThread(thread) || thread.externalRecordId === project.recordId) {
-      targetThread = { ...thread, ...patch };
-    } else {
-      const existing = threadsRef.current.find((candidate) =>
-        candidate.externalType === "project"
-        && candidate.externalRecordId === project.recordId
-      );
-      if (existing) {
-        targetThread = { ...existing, ...patch };
-      } else {
-        createTargetThread = true;
-        targetThread = {
-          id: createId("thread"),
-          projectId: `domi-project-${project.recordId}`,
-          workspacePath,
-          title: `${workflow?.title || "项目任务"}：${project.name}`,
-          project: String(patch.project || project.name),
-          updatedAt: nowLabel(),
-          lastActiveAt: Date.now(),
-          pinned: project.rating === "S",
-          manualTitle: true,
-          externalType: "project",
-          externalRecordId: project.recordId,
-          timeline: [],
-          lastUsage: null,
-          messages: []
-        };
+    // Project recognition may bind this conversation to the canonical project
+    // directory, but it must never replace its conversation identity. Multiple
+    // tasks can share one project workspace while retaining independent
+    // messages, Codex threads, queues, drafts and UI selection.
+    if (!shouldBindProjectToSourceConversation(thread, project.recordId)) {
+      const isolated = await prepareIsolatedEntityExecution(thread);
+      if (!isolated.execution) {
+        setThreadAttachmentError(thread.id, isolated.error || "无法准备隔离项目任务。");
+        return { thread, attachments: selectedAttachments, canceled: true };
       }
+      return {
+        thread,
+        attachments: selectedAttachments,
+        execution: isolated.execution
+      };
     }
-    if (targetThread.id !== thread.id && !await navigateWorkspace("conversation")) {
-      return { thread, attachments: selectedAttachments, canceled: true };
-    }
+    const targetThread: Thread = { ...thread, ...patch };
     const committed = await commitAttachmentsToEntity(targetThread, selectedAttachments);
     if (!committed.ok) {
-      setAttachmentError(committed.error || "附件归档失败，本次消息尚未发送。");
+      setThreadAttachmentError(thread.id, committed.error || "附件归档失败，本次消息尚未发送。");
       return { thread, attachments: selectedAttachments, canceled: true };
     }
-    if (createTargetThread) {
-      setThreads((current) => [targetThread, ...current]);
-    } else {
-      patchThread(targetThread.id, patch);
-    }
-    if (targetThread.id !== thread.id) {
-      setActiveThreadId(targetThread.id);
-    }
-    if (targetThread.id !== thread.id) clearComposerDraft(thread.id);
-    setAttachmentError("");
+    patchThread(thread.id, patch);
+    setThreadAttachmentError(thread.id, "");
     return { thread: targetThread, attachments: committed.attachments };
   }
 
@@ -6816,20 +7205,74 @@ function App() {
     overrideInput?: string,
     options: SubmitToCodexOptions = {}
   ) {
-    let targetThread = options.thread || activeThread;
+    const sourceThread = options.thread || activeThread;
+    const submissionSource = options.queuedSubmission ? "queue" : "foreground";
+    // Own the entire preflight lifecycle here so UI sends, queue-pump sends
+    // and programmatic sends all participate in the same deletion guard.
+    markThreadSubmissionStart(sourceThread.id, submissionSource, true);
+    const submittedActiveDocumentPath = Object.prototype.hasOwnProperty.call(
+      options,
+      "activeDocumentPath"
+    )
+      ? options.activeDocumentPath
+      : selectedDocumentLibraryPath || undefined;
+    const submittedRepositoryIdentity = options.repositoryIdentitySnapshot
+      ?? options.queuedSubmission?.repositoryIdentity
+      ?? queueRepositoryIdentity(appSettingsRef.current);
+    try {
+      if (!codexRecoveryReady) {
+        throw new Error("Codex 任务恢复检查尚未完成，请稍后重试；当前输入已保留。");
+      }
+      return await submitToCodexInternal(workflow, overrideInput, {
+        ...options,
+        activeDocumentPath: submittedActiveDocumentPath,
+        repositoryIdentitySnapshot: submittedRepositoryIdentity
+      });
+    } finally {
+      markThreadSubmissionStart(sourceThread.id, submissionSource, false);
+    }
+  }
+
+  async function submitToCodexInternal(
+    workflow?: Workflow,
+    overrideInput?: string,
+    options: SubmitToCodexOptions = {}
+  ) {
+    const sourceThread = options.thread || activeThread;
+    let targetThread = sourceThread;
     const useDomiPlugin = options.useDomiPlugin ?? domiPluginEnabled;
-    const rawInput = (overrideInput ?? input).trim();
-    let selectedAttachments = options.attachments ?? attachments;
+    const submittedInput = overrideInput ?? input;
+    const rawInput = submittedInput.trim();
+    const submittedAttachments = options.attachments ?? attachments;
+    let selectedAttachments = submittedAttachments;
     const messageText = rawInput || workflow?.defaultPrompt || (selectedAttachments.length ? "请分析所附材料" : "");
     if (!messageText) {
       return;
     }
-    let effectiveDomiSnapshot = domiSnapshot;
+    const assertRepositoryIdentityUnchanged = () => {
+      const currentIdentity = queueRepositoryIdentity(appSettingsRef.current);
+      if (
+        !options.repositoryIdentitySnapshot
+        || options.repositoryIdentitySnapshot !== currentIdentity
+      ) {
+        throw new Error("资料库配置在发送准备期间发生变化；本次任务已安全保留，请确认配置后重试。");
+      }
+    };
+    let effectiveDomiSnapshot = domiSnapshotRef.current;
     if (useDomiPlugin && !effectiveDomiSnapshot) {
       const cached = await workbench.loadDomiCache();
       effectiveDomiSnapshot = cached.snapshot || null;
-      if (effectiveDomiSnapshot) setDomiSnapshot(effectiveDomiSnapshot);
+      if (effectiveDomiSnapshot) {
+        domiSnapshotRef.current = effectiveDomiSnapshot;
+        setDomiSnapshot(effectiveDomiSnapshot);
+      }
     }
+    assertRepositoryIdentityUnchanged();
+    const latestSourceThread = threadsRef.current.find((thread) => thread.id === sourceThread.id);
+    if (!latestSourceThread) {
+      throw new Error("发送前原任务已被删除，本次消息未发送。");
+    }
+    targetThread = latestSourceThread;
     const binding = await bindThreadToMentionedProject(
       targetThread,
       messageText,
@@ -6840,17 +7283,32 @@ function App() {
     );
     if (binding.canceled) return;
     targetThread = binding.thread;
+    if (targetThread.id !== sourceThread.id) {
+      throw new Error("发送前处理试图改变任务归属；为避免消息串线，本次发送已停止。");
+    }
     selectedAttachments = binding.attachments;
-    // Project routing may move a persisted queue item to another canonical
-    // entity thread and may replace staging paths with committed attachments.
-    // Store only that final ownership in the run context so a later stop,
-    // failure or restart cannot restore the item to its stale source thread.
+    const execution: SubmissionExecutionContext = binding.execution || {
+      workspacePath: targetThread.workspacePath,
+      externalType: targetThread.externalType,
+      externalRecordId: targetThread.externalRecordId,
+      entityFinalizationMode: entityFinalizationModeForSourceConversation(targetThread),
+      isolated: false
+    };
+    // Project lookup and attachment import both yield. Revalidate immediately
+    // before any queue mutation, optimistic message append or Codex launch.
+    // If a stale UI/programmatic action removed the source task, fail closed.
+    if (!threadsRef.current.some((thread) => thread.id === sourceThread.id)) {
+      throw new Error("发送前原任务已被删除，本次消息未发送。");
+    }
+    assertRepositoryIdentityUnchanged();
+    // A queue item always belongs to the task where the user submitted it.
+    // Project routing may replace staging paths after committing attachments,
+    // but must never rewrite its conversation owner.
     const routedQueuedSubmission = options.queuedSubmission
       ? {
           ...options.queuedSubmission,
           threadId: targetThread.id,
-          attachments: selectedAttachments,
-          repositoryIdentity: queueRepositoryIdentity(appSettingsRef.current)
+          attachments: selectedAttachments
         }
       : undefined;
     const targetAlreadyRunning = Boolean(activeRunsByThread[targetThread.id])
@@ -6874,23 +7332,7 @@ function App() {
           });
           return { ok: true, queued: true, stopped: false, error: undefined };
         }
-        setQueuedSubmissionsByThread((current) => {
-          const withoutSource = (current[options.queuedSubmission!.threadId] || [])
-            .filter((item) => item.id !== options.queuedSubmission!.id);
-          const targetQueue = options.queuedSubmission!.threadId === targetThread.id
-            ? withoutSource
-            : current[targetThread.id] || [];
-          const next = { ...current };
-          if (withoutSource.length) next[options.queuedSubmission!.threadId] = withoutSource;
-          else delete next[options.queuedSubmission!.threadId];
-          next[targetThread.id] = targetQueue.some((item) => item.id === movedSubmission.id)
-            ? targetQueue
-            : [...targetQueue, movedSubmission];
-          queuedSubmissionsByThreadRef.current = next;
-          return next;
-        });
-        options.onAccepted?.(movedSubmission);
-        return { ok: true, queued: true, stopped: false, error: undefined };
+        throw new Error("排队任务的对话归属发生变化；为避免消息串线，已暂停该任务。");
       }
       const queuedSubmission: QueuedSubmission = {
         id: createId("queue"),
@@ -6898,12 +7340,13 @@ function App() {
         input: messageText,
         workflowId: workflow?.id,
         attachments: selectedAttachments,
+        activeDocumentPath: options.activeDocumentPath,
         useDomiPlugin,
         model: options.model ?? model,
         reasoningEffort: options.reasoningEffort ?? reasoningEffort,
         serviceTier: options.serviceTier ?? serviceTier,
         createdAt: Date.now(),
-        repositoryIdentity: queueRepositoryIdentity(appSettingsRef.current)
+        repositoryIdentity: options.repositoryIdentitySnapshot
       };
       setQueuedSubmissionsByThread((current) => {
         const next = {
@@ -6913,8 +7356,36 @@ function App() {
         queuedSubmissionsByThreadRef.current = next;
         return next;
       });
-      if (!options.preserveComposer) clearComposerDraft(targetThread.id);
+      if (!options.preserveComposer) {
+        clearSubmittedComposerDraft(
+          sourceThread.id,
+          submittedInput,
+          selectedAttachments,
+          workflow?.id
+        );
+      }
       return;
+    }
+    const duplicateCanonicalId = targetThread.codexThreadId;
+    const quarantinedOwnership = quarantineDuplicateCodexThreadOwnership(
+      threadsRef.current,
+      duplicateCanonicalId
+    );
+    if (quarantinedOwnership.quarantinedThreadIds.length > 0) {
+      // Clear the polluted canonical id from every local owner atomically.
+      // Otherwise A could start a fresh remote conversation while B silently
+      // becomes the sole owner of the old id and resumes the wrong history.
+      threadsRef.current = quarantinedOwnership.threads;
+      setThreads((current) =>
+        quarantineDuplicateCodexThreadOwnership(current, duplicateCanonicalId).threads
+      );
+      targetThread = quarantinedOwnership.threads.find(
+        (thread) => thread.id === targetThread.id
+      ) || { ...targetThread, codexThreadId: undefined };
+      workbench.reportRendererIssue({
+        kind: "codex-run",
+        message: `检测到 ${quarantinedOwnership.quarantinedThreadIds.length} 个本地任务共用 Codex 对话；已隔离旧对话，本轮将新建独立会话。`
+      });
     }
     const displayText = options.displayText?.trim() || messageText;
 
@@ -6936,13 +7407,20 @@ function App() {
       status: "running",
       content: "",
       runId,
-      runStartedAt
+      runStartedAt,
+      entityFinalizationMode: execution.entityFinalizationMode,
+      entityExecutionIsolated: execution.isolated
     };
 
     appendMessageToThread(targetThread.id, userMessage);
     appendMessageToThread(targetThread.id, assistantMessage);
     if (!options.preserveComposer) {
-      clearComposerDraft(targetThread.id);
+      clearSubmittedComposerDraft(
+        sourceThread.id,
+        submittedInput,
+        selectedAttachments,
+        workflow?.id
+      );
     }
     patchThread(targetThread.id, { timeline: [], lastUsage: null, hasUnreadCompletion: false });
     runContextRef.current.set(runId, {
@@ -6954,15 +7432,28 @@ function App() {
       attachments: selectedAttachments,
       knownProjectIds: effectiveDomiSnapshot?.projects.map((project) => project.recordId),
       knownPersonIds: effectiveDomiSnapshot?.people.map((person) => person.recordId),
-      queuedSubmission: routedQueuedSubmission
+      queuedSubmission: routedQueuedSubmission,
+      entityFinalizationMode: execution.entityFinalizationMode,
+      entityExecutionIsolated: execution.isolated
     });
     setActiveRunsByThread((current) => ({ ...current, [targetThread.id]: runId }));
     options.onAccepted?.(routedQueuedSubmission);
 
+    const executionNotice = execution.isolated
+      ? [
+          "本轮实体执行隔离规则：",
+          "- 当前对话的项目／人物绑定只作为只读背景，不是本轮文件写入目标。",
+          "- 本轮运行在隔离任务目录；不得把附件或临时产物写入当前对话已绑定的实体目录。",
+          "- 只有完成写入、按 record_id 回读并输出 DOMI_ENTITY_RESULT_V1 后，客户端才会把本轮附件归入该已验证实体。"
+        ].join("\n")
+      : "";
     const basePrompt = workflowPrompt(
       workflow,
       messageText,
-      domiContextForThread(effectiveDomiSnapshot, targetThread),
+      [
+        domiContextForThread(effectiveDomiSnapshot, targetThread),
+        executionNotice
+      ].filter(Boolean).join("\n\n"),
       useDomiPlugin
     );
     const prompt = selectedAttachments.length
@@ -6976,21 +7467,31 @@ function App() {
         runId,
         prompt,
         requestText: messageText,
-        activeDocumentPath: selectedDocumentLibraryPath || undefined,
+        activeDocumentPath: options.activeDocumentPath,
         attachmentPaths: selectedAttachments.map((attachment) => attachment.path),
-        threadId: targetThread.codexThreadId,
+        // An isolated entity turn must not resume the source task's remote
+        // Codex conversation. Its new remote thread id is stored only on this
+        // assistant turn and never replaces the source task identity.
+        threadId: resumableCodexThreadId(
+          threadsRef.current,
+          sourceThread.id,
+          targetThread.codexThreadId,
+          execution.isolated
+        ),
         workflowId: workflow?.id || (useDomiPlugin ? "domi-analyst" : undefined),
         webSearch: Boolean(workflow?.webSearch),
         model: options.model ?? model,
         reasoningEffort: options.reasoningEffort ?? reasoningEffort,
         serviceTier: options.serviceTier ?? serviceTier,
         background: options.background,
-        workspacePath: targetThread.workspacePath,
-        externalType: targetThread.externalType,
-        externalRecordId: targetThread.externalRecordId,
-        entityUpdatedAt: targetThread.externalType === "project"
-          ? effectiveDomiSnapshot?.projects.find((project) => project.recordId === targetThread.externalRecordId)?.updatedAt
-          : effectiveDomiSnapshot?.people.find((person) => person.recordId === targetThread.externalRecordId)?.updatedAt
+        workspacePath: execution.workspacePath,
+        externalType: execution.externalType,
+        externalRecordId: execution.externalRecordId,
+        entityUpdatedAt: execution.externalType === "project"
+          ? effectiveDomiSnapshot?.projects.find((project) => project.recordId === execution.externalRecordId)?.updatedAt
+          : execution.externalType === "person"
+            ? effectiveDomiSnapshot?.people.find((person) => person.recordId === execution.externalRecordId)?.updatedAt
+            : undefined
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -7002,13 +7503,38 @@ function App() {
         ok: false,
         runId,
         output: "",
-        workspacePath: targetThread.workspacePath || "",
+        workspacePath: execution.workspacePath || targetThread.workspacePath || "",
         error: `无法启动任务：${message}`
       };
     }
 
     if (result.threadId) {
-      patchThread(targetThread.id, { codexThreadId: result.threadId });
+      const latestOwner = threadsRef.current.find((thread) => thread.id === targetThread.id)
+        || targetThread;
+      const conflictingOwners = codexThreadOwnerIds(
+        threadsRef.current,
+        result.threadId
+      ).filter((threadId) => threadId !== targetThread.id);
+      if (latestOwner.quarantinedCodexThreadIds?.includes(result.threadId)) {
+        workbench.reportRendererIssue({
+          kind: "codex-run",
+          message: "Codex 启动结果命中了已隔离的旧对话标识；已拒绝重新绑定。"
+        });
+      } else if (conflictingOwners.length > 0) {
+        workbench.reportRendererIssue({
+          kind: "codex-run",
+          message: "Codex 启动结果命中了另一任务持有的对话标识；已拒绝重新绑定。"
+        });
+      } else if (execution.isolated) {
+        patchMessage(assistantId, { executionCodexThreadId: result.threadId });
+        const context = runContextRef.current.get(runId);
+        if (context) {
+          context.executionCodexThreadId = result.threadId;
+          runContextRef.current.set(runId, context);
+        }
+      } else {
+        patchThread(targetThread.id, { codexThreadId: result.threadId });
+      }
     }
 
     if (result.ok && result.output && !hasNativeWorkbench) {
@@ -7065,48 +7591,82 @@ function App() {
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
+    const sourceThread = activeThread;
+    const sourceThreadId = sourceThread.id;
+    const submittedInput = input;
+    const submittedAttachments = [...attachments];
+    const submittedActiveDocumentPath = selectedDocumentLibraryPath || undefined;
+    const submittedWorkflow = selectedWorkflow;
     if (attachmentImportCount > 0) {
-      setAttachmentError("附件仍在导入，请等待完成后再发送。");
+      setThreadAttachmentError(sourceThreadId, "附件仍在导入，请等待完成后再发送。");
       return;
     }
-    if (!input.trim() && attachments.length === 0) return;
-    const threadHasActiveRun = Boolean(activeRunsByThread[activeThread.id])
-      || [...runContextRef.current.values()].some((context) => context.threadId === activeThread.id);
+    if (!submittedInput.trim() && submittedAttachments.length === 0) return;
+    const threadHasActiveRun = Boolean(activeRunsByThread[sourceThreadId])
+      || [...runContextRef.current.values()].some((context) => context.threadId === sourceThreadId);
     if (threadHasActiveRun) {
-      enqueueSubmission(selectedWorkflow, input);
+      enqueueSubmission(submittedWorkflow, submittedInput, {
+        thread: sourceThread,
+        attachments: submittedAttachments,
+        activeDocumentPath: submittedActiveDocumentPath
+      });
       return;
     }
-    if (submissionStartingThreadIdsRef.current.has(activeThread.id)) return;
-    submissionStartingThreadIdsRef.current.add(activeThread.id);
-    void submitToCodex(selectedWorkflow, input)
+    if (
+      submissionStartingThreadIdsRef.current.has(sourceThreadId)
+      || queueStartingThreadIdsRef.current.has(sourceThreadId)
+    ) return;
+    void submitToCodex(submittedWorkflow, submittedInput, {
+      thread: sourceThread,
+      attachments: submittedAttachments,
+      activeDocumentPath: submittedActiveDocumentPath,
+      useDomiPlugin: domiPluginEnabled,
+      model,
+      reasoningEffort,
+      serviceTier
+    })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
-        setAttachmentError(`本次消息未能发送：${message}`);
+        setThreadAttachmentError(sourceThreadId, `本次消息未能发送：${message}`);
         workbench.reportRendererIssue({
           kind: "codex-run",
           message: `发送前处理失败：${message}`
         });
-      })
-      .finally(() => {
-        submissionStartingThreadIdsRef.current.delete(activeThread.id);
       });
   }
 
-  function enqueueSubmission(workflow?: Workflow, overrideInput?: string) {
+  function enqueueSubmission(
+    workflow?: Workflow,
+    overrideInput?: string,
+    options: {
+      thread?: Thread;
+      attachments?: LocalAttachment[];
+      activeDocumentPath?: string;
+    } = {}
+  ) {
     if (attachmentImportCount > 0) {
       setAttachmentError("附件仍在导入，请等待完成后再加入队列。");
       return;
     }
+    const queueThread = options.thread || activeThread;
+    const queuedAttachments = options.attachments ?? attachments;
+    const queuedActiveDocumentPath = Object.prototype.hasOwnProperty.call(
+      options,
+      "activeDocumentPath"
+    )
+      ? options.activeDocumentPath
+      : selectedDocumentLibraryPath || undefined;
     const rawInput = (overrideInput ?? input).trim();
-    const messageText = rawInput || workflow?.defaultPrompt || (attachments.length ? "请分析所附材料" : "");
+    const messageText = rawInput || workflow?.defaultPrompt || (queuedAttachments.length ? "请分析所附材料" : "");
     if (!messageText) return;
 
     const queuedSubmission: QueuedSubmission = {
       id: createId("queue"),
-      threadId: activeThread.id,
+      threadId: queueThread.id,
       input: messageText,
       workflowId: workflow?.id,
-      attachments: [...attachments],
+      attachments: [...queuedAttachments],
+      activeDocumentPath: queuedActiveDocumentPath,
       useDomiPlugin: domiPluginEnabled,
       model,
       reasoningEffort,
@@ -7117,34 +7677,31 @@ function App() {
     setQueuedSubmissionsByThread((current) => {
       const next = {
         ...current,
-        [activeThread.id]: [...(current[activeThread.id] || []), queuedSubmission]
+        [queueThread.id]: [...(current[queueThread.id] || []), queuedSubmission]
       };
       queuedSubmissionsByThreadRef.current = next;
       return next;
     });
-    clearComposerDraft(activeThread.id);
-    patchThread(activeThread.id, { updatedAt: nowLabel(), lastActiveAt: Date.now() });
+    clearComposerDraft(queueThread.id);
+    patchThread(queueThread.id, { updatedAt: nowLabel(), lastActiveAt: Date.now() });
   }
 
   function removeQueuedSubmission(threadId: string, queuedId: string) {
-    const queued = queuedSubmissionsByThread[threadId]?.find((item) => item.id === queuedId);
+    if (queuedSubmissionRemovalIsBusy(threadId, queuedId)) return;
+    const currentState = queuedSubmissionsByThreadRef.current;
+    const queued = currentState[threadId]?.find((item) => item.id === queuedId);
+    const remaining = (currentState[threadId] || []).filter((item) => item.id !== queuedId);
+    const nextState = remaining.length > 0
+      ? { ...currentState, [threadId]: remaining }
+      : { ...currentState };
+    if (remaining.length === 0) delete nextState[threadId];
+    queuedSubmissionsByThreadRef.current = nextState;
+    setQueuedSubmissionsByThread(nextState);
     if (queued) {
       void Promise.allSettled(
         queued.attachments.map((attachment) => workbench.discardStagedAttachment(attachment.path))
       );
     }
-    setQueuedSubmissionsByThread((current) => {
-      const remaining = (current[threadId] || []).filter((item) => item.id !== queuedId);
-      if (remaining.length > 0) {
-        const next = { ...current, [threadId]: remaining };
-        queuedSubmissionsByThreadRef.current = next;
-        return next;
-      }
-      const next = { ...current };
-      delete next[threadId];
-      queuedSubmissionsByThreadRef.current = next;
-      return next;
-    });
     setPausedQueuedSubmissionIds((current) => {
       if (!current.has(queuedId)) return current;
       const next = new Set(current);
@@ -7345,7 +7902,7 @@ function App() {
       (thread) => isUnusedDraftThread(thread) && !composerDraftHasContent(thread.id)
     );
     if (reusableDraft) {
-      setActiveThreadId(reusableDraft.id);
+      activateThreadNow(reusableDraft.id);
       clearComposerDraft(reusableDraft.id);
       applyNewThreadAgentDefaults();
       setThreadMenuId(null);
@@ -7382,8 +7939,15 @@ function App() {
           }
         ]
       };
-      setThreads((current) => [nextThread, ...current]);
-      setActiveThreadId(nextThread.id);
+      threadsRef.current = [
+        nextThread,
+        ...threadsRef.current.filter((thread) => thread.id !== nextThread.id)
+      ];
+      setThreads((current) => [
+        nextThread,
+        ...current.filter((thread) => thread.id !== nextThread.id)
+      ]);
+      activateThreadNow(nextThread.id);
       clearComposerDraft(nextThread.id);
       applyNewThreadAgentDefaults();
       setThreadMenuId(null);
@@ -7452,18 +8016,40 @@ function App() {
     });
   }
 
+  function activateThreadNow(threadId: string, expectedSelectionIntent?: number) {
+    if (expectedSelectionIntent === undefined) {
+      // Any direct activation (new task, PLAUD, suggestion, entity opening or
+      // deletion fallback) supersedes an older async sidebar selection.
+      threadSelectionIntentRef.current += 1;
+    } else if (expectedSelectionIntent !== threadSelectionIntentRef.current) {
+      return false;
+    }
+    if (!threadsRef.current.some((thread) => thread.id === threadId)) return false;
+    activeThreadIdRef.current = threadId;
+    setActiveThreadId(threadId);
+    return true;
+  }
+
   async function selectThread(threadId: string) {
+    const selectionIntent = ++threadSelectionIntentRef.current;
+    const selectionIsCurrent = () =>
+      selectionIntent === threadSelectionIntentRef.current
+      && threadsRef.current.some((thread) => thread.id === threadId);
+    if (!selectionIsCurrent()) return;
     if (threadId !== activeThreadIdRef.current && documentPreviewOriginRef.current) {
       if (markdownDocumentRef.current || markdownRequestLabel) {
         await closeMarkdown({ restoreOrigin: false });
+        if (!selectionIsCurrent()) return;
         if (markdownDocumentRef.current) return;
       }
       if (pdfDocumentRef.current || pdfRequestLabel) closePdf({ restoreOrigin: false });
       documentPreviewOriginRef.current = null;
     }
+    if (!selectionIsCurrent()) return;
     rememberActiveChatScrollPosition();
     if (!await navigateWorkspace("conversation")) return;
-    setActiveThreadId(threadId);
+    if (!selectionIsCurrent()) return;
+    if (!activateThreadNow(threadId, selectionIntent)) return;
     setDocumentLibrarySidebarExpanded(false);
     setThreadMenuId(null);
     setComposerDragActive(false);
@@ -7490,12 +8076,14 @@ function App() {
   }
 
   async function deleteThread(thread: Thread) {
-    if (threads.length <= 1 || Boolean(activeRunsByThread[thread.id])) {
+    const threadId = thread.id;
+    const initialTarget = threadsRef.current.find((candidate) => candidate.id === threadId);
+    if (!initialTarget || threadsRef.current.length <= 1 || threadDeletionIsBusy(threadId)) {
       return;
     }
     const confirmed = await requestConfirmation({
       title: "删除这段对话？",
-      message: `“${thread.title}”将从最近对话中移除。`,
+      message: `“${initialTarget.title}”将从最近对话中移除。`,
       detail: "项目目录、研究文档和其他材料不会被删除。",
       confirmLabel: "删除对话",
       tone: "danger"
@@ -7503,31 +8091,49 @@ function App() {
     if (!confirmed) {
       return;
     }
+    // The confirmation dialog yields to the event loop. A send preflight or
+    // queue pump may have claimed this task while it was open, so re-check the
+    // guards before removing its conversation, draft or staged attachments.
+    const latestThreads = threadsRef.current;
+    const latestTarget = latestThreads.find((candidate) => candidate.id === threadId);
+    if (!latestTarget || latestThreads.length <= 1 || threadDeletionIsBusy(threadId)) {
+      return;
+    }
+    const latestDraft = composerDraftsByThreadRef.current[threadId];
+    const latestQueue = queuedSubmissionsByThreadRef.current[threadId] || [];
+    const queuedIds = new Set(latestQueue.map((item) => item.id));
     const stagedPaths = [...new Set([
-      ...(composerDraftsByThread[thread.id]?.attachments || []),
-      ...(queuedSubmissionsByThread[thread.id] || []).flatMap((item) => item.attachments)
+      ...(latestDraft?.attachments || []),
+      ...latestQueue.flatMap((item) => item.attachments)
     ].map((attachment) => attachment.path))];
     void Promise.allSettled(
       stagedPaths.map((filePath) => workbench.discardStagedAttachment(filePath))
     );
-    const remaining = threads.filter((item) => item.id !== thread.id);
-    setThreads(remaining);
+    const remainingAfterDeletion = latestThreads.filter((item) => item.id !== threadId);
+    threadsRef.current = remainingAfterDeletion;
+    setThreads(remainingAfterDeletion);
+    if (activeThreadIdRef.current === threadId) {
+      const fallbackThreadId = remainingAfterDeletion[0]?.id;
+      if (fallbackThreadId) activateThreadNow(fallbackThreadId);
+    }
     setQueuedSubmissionsByThread((current) => {
-      if (!current[thread.id]) return current;
+      if (!current[threadId]) return current;
       const next = { ...current };
-      delete next[thread.id];
+      delete next[threadId];
       queuedSubmissionsByThreadRef.current = next;
       return next;
     });
     setPausedQueuedSubmissionIds((current) => {
-      const queuedIds = new Set((queuedSubmissionsByThread[thread.id] || []).map((item) => item.id));
       if (![...queuedIds].some((id) => current.has(id))) return current;
       return new Set([...current].filter((id) => !queuedIds.has(id)));
     });
-    clearComposerDraft(thread.id);
-    if (activeThreadId === thread.id) {
-      setActiveThreadId(remaining[0].id);
-    }
+    setComposerDraftsByThread((current) => {
+      if (!current[threadId]) return current;
+      const next = { ...current };
+      delete next[threadId];
+      composerDraftsByThreadRef.current = next;
+      return next;
+    });
     setThreadMenuId(null);
   }
 
@@ -8981,6 +9587,7 @@ function App() {
                       <button
                         type="button"
                         onClick={() => removeQueuedSubmission(submission.threadId, submission.id)}
+                        disabled={queuedSubmissionRemovalIsBusy(submission.threadId, submission.id)}
                         title="从队列移除"
                         aria-label={`从队列移除 ${submission.input}`}
                       >
@@ -10700,6 +11307,7 @@ function App() {
                   <button
                     type="button"
                     onClick={() => removeQueuedSubmission(activeThread.id, queued.id)}
+                    disabled={queuedSubmissionRemovalIsBusy(activeThread.id, queued.id)}
                     title="取消这条待执行消息"
                     aria-label="取消这条待执行消息"
                   >
@@ -11269,7 +11877,7 @@ function App() {
                       className="danger"
                       type="button"
                       onClick={() => void deleteThread(thread)}
-                      disabled={threads.length <= 1 || Boolean(activeRunsByThread[thread.id])}
+                      disabled={threads.length <= 1 || threadDeletionIsBusy(thread.id)}
                     >
                       <Trash2 size={13} />
                       删除对话

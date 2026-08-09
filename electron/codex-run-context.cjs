@@ -24,6 +24,103 @@ function partitionCodexRuns(runs = []) {
   return partition;
 }
 
+function firstCodexIdentifier(...values) {
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function normalizeCodexRoutingParams(params = {}) {
+  const source = params && typeof params === "object" ? params : {};
+  const threadId = firstCodexIdentifier(
+    source.threadId,
+    source.thread?.id,
+    source.turn?.threadId,
+    source.item?.threadId,
+    source.request?.threadId
+  );
+  const turnId = firstCodexIdentifier(
+    source.turnId,
+    source.turn?.id,
+    source.item?.turnId,
+    source.item?.turn?.id,
+    source.request?.turnId
+  );
+  return {
+    ...source,
+    threadId,
+    turnId
+  };
+}
+
+function resolveCodexActiveRun(runs = [], params = {}) {
+  const candidates = [...runs].filter(Boolean);
+  const route = normalizeCodexRoutingParams(params);
+
+  if (route.turnId) {
+    const exactTurnCandidates = candidates.filter((run) => run.turnId === route.turnId);
+    if (exactTurnCandidates.length === 1) {
+      return {
+        run: exactTurnCandidates[0],
+        matchedBy: "turnId",
+        ambiguousCandidates: [],
+        conflictingCandidates: [],
+        rejectionReason: ""
+      };
+    }
+    if (exactTurnCandidates.length > 1) {
+      return {
+        run: null,
+        matchedBy: null,
+        ambiguousCandidates: exactTurnCandidates,
+        conflictingCandidates: [],
+        rejectionReason: "duplicate-turn-id"
+      };
+    }
+  }
+
+  if (!route.threadId) {
+    return {
+      run: null,
+      matchedBy: null,
+      ambiguousCandidates: [],
+      conflictingCandidates: [],
+      rejectionReason: ""
+    };
+  }
+
+  const threadCandidates = candidates.filter((run) => run.threadId === route.threadId);
+  if (threadCandidates.length === 1) {
+    const candidate = threadCandidates[0];
+    if (route.turnId && candidate.turnId && candidate.turnId !== route.turnId) {
+      return {
+        run: null,
+        matchedBy: null,
+        ambiguousCandidates: [],
+        conflictingCandidates: [candidate],
+        rejectionReason: "turn-id-conflict"
+      };
+    }
+    return {
+      run: candidate,
+      matchedBy: "threadId",
+      ambiguousCandidates: [],
+      conflictingCandidates: [],
+      rejectionReason: ""
+    };
+  }
+
+  return {
+    run: null,
+    matchedBy: null,
+    ambiguousCandidates: threadCandidates.length > 1 ? threadCandidates : [],
+    conflictingCandidates: [],
+    rejectionReason: threadCandidates.length > 1 ? "duplicate-thread-id" : ""
+  };
+}
+
 function runtimeAdditionalContext(runtimeContext) {
   const value = String(runtimeContext || "").trim();
   if (!value) return undefined;
@@ -120,8 +217,10 @@ module.exports = {
   codexRunExecutionMode,
   compatibilityInput,
   codexTurnContext,
+  normalizeCodexRoutingParams,
   partitionCodexRuns,
   requestCodexTurn,
+  resolveCodexActiveRun,
   runtimeAdditionalContext,
   threadPersistenceOptions
 };

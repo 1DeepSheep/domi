@@ -246,7 +246,7 @@ input.on("line", (line) => {
       method: "item/tool/requestUserInput",
       params: {
         threadId: "thread-1",
-        turnId: "turn-1",
+        item: { turnId: "turn-1" },
         itemId: "item-1",
         isBlocking: true,
         autoResolutionMs: null,
@@ -290,6 +290,7 @@ input.on("line", (line) => {
     const resultPromise = server.request("begin");
     const request = await requestReceived;
     assert.equal(request.id, "ask-1");
+    assert.equal(request.params.turnId, "turn-1");
     assert.equal(request.params.questions[0].isSecret, false);
     assert.equal(server.pendingUserInputRequests().length, 1);
 

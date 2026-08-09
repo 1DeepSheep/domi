@@ -7,6 +7,7 @@ const {
   codexClientCapabilities,
   isExperimentalApiInitializationError
 } = require("./codex-protocol.cjs");
+const { normalizeCodexRoutingParams } = require("./codex-run-context.cjs");
 
 function codexEnvironment(extra = {}) {
   const home = os.homedir();
@@ -434,9 +435,10 @@ class CodexAppServer {
 
   #normalizeUserInputRequest(params) {
     if (!params || typeof params !== "object") return null;
-    const threadId = String(params.threadId || "").trim();
-    const turnId = String(params.turnId || "").trim();
-    const itemId = String(params.itemId || "").trim();
+    const route = normalizeCodexRoutingParams(params);
+    const threadId = route.threadId;
+    const turnId = route.turnId;
+    const itemId = String(params.itemId || params.item?.id || "").trim();
     if (!threadId || !turnId || !itemId || !Array.isArray(params.questions)) return null;
     const questionIds = new Set();
     const questions = [];
