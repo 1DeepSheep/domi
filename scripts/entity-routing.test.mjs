@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   automaticallyRoutedProject,
+  entityCandidatesRequireIsolatedExecution,
+  entityFinalizationModeForSourceConversation,
+  entityTargetMatchesSourceConversation,
   mentionedProjectCandidates,
   normalizedEntityMention,
   parseDomiEntityResult,
-  projectMentionMatches
+  projectMentionMatches,
+  shouldBindProjectToSourceConversation
 } from "../src/entity-routing.ts";
 
 const projects = [
@@ -108,6 +112,111 @@ test("project intake may route one explicit strong project but otherwise stays n
     ),
     undefined
   );
+});
+
+test("project context binds only the conversation where the user pressed Send", () => {
+  assert.equal(shouldBindProjectToSourceConversation({}, "project-b"), true);
+  assert.equal(
+    shouldBindProjectToSourceConversation(
+      { externalType: "project", externalRecordId: "project-b" },
+      "project-b"
+    ),
+    true
+  );
+  assert.equal(
+    shouldBindProjectToSourceConversation(
+      { externalType: "project", externalRecordId: "project-a" },
+      "project-b"
+    ),
+    false
+  );
+  assert.equal(
+    shouldBindProjectToSourceConversation(
+      { externalType: "person", externalRecordId: "person-a" },
+      "project-b"
+    ),
+    false
+  );
+});
+
+test("verified results archive without rebinding an already canonical conversation", () => {
+  assert.equal(entityFinalizationModeForSourceConversation({}), "bind-source");
+  assert.equal(
+    entityFinalizationModeForSourceConversation({
+      externalType: "project",
+      externalRecordId: "project-a"
+    }),
+    "archive-only"
+  );
+  assert.equal(
+    entityFinalizationModeForSourceConversation({
+      externalType: "person",
+      externalRecordId: "person-a"
+    }),
+    "archive-only"
+  );
+});
+
+test("entity-producing work may run directly only for the exact canonical source", () => {
+  const projectA = { externalType: "project", externalRecordId: "project-a" };
+  assert.equal(
+    entityTargetMatchesSourceConversation(projectA, {
+      entityType: "project",
+      recordId: "project-a"
+    }),
+    true
+  );
+  assert.equal(
+    entityTargetMatchesSourceConversation(projectA, {
+      entityType: "project",
+      recordId: "project-b"
+    }),
+    false
+  );
+  assert.equal(
+    entityTargetMatchesSourceConversation(projectA, {
+      entityType: "person",
+      recordId: "person-a"
+    }),
+    false
+  );
+  assert.equal(
+    entityTargetMatchesSourceConversation({}, {
+      entityType: "project",
+      recordId: "project-a"
+    }),
+    false
+  );
+  assert.equal(entityTargetMatchesSourceConversation(projectA, undefined), false);
+});
+
+test("plain canonical work isolates only when every explicit entity candidate is elsewhere", () => {
+  const projectA = { externalType: "project", externalRecordId: "project-a" };
+  assert.equal(
+    entityCandidatesRequireIsolatedExecution(projectA, [
+      { entityType: "project", recordId: "project-b" },
+      { entityType: "project", recordId: "project-c" }
+    ]),
+    true,
+    "multiple other projects must not fall back to project A"
+  );
+  assert.equal(
+    entityCandidatesRequireIsolatedExecution(projectA, [
+      { entityType: "person", recordId: "person-b" },
+      { entityType: "project", recordId: "project-c" }
+    ]),
+    true,
+    "cross-type ambiguity must remain isolated"
+  );
+  assert.equal(
+    entityCandidatesRequireIsolatedExecution(projectA, [
+      { entityType: "project", recordId: "project-a" },
+      { entityType: "project", recordId: "project-b" }
+    ]),
+    false,
+    "mentioning the canonical source preserves current-task comparison semantics"
+  );
+  assert.equal(entityCandidatesRequireIsolatedExecution(projectA, []), false);
 });
 
 test("project matching never joins words across punctuation boundaries", () => {

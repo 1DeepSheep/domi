@@ -36,8 +36,10 @@ const { classifyCodexTurnStatus } = require("./codex-turn-status.cjs");
 const { isSelectedCodexConnectionReady } = require("./codex-protocol.cjs");
 const {
   codexRunExecutionMode,
+  normalizeCodexRoutingParams,
   partitionCodexRuns,
   requestCodexTurn,
+  resolveCodexActiveRun,
   threadPersistenceOptions
 } = require("./codex-run-context.cjs");
 const {
@@ -1772,6 +1774,7 @@ function publishCodexUserInputRequest(run, request) {
 }
 
 function handleCodexUserInputRequest({ id, params }) {
+  params = normalizeCodexRoutingParams(params);
   const run = findActiveRun(params);
   if (!run || run.finished) {
     codexClient?.cancelUserInput(id, "对应的 domi 任务已经结束。");
@@ -1797,6 +1800,7 @@ function handleCodexUserInputRequest({ id, params }) {
 }
 
 function handleCodexUserInputRequestClosed({ id, params, reason }) {
+  params = normalizeCodexRoutingParams(params);
   const key = codexUserInputRequestKey(id);
   const run = findActiveRun(params);
   if (!run) return;
@@ -1815,16 +1819,36 @@ function handleCodexUserInputRequestClosed({ id, params, reason }) {
   }
 }
 
-function findActiveRun(params) {
-  for (const run of activeRuns.values()) {
-    if (params.turnId && run.turnId === params.turnId) {
-      return run;
-    }
-    if (params.threadId && run.threadId === params.threadId) {
-      return run;
-    }
+function findActiveRun(params = {}) {
+  params = normalizeCodexRoutingParams(params);
+  const resolution = resolveCodexActiveRun(activeRuns.values(), params);
+  if (resolution.ambiguousCandidates.length > 0) {
+    appendRuntimeLog("codex-active-run-routing-ambiguous", {
+      threadId: boundedRuntimeText(params.threadId, 240),
+      turnId: boundedRuntimeText(params.turnId, 240),
+      candidateCount: resolution.ambiguousCandidates.length,
+      candidateRunIds: resolution.ambiguousCandidates
+        .slice(0, 20)
+        .map((run) => boundedRuntimeText(run.runId, 240)),
+      candidateTurnIds: resolution.ambiguousCandidates
+        .slice(0, 20)
+        .map((run) => boundedRuntimeText(run.turnId, 240))
+    });
   }
-  return null;
+  if (resolution.conflictingCandidates.length > 0) {
+    appendRuntimeLog("codex-active-run-routing-conflict", {
+      reason: boundedRuntimeText(resolution.rejectionReason, 120),
+      threadId: boundedRuntimeText(params.threadId, 240),
+      turnId: boundedRuntimeText(params.turnId, 240),
+      candidateRunIds: resolution.conflictingCandidates
+        .slice(0, 20)
+        .map((run) => boundedRuntimeText(run.runId, 240)),
+      candidateTurnIds: resolution.conflictingCandidates
+        .slice(0, 20)
+        .map((run) => boundedRuntimeText(run.turnId, 240))
+    });
+  }
+  return resolution.run;
 }
 
 function textFromReasoning(item) {
@@ -2065,6 +2089,7 @@ function prepareCodexConnectionMaintenance(blockedError) {
 }
 
 function handleCodexNotification(method, params) {
+  params = normalizeCodexRoutingParams(params);
   const run = findActiveRun(params);
   if (!run) {
     return;
@@ -2074,7 +2099,7 @@ function handleCodexNotification(method, params) {
   armRunIdleTimeout(run);
 
   if (method === "turn/started") {
-    run.turnId = params.turn?.id || run.turnId;
+    run.turnId = params.turnId || run.turnId;
     publishCodexEvent(run.sender, run.runId, {
       type: "started",
       threadId: run.threadId,
@@ -2143,7 +2168,7 @@ function handleCodexNotification(method, params) {
   }
 
   if (method === "turn/completed") {
-    run.turnId = params.turn?.id || run.turnId;
+    run.turnId = params.turnId || run.turnId;
     const status = classifyCodexTurnStatus(params.turn?.status);
     if (run.stopRequested) {
       finishRun(run, "stopped");
@@ -3100,7 +3125,28 @@ async function recoverCodexThread(threadId) {
     return { ok: false, threadId: "", status: "unknown", error: "Codex 对话 ID 不能为空。" };
   }
 
-  const activeRun = [...activeRuns.values()].find((run) => run.threadId === normalizedThreadId);
+  const activeResolution = resolveCodexActiveRun(activeRuns.values(), {
+    threadId: normalizedThreadId
+  });
+  if (activeResolution.ambiguousCandidates.length > 0) {
+    appendRuntimeLog("codex-thread-recovery-ambiguous", {
+      threadId: boundedRuntimeText(normalizedThreadId, 240),
+      candidateCount: activeResolution.ambiguousCandidates.length,
+      candidateRunIds: activeResolution.ambiguousCandidates
+        .slice(0, 20)
+        .map((run) => boundedRuntimeText(run.runId, 240)),
+      candidateTurnIds: activeResolution.ambiguousCandidates
+        .slice(0, 20)
+        .map((run) => boundedRuntimeText(run.turnId, 240))
+    });
+    return {
+      ok: false,
+      threadId: normalizedThreadId,
+      status: "unknown",
+      error: "检测到多个任务共用同一个 Codex 对话，已停止自动恢复以避免把消息绑定到错误任务。"
+    };
+  }
+  const activeRun = activeResolution.run;
   try {
     const response = await getCodexClient().request("thread/read", {
       threadId: normalizedThreadId,
