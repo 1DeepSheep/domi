@@ -112,6 +112,63 @@ export function automaticallyRoutedProject<T extends EntityRoutingProject>(
   return confident.length === 1 ? confident[0].project : undefined;
 }
 
+export function shouldBindProjectToSourceConversation(
+  source: { externalType?: "project" | "person"; externalRecordId?: string },
+  projectRecordId: string
+) {
+  // Project recognition may add canonical storage context to the task where
+  // the user pressed Send. It must never reassign an already-bound task to a
+  // different entity; nor should callers interpret this decision as permission
+  // to reuse another conversation that happens to share the same project.
+  return !source.externalType
+    || (source.externalType === "project" && source.externalRecordId === projectRecordId);
+}
+
+export function entityTargetMatchesSourceConversation(
+  source: { externalType?: "project" | "person"; externalRecordId?: string },
+  target: { entityType: "project" | "person"; recordId: string } | undefined
+) {
+  // Entity-producing workflows may write before their final receipt is
+  // available. Direct execution is safe only when one explicit target was
+  // resolved and it is exactly the canonical entity already represented by
+  // this conversation. An unbound source is not proof of a matching target.
+  return Boolean(
+    target
+    && source.externalType
+    && source.externalRecordId
+    && source.externalType === target.entityType
+    && source.externalRecordId === target.recordId
+  );
+}
+
+export function entityCandidatesRequireIsolatedExecution(
+  source: { externalType?: "project" | "person"; externalRecordId?: string },
+  candidates: Array<{ entityType: "project" | "person"; recordId: string }>
+) {
+  // Free-form text may mention several entities, so the deterministic single
+  // target can be undefined even though every raw candidate conflicts with the
+  // canonical source. In that case attachments must stay staged. If the source
+  // itself is one of the candidates, preserve the current-task interpretation:
+  // other names may simply be competitors, customers or comparison subjects.
+  return Boolean(
+    source.externalType
+    && candidates.length > 0
+    && !candidates.some((candidate) =>
+      entityTargetMatchesSourceConversation(source, candidate)
+    )
+  );
+}
+
+export function entityFinalizationModeForSourceConversation(
+  source: { externalType?: "project" | "person"; externalRecordId?: string }
+) {
+  // An unbound conversation may adopt the verified entity after a successful
+  // intake. A conversation already serving as a canonical project/person view
+  // must keep that identity; a different verified result may receive this
+  // turn's attachments, but may not rebind the conversation itself.
+  return source.externalType ? "archive-only" as const : "bind-source" as const;
+}
+
 export function parseDomiEntityResult(output: string): DomiEntityResult | null {
   const text = String(output || "");
   const marker = text.match(

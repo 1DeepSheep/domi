@@ -365,10 +365,56 @@ assert.doesNotMatch(
   /requestComposerChoice|ComposerChoiceDialog|window\.prompt/,
   "Internal project routing must not interrupt sending with a project-choice prompt or dialog."
 );
+const projectBindingBody = app.match(
+  /async function bindThreadToMentionedProject[\s\S]*?\n  async function submitToCodex/
+)?.[0] || "";
+assert.match(
+  projectBindingBody,
+  /const entityResultWorkflow = Boolean\([\s\S]*?ENTITY_RESULT_WORKFLOW_IDS\.has\(workflow\.id\)[\s\S]*?entityResultWorkflow && \(!useDomiPlugin \|\| !projectSnapshot\)[\s\S]*?return isolateEntityExecution[\s\S]*?const explicitEntityTargets =[\s\S]*?entityResultWorkflow[\s\S]*?!entityTargetMatchesSourceConversation\(thread, explicitEntityTarget\)[\s\S]*?return isolateEntityExecution/,
+  "Every entity-producing workflow must keep attachments staged unless one explicit result entity is proven to equal the source."
+);
 assert.match(
   app,
-  /needsNeutralTarget[\s\S]*?workflow\?\.id === "project-intake"[\s\S]*?prepareNeutralProjectTarget[\s\S]*?commitAttachmentsToEntity/,
-  "A new project intake must run through neutral staging automatically and bind after a verified result."
+  /const ENTITY_RESULT_WORKFLOW_IDS = new Set\(\[[\s\S]*?"project-intake"[\s\S]*?"people-intake"[\s\S]*?"domi-router"[\s\S]*?"investment-mgmt"/,
+  "Project/person intake, router and investment management must all share the entity isolation boundary."
+);
+assert.match(
+  projectBindingBody,
+  /const rawExplicitEntityCandidates = \[[\s\S]*?explicitProjectCandidates\.map[\s\S]*?explicitPersonCandidates\.map[\s\S]*?!workflow[\s\S]*?entityCandidatesRequireIsolatedExecution\(thread, rawExplicitEntityCandidates\)[\s\S]*?return isolateEntityExecution\("无法准备隔离跨实体任务。"\)/,
+  "Plain text from canonical A must isolate whenever every raw explicit entity candidate is outside A, including B+C and cross-type ambiguity."
+);
+assert.match(
+  projectBindingBody,
+  /if \(!workflowAllowsProjectRouting\(workflow\)\) \{[\s\S]*?entityResultWorkflow[\s\S]*?commitAttachmentsToEntity\(thread, selectedAttachments\)/,
+  "After the mismatch guard, a proven same-person or same-project entity workflow may use the source workspace directly."
+);
+assert.match(
+  projectBindingBody,
+  /if \(!shouldBindProjectToSourceConversation\(thread, project\.recordId\)\) \{[\s\S]*?prepareIsolatedEntityExecution\(thread\)[\s\S]*?attachments: selectedAttachments,[\s\S]*?execution: isolated\.execution/,
+  "A project that conflicts with the source conversation must use isolated execution instead of rebinding that conversation."
+);
+assert.doesNotMatch(
+  projectBindingBody,
+  /setActiveThreadId|threadsRef\.current\.find|setThreads\(\(current\) => \[targetThread/,
+  "Automatic project binding must never reuse another conversation or change the visible task."
+);
+assert.match(
+  projectBindingBody,
+  /shouldBindProjectToSourceConversation\(thread, project\.recordId\)[\s\S]*?const targetThread: Thread = \{ \.\.\.thread, \.\.\.patch \}[\s\S]*?patchThread\(thread\.id, patch\)/,
+  "A recognized project may bind only the source conversation to the canonical project workspace."
+);
+const isolatedExecutionBody = app.match(
+  /async function prepareIsolatedEntityExecution[\s\S]*?\n  async function bindThreadToMentionedProject/
+)?.[0] || "";
+assert.match(
+  isolatedExecutionBody,
+  /createProjectWorkspace\([\s\S]*?workspacePath: workspace\.workspacePath[\s\S]*?entityFinalizationModeForSourceConversation\(thread\)[\s\S]*?isolated: true/,
+  "Neutral entity execution must allocate a unique workspace and preserve whether the source conversation may ever bind."
+);
+assert.doesNotMatch(
+  isolatedExecutionBody,
+  /setActiveThreadId|patchThread|commitAttachmentsToEntity|externalRecordId:/,
+  "Preparing a neutral execution context must not navigate, rebind a task, or commit staged attachments."
 );
 assert.doesNotMatch(
   app,
@@ -377,7 +423,7 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /submitToCodex\(selectedWorkflow, input\)[\s\S]*?\.catch\(\(error\)[\s\S]*?本次消息未能发送/,
+  /const sourceThread = activeThread[\s\S]*?submitToCodex\(submittedWorkflow, submittedInput, \{[\s\S]*?thread: sourceThread[\s\S]*?\.catch\(\(error\)[\s\S]*?setThreadAttachmentError\(sourceThreadId, `本次消息未能发送/,
   "Unexpected submission preflight failures must be visible and retryable instead of becoming unhandled rejections."
 );
 assert.match(
@@ -1260,7 +1306,7 @@ assert.match(
 );
 assert.match(
   app,
-  /reboundRunId = result\.runId[\s\S]*?runContextRef\.current\.set\(reboundRunId[\s\S]*?await workbench\.bindCodexRun\(reboundRunId\)[\s\S]*?recoverCodexThread\(thread\.codexThreadId\)/,
+  /reboundRunId = result\.runId[\s\S]*?runContextRef\.current\.set\(reboundRunId[\s\S]*?await workbench\.bindCodexRun\(reboundRunId\)[\s\S]*?recoverCodexThread\(recoveryThreadId\)/,
   "The renderer must register recovery context before binding live events and reconcile a bind race."
 );
 assert.match(
@@ -1298,10 +1344,81 @@ const deleteThreadStart = app.indexOf("function deleteThread(thread: Thread)");
 const deleteThreadEnd = app.indexOf("function toggleSection", deleteThreadStart);
 assert.ok(deleteThreadStart >= 0 && deleteThreadEnd > deleteThreadStart);
 const deleteThreadBody = app.slice(deleteThreadStart, deleteThreadEnd);
+const selectThreadStart = app.indexOf("async function selectThread(threadId: string)");
+const selectThreadEnd = app.indexOf("function startThreadRename", selectThreadStart);
+assert.ok(selectThreadStart >= 0 && selectThreadEnd > selectThreadStart);
+const selectThreadBody = app.slice(selectThreadStart, selectThreadEnd);
+const activateThreadStart = app.indexOf("function activateThreadNow(");
+const activateThreadEnd = app.indexOf("async function selectThread", activateThreadStart);
+assert.ok(activateThreadStart >= 0 && activateThreadEnd > activateThreadStart);
+const activateThreadBody = app.slice(activateThreadStart, activateThreadEnd);
+assert.match(
+  activateThreadBody,
+  /expectedSelectionIntent === undefined[\s\S]*?threadSelectionIntentRef\.current \+= 1[\s\S]*?expectedSelectionIntent !== threadSelectionIntentRef\.current[\s\S]*?threadsRef\.current\.some\([\s\S]*?activeThreadIdRef\.current = threadId[\s\S]*?setActiveThreadId\(threadId\)/,
+  "Every direct activation must invalidate older async selections, verify existence and synchronously update the active-task ref."
+);
+assert.equal(
+  (app.match(/setActiveThreadId\(/g) || []).length,
+  1,
+  "All user and programmatic task switches must go through the shared activation intent gate."
+);
+assert.match(
+  selectThreadBody,
+  /const selectionIntent = \+\+threadSelectionIntentRef\.current[\s\S]*?selectionIntent === threadSelectionIntentRef\.current[\s\S]*?threadsRef\.current\.some\(\(thread\) => thread\.id === threadId\)/,
+  "Conversation selection must be owned by the newest intent and require a still-existing target."
+);
+assert.match(
+  selectThreadBody,
+  /await closeMarkdown\([\s\S]*?if \(!selectionIsCurrent\(\)\) return;[\s\S]*?await navigateWorkspace\("conversation"\)[\s\S]*?if \(!selectionIsCurrent\(\)\) return;[\s\S]*?activateThreadNow\(threadId, selectionIntent\)/,
+  "Every asynchronous selection boundary must reject stale B→C completions before activating a task."
+);
+assert.match(
+  app,
+  /threadsRef\.current = \[[\s\S]*?nextThread,[\s\S]*?setThreads\(\(current\) => \[[\s\S]*?nextThread,[\s\S]*?activateThreadNow\(nextThread\.id\)/,
+  "A newly created C must be registered before activation so it invalidates a slower pending selection of B."
+);
 assert.doesNotMatch(
   deleteThreadBody,
   /thread\.messages|message\.attachments/,
   "Deleting a conversation must not delete attachments referenced by historical messages."
+);
+assert.ok(
+  (deleteThreadBody.match(/threadDeletionIsBusy\(threadId\)/g) || []).length >= 2,
+  "Deleting a conversation must check foreground and queue startup guards both before and after confirmation."
+);
+assert.match(
+  deleteThreadBody,
+  /const latestThreads = threadsRef\.current[\s\S]*?latestThreads\.find\([\s\S]*?composerDraftsByThreadRef\.current\[threadId\][\s\S]*?queuedSubmissionsByThreadRef\.current\[threadId\]/,
+  "After confirmation, deletion must re-read the live target, draft and queue instead of stale render snapshots."
+);
+assert.match(
+  deleteThreadBody,
+  /const remainingAfterDeletion = latestThreads\.filter\([\s\S]*?threadsRef\.current = remainingAfterDeletion[\s\S]*?setThreads\(remainingAfterDeletion\)[\s\S]*?activeThreadIdRef\.current === threadId[\s\S]*?activateThreadNow\(fallbackThreadId\)/,
+  "Conversation deletion must preserve tasks created during confirmation and repair the active task outside the thread-state update."
+);
+assert.match(
+  deleteThreadBody,
+  /setComposerDraftsByThread\(\(current\) => \{[\s\S]*?delete next\[threadId\][\s\S]*?composerDraftsByThreadRef\.current = next/,
+  "Deletion must remove only the confirmed task's latest draft and synchronize its live ref."
+);
+assert.match(
+  app,
+  /disabled=\{threads\.length <= 1 \|\| threadDeletionIsBusy\(thread\.id\)\}/,
+  "The conversation menu must visibly disable deletion while send preflight or queue startup owns the task."
+);
+assert.match(
+  app,
+  /isThreadSubmissionBusy\([\s\S]*?submissionStartingThreadIdsRef\.current,[\s\S]*?queueStartingThreadIdsRef\.current,[\s\S]*?settlingThreadIdsRef\.current/,
+  "Conversation deletion must remain disabled while completed output and entity attachments are settling."
+);
+const commitAttachmentsStart = app.indexOf("async function commitAttachmentsToEntity");
+const commitAttachmentsEnd = app.indexOf("async function bindThreadToMentionedProject", commitAttachmentsStart);
+assert.ok(commitAttachmentsStart >= 0 && commitAttachmentsEnd > commitAttachmentsStart);
+const commitAttachmentsBody = app.slice(commitAttachmentsStart, commitAttachmentsEnd);
+assert.match(
+  commitAttachmentsBody,
+  /setComposerDraftsByThread[\s\S]*?reconcileCommittedAttachmentPaths\([\s\S]*?draft\.attachments,[\s\S]*?pending,[\s\S]*?imported\.files/,
+  "Committed entity attachments must atomically replace matching staging paths in the live source draft."
 );
 assert.match(
   app,
@@ -1325,8 +1442,165 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /prepareNeutralProjectTarget[\s\S]*?needsNeutralTarget[\s\S]*?workflow\?\.id === "project-intake"[\s\S]*?Boolean\(thread\.externalType\)[\s\S]*?prepareNeutralProjectTarget/,
-  "A new project intake launched from an existing entity must automatically use neutral staging instead of prompting or polluting the old entity."
+  /const sourceThread = options\.thread \|\| activeThread[\s\S]*?threadsRef\.current\.find\(\(thread\) => thread\.id === sourceThread\.id\)[\s\S]*?if \(!latestSourceThread\)[\s\S]*?原任务已被删除[\s\S]*?targetThread\.id !== sourceThread\.id[\s\S]*?发送前处理试图改变任务归属/,
+  "Every send must retain an immutable source conversation and fail closed if preflight attempts to change it."
+);
+assert.match(
+  app,
+  /selectedAttachments = binding\.attachments[\s\S]*?!threadsRef\.current\.some\(\(thread\) => thread\.id === sourceThread\.id\)[\s\S]*?原任务已被删除[\s\S]*?const routedQueuedSubmission/,
+  "A send must revalidate its source task after asynchronous binding and before queue mutation, message append or Codex launch."
+);
+assert.doesNotMatch(
+  app,
+  /sourceThreadWasPersisted/,
+  "Programmatic same-tick submissions must not permanently bypass source-task existence checks."
+);
+assert.match(
+  app,
+  /async function submitToCodex\([\s\S]*?markThreadSubmissionStart\(sourceThread\.id, submissionSource, true\)[\s\S]*?await submitToCodexInternal[\s\S]*?finally \{[\s\S]*?markThreadSubmissionStart\(sourceThread\.id, submissionSource, false\)/,
+  "One wrapper must own the complete preflight busy lifecycle for UI, queue and programmatic submissions."
+);
+assert.equal(
+  (app.match(/markThreadSubmissionStart\(sourceThread\.id, submissionSource,/g) || []).length,
+  2,
+  "Callers must not double-mark the wrapper-owned preflight lock."
+);
+assert.match(
+  app,
+  /threadsRef\.current = \[[\s\S]*?targetThread as Thread[\s\S]*?submitToCodex\(workflow, plaudNotesWorkflowRequest/,
+  "A newly created PLAUD task must be synchronously registered before same-tick submission."
+);
+assert.match(
+  app,
+  /threadsRef\.current = \[[\s\S]*?nextThread[\s\S]*?const result = await submitToCodex\(workflow, suggestion\.prompt/,
+  "A newly created suggested task must be synchronously registered before same-tick submission."
+);
+assert.match(
+  app,
+  /submitToCodex\(workflow, plaudNotesWorkflowRequest[\s\S]*?activeDocumentPath: undefined[\s\S]*?submitToCodex\(workflow, suggestion\.prompt[\s\S]*?activeDocumentPath: undefined/,
+  "Programmatic tasks must not inherit a document currently open in another task."
+);
+assert.match(
+  app,
+  /if \(!codexRecoveryReady\)[\s\S]*?任务恢复检查尚未完成[\s\S]*?await submitToCodexInternal/,
+  "Foreground and programmatic sends must fail closed until ownership recovery has completed."
+);
+assert.match(
+  app,
+  /function threadDeletionIsBusy\(threadId: string\) \{[\s\S]*?if \(!codexRecoveryReady\) return true/,
+  "Tasks must not be deletable until restart ownership recovery has completed."
+);
+assert.match(
+  app,
+  /function queuedSubmissionRemovalIsBusy[\s\S]*?queueStartingThreadIdsRef\.current\.has\(threadId\)[\s\S]*?\?\.\[0\]\?\.id === queuedId[\s\S]*?function removeQueuedSubmission[\s\S]*?if \(queuedSubmissionRemovalIsBusy\(threadId, queuedId\)\) return/,
+  "The queue head and its staged attachments must not be removable while queue preflight reads them."
+);
+assert.ok(
+  (app.match(/disabled=\{queuedSubmissionRemovalIsBusy\(/g) || []).length >= 2,
+  "Every queue removal surface must visibly disable its control during head preflight."
+);
+assert.match(
+  app,
+  /const submittedRepositoryIdentity = options\.repositoryIdentitySnapshot[\s\S]*?options\.queuedSubmission\?\.repositoryIdentity[\s\S]*?assertRepositoryIdentityUnchanged[\s\S]*?资料库配置在发送准备期间发生变化[\s\S]*?assertRepositoryIdentityUnchanged\(\)[\s\S]*?bindThreadToMentionedProject[\s\S]*?assertRepositoryIdentityUnchanged\(\)/,
+  "Repository identity must be snapshotted and revalidated both before binding and before launch."
+);
+assert.match(
+  app,
+  /clearSubmittedComposerDraft[\s\S]*?draft\.input !== submittedInput[\s\S]*?sameAttachments[\s\S]*?delete next\[threadId\]/,
+  "A completed preflight may clear only the exact submitted source draft snapshot, never another task or newer typing."
+);
+assert.match(
+  app,
+  /const routedQueuedSubmission[\s\S]*?threadId: targetThread\.id[\s\S]*?排队任务的对话归属发生变化/,
+  "Persistent queue items must fail closed rather than move between conversations."
+);
+assert.match(
+  app,
+  /const execution: SubmissionExecutionContext = binding\.execution \|\|[\s\S]*?threadId: resumableCodexThreadId\([\s\S]*?sourceThread\.id,[\s\S]*?targetThread\.codexThreadId,[\s\S]*?execution\.isolated[\s\S]*?workspacePath: execution\.workspacePath[\s\S]*?externalType: execution\.externalType[\s\S]*?externalRecordId: execution\.externalRecordId/,
+  "An isolated turn must start a new remote Codex conversation while retaining only the local source task identity."
+);
+assert.match(
+  app,
+  /const execution: SubmissionExecutionContext = binding\.execution \|\| \{[\s\S]*?entityFinalizationMode: entityFinalizationModeForSourceConversation\(targetThread\)[\s\S]*?isolated: false/,
+  "A non-isolated run from canonical A must remain archive-only and never gain permission to rebind A from an unexpected receipt."
+);
+assert.doesNotMatch(
+  app,
+  /executionCodexThreadId: execution\.isolated \? targetThread\.codexThreadId/,
+  "An isolated turn must not seed its private recovery id from the source task's Codex thread."
+);
+assert.match(
+  app,
+  /if \(payload\.type === "thread" && payload\.threadId\) \{[\s\S]*?if \(context\.entityExecutionIsolated\)[\s\S]*?executionCodexThreadId: payload\.threadId[\s\S]*?else \{[\s\S]*?patchThread\(context\.threadId, \{ codexThreadId: payload\.threadId \}\)/,
+  "A thread event from isolated execution must be stored on the turn, never overwrite the source conversation's Codex identity."
+);
+assert.match(
+  app,
+  /if \(result\.threadId\) \{[\s\S]*?if \(execution\.isolated\)[\s\S]*?patchMessage\(assistantId, \{ executionCodexThreadId: result\.threadId \}\)[\s\S]*?else \{[\s\S]*?patchThread\(targetThread\.id, \{ codexThreadId: result\.threadId \}\)/,
+  "The run-start response must keep an isolated Codex thread id on the turn instead of rebinding the source conversation."
+);
+assert.match(
+  app,
+  /const allLocalThreads = threadsRef\.current[\s\S]*?const recoveryThreadId = recoveryCodexThreadId\([\s\S]*?latestAssistant\.entityExecutionIsolated === true[\s\S]*?if \(!recoveryThreadId\)[\s\S]*?隔离任务缺少独立的 Codex 对话标识[\s\S]*?recoverCodexThread\(recoveryThreadId\)/,
+  "Restart recovery must resume an isolated turn by its private Codex thread id while preserving the task's canonical id."
+);
+assert.match(
+  app,
+  /const allLocalThreads = threadsRef\.current[\s\S]*?recoveryCodexThreadId\([\s\S]*?candidate\.entityExecutionIsolated === true[\s\S]*?const recoveryOwners = allLocalThreads\.filter[\s\S]*?const recovered = recoveryCandidates\.length === 1 && recoveryOwners\.length === 1[\s\S]*?已拒绝自动绑定本轮事件/,
+  "Live recovery must count all local canonical and execution owners before binding an event."
+);
+assert.match(
+  app,
+  /const recoveryOwners = allLocalThreads\.filter[\s\S]*?candidate\.codexThreadId === recoveryThreadId[\s\S]*?candidate\.messages\.some[\s\S]*?recoveryOwners\.length !== 1[\s\S]*?已拒绝自动恢复以避免串线/,
+  "Startup recovery must count every local task, including completed duplicate owners, before binding a remote run."
+);
+assert.match(
+  app,
+  /quarantineDuplicateCodexThreadOwnership\([\s\S]*?threadsRef\.current = quarantinedOwnership\.threads[\s\S]*?setThreads\([\s\S]*?targetThread = quarantinedOwnership\.threads\.find/,
+  "Duplicate canonical owners must be synchronously and persistently quarantined before a new run starts."
+);
+assert.match(
+  app,
+  /quarantinedCodexThreadIds\?\.includes\(payload\.threadId\)[\s\S]*?已忽略该标识[\s\S]*?quarantinedCodexThreadIds\?\.includes\(result\.threadId\)[\s\S]*?已拒绝重新绑定/,
+  "An active sibling's late thread event or launch result must never refill a quarantined old conversation id."
+);
+assert.match(
+  app,
+  /codexThreadOwnerIds\([\s\S]*?payload\.threadId[\s\S]*?conflictingOwners\.length > 0[\s\S]*?已拒绝重新绑定，当前任务归属保持不变[\s\S]*?codexThreadOwnerIds\([\s\S]*?result\.threadId[\s\S]*?conflictingOwners\.length > 0[\s\S]*?命中了另一任务持有的对话标识/,
+  "Live thread events and launch results must reject a Codex conversation already owned by any other local task."
+);
+assert.match(
+  app,
+  /activeDocumentPath\?: string[\s\S]*?candidate\.activeDocumentPath === undefined[\s\S]*?activeDocumentPath: queued\.activeDocumentPath[\s\S]*?activeDocumentPath: options\.activeDocumentPath[\s\S]*?workbench\.runCodex\(\{[\s\S]*?activeDocumentPath: options\.activeDocumentPath/,
+  "The active document must be snapshotted, persisted with queued work and never re-read when the run starts."
+);
+const submitInternalStart = app.indexOf("async function submitToCodexInternal");
+const submitInternalEnd = app.indexOf("function handleSubmit", submitInternalStart);
+assert.ok(submitInternalStart >= 0 && submitInternalEnd > submitInternalStart);
+assert.doesNotMatch(
+  app.slice(submitInternalStart, submitInternalEnd),
+  /selectedDocumentLibraryPath/,
+  "Asynchronous preflight and run launch must use only the submitted active-document snapshot."
+);
+assert.match(
+  app,
+  /const executionNotice = execution\.isolated[\s\S]*?当前对话的项目／人物绑定只作为只读背景[\s\S]*?只有完成写入、按 record_id 回读并输出 DOMI_ENTITY_RESULT_V1/,
+  "The model must be told that a canonical source entity is read-only during isolated execution."
+);
+assert.match(
+  app,
+  /const assistantMessage: Message = \{[\s\S]*?entityFinalizationMode: execution\.entityFinalizationMode,[\s\S]*?entityExecutionIsolated: execution\.isolated[\s\S]*?runContextRef\.current\.set\(runId,[\s\S]*?entityFinalizationMode: execution\.entityFinalizationMode,[\s\S]*?entityExecutionIsolated: execution\.isolated/,
+  "Entity isolation and finalization policy must survive both live completion and persisted assistant recovery."
+);
+assert.match(
+  app,
+  /finalizeRecoveredEntityBinding[\s\S]*?entityFinalizationMode: assistantMessage\.entityFinalizationMode,[\s\S]*?entityExecutionIsolated: assistantMessage\.entityExecutionIsolated[\s\S]*?if \(!stableResult && context\.entityExecutionIsolated\)[\s\S]*?附件仍保留在本机暂存区/,
+  "An isolated run must require a verified result marker after restart rather than inferring a target from prose."
+);
+assert.match(
+  app,
+  /const archiveOnly = context\.entityFinalizationMode === "archive-only"[\s\S]*?!archiveOnly[\s\S]*?thread\.externalType[\s\S]*?const boundThread = \{ \.\.\.thread, \.\.\.patch \}[\s\S]*?commitAttachmentsToEntity\([\s\S]*?boundThread,[\s\S]*?attachmentsToCommit[\s\S]*?\.\.\.\(archiveOnly \? \{\} : patch\)/,
+  "A verified conflicting result may archive this turn to its entity workspace but must never rebind the canonical source conversation."
 );
 assert.match(
   app,
@@ -1350,8 +1624,18 @@ assert.match(
 );
 assert.match(
   main,
-  /async function recoverCodexThread[\s\S]*?const activeRun = \[\.\.\.activeRuns\.values\(\)\][\s\S]*?catch \(error\)[\s\S]*?if \(activeRun\)[\s\S]*?status: "running"/,
-  "A live main-process run must remain recoverable when the diagnostic thread read transiently fails."
+  /async function recoverCodexThread[\s\S]*?resolveCodexActiveRun\(activeRuns\.values\(\)[\s\S]*?codex-thread-recovery-ambiguous[\s\S]*?const activeRun = activeResolution\.run[\s\S]*?catch \(error\)[\s\S]*?if \(activeRun\)[\s\S]*?status: "running"/,
+  "A live main-process run must remain recoverable only when its Codex thread has one unambiguous owner."
+);
+assert.match(
+  main,
+  /function handleCodexNotification\(method, params\)[\s\S]*?normalizeCodexRoutingParams\(params\)[\s\S]*?findActiveRun\(params\)[\s\S]*?method === "turn\/completed"[\s\S]*?run\.turnId = params\.turnId \|\| run\.turnId/,
+  "Codex notifications must normalize nested turn identifiers before routing and completion."
+);
+assert.match(
+  main,
+  /function findActiveRun\(params = \{\}\)[\s\S]*?codex-active-run-routing-ambiguous[\s\S]*?codex-active-run-routing-conflict[\s\S]*?return resolution\.run/,
+  "Ambiguous or conflicting active-run fallbacks must be rejected and diagnosed."
 );
 assert.doesNotMatch(
   app.match(/const candidates = threadsRef\.current[\s\S]*?void \(async \(\) =>/)?.[0] || "",
@@ -1360,15 +1644,23 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /const routedQueuedSubmission = options\.queuedSubmission[\s\S]*?threadId: targetThread\.id[\s\S]*?attachments: selectedAttachments[\s\S]*?repositoryIdentity: queueRepositoryIdentity\(appSettingsRef\.current\)[\s\S]*?queuedSubmission: routedQueuedSubmission[\s\S]*?onAccepted\?\.\(routedQueuedSubmission\)/,
-  "A routed queued run must persist its final thread, attachment paths and repository identity before it can be restored."
+  /const routedQueuedSubmission = options\.queuedSubmission[\s\S]*?\.\.\.options\.queuedSubmission,[\s\S]*?threadId: targetThread\.id,[\s\S]*?attachments: selectedAttachments[\s\S]*?queuedSubmission: routedQueuedSubmission[\s\S]*?onAccepted\?\.\(routedQueuedSubmission\)/,
+  "A queued run must persist its source thread, committed attachment paths and repository identity before it can be restored."
+);
+const routedSubmissionStart = app.indexOf("const routedQueuedSubmission = options.queuedSubmission");
+const routedSubmissionEnd = app.indexOf("const targetAlreadyRunning", routedSubmissionStart);
+assert.ok(routedSubmissionStart >= 0 && routedSubmissionEnd > routedSubmissionStart);
+assert.doesNotMatch(
+  app.slice(routedSubmissionStart, routedSubmissionEnd),
+  /repositoryIdentity:/,
+  "Preflight must preserve a queued task's original repository identity instead of migrating it to current settings."
 );
 const retainedQueueStart = app.indexOf(
   "if (options.queuedSubmission.threadId === targetThread.id)"
 );
-const crossTargetMoveStart = app.indexOf("const withoutSource", retainedQueueStart);
-assert.ok(retainedQueueStart >= 0 && crossTargetMoveStart > retainedQueueStart);
-const retainedQueueBranch = app.slice(retainedQueueStart, crossTargetMoveStart);
+const retainedQueueEnd = app.indexOf("排队任务的对话归属发生变化", retainedQueueStart);
+assert.ok(retainedQueueStart >= 0 && retainedQueueEnd > retainedQueueStart);
+const retainedQueueBranch = app.slice(retainedQueueStart, retainedQueueEnd);
 assert.match(
   retainedQueueBranch,
   /targetQueue\.map[\s\S]*?movedSubmission[\s\S]*?return \{ ok: true, queued: true/,
@@ -1378,6 +1670,49 @@ assert.doesNotMatch(
   retainedQueueBranch,
   /onAccepted/,
   "Retaining a same-thread queued item must not trigger source-dequeue semantics."
+);
+assert.doesNotMatch(
+  app,
+  /const withoutSource|delete next\[options\.queuedSubmission!\.threadId\]|\[targetThread\.id\]: \[\.\.\.targetQueue, movedSubmission\]/,
+  "A queued item must never be migrated into another conversation during project recognition."
+);
+const repositoryIdentityStart = app.indexOf("function queueRepositoryIdentity");
+const repositoryIdentityEnd = app.indexOf("function readQueuedSubmissions", repositoryIdentityStart);
+assert.ok(repositoryIdentityStart >= 0 && repositoryIdentityEnd > repositoryIdentityStart);
+const repositoryIdentitySource = app.slice(repositoryIdentityStart, repositoryIdentityEnd);
+for (const field of [
+  "localRepositoryDir",
+  "localDatabasePath",
+  "localLibraryDir",
+  "projectBaseToken",
+  "projectTableId",
+  "peopleBaseToken",
+  "peopleTableId",
+  "radarBaseToken",
+  "radarTableId",
+  "wikiSpaceId",
+  "taskDocumentUrl"
+]) {
+  assert.match(
+    repositoryIdentitySource,
+    new RegExp(`settings\\.${field}`),
+    `Repository identity must include ${field}.`
+  );
+}
+assert.match(
+  app,
+  /const dataConnectionChanged = requestChangesDataConnection\(request\)[\s\S]*?submissionStartingThreadIdsRef\.current\.size > 0[\s\S]*?queueStartingThreadIdsRef\.current\.size > 0[\s\S]*?runContextRef\.current\.size > 0[\s\S]*?settlingThreadIdsRef\.current\.size > 0[\s\S]*?请等待任务完成后再修改资料连接[\s\S]*?workbench\.saveSettings\(request\)/,
+  "Data-connection changes must fail closed before persistence while a submission or archive is active."
+);
+assert.match(
+  app,
+  /if \(dataConnectionChanged && result\.settings\.onboardingComplete\) \{[\s\S]*?domiSnapshotRef\.current = null;[\s\S]*?setDomiSnapshot\(null\);[\s\S]*?refreshAfterDataConnectionSave/,
+  "Switching repositories must synchronously discard the old snapshot before refreshing the new one."
+);
+assert.match(
+  app,
+  /let effectiveDomiSnapshot = domiSnapshotRef\.current;/,
+  "Submission preflight must read the repository-scoped snapshot ref instead of a stale render closure."
 );
 assert.match(
   app,
