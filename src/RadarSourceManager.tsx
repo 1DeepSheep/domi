@@ -7,16 +7,18 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Upload,
   Trash2,
   X
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { workbench } from "./bridge";
 import { useAppConfirm } from "./AppConfirmDialog";
 import type {
   PodcastJob,
   PodcastProcessResult,
   RadarSource,
+  RadarSourceBulkImportResult,
   RadarSourceKind,
   RadarSourceSaveRequest,
   RadarSourceSnapshot
@@ -100,6 +102,14 @@ export default function RadarSourceManager({
   const [saving, setSaving] = useState(false);
   const [processingIds, setProcessingIds] = useState<Set<string>>(() => new Set());
   const [draft, setDraft] = useState<SourceDraft | null>(null);
+  const [bulkImportOpen, setBulkImportOpen] = useState(false);
+  const [bulkImportText, setBulkImportText] = useState("");
+  const [bulkImportFileName, setBulkImportFileName] = useState("");
+  const [bulkImportKeywords, setBulkImportKeywords] = useState("");
+  const [bulkImportImportant, setBulkImportImportant] = useState(true);
+  const [bulkImportPreview, setBulkImportPreview] = useState<RadarSourceBulkImportResult | null>(null);
+  const [bulkImportBusy, setBulkImportBusy] = useState(false);
+  const bulkImportFileRef = useRef<HTMLInputElement | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -174,6 +184,80 @@ export default function RadarSourceManager({
       await load();
     } finally {
       setSaving(false);
+    }
+  }
+
+  function resetBulkImport() {
+    setBulkImportOpen(false);
+    setBulkImportText("");
+    setBulkImportFileName("");
+    setBulkImportKeywords("");
+    setBulkImportImportant(true);
+    setBulkImportPreview(null);
+    if (bulkImportFileRef.current) bulkImportFileRef.current.value = "";
+  }
+
+  function openBulkImport() {
+    setDraft(null);
+    setError("");
+    setNotice("");
+    setBulkImportOpen(true);
+    setBulkImportPreview(null);
+  }
+
+  async function chooseBulkImportFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (file.size > 4 * 1024 * 1024) {
+      setError("List 文件超过 4 MB，请拆分后再导入。");
+      event.target.value = "";
+      return;
+    }
+    try {
+      const text = await file.text();
+      setBulkImportText(text);
+      setBulkImportFileName(file.name);
+      setBulkImportPreview(null);
+      setError("");
+    } catch (fileError) {
+      setError(fileError instanceof Error ? fileError.message : "无法读取这个 List 文件。");
+    }
+  }
+
+  async function runBulkImport(previewOnly: boolean) {
+    if (!bulkImportText.trim()) {
+      setError("请粘贴公众号名单，或选择一个 TXT、LIST、CSV、TSV 文件。");
+      return;
+    }
+    setBulkImportBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await workbench.bulkImportRadarSources({
+        kind: "wechat",
+        text: bulkImportText,
+        fileName: bulkImportFileName || undefined,
+        previewOnly,
+        enabled: true,
+        priority: bulkImportImportant ? "important" : "normal",
+        keywords: splitKeywords(bulkImportKeywords)
+      });
+      if (!result.ok) {
+        setError(result.error || "批量导入失败，请检查名单格式后重试。");
+        return;
+      }
+      setBulkImportPreview(result);
+      if (previewOnly) return;
+      const imported = result.stats.importedCount;
+      setNotice(imported
+        ? `已导入 ${imported} 个公众号；重复和已有账号已自动跳过。`
+        : "没有需要新增的公众号；重复和已有账号已自动跳过。");
+      resetBulkImport();
+      await load();
+    } catch (bulkError) {
+      setError(bulkError instanceof Error ? bulkError.message : String(bulkError));
+    } finally {
+      setBulkImportBusy(false);
     }
   }
 
@@ -308,7 +392,7 @@ export default function RadarSourceManager({
                 role="tab"
                 aria-selected={tab === item.kind}
                 className={tab === item.kind ? "active" : ""}
-                onClick={() => { setTab(item.kind); setDraft(null); setError(""); }}
+                onClick={() => { setTab(item.kind); setDraft(null); resetBulkImport(); setError(""); }}
                 key={item.kind}
               >
                 <Icon size={16} />{item.label}<small>{count}</small>
@@ -324,9 +408,14 @@ export default function RadarSourceManager({
               ? "记录重点公众号名称与关注关键词；不绕过微信访问限制。"
               : "支持公开 RSS、小宇宙公开节目页或单集页；拒绝付费、私密和 DRM 内容。"}</p>
           <span>
-            <button type="button" onClick={() => setDraft({ ...EMPTY_DRAFT, kind: tab })}>
+            <button type="button" onClick={() => { resetBulkImport(); setDraft({ ...EMPTY_DRAFT, kind: tab }); }}>
               <Plus size={15} />添加
             </button>
+            {tab === "wechat" && (
+              <button type="button" onClick={openBulkImport} aria-expanded={bulkImportOpen}>
+                <Upload size={15} />批量上传
+              </button>
+            )}
             <button type="button" onClick={() => void sync()} disabled={syncing || loading}>
               <RefreshCw className={syncing ? "spinning" : ""} size={15} />同步信源
             </button>
@@ -335,6 +424,101 @@ export default function RadarSourceManager({
 
         {error && <div className="radar-source-error"><AlertCircle size={15} />{error}</div>}
         {notice && <div className="radar-source-notice"><Check size={15} />{notice}</div>}
+
+        {tab === "wechat" && bulkImportOpen && (
+          <section className="radar-source-bulk" aria-label="批量上传重点公众号">
+            <div className="radar-source-form-title">
+              <div>
+                <strong>批量上传重点公众号</strong>
+                <small>一行一个名称；也支持带表头的 CSV / TSV。</small>
+              </div>
+              <button type="button" aria-label="关闭批量上传" onClick={resetBulkImport}><X size={15} /></button>
+            </div>
+            <textarea
+              value={bulkImportText}
+              onChange={(event) => {
+                setBulkImportText(event.target.value);
+                setBulkImportFileName("");
+                setBulkImportPreview(null);
+              }}
+              placeholder={'粘贴公众号名单，例如：\n晚点LatePost\n机器之心\n甲子光年'}
+              spellCheck={false}
+            />
+            <div className="radar-source-bulk-file">
+              <input
+                ref={bulkImportFileRef}
+                type="file"
+                accept=".txt,.list,.csv,.tsv,text/plain,text/csv,text/tab-separated-values"
+                onChange={(event) => void chooseBulkImportFile(event)}
+              />
+              <button type="button" onClick={() => bulkImportFileRef.current?.click()}>
+                <Upload size={14} />选择 List 文件
+              </button>
+              <span>{bulkImportFileName || "TXT / LIST / CSV / TSV，最大 4 MB"}</span>
+            </div>
+            <div className="radar-source-bulk-options">
+              <label>
+                <span>统一关注关键词（可选）</span>
+                <input
+                  value={bulkImportKeywords}
+                  placeholder="AI、半导体，用逗号分隔"
+                  onChange={(event) => { setBulkImportKeywords(event.target.value); setBulkImportPreview(null); }}
+                />
+              </label>
+              <label className="radar-source-bulk-check">
+                <input
+                  type="checkbox"
+                  checked={bulkImportImportant}
+                  onChange={(event) => { setBulkImportImportant(event.target.checked); setBulkImportPreview(null); }}
+                />
+                标记为重点关注
+              </label>
+            </div>
+            {bulkImportPreview && (
+              <div className="radar-source-bulk-preview">
+                <div className="radar-source-bulk-stats">
+                  <span>可导入 <strong>{bulkImportPreview.stats.importableCount}</strong></span>
+                  <span>已有 {bulkImportPreview.stats.existingCount}</span>
+                  <span>本批重复 {bulkImportPreview.stats.duplicateCount}</span>
+                  <span className={bulkImportPreview.stats.invalidCount ? "error" : ""}>无效 {bulkImportPreview.stats.invalidCount}</span>
+                </div>
+                <div className="radar-source-bulk-list">
+                  {bulkImportPreview.items.slice(0, 50).map((item) => (
+                    <div key={`${item.row}-${item.name}-${item.status}`}>
+                      <span>{item.row}</span>
+                      <strong>{item.name || "未命名"}</strong>
+                      <small className={item.status === "invalid" ? "error" : item.status}>
+                        {item.status === "new" ? "将导入"
+                          : item.status === "existing" ? "已有"
+                            : item.status === "duplicate" ? "本批重复"
+                              : item.error || "无效"}
+                      </small>
+                    </div>
+                  ))}
+                  {(bulkImportPreview.previewTruncated || bulkImportPreview.items.length > 50) && (
+                    <p>这里只预览前 50 行，导入时会处理全部有效记录。</p>
+                  )}
+                </div>
+              </div>
+            )}
+            <div className="radar-source-bulk-actions">
+              <small>名单与设置只保存在本机，软件更新不会清除。</small>
+              <span>
+                <button type="button" onClick={() => void runBulkImport(true)} disabled={bulkImportBusy}>
+                  {bulkImportBusy ? "处理中" : "预览并去重"}
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => void runBulkImport(false)}
+                  disabled={bulkImportBusy || !bulkImportPreview || bulkImportPreview.stats.importableCount === 0}
+                >
+                  导入 {bulkImportPreview?.stats.importableCount || 0} 个
+                </button>
+              </span>
+            </div>
+          </section>
+        )}
 
         {draft && (
           <form className="radar-source-form" onSubmit={save}>

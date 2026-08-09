@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld("workbench", {
   saveWeeklyNewsCheckpoint: (request) => ipcRenderer.invoke("domi:weekly-news-checkpoint", request),
   listRadarSources: () => ipcRenderer.invoke("domi:radar-source-list"),
   saveRadarSource: (request) => ipcRenderer.invoke("domi:radar-source-save", request),
+  bulkImportRadarSources: (request) => ipcRenderer.invoke("domi:radar-source-bulk-import", request),
   deleteRadarSource: (request) => ipcRenderer.invoke("domi:radar-source-delete", request),
   syncRadarSources: (request) => ipcRenderer.invoke("domi:radar-source-sync", request),
   processPodcastEpisode: (request) => ipcRenderer.invoke("domi:podcast-process", request),

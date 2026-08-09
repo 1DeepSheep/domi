@@ -66,12 +66,21 @@ test("downloaded update explains automatic safe restart", () => {
 test("update failures remain actionable from the sidebar", () => {
   assert.deepEqual(sidebarUpdateEntry(status("error", { error: "offline" })), {
     label: "更新失败",
-    detail: "点击重试",
+    detail: "offline · 点击重试",
     state: "error"
   });
   assert.deepEqual(sidebarUpdateEntry(status("downloaded", { error: "save failed" })), {
     label: "更新重启未完成",
-    detail: "点击重试",
+    detail: "save failed · 点击重试",
     state: "error"
   });
+});
+
+test("long updater failures are summarized without hiding the recovery action", () => {
+  const entry = sidebarUpdateEntry(status("downloaded", {
+    error: "更新安装器在 3 分钟内未确认启动。已保留已下载更新和全部本地数据；请确认 domi 位于应用程序文件夹。"
+  }));
+  assert.equal(entry?.state, "error");
+  assert.match(entry?.detail || "", /已保留已下载更新/);
+  assert.match(entry?.detail || "", /… · 点击重试$/);
 });

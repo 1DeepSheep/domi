@@ -22,6 +22,9 @@ const DEFAULT_AUDIO_LIMIT_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_BULK_IMPORT_BYTES = 4 * 1024 * 1024;
+const MAX_BULK_IMPORT_ROWS = 5_000;
+const MAX_BULK_PREVIEW_ITEMS = 200;
 
 function decodeEntities(value) {
   return String(value || "")
@@ -301,6 +304,266 @@ function normalizeStringList(value, limit = 30) {
   return [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))].slice(0, limit);
 }
 
+const BULK_HEADER_ALIASES = new Map([
+  ["name", "name"],
+  ["名称", "name"],
+  ["公众号", "name"],
+  ["公众号名称", "name"],
+  ["wechat", "name"],
+  ["account", "name"],
+  ["url", "url"],
+  ["链接", "url"],
+  ["主页", "url"],
+  ["主页链接", "url"],
+  ["keywords", "keywords"],
+  ["keyword", "keywords"],
+  ["关键词", "keywords"],
+  ["关注关键词", "keywords"],
+  ["priority", "priority"],
+  ["优先级", "priority"],
+  ["重要性", "priority"],
+  ["enabled", "enabled"],
+  ["启用", "enabled"],
+  ["状态", "enabled"]
+]);
+
+function normalizeBulkHeader(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
+
+function canonicalSourceName(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("zh-CN");
+}
+
+function cleanBulkListName(value) {
+  return String(value || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/^\s*(?:[-*•·]|\d{1,5}[.)、])\s+/, "")
+    .trim();
+}
+
+function parseDelimitedRecords(text, delimiter) {
+  const records = [];
+  let fields = [];
+  let field = "";
+  let quoted = false;
+  let row = 1;
+  let recordRow = 1;
+  let malformed = false;
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  const finishRecord = () => {
+    fields.push(field);
+    records.push({ row: recordRow, fields, malformed });
+    fields = [];
+    field = "";
+    malformed = false;
+  };
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (quoted) {
+      if (character === '"') {
+        if (source[index + 1] === '"') {
+          field += '"';
+          index += 1;
+        } else {
+          quoted = false;
+        }
+      } else {
+        field += character;
+        if (character === "\n") row += 1;
+      }
+      continue;
+    }
+    if (character === '"') {
+      if (!field.trim()) quoted = true;
+      else {
+        malformed = true;
+        field += character;
+      }
+      continue;
+    }
+    if (character === delimiter) {
+      fields.push(field);
+      field = "";
+      continue;
+    }
+    if (character === "\n" || character === "\r") {
+      finishRecord();
+      if (character === "\r" && source[index + 1] === "\n") index += 1;
+      row += 1;
+      recordRow = row;
+      continue;
+    }
+    field += character;
+  }
+  if (quoted) malformed = true;
+  if (field || fields.length || malformed) finishRecord();
+  return records;
+}
+
+function bulkTextFormat(text, fileName = "") {
+  const extension = path.extname(String(fileName || "")).toLowerCase();
+  if (extension === ".tsv") return { name: "tsv", delimiter: "\t" };
+  if (extension === ".csv") return { name: "csv", delimiter: "," };
+  const firstLine = String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0] || "";
+  if (firstLine.includes("\t")) return { name: "tsv", delimiter: "\t" };
+  if (firstLine.includes(",")) {
+    const headers = parseDelimitedRecords(firstLine, ",")[0]?.fields || [];
+    if (headers.some((value) => BULK_HEADER_ALIASES.has(normalizeBulkHeader(value)))) {
+      return { name: "csv", delimiter: "," };
+    }
+  }
+  return { name: "list", delimiter: "" };
+}
+
+function bulkEnabled(value, fallback = true) {
+  const normalized = normalizeBulkHeader(value);
+  if (!normalized) return fallback;
+  if (["false", "0", "否", "禁用", "停用", "disabled", "off"].includes(normalized)) return false;
+  if (["true", "1", "是", "启用", "enabled", "on"].includes(normalized)) return true;
+  return fallback;
+}
+
+function bulkPriority(value, fallback = "normal") {
+  const normalized = normalizeBulkHeader(value);
+  if (["important", "重点", "重要", "high", "高"].includes(normalized)) return "important";
+  if (["normal", "普通", "一般", "默认"].includes(normalized)) return "normal";
+  return fallback === "important" ? "important" : "normal";
+}
+
+function parseRadarSourceBulkText(textValue, options = {}) {
+  const text = String(textValue || "").replace(/^\uFEFF/, "");
+  if (Buffer.byteLength(text, "utf8") > MAX_BULK_IMPORT_BYTES) {
+    throw new Error("批量信源文件超过 4 MB，请拆分后重试。");
+  }
+  const kind = options.kind || "wechat";
+  if (kind !== "wechat") throw new Error("当前仅支持批量导入重点公众号。");
+  const format = bulkTextFormat(text, options.fileName);
+  const records = format.delimiter
+    ? parseDelimitedRecords(text, format.delimiter)
+    : text.split(/\r?\n/).map((value, index) => ({ row: index + 1, fields: [value], malformed: false }));
+  if (records.length > MAX_BULK_IMPORT_ROWS) {
+    throw new Error(`单次最多导入 ${MAX_BULK_IMPORT_ROWS} 条信源，请拆分后重试。`);
+  }
+
+  let header = null;
+  let startIndex = 0;
+  const firstContentIndex = records.findIndex((record) => record.fields.some((value) => String(value || "").trim()));
+  if (firstContentIndex >= 0) {
+    const mapped = records[firstContentIndex].fields.map((value) => BULK_HEADER_ALIASES.get(normalizeBulkHeader(value)) || "");
+    if (mapped.includes("name")) {
+      header = mapped;
+      startIndex = firstContentIndex + 1;
+    }
+  }
+
+  const defaults = {
+    priority: bulkPriority(options.priority, "normal"),
+    enabled: options.enabled !== false,
+    keywords: normalizeStringList(options.keywords)
+  };
+  const recordsByName = new Map();
+  const recordsByUrl = new Map();
+  const items = [];
+  let blankCount = 0;
+  let duplicateCount = 0;
+  let invalidCount = 0;
+
+  for (let index = startIndex; index < records.length; index += 1) {
+    const record = records[index];
+    const rawValues = record.fields.map((value) => String(value || "").trim());
+    if (!rawValues.some(Boolean)) {
+      blankCount += 1;
+      continue;
+    }
+    let candidate;
+    if (header) {
+      candidate = {};
+      for (let column = 0; column < header.length; column += 1) {
+        if (header[column]) candidate[header[column]] = rawValues[column] || "";
+      }
+    } else {
+      candidate = {
+        name: rawValues[0] || "",
+        keywords: format.delimiter ? rawValues[1] || "" : "",
+        url: format.delimiter ? rawValues[2] || "" : "",
+        priority: format.delimiter ? rawValues[3] || "" : "",
+        enabled: format.delimiter ? rawValues[4] || "" : ""
+      };
+    }
+    const name = cleanBulkListName(candidate.name);
+    const previewBase = { row: record.row, name, status: "new" };
+    if (record.malformed) {
+      invalidCount += 1;
+      items.push({ ...previewBase, status: "invalid", error: "CSV/TSV 引号未正确闭合。" });
+      continue;
+    }
+    if (!name) {
+      invalidCount += 1;
+      items.push({ ...previewBase, status: "invalid", error: "缺少公众号名称。" });
+      continue;
+    }
+    if (name.length > 120) {
+      invalidCount += 1;
+      items.push({ ...previewBase, status: "invalid", error: "公众号名称超过 120 个字符。" });
+      continue;
+    }
+    let url = "";
+    try {
+      url = normalizePublicUrl(candidate.url, { optional: true });
+    } catch (error) {
+      invalidCount += 1;
+      items.push({ ...previewBase, status: "invalid", error: error instanceof Error ? error.message : String(error) });
+      continue;
+    }
+    const key = canonicalSourceName(name);
+    if (recordsByName.has(key)) {
+      duplicateCount += 1;
+      items.push({ ...previewBase, status: "duplicate", duplicateOfRow: recordsByName.get(key).row });
+      continue;
+    }
+    if (url && recordsByUrl.has(url)) {
+      duplicateCount += 1;
+      items.push({ ...previewBase, status: "duplicate", duplicateOfRow: recordsByUrl.get(url).row });
+      continue;
+    }
+    const source = {
+      kind,
+      name,
+      url,
+      enabled: bulkEnabled(candidate.enabled, defaults.enabled),
+      priority: bulkPriority(candidate.priority, defaults.priority),
+      keywords: normalizeStringList([...defaults.keywords, ...normalizeStringList(candidate.keywords)])
+    };
+    const item = { ...previewBase, source };
+    recordsByName.set(key, item);
+    if (url) recordsByUrl.set(url, item);
+    items.push(item);
+  }
+
+  const sources = items.filter((item) => item.status === "new").map((item) => item.source);
+  return {
+    format: format.name,
+    sources,
+    items,
+    stats: {
+      totalRows: records.length,
+      validCount: sources.length,
+      duplicateCount,
+      invalidCount,
+      blankCount
+    }
+  };
+}
+
 function sourceId() {
   return typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
@@ -523,6 +786,66 @@ class RadarSourceService {
       : [...state.sources, source];
     const saved = this.saveSources(sources);
     return { ok: true, source, sources, updatedAt: saved.updatedAt };
+  }
+
+  bulkImport(input = {}) {
+    const parsed = parseRadarSourceBulkText(input.text, input);
+    const state = this.loadSources();
+    const existingNames = new Map();
+    const existingUrls = new Map();
+    for (const source of state.sources) {
+      if (source.kind !== "wechat") continue;
+      existingNames.set(canonicalSourceName(source.name), source);
+      if (source.url) existingUrls.set(source.url, source);
+    }
+
+    let existingCount = 0;
+    const importable = [];
+    const items = parsed.items.map((item) => {
+      if (item.status !== "new") return item;
+      const existing = existingNames.get(canonicalSourceName(item.source.name))
+        || (item.source.url ? existingUrls.get(item.source.url) : null);
+      if (existing) {
+        existingCount += 1;
+        return {
+          row: item.row,
+          name: item.name,
+          status: "existing",
+          existingSourceId: existing.id
+        };
+      }
+      importable.push(item.source);
+      return item;
+    });
+    const stats = {
+      ...parsed.stats,
+      existingCount,
+      importableCount: importable.length,
+      importedCount: 0
+    };
+    const baseResult = {
+      ok: true,
+      previewOnly: input.previewOnly === true,
+      format: parsed.format,
+      stats,
+      items: items.slice(0, MAX_BULK_PREVIEW_ITEMS),
+      previewTruncated: items.length > MAX_BULK_PREVIEW_ITEMS,
+      updatedAt: state.updatedAt
+    };
+    if (input.previewOnly === true || !importable.length) return baseResult;
+
+    const now = this.now();
+    const added = importable.map((source) => normalizeSource(source, null, now));
+    const sources = [...state.sources, ...added];
+    const saved = this.saveSources(sources);
+    return {
+      ...baseResult,
+      previewOnly: false,
+      stats: { ...stats, importedCount: added.length },
+      added,
+      sources,
+      updatedAt: saved.updatedAt
+    };
   }
 
   delete(sourceIdValue) {
@@ -810,11 +1133,15 @@ class RadarSourceService {
 
 module.exports = {
   DEFAULT_AUDIO_LIMIT_BYTES,
+  MAX_BULK_IMPORT_BYTES,
+  MAX_BULK_IMPORT_ROWS,
   PODCAST_JOBS_CACHE_KEY,
   RADAR_SOURCES_SETTINGS_KEY,
   RadarSourceService,
+  canonicalSourceName,
   normalizePublicUrl,
   normalizeSource,
+  parseRadarSourceBulkText,
   parseDurationSeconds,
   parsePodcastRss,
   parseXiaoyuzhouEpisode,

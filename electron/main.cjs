@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, Notification, protocol, safeStorage, session, shell } = require("electron");
+const { app, autoUpdater: nativeAutoUpdater, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, Notification, protocol, safeStorage, session, shell } = require("electron");
 const { execFile } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -1278,7 +1278,31 @@ let updateInstallRequested = false;
 let updateInstallAttempt = null;
 let updateInstallTimer = null;
 let updateRestartPreparing = false;
+let updateNativeQuitAccepted = false;
+let updateInstallFailureHandler = null;
 const UPDATE_INSTALL_IDLE_POLL_MS = 1_000;
+const UPDATE_INSTALL_START_TIMEOUT_MS = 3 * 60 * 1_000;
+
+nativeAutoUpdater.on("before-quit-for-update", () => {
+  // Squirrel has accepted the verified package and is about to replace the
+  // application. Keep the normal quit/renderer recovery handlers out of this
+  // dedicated update exit path even if staging took longer than expected.
+  updateNativeQuitAccepted = true;
+  updateInstallFailureHandler = null;
+  updateRestartPreparing = true;
+  applicationQuitFlushStarted = true;
+  applicationQuitFlushComplete = true;
+  appendRuntimeLog("update-native-quit-accepted", {
+    version: getUpdateService().snapshot().availableVersion || ""
+  });
+});
+
+nativeAutoUpdater.on("error", (error) => {
+  appendRuntimeLog("update-native-error", {
+    message: boundedRuntimeText(error?.message || error, 2_000)
+  });
+  updateInstallFailureHandler?.(error);
+});
 
 function criticalUpdateActivity() {
   const domiOperations = domiIntegration?.criticalOperationSnapshot?.() || { total: 0 };
@@ -1311,6 +1335,7 @@ function scheduleUpdateInstallAttempt(delayMs = 0) {
 }
 
 function deferUpdateInstall(service, activity) {
+  appendRuntimeLog("update-install-deferred", { counts: activity.counts, total: activity.total });
   service.markRestartWaiting(activity.total);
   scheduleUpdateInstallAttempt(UPDATE_INSTALL_IDLE_POLL_MS);
 }
@@ -1337,6 +1362,9 @@ async function attemptSafeUpdateInstall() {
     );
     const failed = flushResults.find((result) => !result.ok);
     if (failed) {
+      appendRuntimeLog("update-renderer-flush-failed", {
+        message: boundedRuntimeText(failed.error, 2_000)
+      });
       updateInstallRequested = false;
       service.markInstallFailure(
         failed.error || "更新前未能安全保存当前内容，请点击重试。"
@@ -1385,6 +1413,9 @@ async function attemptSafeUpdateInstall() {
 
       const prepared = service.armInstall();
       if (!prepared.ok) {
+        appendRuntimeLog("update-install-arm-failed", {
+          message: boundedRuntimeText(prepared.error, 2_000)
+        });
         updateRestartPreparing = false;
         updateInstallRequested = false;
         service.markInstallFailure(prepared.error || "更新尚未准备完成。");
@@ -1393,6 +1424,7 @@ async function attemptSafeUpdateInstall() {
 
       let installQuitWatchdog = null;
       const closeUpdateResources = () => {
+        updateInstallFailureHandler = null;
         if (installQuitWatchdog !== null) clearTimeout(installQuitWatchdog);
         installQuitWatchdog = null;
         updateService?.stop();
@@ -1412,6 +1444,13 @@ async function attemptSafeUpdateInstall() {
         }
       };
       const restoreAfterInstallFailure = (error) => {
+        // A late watchdog must never undo the update-specific quit gate after
+        // Squirrel has accepted the package. Doing so lets render-process-gone
+        // recovery race the updater and reopen the old application.
+        if (updateNativeQuitAccepted) return;
+        if (updateInstallFailureHandler === restoreAfterInstallFailure) {
+          updateInstallFailureHandler = null;
+        }
         if (installQuitWatchdog !== null) clearTimeout(installQuitWatchdog);
         installQuitWatchdog = null;
         app.removeListener("will-quit", closeUpdateResources);
@@ -1419,6 +1458,9 @@ async function attemptSafeUpdateInstall() {
         updateInstallRequested = false;
         applicationQuitFlushStarted = false;
         applicationQuitFlushComplete = false;
+        appendRuntimeLog("update-install-launch-failed", {
+          message: boundedRuntimeText(error?.message || error, 2_000)
+        });
         service.markInstallFailure(error || "无法启动更新安装器。");
       };
 
@@ -1429,6 +1471,8 @@ async function attemptSafeUpdateInstall() {
       // therefore leaves the current app fully operational and retryable.
       applicationQuitFlushStarted = true;
       applicationQuitFlushComplete = true;
+      updateNativeQuitAccepted = false;
+      updateInstallFailureHandler = restoreAfterInstallFailure;
       app.once("will-quit", closeUpdateResources);
       const committed = service.commitInstall(prepared.candidate, {
         onFailure: restoreAfterInstallFailure
@@ -1442,11 +1486,19 @@ async function attemptSafeUpdateInstall() {
       // alive until will-quit proves that Electron accepted the restart.
       updateInstallRequested = false;
       clearUpdateInstallTimer();
+      appendRuntimeLog("update-install-committed", {
+        version: prepared.candidate.version || "",
+        timeoutMs: UPDATE_INSTALL_START_TIMEOUT_MS
+      });
       installQuitWatchdog = setTimeout(() => {
-        restoreAfterInstallFailure("更新安装器未能启动，domi 已继续运行；请点击重试。");
-      }, 15_000);
+        if (updateNativeQuitAccepted) return;
+        restoreAfterInstallFailure(
+          "更新安装器在 3 分钟内未确认启动。已保留已下载更新和全部本地数据；请确认 domi 位于“应用程序”文件夹后点击重试。"
+        );
+      }, UPDATE_INSTALL_START_TIMEOUT_MS);
       installQuitWatchdog.unref?.();
     } catch (error) {
+      updateInstallFailureHandler = null;
       updateRestartPreparing = false;
       updateInstallRequested = false;
       applicationQuitFlushStarted = false;
@@ -1468,8 +1520,14 @@ function requestSafeUpdateInstall() {
   if (status.state !== "downloaded") {
     return { ok: false, status, error: "更新尚未下载完成。" };
   }
+  updateNativeQuitAccepted = false;
   updateInstallRequested = true;
   const activity = criticalUpdateActivity();
+  appendRuntimeLog("update-install-requested", {
+    version: status.availableVersion || "",
+    counts: activity.counts,
+    total: activity.total
+  });
   service.markRestartWaiting(activity.total);
   scheduleUpdateInstallAttempt(activity.total > 0 ? UPDATE_INSTALL_IDLE_POLL_MS : 0);
   return { ok: true, deferred: activity.total > 0, status: service.snapshot() };
@@ -1508,10 +1566,32 @@ function createWindow() {
 
   let rendererRecoveryAttempts = 0;
   let rendererStableTimer = null;
+  let rendererUpdateRecoveryTimer = null;
   let rendererCloseReady = false;
   let rendererClosePending = false;
   let backgroundCloseConfirmed = false;
   const scheduleRendererRecovery = (trigger, baseDelayMs) => {
+    if (updateRestartPreparing || applicationQuitFlushComplete) {
+      appendRuntimeLog("renderer-reload-suppressed", {
+        trigger,
+        reason: "update-restart"
+      });
+      if (rendererUpdateRecoveryTimer === null) {
+        const waitForUpdateRestart = () => {
+          rendererUpdateRecoveryTimer = null;
+          if (win.isDestroyed()) return;
+          if (updateRestartPreparing || applicationQuitFlushComplete) {
+            rendererUpdateRecoveryTimer = setTimeout(waitForUpdateRestart, 1_000);
+            rendererUpdateRecoveryTimer.unref?.();
+            return;
+          }
+          scheduleRendererRecovery(trigger, baseDelayMs);
+        };
+        rendererUpdateRecoveryTimer = setTimeout(waitForUpdateRestart, 1_000);
+        rendererUpdateRecoveryTimer.unref?.();
+      }
+      return;
+    }
     rendererRecoveryAttempts += 1;
     const attempt = rendererRecoveryAttempts;
     if (attempt > 2) {
@@ -1521,7 +1601,7 @@ function createWindow() {
     const delayMs = baseDelayMs * attempt;
     appendRuntimeLog("renderer-reload-scheduled", { trigger, attempt, delayMs });
     setTimeout(() => {
-      if (win.isDestroyed()) return;
+      if (win.isDestroyed() || updateRestartPreparing || applicationQuitFlushComplete) return;
       appendRuntimeLog("renderer-reload-started", { trigger, attempt });
       win.webContents.reload();
     }, delayMs).unref();
@@ -1633,6 +1713,7 @@ function createWindow() {
   });
   win.on("closed", () => {
     if (rendererStableTimer) clearTimeout(rendererStableTimer);
+    if (rendererUpdateRecoveryTimer) clearTimeout(rendererUpdateRecoveryTimer);
   });
 
   if (app.isPackaged || process.env.NODE_ENV === "production") {
@@ -3568,6 +3649,34 @@ ipcMain.handle("domi:radar-source-save", (_event, request) => {
     return result;
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:radar-source-bulk-import", (_event, request) => {
+  try {
+    const result = getDomiIntegration().radarSourceService.bulkImport(request);
+    if (Number(result?.stats?.importedCount) > 0) {
+      serviceCoordinator.invalidate("domi:radar-source-sync:");
+    }
+    return result;
+  } catch (error) {
+    return {
+      ok: false,
+      previewOnly: request?.previewOnly === true,
+      format: "list",
+      stats: {
+        totalRows: 0,
+        validCount: 0,
+        duplicateCount: 0,
+        invalidCount: 0,
+        blankCount: 0,
+        existingCount: 0,
+        importableCount: 0,
+        importedCount: 0
+      },
+      items: [],
+      previewTruncated: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
   }
 });
 ipcMain.handle("domi:radar-source-delete", (_event, request) => {
