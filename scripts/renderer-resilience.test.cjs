@@ -125,6 +125,26 @@ assert.match(
 );
 assert.match(
   radarSourceManager,
+  /workbench\.bulkImportRadarSources\([\s\S]*?kind:\s*"wechat"[\s\S]*?previewOnly/,
+  "Important WeChat sources must support pasted lists and local TXT/LIST/CSV/TSV batch files."
+);
+assert.match(
+  radarSourceManager,
+  /批量上传重点公众号[\s\S]*?accept="\.txt,\.list,\.csv,\.tsv,[^"]+"/,
+  "The batch source importer must accept pasted text and TXT/LIST/CSV/TSV files."
+);
+assert.match(
+  radarSourceManager,
+  /bulkImportPreview\.stats\.importableCount[\s\S]*?软件更新不会清除[\s\S]*?预览并去重/,
+  "Batch source import must preview and deduplicate before a single confirmed local import."
+);
+assert.match(
+  styles,
+  /\.radar-source-bulk\s*\{[\s\S]*?\.radar-source-bulk-list\s*\{[\s\S]*?max-height:\s*180px/,
+  "The batch importer must stay compact inside the existing source-management panel."
+);
+assert.match(
+  radarSourceManager,
   /processPodcastEpisode[\s\S]*?公开 RSS、小宇宙公开节目页或单集页/,
   "Podcast source management must discover public episodes and hand audio to the PLAUD processor."
 );
@@ -1217,6 +1237,16 @@ assert.match(
   main,
   /requestRendererFlush[\s\S]*?app:prepare-close[\s\S]*?domi 已阻止关闭窗口[\s\S]*?before-quit/,
   "Window close and application quit must wait for renderer persistence and block on failure."
+);
+assert.match(
+  main,
+  /scheduleRendererRecovery[\s\S]*?updateRestartPreparing \|\| applicationQuitFlushComplete[\s\S]*?reason: "update-restart"[\s\S]*?renderer-reload-suppressed/,
+  "Renderer crash recovery must not race an updater-owned restart."
+);
+assert.match(
+  main,
+  /before-quit-for-update[\s\S]*?updateNativeQuitAccepted = true[\s\S]*?applicationQuitFlushComplete = true/,
+  "The native updater acceptance signal must preserve the update-specific quit gate."
 );
 assert.match(
   preload,

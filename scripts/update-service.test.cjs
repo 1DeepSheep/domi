@@ -521,7 +521,7 @@ test("install requires a current downloaded candidate and rechecks the gate at e
   valid.updater.downloadImplementation = async () => ["/tmp/domi-update.zip"];
   await valid.service.download();
   assert.equal(valid.service.install().ok, true);
-  assert.equal(valid.values.autoInstallOnAppQuit, true);
+  assert.equal(valid.values.autoInstallOnAppQuit, false);
   assert.equal(valid.service.snapshot().installing, true);
   valid.runImmediates();
   assert.deepEqual(valid.calls.install, [[false, true]]);
@@ -560,7 +560,7 @@ test("downloaded update can wait for active tasks and recover from a failed safe
   const prepared = harness.service.armInstall();
   assert.equal(prepared.ok, true);
   assert.equal(harness.service.snapshot().installing, true);
-  assert.equal(harness.values.autoInstallOnAppQuit, true);
+  assert.equal(harness.values.autoInstallOnAppQuit, false);
   assert.equal(harness.service.commitInstall(prepared.candidate).ok, true);
   harness.runImmediates();
   assert.deepEqual(harness.calls.install, [[false, true]]);

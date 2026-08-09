@@ -619,7 +619,14 @@ class UpdateService {
     ) {
       return { ok: false, status: this.snapshot(), error: "更新尚未下载完成。" };
     }
-    this.updater.autoInstallOnAppQuit = true;
+    // Keep implicit install-on-quit disabled. On macOS electron-updater only
+    // asks Squirrel.Mac to fetch the already verified local ZIP from its proxy
+    // when quitAndInstall() sees this flag as false. Flipping it to true here
+    // makes MacUpdater assume Squirrel was armed during download even though
+    // domi deliberately downloaded with the flag disabled, so no installer is
+    // started and the old app is reopened. Explicit quitAndInstall() does not
+    // require this flag on Windows or Linux either.
+    this.disableAutoInstall();
     this.publish({
       restartPending: true,
       busyTaskCount: 0,

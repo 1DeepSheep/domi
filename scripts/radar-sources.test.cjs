@@ -5,6 +5,7 @@ const path = require("node:path");
 const {
   RadarSourceService,
   normalizePublicUrl,
+  parseRadarSourceBulkText,
   parsePodcastRss,
   parseXiaoyuzhouEpisode,
   parseXiaoyuzhouEpisodeLinks
@@ -15,11 +16,14 @@ function memoryStore() {
   const settings = new Map();
   const cache = new Map();
   let tick = 1_700_000_000_000;
+  const metrics = { saveAppSettingsCount: 0, saveCacheCount: 0 };
   return {
+    metrics,
     loadAppSettings(key, fallback) {
       return settings.get(key) || { value: fallback, updatedAt: 0 };
     },
     saveAppSettings(key, value) {
+      metrics.saveAppSettingsCount += 1;
       const stored = { value, updatedAt: tick += 1 };
       settings.set(key, stored);
       return stored;
@@ -28,11 +32,63 @@ function memoryStore() {
       return cache.get(key) || null;
     },
     saveCache(key, value) {
+      metrics.saveCacheCount += 1;
       const stored = { value, updatedAt: tick += 1 };
       cache.set(key, stored);
       return stored;
     }
   };
+}
+
+{
+  const names = Array.from({ length: 700 }, (_value, index) => `重点公众号 ${String(index + 1).padStart(3, "0")}`);
+  const startedAt = Date.now();
+  const parsed = parseRadarSourceBulkText([
+    ...names,
+    "  重点公众号 001  ",
+    "x".repeat(121),
+    ""
+  ].join("\n"), { kind: "wechat", fileName: "accounts.list", priority: "important" });
+  assert.equal(parsed.format, "list");
+  assert.equal(parsed.sources.length, 700);
+  assert.equal(parsed.stats.duplicateCount, 1);
+  assert.equal(parsed.stats.invalidCount, 1);
+  assert.equal(parsed.stats.blankCount, 1);
+  assert.equal(parsed.sources[0].priority, "important");
+  assert.ok(Date.now() - startedAt < 2_000, "700-row plain-text parsing should remain interactive");
+}
+
+{
+  const csv = parseRadarSourceBulkText([
+    "公众号名称,关键词,链接,优先级,启用",
+    '"芯片,前沿","芯片;AI",https://example.com/account,重点,是',
+    "同链接别名,芯片,https://example.com/account,重点,是",
+    "自动驾驶观察,智能出行,,普通,否",
+    ",缺少名称,,,"
+  ].join("\n"), { kind: "wechat", fileName: "accounts.csv" });
+  assert.equal(csv.format, "csv");
+  assert.equal(csv.sources.length, 2);
+  assert.equal(csv.sources[0].name, "芯片,前沿");
+  assert.deepEqual(csv.sources[0].keywords, ["芯片", "AI"]);
+  assert.equal(csv.sources[0].priority, "important");
+  assert.equal(csv.sources[1].enabled, false);
+  assert.equal(csv.stats.duplicateCount, 1);
+  assert.equal(csv.stats.invalidCount, 1);
+
+  const tsv = parseRadarSourceBulkText(
+    "名称\t关键词\t优先级\n机器人前沿\t具身智能；机器人\t重点",
+    { kind: "wechat", fileName: "accounts.tsv" }
+  );
+  assert.equal(tsv.format, "tsv");
+  assert.deepEqual(tsv.sources[0].keywords, ["具身智能", "机器人"]);
+  assert.equal(tsv.sources[0].priority, "important");
+
+  const malformed = parseRadarSourceBulkText('公众号名称,关键词\n"未闭合,芯片', {
+    kind: "wechat",
+    fileName: "bad.csv"
+  });
+  assert.equal(malformed.sources.length, 0);
+  assert.equal(malformed.stats.invalidCount, 1);
 }
 
 const rss = `<?xml version="1.0"?>
@@ -108,6 +164,57 @@ const xiaoyuzhouEpisodeHtml = `<!doctype html><html><head>
 assert.throws(() => normalizePublicUrl("file:///tmp/private"), /http/);
 assert.throws(() => normalizePublicUrl("http://127.0.0.1:8080/feed"), /本机或内网/);
 assert.throws(() => normalizePublicUrl("https://user:pass@example.com/feed"), /凭据/);
+
+{
+  const store = memoryStore();
+  const service = new RadarSourceService({ stateStore: store, now: () => 1_700_000_000_100 });
+  service.save({ kind: "wechat", name: "已经关注", keywords: ["存量"] });
+  store.metrics.saveAppSettingsCount = 0;
+  const text = [
+    "已经关注",
+    ...Array.from({ length: 700 }, (_value, index) => `批量公众号 ${String(index + 1).padStart(3, "0")}`),
+    "批量公众号 001",
+    "x".repeat(121)
+  ].join("\n");
+
+  const preview = service.bulkImport({
+    kind: "wechat",
+    text,
+    fileName: "重点公众号.txt",
+    previewOnly: true,
+    priority: "important"
+  });
+  assert.equal(preview.ok, true);
+  assert.equal(preview.previewOnly, true);
+  assert.equal(preview.stats.existingCount, 1);
+  assert.equal(preview.stats.importableCount, 700);
+  assert.equal(preview.stats.duplicateCount, 1);
+  assert.equal(preview.stats.invalidCount, 1);
+  assert.equal(preview.stats.importedCount, 0);
+  assert.equal(preview.items.length, 200);
+  assert.equal(preview.previewTruncated, true);
+  assert.equal(store.metrics.saveAppSettingsCount, 0, "preview must not persist");
+
+  const startedAt = Date.now();
+  const imported = service.bulkImport({
+    kind: "wechat",
+    text,
+    fileName: "重点公众号.txt",
+    priority: "important"
+  });
+  assert.equal(imported.ok, true);
+  assert.equal(imported.stats.importedCount, 700);
+  assert.equal(imported.sources.length, 701);
+  assert.equal(store.metrics.saveAppSettingsCount, 1, "700 rows must be persisted in one settings write");
+  assert.ok(Date.now() - startedAt < 2_000, "700-row bulk import should remain interactive");
+
+  const afterUpgradeService = new RadarSourceService({ stateStore: store, now: () => 1_700_000_000_200 });
+  assert.equal(afterUpgradeService.list().sources.length, 701, "saved sources must survive service/app upgrades");
+  const repeated = afterUpgradeService.bulkImport({ kind: "wechat", text, fileName: "重点公众号.txt" });
+  assert.equal(repeated.stats.importedCount, 0);
+  assert.equal(repeated.stats.existingCount, 701);
+  assert.equal(store.metrics.saveAppSettingsCount, 1, "a no-op duplicate import must not rewrite settings");
+}
 
 (async () => {
   const store = memoryStore();
