@@ -249,9 +249,28 @@ body.panel-resizing .main-grid {
   line-height: 1.2;
 }
 
+.sidebar-entity-search {
+  min-width: 0;
+  flex: 0 0 auto;
+  margin-top: 11px;
+}
+
+.sidebar-entity-search .domi-entity-search {
+  width: 100%;
+  margin: 0;
+  border-color: var(--line-strong);
+}
+
+.sidebar-domi-search-results {
+  max-height: min(36vh, 300px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-bottom: 0;
+}
+
 .sidebar-primary-nav {
   flex: 0 0 auto;
-  margin-top: 15px;
+  margin-top: 9px;
 }
 
 .sidebar-nav-item,

@@ -1,11 +1,27 @@
 const path = require("node:path");
 
-const FEISHU_DOCUMENT_PATTERN = /(?:飞书|lark).{0,12}(?:文档|docx?|知识库)|(?:文档|docx?|知识库).{0,12}(?:飞书|lark)/i;
-const CREATE_IN_FEISHU_PATTERN = /(?:(?:创建|新建|生成).{0,18}(?:飞书|lark).{0,8}(?:文档|docx?)|(?:飞书|lark).{0,12}(?:创建|新建|生成).{0,8}(?:文档|docx?))/i;
-const COPY_TO_FEISHU_PATTERN = /(?:复制|拷贝|搬|导出|上传|发布|同步|转|发(?:送)?).{0,24}(?:到|至|进|为|成|上).{0,8}(?:飞书|lark).{0,8}(?:文档|docx?|知识库)/i;
-const EDIT_PATTERN = /(?:编辑|修改|更新|覆盖|补充|追加|替换)/i;
+const FEISHU_DOCUMENT_PATTERN = /(?:飞书|lark).{0,8}(?:wiki|文档|docs?|docx?|知识库)|(?:wiki|文档|docs?|docx?|知识库).{0,8}(?:飞书|lark)/i;
+const FEISHU_RESOURCE_PATTERN = /(?:飞书|lark).{0,8}(?:base|多维表格|wiki|知识库|云文档|文档|docs?|docx?|云盘|drive|私聊|消息|群聊)/i;
+const TO_FEISHU_DESTINATION_PATTERN = /(?:到|至|进|上|向|往|写入|添加到|上传到|发布到|移动到|同步到|保存到)\s*(?:飞书|lark)(?:\s*(?:base|多维表格|wiki|知识库|云文档|文档|docs?|docx?|云盘|drive|私聊|消息|群聊))?/i;
+const LOCAL_TARGET_PATTERN = /(?:本地|domi|markdown|纪要|报告|项目库|人脉库|资料库|工作区|邮箱|邮件|本地通知|本地提醒)/i;
+const LOCAL_WRITE_PATTERN = /(?:补充|更新|整理|写入|保存|合并|添加|同步|导入|下载|复制|搬|转换|生成|创建|新建|发送|推送)/i;
+// A write verb must bind directly to its Feishu destination. Do not infer a
+// remote write merely because one clause mentions Feishu while another clause
+// creates or updates a local note.
+const CREATE_IN_FEISHU_PATTERN = /(?:(?:创建|新建|生成)(?:一(?:篇|份|个))?(?:新)?\s*(?:飞书|lark)(?:\s*(?:wiki|知识库|云文档|文档|docs?|docx?))(?=$|[，。；！？、：,.;!?\n])|(?:在|到|向|往)\s*(?:飞书|lark)(?:\s*(?:wiki|知识库|云文档))?\s*(?:中|里|上)?\s*(?:创建|新建|生成)(?:一(?:篇|份|个))?(?:新)?(?:\s*(?:文档|页面|节点))?)/i;
+const COPY_TO_FEISHU_PATTERN = /(?:复制|拷贝|搬|导出|上传|发布|同步|转(?:换)?|发(?:送)?)[^，。；！？、：,.;!?\n]{0,16}(?:到|至|进|为|成|上)\s*(?:飞书|lark)(?:\s*(?:wiki|知识库|云文档|文档|docs?|docx?))/i;
+const EDIT_FEISHU_DOCUMENT_PATTERN = /(?:(?:编辑|修改|更新|覆盖|补充|追加|替换)(?:这篇|该|指定的|已有的|现有的|上述|目标)?\s*(?:飞书|lark)(?:\s*(?:wiki|知识库|云文档|文档|docs?|docx?))(?=$|[，。；！？、：,.;!?\n])|(?:在|对)\s*(?:这篇|该|指定的|已有的|现有的|上述|目标)?\s*(?:飞书|lark)(?:\s*(?:wiki|知识库|云文档|文档|docs?|docx?))\s*(?:中|里|上)?\s*(?:编辑|修改|更新|覆盖|补充|追加|替换))/i;
 const NEGATED_WRITE_PATTERN = /(?:不要|别|无需|不用|禁止|先不|暂不|不需要|不要再).{0,18}(?:创建|新建|生成|复制|拷贝|搬|导出|上传|发布|同步|转|发送|编辑|修改|更新|覆盖|补充|追加|替换).{0,18}(?:飞书|lark|文档)/i;
 const IMPORT_TO_LOCAL_PATTERN = /(?:飞书|lark).{0,12}(?:文档|docx?|知识库).{0,24}(?:导入|下载|保存|复制|搬|同步|转).{0,12}(?:本地|domi|工作区|Markdown|项目库|人脉库)/i;
+const FEISHU_CHANNEL_WRITE_PATTERN = /(?:(?:发送|发给|推送)[^，。；！？、：,.;!?\n]{0,12}(?:到|至|给|向)\s*(?:我的)?\s*(?:飞书|lark)(?:\s*(?:私聊|消息|群聊))?|(?:发送|发给|推送)[^，。；！？、：,.;!?\n]{0,16}(?:飞书|lark)\s*(?:私聊|消息|群聊)|(?:飞书|lark)\s*(?:私聊|消息|群聊)[^，。；！？、：,.;!?\n]{0,12}(?:发送|发给|推送))/i;
+const FEISHU_RESOURCE_WRITE_PATTERN = /(?:(?:在|向|往|对)\s*(?:这(?:个|条|份)|该|指定的|已有的|现有的)?\s*(?:飞书|lark)(?:\s*(?:base|多维表格|云盘|drive|wiki|知识库))?\s*(?:中|里|上)?\s*(?:新增|创建|编辑|修改|更新|覆盖|补充|追加|上传|移动|删除|整理)|(?:把|将)[^，。；！？、：,.;!?\n]{1,40}(?:写入|添加到|上传到|发布到|移动到|同步到|保存到)\s*(?:飞书|lark)(?:\s*(?:base|多维表格|云盘|drive|wiki|知识库))|(?:新增|创建|编辑|修改|更新|覆盖|补充|追加|上传|移动|删除|整理)\s*(?:这(?:个|条|份)|该|指定的|已有的|现有的)?\s*(?:飞书|lark)(?:\s*(?:base|多维表格|云盘|drive|wiki|知识库))(?=$|[，。；！？、：,.;!?\n]))/i;
+
+function isFeishuReferenceWrittenLocally(text) {
+  return !TO_FEISHU_DESTINATION_PATTERN.test(text)
+    && FEISHU_RESOURCE_PATTERN.test(text)
+    && LOCAL_TARGET_PATTERN.test(text)
+    && LOCAL_WRITE_PATTERN.test(text);
+}
 
 function classifyFeishuDocumentIntent(value) {
   const text = String(value || "").trim();
@@ -13,12 +29,37 @@ function classifyFeishuDocumentIntent(value) {
     !text
     || NEGATED_WRITE_PATTERN.test(text)
     || IMPORT_TO_LOCAL_PATTERN.test(text)
+    || isFeishuReferenceWrittenLocally(text)
     || !FEISHU_DOCUMENT_PATTERN.test(text)
   ) return null;
   if (CREATE_IN_FEISHU_PATTERN.test(text) || COPY_TO_FEISHU_PATTERN.test(text)) {
     return { action: "publish-copy" };
   }
-  if (EDIT_PATTERN.test(text)) return { action: "edit-existing" };
+  if (EDIT_FEISHU_DOCUMENT_PATTERN.test(text)) return { action: "edit-existing" };
+  return null;
+}
+
+function classifyFeishuDocumentIntentFromRun(payload = {}) {
+  if (payload.requestOrigin !== "user") return null;
+  const userInstructionText = typeof payload.userInstructionText === "string"
+    ? payload.userInstructionText
+    : "";
+  return classifyFeishuDocumentIntent(userInstructionText);
+}
+
+function classifyFeishuWriteIntentFromRun(payload = {}) {
+  if (payload.requestOrigin !== "user") return null;
+  const userInstructionText = typeof payload.userInstructionText === "string"
+    ? payload.userInstructionText.trim()
+    : "";
+  if (!userInstructionText || NEGATED_WRITE_PATTERN.test(userInstructionText)) return null;
+  const documentIntent = classifyFeishuDocumentIntent(userInstructionText);
+  if (documentIntent) return documentIntent;
+  if (isFeishuReferenceWrittenLocally(userInstructionText)) return null;
+  if (FEISHU_CHANNEL_WRITE_PATTERN.test(userInstructionText)
+    || FEISHU_RESOURCE_WRITE_PATTERN.test(userInstructionText)) {
+    return { action: "external-write" };
+  }
   return null;
 }
 
@@ -76,6 +117,8 @@ function safeFeishuExportContext({ intent, candidates, result }) {
 
 module.exports = {
   classifyFeishuDocumentIntent,
+  classifyFeishuDocumentIntentFromRun,
+  classifyFeishuWriteIntentFromRun,
   feishuMarkdownSourceCandidates,
   safeFeishuExportContext
 };

@@ -20,8 +20,10 @@ const { CodexRuntimeManager } = require("./codex-runtime.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
 const { resolveLarkCliForChild } = require("./lark-runtime.cjs");
+const { resolveEntityWorkspaceWithRecovery } = require("./entity-workspace-recovery.cjs");
 const {
-  classifyFeishuDocumentIntent,
+  classifyFeishuDocumentIntentFromRun,
+  classifyFeishuWriteIntentFromRun,
   feishuMarkdownSourceCandidates,
   safeFeishuExportContext
 } = require("./feishu-document-intent.cjs");
@@ -146,8 +148,17 @@ const externalDomiWorkflows = new Map([
   ["sourcing", "访问当前人脉库和公开信息源，并可能按要求更新人脉记录"],
   ["investment-mgmt", "访问并可能更新当前项目库、文档与本地材料"]
 ]);
+const legacyFeishuPrimaryWriteWorkflows = new Set([
+  "domi-router",
+  "people-intake",
+  "project-intake",
+  "investment-radar",
+  "investment-mgmt",
+  "sourcing",
+  "task"
+]);
 const larkRequestPattern = /(?:飞书|lark|wiki|watching\s*list|项目库|人脉库|people|onedrive|项目文档|交流文档|线上文档|1\.\s*待办事项|1\.\s*task|待办事项|任务建议)/i;
-const explicitFeishuRequestPattern = /(?:飞书|lark|wiki|watching\s*list|线上文档)/i;
+const feishuReferenceRequestPattern = /(?:飞书|lark|wiki|watching\s*list|线上文档)/i;
 
 const appName = brandPaths.appName;
 const rootDir = path.resolve(__dirname, "..");
@@ -409,6 +420,48 @@ function validCodexWorkspace(candidate) {
     projectsDir,
     settings: getAppSettings().load().settings
   });
+}
+
+async function resolveCanonicalEntityWorkspace(request, { repairMissing = false } = {}) {
+  const entityRequest = {
+    entityType: ["project", "person"].includes(request?.entityType)
+      ? request.entityType
+      : "",
+    recordId: String(request?.recordId || "").trim()
+  };
+  const mayRepair = repairMissing
+    && getAppSettings().load().settings.storageBackend === "local"
+    && entityRequest.entityType
+    && entityRequest.recordId;
+  const result = await resolveEntityWorkspaceWithRecovery({
+    request: entityRequest,
+    resolveWorkspace: (candidate) => getDomiIntegration().entityWorkspace(candidate),
+    validateWorkspace: (candidate) => validCodexWorkspace(candidate),
+    reindex: mayRepair
+      ? async () => {
+          const synced = await serviceCoordinator.run(
+            "domi:sync",
+            () => getDomiIntegration().sync(),
+            {
+              force: true,
+              allowStale: false,
+              retries: 0,
+              isSuccess: (value) => value?.ok !== false && value?.stale !== true
+            }
+          );
+          serviceCoordinator.invalidate("domi:status");
+          serviceCoordinator.invalidate("domi:entity-materials:");
+          return synced;
+        }
+      : undefined
+  });
+  return {
+    ok: result.ok,
+    workspacePath: result.workspacePath,
+    recovered: Boolean(result.recovered),
+    snapshot: result.reindexResult?.snapshot,
+    error: result.error
+  };
 }
 
 function isEntityWorkspace(workspacePath) {
@@ -2714,12 +2767,17 @@ async function exportSystemDiagnostics(sender, report) {
   }
 }
 
+function explicitFeishuWriteIntent(payload) {
+  return classifyFeishuWriteIntentFromRun(payload);
+}
+
 function needsLarkAccess(payload) {
   const requestText = String(payload?.requestText || "");
   const backend = getAppSettings().load().settings.storageBackend;
-  // 飞书消息、一次性文档和显式 Wiki 请求是“交付渠道”，并不等于把
-  // 项目/人脉/行业资料库切换成飞书。即使主资料库仍在本地也要预检飞书身份。
-  if (explicitFeishuRequestPattern.test(requestText)) return true;
+  // Read/reference access and write authorization are separate. A generated
+  // workflow may request a read-only Feishu lookup, but only original user
+  // text can authorize a remote write.
+  if (feishuReferenceRequestPattern.test(requestText)) return true;
   if (backend === "local") return false;
   if (payload?.workflowId === "schedule") return larkRequestPattern.test(requestText);
   if (payload?.workflowId === "domi-analyst") {
@@ -2735,6 +2793,7 @@ function repositoryRuntimeContext(payload) {
     return "";
   }
   const settings = getAppSettings().load().settings;
+  const feishuWriteIntent = explicitFeishuWriteIntent(payload);
   if (payload?.workflowId === "schedule") {
     return [
       "domi 本轮日历配置事实：",
@@ -2746,24 +2805,32 @@ function repositoryRuntimeContext(payload) {
     ].join("\n");
   }
   if (settings.storageBackend === "local") {
-    const explicitFeishuDelivery = explicitFeishuRequestPattern.test(
-      String(payload?.requestText || "")
-    );
     return [
       "domi 本轮资料库事实：",
       "- 后端：local。",
       `- SQLite：${settings.localDatabasePath}`,
       `- Markdown 与资料目录：${settings.localRepositoryDir}。`,
       "- 使用 domi:investment-mgmt 本地后端；不得把权威资料库静默切换到飞书。",
-      explicitFeishuDelivery
-        ? "- 用户本轮明确要求飞书交付：可以创建飞书文档或发送飞书消息副本；这不要求项目库、人脉库、行业动态 Base，也不改变本地后端。"
-        : "- 未明确要求飞书交付时，不调用飞书 Wiki/Base。"
+      "- 已连接的飞书 Wiki、云文档、Base 和云盘只可按任务需要做只读检索与引用；只读失败不得阻塞本地交付，也不得据此改变本地主库。",
+      feishuWriteIntent
+        ? "- 用户本轮原始消息明确要求飞书写入；只对该消息唯一指定的动作和目标执行，不扩大范围，也不改变本地后端。"
+        : "- 本轮没有用户原始飞书写入指令：禁止创建、编辑、更新、覆盖、上传或发布任何飞书文档、Wiki 节点、Base 记录或消息。"
     ].join("\n");
   }
+  const legacyManagementWrite = legacyFeishuPrimaryWriteWorkflows.has(
+    String(payload?.workflowId || "")
+  );
   return [
     "domi 本轮资料库事实：",
-    "- 后端：feishu。",
-    "- 使用当前配置的 Base、Wiki 与本地材料目录；错误时不要静默切换后端。"
+    "- 后端：legacy_feishu_primary；仅在完成安全本地导入前兼容既有主库。",
+    "- 使用本机已经固定映射的既有 Base、唯一 Wiki 项目文档与本地材料目录；错误时不要静默切换后端，也不得创建第二套管理库。",
+    legacyManagementWrite
+      ? "- 当前工作流可严格按对应 domi Skill 完成既有 Base／唯一 Wiki 主文档的管理闭环；权限只覆盖本机既有固定目标、必要字段和写后回读。"
+      : "- 当前工作流没有旧主库管理写入权限；既有 Base／Wiki 只读。",
+    "- 普通飞书云文档、任意 Wiki 节点、外部发布副本和消息不属于旧主库管理闭环。",
+    feishuWriteIntent
+      ? "- 用户本轮原始消息明确要求额外的飞书外部写入；只对该消息唯一指定的动作和目标执行。"
+      : "- 本轮没有用户原始飞书外部写入指令：除上述既有主库管理闭环外，不得创建、编辑、更新、覆盖或发布任何飞书外部内容。"
   ].join("\n");
 }
 
@@ -2797,7 +2864,7 @@ async function larkRuntimeContext(required) {
 }
 
 async function feishuDocumentWriteContext(payload) {
-  const intent = classifyFeishuDocumentIntent(payload?.requestText);
+  const intent = classifyFeishuDocumentIntentFromRun(payload);
   if (!intent) return "";
   const candidates = feishuMarkdownSourceCandidates(payload);
   if (intent.action !== "publish-copy" || candidates.length !== 1) {
@@ -2876,16 +2943,19 @@ async function runCodex(sender, payload) {
         recordId: String(payload.externalRecordId).trim()
       }
     : null;
-  const canonicalEntityWorkspace = localEntityRequest
-    ? validCodexWorkspace(getDomiIntegration().entityWorkspace(localEntityRequest))
+  const entityWorkspaceResolution = localEntityRequest
+    ? await resolveCanonicalEntityWorkspace(localEntityRequest, { repairMissing: true })
+    : null;
+  const canonicalEntityWorkspace = entityWorkspaceResolution?.ok
+    ? entityWorkspaceResolution.workspacePath
     : null;
   const requestedWorkspace = validCodexWorkspace(payload?.workspacePath);
   const genericWorkspace = requestedWorkspace && !isEntityWorkspace(requestedWorkspace)
     ? requestedWorkspace
     : null;
-  const workspacePath = canonicalEntityWorkspace
-    || (localEntityRequest ? null : genericWorkspace)
-    || demoWorkspace;
+  const workspacePath = localEntityRequest
+    ? canonicalEntityWorkspace
+    : genericWorkspace || demoWorkspace;
 
   const runId = payload?.runId || `run-${Date.now()}`;
   const acceptedAt = Date.now();
@@ -2895,8 +2965,8 @@ async function runCodex(sender, payload) {
       ok: false,
       runId,
       output: "",
-      error: "当前项目或人物记录没有可用的固定本地目录，请先同步资料库后重试。",
-      workspacePath: demoWorkspace
+      error: entityWorkspaceResolution?.error
+        || "当前项目或人物记录没有唯一且可访问的本地目录，请先处理目录冲突后重试。"
     };
   }
   if (!prompt) {
@@ -3467,12 +3537,11 @@ ipcMain.handle("markdown:image-preview", (_event, request) => resolveMarkdownIma
 ipcMain.handle("markdown:image-save", (_event, request) => saveMarkdownImage(request));
 ipcMain.handle("markdown:copy", (_event, request) => copyMarkdownDocument(request));
 ipcMain.handle("pdf:read", (_event, request) => readPdfDocument(request));
-ipcMain.handle("domi:entity-workspace", (_event, request) => {
+ipcMain.handle("domi:entity-workspace", async (_event, request) => {
   try {
-    const workspacePath = getDomiIntegration().entityWorkspace(request);
-    return workspacePath
-      ? { ok: true, workspacePath }
-      : { ok: false, error: "没有找到该实体的本地固定目录。" };
+    return await resolveCanonicalEntityWorkspace(request, {
+      repairMissing: request?.repairMissing === true
+    });
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

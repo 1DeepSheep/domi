@@ -24,6 +24,23 @@ export function normalizedEntityMention(value: string) {
     .replace(/[^a-z0-9\u3400-\u9fff]+/g, "");
 }
 
+export function projectNameNeedsReview(value: string) {
+  const raw = String(value || "").normalize("NFKC").trim();
+  const compact = raw.match(/^((?:19|20)\d{2})(\d{2})(\d{2})\s*[-_—–]\s*.+$/);
+  const separated = compact ? null : raw.match(
+    /^((?:19|20)\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\s*[-_—–]\s*.+$/
+  );
+  const match = compact || separated;
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsedDate = new Date(Date.UTC(year, month - 1, day));
+  return parsedDate.getUTCFullYear() === year
+    && parsedDate.getUTCMonth() + 1 === month
+    && parsedDate.getUTCDate() === day;
+}
+
 const GENERIC_ENTITY_TOKENS = new Set([
   "项目", "公司", "集团", "科技", "智能", "网络", "技术", "数据", "信息", "数字",
   "人工智能", "ai", "有限责任公司", "有限公司"
@@ -180,6 +197,7 @@ export function parseDomiEntityResult(output: string): DomiEntityResult | null {
     const entityType = parsed.entityType === "person" ? "person" : parsed.entityType === "project" ? "project" : "";
     const recordId = String(parsed.recordId || "").trim();
     const name = String(parsed.name || "").trim();
+    if (entityType === "project" && projectNameNeedsReview(name)) return null;
     return entityType && recordId && name
       ? { entityType, recordId, name }
       : null;
