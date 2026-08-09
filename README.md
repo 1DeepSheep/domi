@@ -9,8 +9,8 @@
 <h1 align="center">domi</h1>
 
 <p align="center">
-  <strong>能把投资工作推进到下一步的 AI 投资分析师</strong><br>
-  从信息采集、研究判断到结构化入库、持续跟踪和执行动作，在一个本地优先的 Mac 工作台中完成。
+  <strong>会研究、会判断，也会把事情做下去的 AI 投资分析师</strong><br>
+  domi 把资料整理、研究分析、结构化入库、持续跟踪和后续行动串成一条完整工作流，并将资料沉淀在你的 Mac 上。
 </p>
 
 <p align="center">
