@@ -379,6 +379,24 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "请在 Electron 窗口中保存本地信源。"
   }),
+  bulkImportRadarSources: async (request) => ({
+    ok: false,
+    previewOnly: request.previewOnly === true,
+    format: "list",
+    stats: {
+      totalRows: 0,
+      validCount: 0,
+      duplicateCount: 0,
+      invalidCount: 0,
+      blankCount: 0,
+      existingCount: 0,
+      importableCount: 0,
+      importedCount: 0
+    },
+    items: [],
+    previewTruncated: false,
+    error: "请在 Electron 窗口中批量导入本地信源。"
+  }),
   deleteRadarSource: async () => ({
     ok: false,
     error: "请在 Electron 窗口中删除本地信源。"

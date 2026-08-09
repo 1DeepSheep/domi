@@ -6,6 +6,13 @@ export type SidebarUpdateEntry = {
   state: "available" | "downloading" | "downloaded" | "error";
 };
 
+function retryDetail(error: string | undefined, fallback = "点击重试") {
+  const detail = String(error || "").replace(/\s+/g, " ").trim();
+  if (!detail) return fallback;
+  const summary = detail.length > 42 ? `${detail.slice(0, 41)}…` : detail;
+  return `${summary} · 点击重试`;
+}
+
 export function sidebarUpdateEntry(status: UpdateStatus | null): SidebarUpdateEntry | null {
   if (!status?.supported) return null;
 
@@ -36,7 +43,7 @@ export function sidebarUpdateEntry(status: UpdateStatus | null): SidebarUpdateEn
     if (status.error) {
       return {
         label: "更新重启未完成",
-        detail: "点击重试",
+        detail: retryDetail(status.error),
         state: "error"
       };
     }
@@ -58,7 +65,7 @@ export function sidebarUpdateEntry(status: UpdateStatus | null): SidebarUpdateEn
     if (!status.availableVersion) return null;
     return {
       label: "更新失败",
-      detail: "点击重试",
+      detail: retryDetail(status.error),
       state: "error"
     };
   }

@@ -111,6 +111,9 @@ declare global {
       ) => Promise<DomiWeeklyNewsCheckpointResult>;
       listRadarSources: () => Promise<RadarSourceSnapshot>;
       saveRadarSource: (request: RadarSourceSaveRequest) => Promise<RadarSourceMutationResult>;
+      bulkImportRadarSources: (
+        request: RadarSourceBulkImportRequest
+      ) => Promise<RadarSourceBulkImportResult>;
       deleteRadarSource: (request: { sourceId: string }) => Promise<RadarSourceMutationResult>;
       syncRadarSources: (request?: RadarSourceSyncRequest) => Promise<RadarSourceSyncResult>;
       processPodcastEpisode: (request: PodcastProcessRequest) => Promise<PodcastProcessResult>;
@@ -607,6 +610,50 @@ export type RadarSourceSaveRequest = {
   priority?: RadarSourcePriority;
   keywords?: string[] | string;
   autoProcess?: boolean;
+};
+
+export type RadarSourceBulkImportRequest = {
+  kind: "wechat";
+  text: string;
+  fileName?: string;
+  previewOnly?: boolean;
+  enabled?: boolean;
+  priority?: RadarSourcePriority;
+  keywords?: string[] | string;
+};
+
+export type RadarSourceBulkImportItem = {
+  row: number;
+  name: string;
+  status: "new" | "duplicate" | "existing" | "invalid";
+  source?: RadarSourceSaveRequest;
+  duplicateOfRow?: number;
+  existingSourceId?: string;
+  error?: string;
+};
+
+export type RadarSourceBulkImportStats = {
+  totalRows: number;
+  validCount: number;
+  duplicateCount: number;
+  invalidCount: number;
+  blankCount: number;
+  existingCount: number;
+  importableCount: number;
+  importedCount: number;
+};
+
+export type RadarSourceBulkImportResult = {
+  ok: boolean;
+  previewOnly: boolean;
+  format: "list" | "csv" | "tsv";
+  stats: RadarSourceBulkImportStats;
+  items: RadarSourceBulkImportItem[];
+  previewTruncated: boolean;
+  added?: RadarSource[];
+  sources?: RadarSource[];
+  updatedAt?: number;
+  error?: string;
 };
 
 export type PodcastJobStatus =
