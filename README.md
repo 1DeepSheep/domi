@@ -9,8 +9,8 @@
 <h1 align="center">domi</h1>
 
 <p align="center">
-  <strong>会研究、会判断，也会把事情做下去的 AI 投资分析师</strong><br>
-  domi 把资料整理、研究分析、结构化入库、持续跟踪和后续行动串成一条完整工作流，并将资料沉淀在你的 Mac 上。
+  <strong>懂研究、会判断、能执行的 AI 投资分析师</strong><br>
+  domi 将资料整理、研究分析、结构化入库、持续跟踪和后续行动串联成一套完整的投资工作流，并将资料沉淀在你的 Mac 上。
 </p>
 
 <p align="center">

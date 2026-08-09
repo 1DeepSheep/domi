@@ -9,7 +9,7 @@
 <h1 align="center">domi</h1>
 
 <p align="center">
-  <strong>An AI investment analyst that researches, forms a view, and follows through</strong><br>
+  <strong>An AI investment analyst built for research, judgment, and execution</strong><br>
   domi connects material organization, investment analysis, structured records, ongoing monitoring, and next actions in one workflow—with your knowledge base on your Mac.
 </p>
 
