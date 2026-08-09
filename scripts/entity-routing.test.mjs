@@ -8,6 +8,7 @@ import {
   mentionedProjectCandidates,
   normalizedEntityMention,
   parseDomiEntityResult,
+  projectNameNeedsReview,
   projectMentionMatches,
   shouldBindProjectToSourceConversation
 } from "../src/entity-routing.ts";
@@ -238,6 +239,20 @@ test("entity result parser accepts the stable hidden marker", () => {
     ),
     { entityType: "project", recordId: "project-new", name: "新项目" }
   );
+});
+
+test("entity result parser rejects archive titles as canonical project names", () => {
+  assert.equal(
+    parseDomiEntityResult(
+      '完成。\n<!-- DOMI_ENTITY_RESULT_V1 {"entityType":"project","recordId":"project-new","name":"20260630-示例主体-专题-A"} -->'
+    ),
+    null
+  );
+  assert.equal(projectNameNeedsReview("2026-06-30-示例主体-专题-A"), true);
+  assert.equal(projectNameNeedsReview("20261340-日期品牌-专题-A"), false);
+  assert.equal(projectNameNeedsReview("360"), false);
+  assert.equal(projectNameNeedsReview("3D Systems"), false);
+  assert.equal(projectNameNeedsReview("B-ON"), false);
 });
 
 test("entity result parser rejects incomplete or unrelated output", () => {

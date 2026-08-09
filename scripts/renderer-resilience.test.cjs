@@ -13,7 +13,10 @@ const setupCenter = read("src/SetupCenter.tsx");
 const editor = read("src/RichMarkdownEditor.tsx");
 const editorBoundary = read("src/MarkdownEditorErrorBoundary.tsx");
 const sectionBoundary = read("src/SectionErrorBoundary.tsx");
+const env = read("src/env.d.ts");
 const main = read("electron/main.cjs");
+const entityWorkspaceRecovery = read("electron/entity-workspace-recovery.cjs");
+const feishuDocumentIntent = read("electron/feishu-document-intent.cjs");
 const workspaceBoundary = read("electron/workspace-boundary.cjs");
 const preload = read("electron/preload.cjs");
 const taxonomy = read("src/investmentTaxonomy.ts");
@@ -26,6 +29,12 @@ const databaseGrid = read("src/database/DatabaseGrid.tsx");
 const databaseCellEditors = read("src/database/DatabaseCellEditors.tsx");
 const databaseGridStyles = read("src/database/database-grid.css");
 const appConfirmDialog = read("src/AppConfirmDialog.tsx");
+
+assert.equal(
+  (setupCenter.match(/requestOrigin: "programmatic"/g) || []).length,
+  3,
+  "Connection and account diagnostics must be explicitly marked as programmatic Codex requests."
+);
 
 assert.doesNotMatch(
   `${app}\n${setupCenter}\n${radarSourceManager}`,
@@ -335,6 +344,48 @@ assert.match(
   /<strong>新建任务<\/strong>/,
   "The primary creation action must be presented as a new task."
 );
+const newTaskIndex = app.indexOf("<strong>新建任务</strong>");
+const sidebarEntitySearchIndex = app.indexOf('<div className="sidebar-entity-search"');
+const sidebarPrimaryNavIndex = app.indexOf('<nav className="sidebar-primary-nav"');
+assert.ok(
+  newTaskIndex >= 0
+    && sidebarEntitySearchIndex > newTaskIndex
+    && sidebarPrimaryNavIndex > sidebarEntitySearchIndex,
+  "Project and people search must sit below New Task and above the primary sidebar navigation."
+);
+assert.equal(
+  (app.match(/aria-label="搜索 domi 项目或人脉"/g) || []).length,
+  1,
+  "Project and people search must have one authoritative sidebar input."
+);
+const sidebarEntitySearch = app.slice(sidebarEntitySearchIndex, sidebarPrimaryNavIndex);
+assert.match(
+  sidebarEntitySearch,
+  /value=\{domiQuery\}[\s\S]*?onFocus=\{refreshLocalIndexForSearch\}[\s\S]*?openDomiProject\(project\)[\s\S]*?openDomiPerson\(person\)/,
+  "Moving entity search must preserve local-index refresh and project/person navigation."
+);
+assert.match(
+  styles,
+  /\.sidebar-entity-search\s*\{[\s\S]*?flex:\s*0 0 auto[\s\S]*?\.sidebar-domi-search-results\s*\{[\s\S]*?max-height:[\s\S]*?overflow-y:\s*auto/,
+  "Sidebar entity results must remain bounded and independently scrollable."
+);
+const recordingExchangePanelIndex = app.indexOf('<section className={`panel-section ${openSections.domi');
+const recordingExchangePanel = app.slice(recordingExchangePanelIndex, recordingExchangePanelIndex + 500);
+assert.match(
+  recordingExchangePanel,
+  /<Mic size=\{17\} \/>录音交流/,
+  "The recordings and PLAUD panel must use the user-facing Recording Exchange label."
+);
+assert.doesNotMatch(
+  recordingExchangePanel,
+  /本地资料库|外部连接/,
+  "The recording panel title must no longer be coupled to the repository backend label."
+);
+assert.match(
+  app,
+  /domiSnapshot\.sources\.projects\.needsNameReview[\s\S]*?个项目名待确认/,
+  "Legacy archive folders that cannot safely become company names must stay visible for review."
+);
 assert.doesNotMatch(
   app.match(/async function createThread\(\)[\s\S]*?async function stopRun/)?.[0] || "",
   /createProjectWorkspace/,
@@ -448,13 +499,41 @@ assert.match(
 );
 assert.match(
   main,
-  /ipcMain\.handle\("domi:entity-workspace"[\s\S]*?\.entityWorkspace\(request\)/,
-  "Canonical entity workspace lookup must not require a recursive materials scan."
+  /ipcMain\.handle\("domi:entity-workspace"[\s\S]*?resolveCanonicalEntityWorkspace\(request,[\s\S]*?repairMissing: request\?\.repairMissing === true/,
+  "Canonical entity workspace lookup must opt into the bounded rename recovery path without scanning materials."
 );
 assert.match(
   app,
-  /resolveDomiEntityWorkspacePath[\s\S]*?loadDomiEntityWorkspace/,
-  "Project and person task setup must use the lightweight workspace lookup."
+  /resolveDomiEntityWorkspacePath[\s\S]*?loadDomiEntityWorkspace\(\{[\s\S]*?repairMissing: true/,
+  "Project and person task setup must repair a renamed canonical directory through the lightweight lookup."
+);
+assert.match(
+  main,
+  /async function resolveCanonicalEntityWorkspace[\s\S]*?resolveEntityWorkspaceWithRecovery[\s\S]*?serviceCoordinator\.run\([\s\S]*?"domi:sync"[\s\S]*?getDomiIntegration\(\)\.sync\(\)[\s\S]*?retries: 0/,
+  "A missing entity directory may trigger one coalesced index rebuild with no hidden retry loop."
+);
+assert.match(
+  entityWorkspaceRecovery,
+  /多个本地目录[\s\S]*?保留唯一的实体目录[\s\S]*?A missing canonical directory gets exactly one repair attempt[\s\S]*?await reindex\(\)[\s\S]*?resolveWorkspace\(request\)/,
+  "Rename recovery must re-resolve by repository identity and report duplicate-directory conflicts as actionable errors."
+);
+assert.match(
+  app,
+  /recoverBoundEntityWorkspaceForSubmission[\s\S]*?repairMissing: true[\s\S]*?if \(!resolved\.ok \|\| !resolved\.workspacePath\)[\s\S]*?patchThread\(thread\.id, \{ workspacePath: resolved\.workspacePath \}\)[\s\S]*?await recoverBoundEntityWorkspaceForSubmission/,
+  "Every bound local entity submission must repair and persist its canonical directory before appending or launching the turn."
+);
+assert.match(
+  main,
+  /entityWorkspaceResolution = localEntityRequest[\s\S]*?repairMissing: true[\s\S]*?if \(localEntityRequest && !canonicalEntityWorkspace\)[\s\S]*?error: entityWorkspaceResolution\?\.error[\s\S]*?\n\s*\};/,
+  "The host must independently enforce rename recovery and return entity errors without a fallback workspace."
+);
+const missingEntityWorkspaceGuard = main.match(
+  /if \(localEntityRequest && !canonicalEntityWorkspace\) \{[\s\S]*?\n\s*\}/
+)?.[0] || "";
+assert.doesNotMatch(
+  missingEntityWorkspaceGuard,
+  /workspacePath/,
+  "A failed entity repair must not leak the demo, task or stale directory as a writable fallback."
 );
 assert.equal(
   (app.match(/loadDomiEntityMaterials/g) || []).length,
@@ -750,7 +829,7 @@ assert.match(
 );
 assert.match(
   main,
-  /localEntityRequest[\s\S]*?getDomiIntegration\(\)\.entityWorkspace[\s\S]*?genericWorkspace = requestedWorkspace && !isEntityWorkspace[\s\S]*?const workspacePath = canonicalEntityWorkspace/,
+  /localEntityRequest[\s\S]*?resolveCanonicalEntityWorkspace\(localEntityRequest, \{ repairMissing: true \}\)[\s\S]*?genericWorkspace = requestedWorkspace && !isEntityWorkspace[\s\S]*?const workspacePath = localEntityRequest[\s\S]*?canonicalEntityWorkspace/,
   "A persisted project or person thread must run in the record's current canonical directory, not a stale task workspace."
 );
 assert.match(
@@ -1161,8 +1240,23 @@ assert.match(
 );
 assert.match(
   main,
-  /if \(explicitFeishuRequestPattern\.test\(requestText\)\) return true;[\s\S]*?if \(backend === "local"\) return false;/,
-  "Explicit Feishu document or message delivery must be authorized even when the repository stays local."
+  /if \(feishuReferenceRequestPattern\.test\(requestText\)\) return true;[\s\S]*?if \(backend === "local"\) return false;/,
+  "Read-only Feishu references must remain available even when the repository stays local."
+);
+assert.match(
+  main,
+  /function explicitFeishuWriteIntent\(payload\)[\s\S]*?classifyFeishuWriteIntentFromRun\(payload\)[\s\S]*?本轮没有用户原始飞书写入指令：[\s\S]*?async function feishuDocumentWriteContext\(payload\)[\s\S]*?classifyFeishuDocumentIntentFromRun\(payload\)/,
+  "Feishu reference access and write authorization must be separate, with writes bound to original user text."
+);
+assert.match(
+  feishuDocumentIntent,
+  /function classifyFeishuWriteIntentFromRun\(payload = \{\}\)[\s\S]*?payload\.requestOrigin !== "user"[\s\S]*?userInstructionText[\s\S]*?isFeishuReferenceWrittenLocally[\s\S]*?FEISHU_CHANNEL_WRITE_PATTERN[\s\S]*?FEISHU_RESOURCE_WRITE_PATTERN/,
+  "Every Feishu write classifier must fail closed on programmatic requests and local-target information flows."
+);
+assert.match(
+  main,
+  /const legacyFeishuPrimaryWriteWorkflows = new Set[\s\S]*?const legacyManagementWrite = legacyFeishuPrimaryWriteWorkflows\.has[\s\S]*?既有 Base／唯一 Wiki 主文档的管理闭环[\s\S]*?普通飞书云文档、任意 Wiki 节点、外部发布副本和消息不属于旧主库管理闭环[\s\S]*?除上述既有主库管理闭环外/,
+  "Legacy Feishu-primary workflows must retain only their fixed management loop, not implicit writes to arbitrary external documents."
 );
 assert.match(
   main,
@@ -1482,6 +1576,26 @@ assert.match(
 );
 assert.match(
   app,
+  /function plaudNotesWorkflowRequest[\s\S]*?默认本地主库使用 Markdown 文档和本地项目库[\s\S]*?legacy_feishu_primary[\s\S]*?只读检索飞书 Wiki、云文档或 Base[\s\S]*?飞书只读检索失败不得阻塞[\s\S]*?程序化工作流，不是用户对飞书写入的原始指令[\s\S]*?禁止创建、编辑、更新、覆盖或发布任何飞书外部内容/,
+  "PLAUD processing must archive locally, treat Feishu as an optional read-only reference and forbid implicit remote writes."
+);
+assert.match(
+  app,
+  /submitToCodex\(workflow, plaudNotesWorkflowRequest[\s\S]*?requestOrigin: "programmatic"[\s\S]*?userInstructionText: ""[\s\S]*?submitToCodex\(workflow, suggestion\.prompt[\s\S]*?requestOrigin: "programmatic"[\s\S]*?userInstructionText: ""/,
+  "Generated PLAUD and execution-suggestion requests must never masquerade as original user instructions."
+);
+assert.match(
+  workflows,
+  /requestOrigin: "user" \| "programmatic" = "user"[\s\S]*?客户端工作流指令（不代表用户授权外部写入）[\s\S]*?requestLabel/,
+  "Workflow prompts must label generated instructions separately from original user input."
+);
+assert.match(
+  app,
+  /workflowPrompt\(radarWorkflow,[\s\S]{0,160}?"programmatic"\)[\s\S]*?requestOrigin: "programmatic"[\s\S]*?workflowPrompt\(routerWorkflow,[\s\S]{0,220}?"programmatic"\)[\s\S]*?requestOrigin: "programmatic"[\s\S]*?workflowPrompt\(todoWorkflow,[\s\S]{0,160}?"programmatic"\)[\s\S]*?requestOrigin: "programmatic"/,
+  "Background radar, podcast and todo runs must carry programmatic provenance into both prompt and host payload."
+);
+assert.match(
+  app,
   /if \(!codexRecoveryReady\)[\s\S]*?任务恢复检查尚未完成[\s\S]*?await submitToCodexInternal/,
   "Foreground and programmatic sends must fail closed until ownership recovery has completed."
 );
@@ -1516,12 +1630,12 @@ assert.match(
 );
 assert.match(
   app,
-  /const execution: SubmissionExecutionContext = binding\.execution \|\|[\s\S]*?threadId: resumableCodexThreadId\([\s\S]*?sourceThread\.id,[\s\S]*?targetThread\.codexThreadId,[\s\S]*?execution\.isolated[\s\S]*?workspacePath: execution\.workspacePath[\s\S]*?externalType: execution\.externalType[\s\S]*?externalRecordId: execution\.externalRecordId/,
+  /let execution: SubmissionExecutionContext = binding\.execution \|\|[\s\S]*?threadId: resumableCodexThreadId\([\s\S]*?sourceThread\.id,[\s\S]*?targetThread\.codexThreadId,[\s\S]*?execution\.isolated[\s\S]*?workspacePath: execution\.workspacePath[\s\S]*?externalType: execution\.externalType[\s\S]*?externalRecordId: execution\.externalRecordId/,
   "An isolated turn must start a new remote Codex conversation while retaining only the local source task identity."
 );
 assert.match(
   app,
-  /const execution: SubmissionExecutionContext = binding\.execution \|\| \{[\s\S]*?entityFinalizationMode: entityFinalizationModeForSourceConversation\(targetThread\)[\s\S]*?isolated: false/,
+  /let execution: SubmissionExecutionContext = binding\.execution \|\| \{[\s\S]*?entityFinalizationMode: entityFinalizationModeForSourceConversation\(targetThread\)[\s\S]*?isolated: false/,
   "A non-isolated run from canonical A must remain archive-only and never gain permission to rebind A from an unexpected receipt."
 );
 assert.doesNotMatch(
@@ -1573,6 +1687,16 @@ assert.match(
   app,
   /activeDocumentPath\?: string[\s\S]*?candidate\.activeDocumentPath === undefined[\s\S]*?activeDocumentPath: queued\.activeDocumentPath[\s\S]*?activeDocumentPath: options\.activeDocumentPath[\s\S]*?workbench\.runCodex\(\{[\s\S]*?activeDocumentPath: options\.activeDocumentPath/,
   "The active document must be snapshotted, persisted with queued work and never re-read when the run starts."
+);
+assert.match(
+  app,
+  /type QueuedSubmission = \{[\s\S]*?requestOrigin\?: "user" \| "programmatic"[\s\S]*?userInstructionText\?: string[\s\S]*?candidate\.requestOrigin === undefined[\s\S]*?requestOrigin: queued\.requestOrigin === "user" \? "user" : "programmatic"[\s\S]*?requestOrigin: "user"[\s\S]*?userInstructionText: submittedInput\.trim\(\)/,
+  "Queue persistence and replay must preserve user/programmatic provenance and fail old entries closed."
+);
+assert.match(
+  `${env}\n${app}`,
+  /requestOrigin\?: "user" \| "programmatic"[\s\S]*?userInstructionText\?: string[\s\S]*?workbench\.runCodex\(\{[\s\S]*?requestOrigin,[\s\S]*?userInstructionText,/,
+  "The renderer-to-host run contract must carry original user instruction provenance."
 );
 const submitInternalStart = app.indexOf("async function submitToCodexInternal");
 const submitInternalEnd = app.indexOf("function handleSubmit", submitInternalStart);

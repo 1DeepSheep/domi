@@ -140,6 +140,43 @@ function normalizedName(value) {
     .replace(/[\s·•._\-—–（）()【】[\]{}，,。.!！?？/&／]+/g, "");
 }
 
+function parsedArchiveProjectTitle(value) {
+  const raw = String(value || "").normalize("NFKC").trim();
+  const compact = raw.match(/^((?:19|20)\d{2})(\d{2})(\d{2})\s*[-_—–]\s*(.+)$/);
+  const separated = compact ? null : raw.match(
+    /^((?:19|20)\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\s*[-_—–]\s*(.+)$/
+  );
+  const match = compact || separated;
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsedDate = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsedDate.getUTCFullYear() !== year
+    || parsedDate.getUTCMonth() + 1 !== month
+    || parsedDate.getUTCDate() !== day
+  ) return null;
+  const archiveLabel = String(match[4] || "").trim();
+  if (!archiveLabel) return null;
+  const segments = archiveLabel
+    .split(/\s*[-—–]\s*/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const entityName = String(segments[0] || archiveLabel).trim();
+  if (!entityName) return null;
+  return { entityName, archiveLabel };
+}
+
+function assertProjectEntityName(value) {
+  if (!parsedArchiveProjectTitle(value)) return;
+  const error = new Error(
+    "公司名称应只填写主体名，不能使用“日期-公司-主题-评级”格式的文档或目录标题。"
+  );
+  error.code = "DOMI_PROJECT_NAME_REVIEW_REQUIRED";
+  throw error;
+}
+
 function stableId(prefix, value) {
   return `${prefix}_${crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 16)}`;
 }
@@ -239,6 +276,16 @@ function firstMarkdownFile(directoryPath) {
     return entry ? path.join(directoryPath, entry.name) : "";
   } catch {
     return "";
+  }
+}
+
+function hasVisibleRootFile(directoryPath) {
+  try {
+    return fs.readdirSync(directoryPath, { withFileTypes: true }).some((entry) =>
+      !entry.name.startsWith(".") && (entry.isFile() || entry.isSymbolicLink())
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -368,6 +415,7 @@ function bestPreviewDocument(directoryPath, canonicalPath = "") {
 function scanWorkspaceEntities(libraryDir) {
   const projects = [];
   const people = [];
+  const projectNameReviews = [];
   const projectRoot = path.join(libraryDir, PROJECTS_DIRECTORY);
   const peopleRoot = path.join(libraryDir, PEOPLE_DIRECTORY);
   const indexedProjectPaths = new Set();
@@ -379,17 +427,40 @@ function scanWorkspaceEntities(libraryDir) {
     const hasCanonicalPage = fs.existsSync(canonicalPath);
     const metadata = readManagedFrontmatter(canonicalPath);
     if (metadata.entity_type && metadata.entity_type !== "project") return;
-    const name = String(metadata.company_name || fallbackName || "").trim();
-    if (!looksLikeProjectDirectory(name, hasCanonicalPage)) return;
-    const normalized = normalizedName(name);
-    if (!normalized) return;
-    const metadataSubdomains = stringList(metadata.subdomains);
+    const fallbackProjectName = String(fallbackName || "").trim();
+    const explicitCompanyName = String(metadata.company_name || "").trim();
+    const provisionalName = String(explicitCompanyName || fallbackProjectName || "").trim();
+    if (!looksLikeProjectDirectory(provisionalName, hasCanonicalPage)) return;
     const documentPath = hasCanonicalPage
       ? canonicalPath
       : firstMarkdownFile(resolvedProjectPath);
+    if (
+      !hasCanonicalPage
+      && !documentPath
+      && !hasVisibleRootFile(resolvedProjectPath)
+      && !listDirectories(resolvedProjectPath).some((entry) =>
+        PROJECT_STRUCTURE_DIRECTORIES.has(entry.name)
+      )
+    ) return;
+    const nameUnderReview = explicitCompanyName || fallbackProjectName;
+    const archiveTitle = parsedArchiveProjectTitle(nameUnderReview);
+    if (archiveTitle || (hasCanonicalPage && !explicitCompanyName)) {
+      projectNameReviews.push({
+        sourceTitle: nameUnderReview,
+        suggestedName: archiveTitle?.entityName || fallbackProjectName,
+        domain: String(domainName || "").trim(),
+        subdomain: String(subdomainName || "").trim()
+      });
+      return;
+    }
+    const name = provisionalName;
+    const normalized = normalizedName(name);
+    if (!normalized) return;
+    const metadataSubdomains = stringList(metadata.subdomains);
     indexedProjectPaths.add(resolvedProjectPath);
     projects.push({
       id: String(metadata.project_id || stableId("prj", normalized)),
+      frontmatterRecordId: String(metadata.project_id || "").trim(),
       name,
       normalizedName: normalized,
       domain: String(metadata.domain || domainName || "").trim(),
@@ -431,6 +502,10 @@ function scanWorkspaceEntities(libraryDir) {
   for (const personEntry of listDirectories(peopleRoot)) {
     const personPath = path.join(peopleRoot, personEntry.name);
     const canonicalPath = path.join(personPath, PERSON_PAGE_NAME);
+    const hasCanonicalPage = fs.existsSync(canonicalPath);
+    const fallbackDocumentPath = hasCanonicalPage ? "" : firstMarkdownFile(personPath);
+    const personDocuments = scanPersonDocuments(personPath);
+    if (!hasCanonicalPage && !fallbackDocumentPath && !personDocuments.length) continue;
     const metadata = readManagedFrontmatter(canonicalPath);
     if (metadata.entity_type && metadata.entity_type !== "person") continue;
     const name = String(metadata.name || personEntry.name || "").trim();
@@ -438,21 +513,91 @@ function scanWorkspaceEntities(libraryDir) {
     if (!normalized) continue;
     people.push({
       id: String(metadata.person_id || stableId("per", normalized)),
+      frontmatterRecordId: String(metadata.person_id || "").trim(),
       name,
       normalizedName: normalized,
       types: stringList(metadata.types),
       organization: String(metadata.organization || "").trim(),
       status: String(metadata.status || "").trim(),
       rating: String(metadata.rating || "").trim(),
-      documentPath: fs.existsSync(canonicalPath)
-        ? canonicalPath
-        : firstMarkdownFile(personPath),
-      interactionDocuments: scanPersonDocuments(personPath),
+      documentPath: hasCanonicalPage ? canonicalPath : fallbackDocumentPath,
+      interactionDocuments: personDocuments,
       createdAt: fileCreatedAt(personPath)
     });
   }
 
-  return { projects, people };
+  return { projects, people, projectNameReviews };
+}
+
+function scanManagedEntityIdentityCandidates(
+  libraryDir,
+  entityType,
+  recordId = "",
+  { projectParentDirectory = "" } = {}
+) {
+  const type = String(entityType || "").trim();
+  const expectedRecordId = String(recordId || "").trim();
+  const candidates = [];
+  const seenPaths = new Set();
+  const pageName = type === "person" ? PERSON_PAGE_NAME : PROJECT_PAGE_NAME;
+  const idKey = type === "person" ? "person_id" : "project_id";
+  const expectedEntityType = type === "person" ? "person" : "project";
+
+  function addCandidate(directoryPath) {
+    const documentPath = path.join(directoryPath, pageName);
+    if (!fs.existsSync(documentPath)) return;
+    const resolvedPath = path.resolve(documentPath);
+    if (seenPaths.has(resolvedPath)) return;
+    seenPaths.add(resolvedPath);
+    const metadata = readManagedFrontmatter(resolvedPath);
+    if (metadata.entity_type && metadata.entity_type !== expectedEntityType) return;
+    const frontmatterRecordId = String(metadata[idKey] || "").trim();
+    if (!frontmatterRecordId || (expectedRecordId && frontmatterRecordId !== expectedRecordId)) {
+      return;
+    }
+    candidates.push({
+      id: frontmatterRecordId,
+      frontmatterRecordId,
+      documentPath: resolvedPath
+    });
+  }
+
+  if (type === "person") {
+    const peopleRoot = path.join(libraryDir, PEOPLE_DIRECTORY);
+    for (const personEntry of listDirectories(peopleRoot)) {
+      addCandidate(path.join(peopleRoot, personEntry.name));
+    }
+  } else if (type === "project") {
+    const projectRoot = path.join(libraryDir, PROJECTS_DIRECTORY);
+    const scopedParent = String(projectParentDirectory || "").trim();
+    if (scopedParent) {
+      const resolvedParent = path.resolve(scopedParent);
+      if (!isWithin(projectRoot, resolvedParent) || !directoryExists(resolvedParent)) return [];
+      addCandidate(resolvedParent);
+      for (const projectEntry of listDirectories(resolvedParent)) {
+        addCandidate(path.join(resolvedParent, projectEntry.name));
+      }
+      return candidates.sort((left, right) =>
+        left.documentPath.localeCompare(right.documentPath, "zh-CN")
+      );
+    }
+    for (const domainEntry of listDirectories(projectRoot)) {
+      const domainPath = path.join(projectRoot, domainEntry.name);
+      for (const subdomainEntry of listDirectories(domainPath)) {
+        const subdomainPath = path.join(domainPath, subdomainEntry.name);
+        if (fs.existsSync(path.join(subdomainPath, PROJECT_PAGE_NAME))) {
+          addCandidate(subdomainPath);
+          continue;
+        }
+        for (const projectEntry of listDirectories(subdomainPath)) {
+          addCandidate(path.join(subdomainPath, projectEntry.name));
+        }
+      }
+    }
+  }
+  return candidates.sort((left, right) =>
+    left.documentPath.localeCompare(right.documentPath, "zh-CN")
+  );
 }
 
 function workspaceEntitiesSignature(discovered) {
@@ -484,9 +629,17 @@ function workspaceEntitiesSignature(discovered) {
         document.updatedAt
       ])
     ]);
+  const projectNameReviews = [...(discovered?.projectNameReviews || [])]
+    .sort((left, right) => left.sourceTitle.localeCompare(right.sourceTitle, "zh-CN"))
+    .map((review) => [
+      review.sourceTitle,
+      review.suggestedName,
+      review.domain,
+      review.subdomain
+    ]);
   return crypto
     .createHash("sha256")
-    .update(JSON.stringify({ projects, people }))
+    .update(JSON.stringify({ projects, people, projectNameReviews }))
     .digest("hex");
 }
 
@@ -679,6 +832,95 @@ function assertWithin(rootPath, targetPath) {
   }
 }
 
+function isWithin(rootPath, targetPath) {
+  const root = path.resolve(rootPath);
+  const target = path.resolve(targetPath);
+  return target === root || target.startsWith(`${root}${path.sep}`);
+}
+
+function directoryExists(directoryPath) {
+  try {
+    return fs.statSync(directoryPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function entityDirectoryConflictError(entityType) {
+  const label = entityType === "person" ? "人物" : "项目";
+  const error = new Error(
+    `DOMI_ENTITY_DIRECTORY_CONFLICT: 当前${label}存在多个带相同内部 ID 的本地资料目录，请先合并或移除重复目录。`
+  );
+  error.code = "DOMI_ENTITY_DIRECTORY_CONFLICT";
+  return error;
+}
+
+function entityDirectoryChangedError() {
+  const error = new Error(
+    "DOMI_ENTITY_DIRECTORY_CHANGED: 资料目录在重连期间再次发生变化，请重新同步后再试。"
+  );
+  error.code = "DOMI_ENTITY_DIRECTORY_CHANGED";
+  return error;
+}
+
+function entityDirectoryMissingError(entityType) {
+  const label = entityType === "person" ? "人物" : "项目";
+  const error = new Error(
+    `DOMI_ENTITY_DIRECTORY_MISSING: 当前${label}的固定本地目录已移动或改名，且没有找到唯一的同 ID 目录；请重新同步资料库。`
+  );
+  error.code = "DOMI_ENTITY_DIRECTORY_MISSING";
+  return error;
+}
+
+function materializationSourceMissingError(entityType) {
+  const label = entityType === "person" ? "人物" : "项目";
+  const error = new Error(
+    `DOMI_MATERIALIZATION_SOURCE_MISSING: ${label}的原资料目录已移动或改名；已停止后台落盘，请先重新同步资料库。`
+  );
+  error.code = "DOMI_MATERIALIZATION_SOURCE_MISSING";
+  return error;
+}
+
+function materializationTargetConflictError(entityType) {
+  const label = entityType === "person" ? "人物" : "项目";
+  const error = new Error(
+    `DOMI_MATERIALIZATION_TARGET_CONFLICT: ${label}的目标资料目录已存在，但主页内部 ID 不匹配；已停止后台落盘。`
+  );
+  error.code = "DOMI_MATERIALIZATION_TARGET_CONFLICT";
+  return error;
+}
+
+function managedEntityPageMatches(
+  documentPath,
+  entityType,
+  recordId,
+  { allowMissingId = false } = {}
+) {
+  const targetPath = String(documentPath || "").trim();
+  if (!targetPath || !fs.existsSync(targetPath)) return false;
+  const type = entityType === "person" ? "person" : "project";
+  const idKey = type === "person" ? "person_id" : "project_id";
+  const metadata = readManagedFrontmatter(targetPath);
+  if (metadata.entity_type && metadata.entity_type !== type) return false;
+  const pageRecordId = String(metadata[idKey] || "").trim();
+  if (!pageRecordId) return allowMissingId;
+  return pageRecordId === String(recordId || "").trim();
+}
+
+function pathInsideDirectory(targetPath, directoryPath) {
+  const target = path.resolve(String(targetPath || ""));
+  const directory = path.resolve(String(directoryPath || ""));
+  return target === directory || target.startsWith(`${directory}${path.sep}`);
+}
+
+function rebasePathInsideDirectory(targetPath, sourceDirectory, targetDirectory) {
+  if (!pathInsideDirectory(targetPath, sourceDirectory)) return String(targetPath || "");
+  return path.join(
+    targetDirectory,
+    path.relative(sourceDirectory, path.resolve(String(targetPath || "")))
+  );
+}
+
 function replaceManagedBlock(existingContent, managedBlock) {
   const existing = String(existingContent || "");
   if (MANAGED_BLOCK_PATTERN.test(existing)) {
@@ -843,6 +1085,7 @@ function projectRow(row) {
       ? null
       : Number(row.latest_valuation_usd_100m),
     createdAt: row.created_at || null,
+    lastUpdatedAt: row.last_updated_at || null,
     lastFollowup: row.last_updated_at || null,
     updatedAt: row.updated_at || 0,
     link: localDocumentUrl(row.document_path)
@@ -1226,9 +1469,260 @@ class LocalDomiRepository {
     }
   }
 
-  reindexWorkspace() {
-    const removedStructuralGhosts = this.cleanupStructuralGhostProjects();
+  scanWorkspaceForEntityRelink(force = false) {
+    const now = Date.now();
+    if (
+      !force
+      && this.entityRelinkScanCache
+      && now - this.entityRelinkScanCache.scannedAt < 1_000
+    ) {
+      return this.entityRelinkScanCache.discovered;
+    }
     const discovered = scanWorkspaceEntities(this.libraryDir);
+    this.entityRelinkScanCache = { discovered, scannedAt: now };
+    return discovered;
+  }
+
+  scanEntityIdentityForRelink(
+    entityType,
+    recordId,
+    force = false,
+    projectParentDirectory = ""
+  ) {
+    const type = String(entityType || "").trim();
+    const id = String(recordId || "").trim();
+    const cacheKey = `${type}:${id}:${path.resolve(projectParentDirectory || this.libraryDir)}`;
+    const now = Date.now();
+    const cached = this.entityIdentityScanCache?.get(cacheKey);
+    if (!force && cached && now - cached.scannedAt < 1_000) {
+      const cachedItems = type === "person"
+        ? cached.discovered.people
+        : cached.discovered.projects;
+      if (
+        cachedItems.length > 0
+        && cachedItems.every((item) =>
+          managedEntityPageMatches(item.documentPath, type, id)
+        )
+      ) return cached.discovered;
+    }
+    const items = scanManagedEntityIdentityCandidates(this.libraryDir, type, id, {
+      projectParentDirectory
+    });
+    const discovered = type === "person"
+      ? { projects: [], people: items }
+      : { projects: items, people: [] };
+    if (!this.entityIdentityScanCache) this.entityIdentityScanCache = new Map();
+    this.entityIdentityScanCache.set(cacheKey, { discovered, scannedAt: now });
+    return discovered;
+  }
+
+  indexedEntityDocumentsAvailable(entityType, recordId, directoryPath) {
+    const directory = String(directoryPath || "").trim();
+    if (!directory || !directoryExists(directory)) return false;
+    const rows = this.database.prepare(`
+      SELECT path FROM documents
+      WHERE owner_type = ? AND owner_id = ?
+    `).all(entityType, recordId);
+    return rows.every((row) => {
+      const documentPath = String(row.path || "").trim();
+      return documentPath
+        && pathInsideDirectory(documentPath, directory)
+        && fs.existsSync(documentPath);
+    });
+  }
+
+  staleEntityRelinkPlans(discovered, onlyEntityType = "", onlyRecordId = "") {
+    const plans = [];
+    const definitions = [
+      {
+        entityType: "project",
+        table: "projects",
+        root: path.join(this.libraryDir, PROJECTS_DIRECTORY),
+        idKey: "project_id",
+        items: discovered?.projects || []
+      },
+      {
+        entityType: "person",
+        table: "people",
+        root: path.join(this.libraryDir, PEOPLE_DIRECTORY),
+        idKey: "person_id",
+        items: discovered?.people || []
+      }
+    ];
+
+    for (const definition of definitions) {
+      if (onlyEntityType && onlyEntityType !== definition.entityType) continue;
+      const candidatesById = new Map();
+      for (const item of definition.items) {
+        const frontmatterRecordId = String(item.frontmatterRecordId || "").trim();
+        const documentPath = String(item.documentPath || "").trim();
+        if (!frontmatterRecordId || !documentPath) continue;
+        assertWithin(definition.root, documentPath);
+        const candidates = candidatesById.get(frontmatterRecordId) || new Set();
+        candidates.add(path.resolve(documentPath));
+        candidatesById.set(frontmatterRecordId, candidates);
+      }
+      if (!onlyRecordId) {
+        for (const candidates of candidatesById.values()) {
+          if (candidates.size > 1) throw entityDirectoryConflictError(definition.entityType);
+        }
+      }
+
+      const rows = onlyRecordId
+        ? this.database.prepare(
+            `SELECT id, document_path FROM ${definition.table} WHERE id = ?`
+          ).all(onlyRecordId)
+        : this.database.prepare(
+            `SELECT id, document_path FROM ${definition.table}`
+          ).all();
+      for (const row of rows) {
+        const sourcePath = String(row.document_path || "").trim();
+        const candidates = [...(candidatesById.get(String(row.id)) || [])]
+          .sort((left, right) => left.localeCompare(right, "zh-CN"));
+        if (candidates.length > 1) throw entityDirectoryConflictError(definition.entityType);
+        if (!sourcePath) continue;
+        const sourceDirectory = path.dirname(sourcePath);
+        if (
+          isWithin(definition.root, sourcePath)
+          && managedEntityPageMatches(
+            sourcePath,
+            definition.entityType,
+            row.id,
+            { allowMissingId: true }
+          )
+        ) {
+          continue;
+        }
+        if (candidates.length !== 1) continue;
+        const targetPath = candidates[0];
+        if (path.resolve(targetPath) === path.resolve(sourcePath)) continue;
+        const targetDirectory = path.dirname(targetPath);
+        if (!fs.existsSync(targetPath) || !directoryExists(targetDirectory)) continue;
+        plans.push({
+          entityType: definition.entityType,
+          table: definition.table,
+          root: definition.root,
+          idKey: definition.idKey,
+          recordId: String(row.id),
+          sourcePath,
+          sourceDirectory,
+          targetPath,
+          targetDirectory
+        });
+      }
+    }
+    return plans;
+  }
+
+  applyEntityRelinkPlans(plans) {
+    const relinked = { projects: 0, people: 0 };
+    if (!plans.length) return relinked;
+    const preparedPlans = plans.map((plan) => ({
+      ...plan,
+      interactionDocumentsJson: plan.entityType === "person"
+        ? JSON.stringify(scanPersonDocuments(plan.targetDirectory))
+        : ""
+    }));
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const selectDocuments = this.database.prepare(`
+        SELECT id, path FROM documents
+        WHERE owner_type = ? AND owner_id = ?
+      `);
+      const updateDocumentPath = this.database.prepare(
+        "UPDATE documents SET path = ? WHERE id = ?"
+      );
+      const selectMaterialization = this.database.prepare(`
+        SELECT source_path, target_path
+        FROM repository_materializations
+        WHERE entity_type = ? AND record_id = ?
+      `);
+      const updateMaterialization = this.database.prepare(`
+        UPDATE repository_materializations
+        SET source_path = ?, target_path = ?
+        WHERE entity_type = ? AND record_id = ?
+      `);
+
+      for (const plan of preparedPlans) {
+        assertWithin(plan.root, plan.targetPath);
+        const metadata = readManagedFrontmatter(plan.targetPath);
+        if (String(metadata[plan.idKey] || "").trim() !== plan.recordId) {
+          throw entityDirectoryChangedError();
+        }
+        const fresh = this.database.prepare(
+          `SELECT document_path FROM ${plan.table} WHERE id = ?`
+        ).get(plan.recordId);
+        if (!fresh || String(fresh.document_path || "").trim() !== plan.sourcePath) {
+          throw entityDirectoryChangedError();
+        }
+
+        const pending = selectMaterialization.get(plan.entityType, plan.recordId);
+        const documentSourceDirectories = [
+          pending?.source_path ? path.dirname(String(pending.source_path)) : "",
+          plan.sourceDirectory
+        ].filter((item, index, all) => item && all.indexOf(item) === index);
+        for (const document of selectDocuments.all(plan.entityType, plan.recordId)) {
+          const currentPath = String(document.path || "").trim();
+          const documentSourceDirectory = documentSourceDirectories.find((directory) =>
+            pathInsideDirectory(currentPath, directory)
+          );
+          if (!documentSourceDirectory) continue;
+          updateDocumentPath.run(
+            rebasePathInsideDirectory(
+              currentPath,
+              documentSourceDirectory,
+              plan.targetDirectory
+            ),
+            document.id
+          );
+        }
+
+        const updateResult = plan.entityType === "person"
+          ? this.database.prepare(`
+              UPDATE people
+              SET document_path = ?, interaction_documents_json = ?
+              WHERE id = ? AND document_path = ?
+            `).run(
+              plan.targetPath,
+              plan.interactionDocumentsJson,
+              plan.recordId,
+              plan.sourcePath
+            )
+          : this.database.prepare(`
+              UPDATE projects SET document_path = ?
+              WHERE id = ? AND document_path = ?
+            `).run(plan.targetPath, plan.recordId, plan.sourcePath);
+        if (Number(updateResult.changes) !== 1) throw entityDirectoryChangedError();
+
+        if (pending) {
+          updateMaterialization.run(
+            plan.targetPath,
+            plan.targetPath,
+            plan.entityType,
+            plan.recordId
+          );
+        }
+        if (plan.entityType === "person") relinked.people += 1;
+        else relinked.projects += 1;
+      }
+      this.database.exec("COMMIT");
+      return relinked;
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+
+  repairStaleEntityDirectories(discovered, onlyEntityType = "", onlyRecordId = "") {
+    return this.applyEntityRelinkPlans(
+      this.staleEntityRelinkPlans(discovered, onlyEntityType, onlyRecordId)
+    );
+  }
+
+  reindexWorkspace() {
+    const discovered = this.scanWorkspaceForEntityRelink(true);
+    const relinked = this.repairStaleEntityDirectories(discovered);
+    const removedStructuralGhosts = this.cleanupStructuralGhostProjects();
     const signature = workspaceEntitiesSignature(discovered);
     const previousSignature = this.database.prepare(
       "SELECT value FROM repository_meta WHERE key = 'workspace_index_signature'"
@@ -1243,19 +1737,26 @@ class LocalDomiRepository {
       } catch {
         result = {};
       }
+      const cachedProjects = { ...(result.projects || {}) };
+      const cachedPeople = { ...(result.people || {}) };
+      delete cachedProjects.relinked;
+      delete cachedPeople.relinked;
       return {
         projects: {
-          ...(result.projects || {}),
+          ...cachedProjects,
           discovered: discovered.projects.length,
+          needsNameReview: discovered.projectNameReviews.length,
           created: 0,
           linked: 0,
+          ...(relinked.projects ? { relinked: relinked.projects } : {}),
           ...(removedStructuralGhosts ? { removedStructuralGhosts } : {})
         },
         people: {
-          ...(result.people || {}),
+          ...cachedPeople,
           discovered: discovered.people.length,
           created: 0,
-          linked: 0
+          linked: 0,
+          ...(relinked.people ? { relinked: relinked.people } : {})
         },
         unchanged: true,
         indexedAt: Number(cached?.updated_at) || 0
@@ -1264,16 +1765,27 @@ class LocalDomiRepository {
     const result = {
       projects: {
         discovered: discovered.projects.length,
+        needsNameReview: discovered.projectNameReviews.length,
         created: 0,
         linked: 0,
+        ...(relinked.projects ? { relinked: relinked.projects } : {}),
         ...(removedStructuralGhosts ? { removedStructuralGhosts } : {})
       },
-      people: { discovered: discovered.people.length, created: 0, linked: 0 },
+      people: {
+        discovered: discovered.people.length,
+        created: 0,
+        linked: 0,
+        ...(relinked.people ? { relinked: relinked.people } : {})
+      },
       unchanged: false
     };
     const findProject = this.database.prepare(
       `SELECT id, domain, subdomains_json, status, rating, last_updated_at, document_path
        FROM projects WHERE normalized_name = ?`
+    );
+    const findProjectById = this.database.prepare(
+      `SELECT id, domain, subdomains_json, status, rating, last_updated_at, document_path
+       FROM projects WHERE id = ?`
     );
     const insertProject = this.database.prepare(`
       INSERT INTO projects (
@@ -1290,11 +1802,15 @@ class LocalDomiRepository {
         rating = CASE WHEN rating = '' THEN ? ELSE rating END,
         last_updated_at = COALESCE(last_updated_at, ?),
         document_path = CASE WHEN document_path = '' THEN ? ELSE document_path END
-      WHERE normalized_name = ?
+      WHERE id = ?
     `);
     const findPerson = this.database.prepare(
       `SELECT id, types_json, organization, status, rating, interaction_documents_json, document_path
        FROM people WHERE normalized_name = ?`
+    );
+    const findPersonById = this.database.prepare(
+      `SELECT id, types_json, organization, status, rating, interaction_documents_json, document_path
+       FROM people WHERE id = ?`
     );
     const insertPerson = this.database.prepare(`
       INSERT INTO people (
@@ -1310,7 +1826,7 @@ class LocalDomiRepository {
         rating = CASE WHEN rating = '' THEN ? ELSE rating END,
         interaction_documents_json = ?,
         document_path = CASE WHEN document_path = '' THEN ? ELSE document_path END
-      WHERE normalized_name = ?
+      WHERE id = ?
     `);
     const findTombstone = this.database.prepare(`
       SELECT 1
@@ -1331,7 +1847,10 @@ class LocalDomiRepository {
           project.normalizedName,
           String(project.documentPath || "")
         )) continue;
-        const existing = findProject.get(project.normalizedName);
+        const existing = project.frontmatterRecordId
+          ? findProjectById.get(project.frontmatterRecordId)
+            || findProject.get(project.normalizedName)
+          : findProject.get(project.normalizedName);
         if (existing) {
           const shouldLink = !existing.document_path && project.documentPath;
           const shouldEnrich = (
@@ -1350,7 +1869,7 @@ class LocalDomiRepository {
               project.rating,
               project.lastUpdatedAt,
               project.documentPath,
-              project.normalizedName
+              existing.id
             );
           }
           if (shouldLink) result.projects.linked += 1;
@@ -1378,7 +1897,10 @@ class LocalDomiRepository {
           person.normalizedName,
           String(person.documentPath || "")
         )) continue;
-        const existing = findPerson.get(person.normalizedName);
+        const existing = person.frontmatterRecordId
+          ? findPersonById.get(person.frontmatterRecordId)
+            || findPerson.get(person.normalizedName)
+          : findPerson.get(person.normalizedName);
         if (existing) {
           const shouldLink = !existing.document_path && person.documentPath;
           const interactionDocumentsJson = JSON.stringify(person.interactionDocuments || []);
@@ -1398,7 +1920,7 @@ class LocalDomiRepository {
               person.rating,
               interactionDocumentsJson,
               person.documentPath,
-              person.normalizedName
+              existing.id
             );
           }
           if (shouldLink) result.people.linked += 1;
@@ -1498,7 +2020,7 @@ class LocalDomiRepository {
     const id = String(recordId || "").trim();
     if (!id) return "";
     if (entityType === "person") {
-      const row = this.database.prepare(
+      let row = this.database.prepare(
         `SELECT id, name, types_json, organization, status, rating,
           last_contact_at, cities_json, interaction_documents_json, document_path, created_at, updated_at
          FROM people WHERE id = ?`
@@ -1509,10 +2031,41 @@ class LocalDomiRepository {
       const directory = row.document_path
         ? path.dirname(row.document_path)
         : this.personDirectory(person);
-      assertWithin(peopleRoot, directory);
-      return fs.existsSync(directory) ? directory : "";
+      if (!row.document_path) {
+        assertWithin(peopleRoot, directory);
+        return directoryExists(directory) ? directory : "";
+      }
+      if (
+        isWithin(peopleRoot, row.document_path)
+        && managedEntityPageMatches(
+          row.document_path,
+          "person",
+          id,
+          { allowMissingId: true }
+        )
+        && this.indexedEntityDocumentsAvailable("person", id, directory)
+      ) return directory;
+      this.repairStaleEntityDirectories(
+        this.scanEntityIdentityForRelink("person", id),
+        "person",
+        id
+      );
+      row = this.database.prepare(
+        "SELECT document_path FROM people WHERE id = ?"
+      ).get(id);
+      const resolvedDirectory = row?.document_path ? path.dirname(row.document_path) : directory;
+      assertWithin(peopleRoot, resolvedDirectory);
+      return directoryExists(resolvedDirectory)
+        && (!row?.document_path || managedEntityPageMatches(
+          row.document_path,
+          "person",
+          id,
+          { allowMissingId: true }
+        ))
+        ? resolvedDirectory
+        : "";
     }
-    const row = this.database.prepare(
+    let row = this.database.prepare(
       `SELECT id, name, domain, subdomains_json, status, rating, notes,
         cities_json, investors_json, financing_history, latest_valuation_usd_100m,
         last_updated_at, document_path, created_at, updated_at
@@ -1524,8 +2077,45 @@ class LocalDomiRepository {
     const directory = row.document_path
       ? path.dirname(row.document_path)
       : this.projectDirectory(project);
-    assertWithin(projectRoot, directory);
-    return fs.existsSync(directory) ? directory : "";
+    if (!row.document_path) {
+      assertWithin(projectRoot, directory);
+      return directoryExists(directory) ? directory : "";
+    }
+    if (
+      isWithin(projectRoot, row.document_path)
+      && managedEntityPageMatches(
+        row.document_path,
+        "project",
+        id,
+        { allowMissingId: true }
+      )
+      && this.indexedEntityDocumentsAvailable("project", id, directory)
+    ) return directory;
+    const siblingParent = path.dirname(directory);
+    let discovered = this.scanEntityIdentityForRelink(
+      "project",
+      id,
+      false,
+      siblingParent
+    );
+    if (!discovered.projects.length) {
+      discovered = this.scanEntityIdentityForRelink("project", id);
+    }
+    this.repairStaleEntityDirectories(discovered, "project", id);
+    row = this.database.prepare(
+      "SELECT document_path FROM projects WHERE id = ?"
+    ).get(id);
+    const resolvedDirectory = row?.document_path ? path.dirname(row.document_path) : directory;
+    assertWithin(projectRoot, resolvedDirectory);
+    return directoryExists(resolvedDirectory)
+      && (!row?.document_path || managedEntityPageMatches(
+        row.document_path,
+        "project",
+        id,
+        { allowMissingId: true }
+      ))
+      ? resolvedDirectory
+      : "";
   }
 
   resolvePreviewDocument(entityType, recordId) {
@@ -1926,6 +2516,7 @@ class LocalDomiRepository {
     if (entityType === "project") {
       const name = String(next.name || "").trim();
       if (!name) throw new Error("公司名称不能为空。");
+      assertProjectEntityName(name);
       const investors = stringList(next.investors);
       const invalidInvestor = investors.find((item) => !TRACKED_INVESTORS.has(item));
       if (invalidInvestor) throw new Error(`投资机构“${invalidInvestor}”不在当前关注名单中。`);
@@ -2048,19 +2639,41 @@ class LocalDomiRepository {
       };
     }
 
-    const loaded = this.databasePatchRecord(entityType, recordId);
+    let loaded = this.databasePatchRecord(entityType, recordId);
     if (!loaded) throw new Error("找不到要修改的资料库记录。");
+    if (entityType === "project") {
+      assertProjectEntityName(
+        Object.prototype.hasOwnProperty.call(changes, "name")
+          ? changes.name
+          : loaded.record.name
+      );
+    }
+    if (
+      (entityType === "project" || entityType === "person")
+      && String(loaded.row.document_path || "").trim()
+    ) {
+      const resolvedDirectory = this.recordDirectory(entityType, recordId);
+      if (!resolvedDirectory) throw entityDirectoryMissingError(entityType);
+      loaded = this.databasePatchRecord(entityType, recordId);
+      if (!loaded) throw new Error("找不到要修改的资料库记录。");
+    }
     const expectedUpdatedAt = Number(request.expectedUpdatedAt);
     if (!Number.isFinite(expectedUpdatedAt) || expectedUpdatedAt !== Number(loaded.row.updated_at)) {
       throw new Error("记录已被其他流程更新，请刷新后再保存。");
     }
     const normalized = this.normalizeDatabasePatch(entityType, loaded.record, changes);
     const sourcePath = String(loaded.row.document_path || "").trim();
-    const targetPath = entityType === "project"
+    const canonicalTargetPath = entityType === "project"
       ? path.join(this.projectDirectory(normalized), PROJECT_PAGE_NAME)
       : entityType === "person"
         ? path.join(this.personDirectory(normalized), PERSON_PAGE_NAME)
         : this.newsDocumentPath(normalized);
+    const locationChanged = entityType === "project"
+      ? changedFields.some((field) => ["name", "domain", "subdomains"].includes(field))
+      : entityType === "person"
+        ? changedFields.includes("name")
+        : true;
+    const targetPath = sourcePath && !locationChanged ? sourcePath : canonicalTargetPath;
     const root = path.join(
       this.libraryDir,
       entityType === "project"
@@ -2256,12 +2869,37 @@ class LocalDomiRepository {
       `).run(entityType, recordId, pending.mutation_id);
       return { ok: true, entityType, recordId, materialized: false };
     }
+    if (entityType === "project") assertProjectEntityName(loaded.record.name);
     const sourcePath = String(pending.source_path || "").trim();
     const targetPath = String(pending.target_path || "").trim();
     if (!targetPath || String(loaded.row.document_path || "") !== targetPath) {
       return { ok: true, entityType, recordId, materialized: false, superseded: true };
     }
     try {
+      if (entityType !== "news" && sourcePath) {
+        const sourceDirectory = path.dirname(sourcePath);
+        const sourceIsValid = managedEntityPageMatches(
+          sourcePath,
+          entityType,
+          recordId,
+          { allowMissingId: true }
+        );
+        const targetDirectory = path.dirname(targetPath);
+        const targetPageMatches = sourcePath !== targetPath
+          && managedEntityPageMatches(targetPath, entityType, recordId);
+        const targetIsValidCrashRecovery = sourcePath !== targetPath
+          && !directoryExists(sourceDirectory)
+          && targetPageMatches;
+        if (
+          !sourceIsValid
+          && sourcePath !== targetPath
+          && directoryExists(targetDirectory)
+          && !targetPageMatches
+        ) throw materializationTargetConflictError(entityType);
+        if (!sourceIsValid && !targetIsValidCrashRecovery) {
+          throw materializationSourceMissingError(entityType);
+        }
+      }
       if (entityType === "news") {
         if (sourcePath && sourcePath !== targetPath && fs.existsSync(sourcePath)) {
           fs.mkdirSync(path.dirname(targetPath), { recursive: true });
@@ -2352,21 +2990,28 @@ class LocalDomiRepository {
 
   updateProject(request = {}) {
     const id = String(request.recordId || "").trim();
+    const name = String(request.name || "").trim();
+    if (!name) throw new Error("公司名称不能为空。");
+    assertProjectEntityName(name);
     if (this.database.prepare(`
       SELECT 1 FROM repository_materializations
       WHERE entity_type = 'project' AND record_id = ?
     `).get(id)) {
       this.materializeDatabaseRecord("project", id);
     }
-    const row = this.database.prepare("SELECT * FROM projects WHERE id = ?").get(id);
+    let row = this.database.prepare("SELECT * FROM projects WHERE id = ?").get(id);
     if (!row) throw new Error("找不到要修改的项目记录。");
+    if (String(row.document_path || "").trim()) {
+      const resolvedDirectory = this.recordDirectory("project", id);
+      if (!resolvedDirectory) throw entityDirectoryMissingError("project");
+      row = this.database.prepare("SELECT * FROM projects WHERE id = ?").get(id);
+      if (!row) throw new Error("找不到要修改的项目记录。");
+    }
     const expectedUpdatedAt = Number(request.expectedUpdatedAt);
     if (!Number.isFinite(expectedUpdatedAt) || expectedUpdatedAt !== Number(row.updated_at)) {
       throw new Error("项目已被其他流程更新，请刷新后再保存。");
     }
 
-    const name = String(request.name || "").trim();
-    if (!name) throw new Error("公司名称不能为空。");
     const domain = String(request.domain || "").trim() || "_未分类";
     const subdomains = stringList(request.subdomains);
     const status = normalizedProjectStatus(request.status);
@@ -2560,8 +3205,14 @@ class LocalDomiRepository {
     `).get(id)) {
       this.materializeDatabaseRecord("person", id);
     }
-    const row = this.database.prepare("SELECT * FROM people WHERE id = ?").get(id);
+    let row = this.database.prepare("SELECT * FROM people WHERE id = ?").get(id);
     if (!row) throw new Error("找不到要修改的人脉记录。");
+    if (String(row.document_path || "").trim()) {
+      const resolvedDirectory = this.recordDirectory("person", id);
+      if (!resolvedDirectory) throw entityDirectoryMissingError("person");
+      row = this.database.prepare("SELECT * FROM people WHERE id = ?").get(id);
+      if (!row) throw new Error("找不到要修改的人脉记录。");
+    }
     const expectedUpdatedAt = Number(request.expectedUpdatedAt);
     if (!Number.isFinite(expectedUpdatedAt) || expectedUpdatedAt !== Number(row.updated_at)) {
       throw new Error("人脉记录已被其他流程更新，请刷新后再保存。");
@@ -2936,6 +3587,7 @@ module.exports = {
   LOCAL_REPOSITORY_SCHEMA,
   LocalDomiRepository,
   normalizedName,
+  scanManagedEntityIdentityCandidates,
   scanWorkspaceEntities,
   workspaceEntitiesSignature,
   resolveHomePath

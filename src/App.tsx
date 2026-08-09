@@ -857,6 +857,8 @@ type SubmitToCodexOptions = {
   displayText?: string;
   attachments?: LocalAttachment[];
   activeDocumentPath?: string;
+  requestOrigin?: "user" | "programmatic";
+  userInstructionText?: string;
   repositoryIdentitySnapshot?: string;
   background?: boolean;
   model?: string;
@@ -891,6 +893,8 @@ type QueuedSubmission = {
   workflowId?: string;
   attachments: LocalAttachment[];
   activeDocumentPath?: string;
+  requestOrigin?: "user" | "programmatic";
+  userInstructionText?: string;
   useDomiPlugin: boolean;
   model: string;
   reasoningEffort: string;
@@ -969,6 +973,11 @@ function readQueuedSubmissions(): Record<string, QueuedSubmission[]> {
           && Array.isArray(candidate.attachments)
           && (candidate.activeDocumentPath === undefined
             || typeof candidate.activeDocumentPath === "string")
+          && (candidate.requestOrigin === undefined
+            || candidate.requestOrigin === "user"
+            || candidate.requestOrigin === "programmatic")
+          && (candidate.userInstructionText === undefined
+            || typeof candidate.userInstructionText === "string")
           && typeof candidate.useDomiPlugin === "boolean"
           && typeof candidate.model === "string"
           && typeof candidate.reasoningEffort === "string"
@@ -1648,7 +1657,7 @@ function plaudNotesWorkflowRequest(item: DomiPlaudItem) {
     `- 当前队列阶段：${item.queueStage || "本地队列尚未记录"}`,
     item.transcriptPath ? `- 已有本地文字稿：${item.transcriptPath}` : "- PLAUD 远端已有文字稿，本地尚未绑定文字稿路径",
     "",
-    "目标：生成完整结构化纪要；如果实质内容属于创业项目或创始人交流，继续完成投资快评、飞书 Wiki 文档、本地资料库归档和 Watching List 新增或更新。非项目录音只生成并保存纪要，不做项目入库。",
+    "目标：生成完整结构化纪要；如果实质内容属于创业项目或创始人交流，继续完成投资快评，并按运行时锁定的权威主库归档。默认本地主库使用 Markdown 文档和本地项目库；只有运行时明确标为 legacy_feishu_primary 时，才按对应 Skill 维护本机既有固定 Base／唯一 Wiki 主文档。非项目录音只生成并保存纪要，不做项目入库。",
     "",
     "执行要求：",
     "1. 先采用 domi 插件的 domi-router，并完整读取 PLAUD 投资录音工作流及各阶段 Skill。",
@@ -1656,7 +1665,9 @@ function plaudNotesWorkflowRequest(item: DomiPlaudItem) {
     "3. 如果已经有 transcriptPath，直接复用，不要重新下载或生成。",
     "4. 严格从当前队列阶段恢复，不重复生成纪要、文档或外部记录。",
     "5. 按工作流生成回忆提示并确认对话背景和参会人；需要我补充时在该阶段提问并暂停，收到回复后再继续后续阶段。",
-    "6. 外部写入前执行去重、字段校验和写后回读，最终报告纪要、项目判断、评分、Wiki、本地资料库和 Watching List 的实际结果。"
+    "6. 如已连接飞书，可按本轮内容需要只读检索飞书 Wiki、云文档或 Base 中的相关信息作为外部参考，并标明采用的来源；飞书只读检索失败不得阻塞文字稿、纪要、快评和本地主库归档。",
+    "7. 当前文本是客户端生成的程序化工作流，不是用户对飞书写入的原始指令。除 legacy_feishu_primary 按 Skill 对既有固定 Base／唯一 Wiki 主文档完成管理闭环外，若本轮没有用户明确要求创建、编辑、更新或发布飞书内容的原始消息，禁止创建、编辑、更新、覆盖或发布任何飞书外部内容，也不得运行飞书 Markdown 导出／交接。",
+    "8. 权威主库写入前执行去重、字段校验和写后回读；最终只报告纪要、项目判断、评分、主库归档以及飞书只读参考的实际结果。"
   ].join("\n");
 }
 
@@ -3615,6 +3626,10 @@ function App() {
         useDomiPlugin: queued.useDomiPlugin,
         attachments: queued.attachments,
         activeDocumentPath: queued.activeDocumentPath,
+        requestOrigin: queued.requestOrigin === "user" ? "user" : "programmatic",
+        userInstructionText: queued.requestOrigin === "user"
+          ? queued.userInstructionText || ""
+          : "",
         model: queued.model,
         reasoningEffort: queued.reasoningEffort,
         serviceTier: queued.serviceTier,
@@ -4871,8 +4886,10 @@ function App() {
     try {
       const result = await workbench.runCodex({
         runId,
-        prompt: workflowPrompt(radarWorkflow, requestText, priorityPeopleContext, true),
+        prompt: workflowPrompt(radarWorkflow, requestText, priorityPeopleContext, true, "programmatic"),
         requestText,
+        requestOrigin: "programmatic",
+        userInstructionText: "",
         ephemeral: true,
         background: automatic,
         allowUserInput: false,
@@ -5016,8 +5033,10 @@ function App() {
       const archiveRunId = createId("podcast-archive");
       const archiveResult = await workbench.runCodex({
         runId: archiveRunId,
-        prompt: workflowPrompt(routerWorkflow, requestText, "播客处理必须使用 PLAUD 文字稿，并遵守唯一主归档规则。", true),
+        prompt: workflowPrompt(routerWorkflow, requestText, "播客处理必须使用 PLAUD 文字稿，并遵守唯一主归档规则。", true, "programmatic"),
         requestText,
+        requestOrigin: "programmatic",
+        userInstructionText: "",
         ephemeral: true,
         background: true,
         allowUserInput: false,
@@ -5511,6 +5530,8 @@ function App() {
         thread: targetThread,
         useDomiPlugin: true,
         activeDocumentPath: undefined,
+        requestOrigin: "programmatic",
+        userInstructionText: "",
         displayText: `生成“${item.fileName}”的纪要并按 domi 工作流入库`
       });
       handedOff = true;
@@ -5854,7 +5875,9 @@ function App() {
         useDomiPlugin: true,
         displayText: suggestion.title,
         attachments: [],
-        activeDocumentPath: undefined
+        activeDocumentPath: undefined,
+        requestOrigin: "programmatic",
+        userInstructionText: ""
       });
       if (!result?.ok || result.stopped) {
         setExecutionSuggestionError(
@@ -5987,8 +6010,10 @@ function App() {
       updateSyncPhase("generating", "Todo Skill 正在排序并维护待办事项文档");
       const runPromise = workbench.runCodex({
           runId,
-          prompt: workflowPrompt(todoWorkflow, requestText, recentEntriesContext, true),
+          prompt: workflowPrompt(todoWorkflow, requestText, recentEntriesContext, true, "programmatic"),
           requestText,
+          requestOrigin: "programmatic",
+          userInstructionText: "",
           ephemeral: true,
           background: true,
           allowUserInput: false,
@@ -6153,8 +6178,66 @@ function App() {
     snapshot: DomiSnapshot | null = domiSnapshot
   ) {
     if (snapshot?.backend !== "local") return undefined;
-    const result = await workbench.loadDomiEntityWorkspace({ entityType, recordId });
+    const result = await workbench.loadDomiEntityWorkspace({
+      entityType,
+      recordId,
+      repairMissing: true
+    });
+    if (result.snapshot) {
+      domiSnapshotRef.current = result.snapshot;
+      setDomiSnapshot(result.snapshot);
+    }
     return result.ok ? result.workspacePath : undefined;
+  }
+
+  async function recoverBoundEntityWorkspaceForSubmission(
+    thread: Thread,
+    execution: SubmissionExecutionContext,
+    snapshot: DomiSnapshot | null
+  ): Promise<{
+    thread: Thread;
+    execution: SubmissionExecutionContext;
+    snapshot: DomiSnapshot | null;
+  }> {
+    const entityType = execution.externalType;
+    const recordId = String(execution.externalRecordId || "").trim();
+    if (
+      execution.isolated
+      || appSettingsRef.current?.storageBackend !== "local"
+      || !entityType
+      || !recordId
+    ) {
+      return { thread, execution, snapshot };
+    }
+
+    const resolved = await workbench.loadDomiEntityWorkspace({
+      entityType,
+      recordId,
+      repairMissing: true
+    });
+    const nextSnapshot = resolved.snapshot || snapshot;
+    if (resolved.snapshot) {
+      domiSnapshotRef.current = resolved.snapshot;
+      setDomiSnapshot(resolved.snapshot);
+    }
+    if (!resolved.ok || !resolved.workspacePath) {
+      throw new Error(
+        resolved.error
+          || "当前项目或人物没有唯一且可访问的本地目录；本次消息尚未发送。"
+      );
+    }
+
+    const nextThread = thread.workspacePath === resolved.workspacePath
+      ? thread
+      : { ...thread, workspacePath: resolved.workspacePath };
+    if (nextThread !== thread) {
+      patchThread(thread.id, { workspacePath: resolved.workspacePath });
+    }
+    return {
+      thread: nextThread,
+      execution: { ...execution, workspacePath: resolved.workspacePath },
+      snapshot: nextSnapshot
+    };
   }
 
   async function openDomiProject(project: DomiProject) {
@@ -6479,7 +6562,8 @@ function App() {
     try {
       workspace = await workbench.loadDomiEntityWorkspace({
         entityType: result.entityType,
-        recordId: result.recordId
+        recordId: result.recordId,
+        repairMissing: true
       });
     } catch (error) {
       failBinding(`无法读取“${entity.name}”的固定资料目录：${error instanceof Error ? error.message : String(error)}`);
@@ -6912,7 +6996,8 @@ function App() {
     try {
       workspace = await workbench.loadDomiEntityWorkspace({
         entityType: thread.externalType,
-        recordId: thread.externalRecordId
+        recordId: thread.externalRecordId,
+        repairMissing: true
       });
     } catch (error) {
       return {
@@ -7243,6 +7328,10 @@ function App() {
     const useDomiPlugin = options.useDomiPlugin ?? domiPluginEnabled;
     const submittedInput = overrideInput ?? input;
     const rawInput = submittedInput.trim();
+    const requestOrigin = options.requestOrigin === "user" ? "user" : "programmatic";
+    const userInstructionText = requestOrigin === "user"
+      ? String(options.userInstructionText ?? submittedInput).trim()
+      : "";
     const submittedAttachments = options.attachments ?? attachments;
     let selectedAttachments = submittedAttachments;
     const messageText = rawInput || workflow?.defaultPrompt || (selectedAttachments.length ? "请分析所附材料" : "");
@@ -7287,13 +7376,21 @@ function App() {
       throw new Error("发送前处理试图改变任务归属；为避免消息串线，本次发送已停止。");
     }
     selectedAttachments = binding.attachments;
-    const execution: SubmissionExecutionContext = binding.execution || {
+    let execution: SubmissionExecutionContext = binding.execution || {
       workspacePath: targetThread.workspacePath,
       externalType: targetThread.externalType,
       externalRecordId: targetThread.externalRecordId,
       entityFinalizationMode: entityFinalizationModeForSourceConversation(targetThread),
       isolated: false
     };
+    const recoveredEntityWorkspace = await recoverBoundEntityWorkspaceForSubmission(
+      targetThread,
+      execution,
+      effectiveDomiSnapshot
+    );
+    targetThread = recoveredEntityWorkspace.thread;
+    execution = recoveredEntityWorkspace.execution;
+    effectiveDomiSnapshot = recoveredEntityWorkspace.snapshot;
     // Project lookup and attachment import both yield. Revalidate immediately
     // before any queue mutation, optimistic message append or Codex launch.
     // If a stale UI/programmatic action removed the source task, fail closed.
@@ -7341,6 +7438,8 @@ function App() {
         workflowId: workflow?.id,
         attachments: selectedAttachments,
         activeDocumentPath: options.activeDocumentPath,
+        requestOrigin,
+        userInstructionText,
         useDomiPlugin,
         model: options.model ?? model,
         reasoningEffort: options.reasoningEffort ?? reasoningEffort,
@@ -7454,7 +7553,8 @@ function App() {
         domiContextForThread(effectiveDomiSnapshot, targetThread),
         executionNotice
       ].filter(Boolean).join("\n\n"),
-      useDomiPlugin
+      useDomiPlugin,
+      requestOrigin
     );
     const prompt = selectedAttachments.length
       ? `${basePrompt}\n\n本次任务附带以下本地材料，请直接读取并使用：\n${selectedAttachments
@@ -7467,6 +7567,8 @@ function App() {
         runId,
         prompt,
         requestText: messageText,
+        requestOrigin,
+        userInstructionText,
         activeDocumentPath: options.activeDocumentPath,
         attachmentPaths: selectedAttachments.map((attachment) => attachment.path),
         // An isolated entity turn must not resume the source task's remote
@@ -7608,7 +7710,9 @@ function App() {
       enqueueSubmission(submittedWorkflow, submittedInput, {
         thread: sourceThread,
         attachments: submittedAttachments,
-        activeDocumentPath: submittedActiveDocumentPath
+        activeDocumentPath: submittedActiveDocumentPath,
+        requestOrigin: "user",
+        userInstructionText: submittedInput.trim()
       });
       return;
     }
@@ -7620,6 +7724,8 @@ function App() {
       thread: sourceThread,
       attachments: submittedAttachments,
       activeDocumentPath: submittedActiveDocumentPath,
+      requestOrigin: "user",
+      userInstructionText: submittedInput.trim(),
       useDomiPlugin: domiPluginEnabled,
       model,
       reasoningEffort,
@@ -7642,6 +7748,8 @@ function App() {
       thread?: Thread;
       attachments?: LocalAttachment[];
       activeDocumentPath?: string;
+      requestOrigin?: "user" | "programmatic";
+      userInstructionText?: string;
     } = {}
   ) {
     if (attachmentImportCount > 0) {
@@ -7650,6 +7758,10 @@ function App() {
     }
     const queueThread = options.thread || activeThread;
     const queuedAttachments = options.attachments ?? attachments;
+    const queuedRequestOrigin = options.requestOrigin === "user" ? "user" : "programmatic";
+    const queuedUserInstructionText = queuedRequestOrigin === "user"
+      ? String(options.userInstructionText ?? overrideInput ?? input).trim()
+      : "";
     const queuedActiveDocumentPath = Object.prototype.hasOwnProperty.call(
       options,
       "activeDocumentPath"
@@ -7667,6 +7779,8 @@ function App() {
       workflowId: workflow?.id,
       attachments: [...queuedAttachments],
       activeDocumentPath: queuedActiveDocumentPath,
+      requestOrigin: queuedRequestOrigin,
+      userInstructionText: queuedUserInstructionText,
       useDomiPlugin: domiPluginEnabled,
       model,
       reasoningEffort,
@@ -11641,6 +11755,59 @@ function App() {
           <strong>新建任务</strong>
         </button>
 
+        <div className="sidebar-entity-search" role="search">
+          <div className="domi-entity-search">
+            <Search size={14} />
+            <input
+              value={domiQuery}
+              onChange={(event) => setDomiQuery(event.target.value)}
+              onFocus={refreshLocalIndexForSearch}
+              placeholder="搜索项目或人脉"
+              aria-label="搜索 domi 项目或人脉"
+            />
+            {domiQuery && (
+              <button
+                type="button"
+                onClick={() => setDomiQuery("")}
+                title="清除搜索"
+                aria-label="清除项目或人脉搜索"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+
+          {domiQuery.trim() && (
+            <div className="domi-search-results sidebar-domi-search-results">
+              {domiSearchResults.projects.length > 0 && (
+                <div className="domi-result-group">
+                  <span>项目</span>
+                  {domiSearchResults.projects.map((project) => (
+                    <button type="button" key={project.recordId} onClick={() => openDomiProject(project)}>
+                      <strong>{project.name}</strong>
+                      <small>{[project.domain, project.status, project.rating].filter(Boolean).join(" · ")}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {domiSearchResults.people.length > 0 && (
+                <div className="domi-result-group">
+                  <span>人脉</span>
+                  {domiSearchResults.people.map((person) => (
+                    <button type="button" key={person.recordId} onClick={() => openDomiPerson(person)}>
+                      <strong>{person.name}</strong>
+                      <small>{[person.organization, person.rating].filter(Boolean).join(" · ")}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {domiSearchResults.projects.length === 0 && domiSearchResults.people.length === 0 && (
+                <div className="empty-state">没有匹配的项目或人脉</div>
+              )}
+            </div>
+          )}
+        </div>
+
         <nav className="sidebar-primary-nav" aria-label="工作台导航">
           <button
             className={`sidebar-nav-item ${workspaceView === "tasks" ? "active" : ""}`}
@@ -12237,7 +12404,7 @@ function App() {
                 <strong>今日工作</strong>
                 <span>
                   {todayLabel()} · {domiSnapshot
-                    ? `${domiSnapshot.sources.projects.total} 项目 / ${domiSnapshot.sources.people.total} 人脉`
+                    ? `${domiSnapshot.sources.projects.total} 项目 / ${domiSnapshot.sources.people.total} 人脉${domiSnapshot.sources.projects.needsNameReview ? ` · ${domiSnapshot.sources.projects.needsNameReview} 个项目名待确认` : ""}`
                     : domiSyncing ? "正在连接 domi" : "等待 domi 数据"}
                 </span>
               </div>
@@ -12246,55 +12413,9 @@ function App() {
               </button>
             </div>
 
-            <div className="domi-entity-search">
-              <Search size={14} />
-              <input
-                value={domiQuery}
-                onChange={(event) => setDomiQuery(event.target.value)}
-                onFocus={refreshLocalIndexForSearch}
-                placeholder="搜索项目或人脉"
-                aria-label="搜索 domi 项目或人脉"
-              />
-              {domiQuery && (
-                <button type="button" onClick={() => setDomiQuery("")} title="清除搜索">
-                  <X size={13} />
-                </button>
-              )}
-            </div>
-
-            {domiQuery.trim() && (
-              <div className="domi-search-results">
-                {domiSearchResults.projects.length > 0 && (
-                  <div className="domi-result-group">
-                    <span>项目</span>
-                    {domiSearchResults.projects.map((project) => (
-                      <button type="button" key={project.recordId} onClick={() => openDomiProject(project)}>
-                        <strong>{project.name}</strong>
-                        <small>{[project.domain, project.status, project.rating].filter(Boolean).join(" · ")}</small>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {domiSearchResults.people.length > 0 && (
-                  <div className="domi-result-group">
-                    <span>人脉</span>
-                    {domiSearchResults.people.map((person) => (
-                      <button type="button" key={person.recordId} onClick={() => openDomiPerson(person)}>
-                        <strong>{person.name}</strong>
-                        <small>{[person.organization, person.rating].filter(Boolean).join(" · ")}</small>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {domiSearchResults.projects.length === 0 && domiSearchResults.people.length === 0 && (
-                  <div className="empty-state">没有匹配的项目或人脉</div>
-                )}
-              </div>
-            )}
-
             <section className={`panel-section ${openSections.domi ? "open" : ""}`}>
               <button className="panel-title" type="button" onClick={() => toggleSection("domi")}>
-                <span><Database size={17} />{domiSnapshot?.backend === "local" ? "本地资料库" : "外部连接"}</span>
+                <span><Mic size={17} />录音交流</span>
                 {openSections.domi ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
               </button>
               <div className="panel-content">

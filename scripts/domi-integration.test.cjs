@@ -17,7 +17,10 @@ const {
   renderTaskLedger,
   resolveWeeklyNewsTimestamps
 } = require("../electron/domi-integration.cjs");
-const { LocalDomiRepository } = require("../electron/local-domi-repository.cjs");
+const {
+  LocalDomiRepository,
+  scanManagedEntityIdentityCandidates
+} = require("../electron/local-domi-repository.cjs");
 
 test("critical operation snapshot accounts for queues that must finish before an app update", () => {
   const integration = new DomiIntegration({
@@ -1486,9 +1489,14 @@ rating: "A"
   const repository = new LocalDomiRepository({ databasePath, libraryDir });
   t.after(() => repository.close());
   const first = repository.reindexWorkspace();
-  assert.deepEqual(first.projects, { discovered: 4, created: 4, linked: 0 });
+  assert.deepEqual(first.projects, {
+    discovered: 2,
+    needsNameReview: 1,
+    created: 2,
+    linked: 0
+  });
   assert.deepEqual(first.people, { discovered: 1, created: 1, linked: 0 });
-  assert.equal(repository.listProjects().length, 4);
+  assert.equal(repository.listProjects().length, 2);
   assert.equal(repository.listPeople().length, 1);
   const indexedProject = repository.listProjects().find((project) => project.name === "驭驯网络");
   assert.equal(indexedProject.domain, "AI");
@@ -1500,10 +1508,7 @@ rating: "A"
     repository.listProjects().some((project) => project.name === "不是项目"),
     false
   );
-  assert.equal(
-    repository.listProjects().some((project) => project.name.includes("示例流程软件")),
-    true
-  );
+  assert.equal(repository.listProjects().some((project) => /示例流程软件/.test(project.name)), false);
   assert.equal(
     repository.listProjects().some((project) => project.name === "历史项目"),
     true
@@ -1527,7 +1532,12 @@ rating: "A"
     WHERE normalized_name = '驭驯网络'
   `).run();
   const second = repository.reindexWorkspace();
-  assert.deepEqual(second.projects, { discovered: 4, created: 0, linked: 0 });
+  assert.deepEqual(second.projects, {
+    discovered: 2,
+    needsNameReview: 1,
+    created: 0,
+    linked: 0
+  });
   assert.deepEqual(second.people, { discovered: 1, created: 0, linked: 0 });
   assert.equal(second.unchanged, true);
   assert.ok(second.indexedAt > 0);
@@ -1567,7 +1577,8 @@ subdomains: ["Agent"]
   fs.writeFileSync(path.join(personPath, "20260803-张三电话沟通.md"), "# 电话沟通\n");
   const third = repository.reindexWorkspace();
   assert.equal(third.unchanged, false);
-  assert.equal(third.projects.discovered, 5);
+  assert.equal(third.projects.discovered, 3);
+  assert.equal(third.projects.needsNameReview, 1);
   assert.equal(third.projects.created, 1);
   assert.ok(repository.listProjects().some((project) => project.recordId === "prj_incremental"));
   assert.deepEqual(
@@ -1576,6 +1587,794 @@ subdomains: ["Agent"]
   );
   assert.equal(
     repository.listPeople()[0].documents.some((document) => /人物资料/.test(document.title)),
+    true
+  );
+});
+
+test("legacy workspace import sends dated archive titles to name review", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-project-name-import-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectRoot = path.join(libraryDir, "3.项目库", "AI", "AI4S");
+  const datedArchive = path.join(projectRoot, "20260630-示例生物-分子基础模型-A");
+  const separatedDateArchive = path.join(projectRoot, "2026-07-01-示例制药-蛋白设计-B");
+  const invalidDateArchive = path.join(projectRoot, "20261340-日期品牌-专题-A");
+  const hyphenatedCompany = path.join(projectRoot, "Alpha-Beta Labs");
+  const canonicalArchive = path.join(projectRoot, "20260628-历史归档目录-专题-A");
+  const pollutedHomepage = path.join(projectRoot, "错误主页名称");
+  const missingHomepageName = path.join(projectRoot, "缺少主体名");
+  for (const directory of [
+    datedArchive,
+    separatedDateArchive,
+    invalidDateArchive,
+    hyphenatedCompany,
+    canonicalArchive,
+    pollutedHomepage,
+    missingHomepageName
+  ]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.writeFileSync(path.join(datedArchive, "材料.md"), "# 材料\n");
+  fs.writeFileSync(path.join(separatedDateArchive, "材料.md"), "# 材料\n");
+  fs.writeFileSync(path.join(invalidDateArchive, "材料.md"), "# 材料\n");
+  fs.writeFileSync(path.join(hyphenatedCompany, "材料.md"), "# 材料\n");
+  fs.writeFileSync(path.join(canonicalArchive, "项目主页.md"), `---
+entity_type: "project"
+project_id: "prj_canonical_archive_title"
+company_name: "已确认主体"
+---
+# 已确认主体
+`);
+  fs.writeFileSync(path.join(pollutedHomepage, "项目主页.md"), `---
+entity_type: "project"
+project_id: "prj_polluted_homepage"
+company_name: "20260627-错误主体-专题-A"
+---
+# 20260627-错误主体-专题-A
+`);
+  fs.writeFileSync(path.join(missingHomepageName, "项目主页.md"), `---
+entity_type: "project"
+project_id: "prj_missing_homepage_name"
+---
+# 缺少主体名
+`);
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const indexed = repository.reindexWorkspace();
+  assert.equal(indexed.projects.created, 3);
+  assert.equal(indexed.projects.needsNameReview, 4);
+  const projects = repository.listProjects();
+  assert.equal(projects.some((project) => /示例生物|示例制药/.test(project.name)), false);
+  assert.ok(projects.some((project) => project.name === "20261340-日期品牌-专题-A"));
+  assert.ok(projects.some((project) => project.name === "Alpha-Beta Labs"));
+  assert.ok(projects.some((project) =>
+    project.recordId === "prj_canonical_archive_title"
+      && project.name === "已确认主体"
+  ));
+  assert.equal(projects.some((project) =>
+    ["prj_polluted_homepage", "prj_missing_homepage_name"].includes(project.recordId)
+  ), false);
+  const reviewTitles = repository.scanWorkspaceForEntityRelink(true).projectNameReviews
+    .map((review) => review.sourceTitle);
+  assert.deepEqual(
+    new Set(reviewTitles),
+    new Set([
+      "20260630-示例生物-分子基础模型-A",
+      "2026-07-01-示例制药-蛋白设计-B",
+      "20260627-错误主体-专题-A",
+      "缺少主体名"
+    ])
+  );
+});
+
+test("recordDirectory returns a valid bound homepage without enumerating sibling directories", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-record-fast-path-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "已绑定项目");
+  const projectPage = path.join(projectDirectory, "项目主页.md");
+  fs.mkdirSync(projectDirectory, { recursive: true });
+  fs.writeFileSync(projectPage, `---
+entity_type: "project"
+project_id: "prj_bound_fast_path"
+---
+# 已绑定项目
+`);
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const now = Date.now();
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_bound_fast_path", "已绑定项目", "已绑定项目", "AI", '["Agent"]',
+    "待交流", "", "", "[]", "[]", "", null, now, projectPage, now, now
+  );
+
+  const originalReaddirSync = fs.readdirSync;
+  fs.readdirSync = () => {
+    throw new Error("valid recordDirectory must not enumerate siblings");
+  };
+  try {
+    assert.equal(
+      repository.recordDirectory("project", "prj_bound_fast_path"),
+      projectDirectory
+    );
+  } finally {
+    fs.readdirSync = originalReaddirSync;
+  }
+});
+
+test("workspace indexing skips empty person shells but preserves nested-only legacy people", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-person-shell-filter-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const emptyPersonDirectory = path.join(libraryDir, "4.人脉库", "旧空壳人物");
+  const legacyPersonDirectory = path.join(libraryDir, "4.人脉库", "仅嵌套资料人物");
+  const legacyMinutes = path.join(legacyPersonDirectory, "纪要", "20260810-交流纪要.md");
+  const legacyResearch = path.join(legacyPersonDirectory, "研究", "人物研究.pdf");
+  fs.mkdirSync(emptyPersonDirectory, { recursive: true });
+  fs.mkdirSync(path.dirname(legacyMinutes), { recursive: true });
+  fs.mkdirSync(path.dirname(legacyResearch), { recursive: true });
+  fs.writeFileSync(legacyMinutes, "# 交流纪要\n");
+  fs.writeFileSync(legacyResearch, "%PDF-1.4\n");
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const indexed = repository.reindexWorkspace();
+
+  assert.equal(indexed.people.discovered, 1);
+  assert.equal(repository.listPeople().length, 1);
+  assert.equal(repository.listPeople()[0].name, "仅嵌套资料人物");
+  const storedDocuments = JSON.parse(
+    repository.database.prepare(
+      "SELECT interaction_documents_json FROM people WHERE name = ?"
+    ).get("仅嵌套资料人物").interaction_documents_json
+  );
+  assert.deepEqual(
+    new Set(storedDocuments.map((document) => document.title)),
+    new Set(["20260810-交流纪要", "人物研究"])
+  );
+});
+
+test("workspace indexing preserves a legacy project with only a root material file", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-project-material-filter-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectParent = path.join(libraryDir, "3.项目库", "AI", "Agent");
+  const emptyProjectDirectory = path.join(projectParent, "旧空壳项目");
+  const legacyProjectDirectory = path.join(projectParent, "仅BP项目");
+  fs.mkdirSync(emptyProjectDirectory, { recursive: true });
+  fs.mkdirSync(legacyProjectDirectory, { recursive: true });
+  fs.writeFileSync(path.join(legacyProjectDirectory, "BP.pdf"), "%PDF-1.4\n");
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const indexed = repository.reindexWorkspace();
+
+  assert.equal(indexed.projects.discovered, 1);
+  assert.equal(repository.listProjects().length, 1);
+  assert.equal(repository.listProjects()[0].name, "仅BP项目");
+});
+
+test("recordDirectory keeps a uniquely bound canonical homepage when an indexed attachment is missing", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-record-stale-document-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "附件已删除项目");
+  const projectPage = path.join(projectDirectory, "项目主页.md");
+  const missingAttachment = path.join(projectDirectory, "原始材料", "已删除-BP.pdf");
+  fs.mkdirSync(projectDirectory, { recursive: true });
+  fs.writeFileSync(projectPage, `---
+entity_type: "project"
+project_id: "prj_stale_indexed_document"
+---
+# 附件已删除项目
+`);
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const now = Date.now();
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_stale_indexed_document", "附件已删除项目", "附件已删除项目", "AI", '["Agent"]',
+    "待交流", "", "", "[]", "[]", "", null, now, projectPage, now, now
+  );
+  repository.database.prepare(`
+    INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, 'project', ?, '原始材料', '已删除-BP', ?, ?, ?)
+  `).run(
+    "doc_stale_indexed_document",
+    "prj_stale_indexed_document",
+    missingAttachment,
+    now,
+    now
+  );
+
+  assert.equal(fs.existsSync(missingAttachment), false);
+  assert.equal(
+    repository.recordDirectory("project", "prj_stale_indexed_document"),
+    projectDirectory
+  );
+  assert.equal(
+    repository.database.prepare("SELECT document_path FROM projects WHERE id = ?")
+      .get("prj_stale_indexed_document").document_path,
+    projectPage
+  );
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_stale_indexed_document").path,
+    missingAttachment,
+    "directory validation must not silently delete or rewrite a stale document index"
+  );
+});
+
+test("background materialization accepts a valid canonical source with a stale attachment index", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-materializer-stale-document-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "物化附件已删除项目");
+  const projectPage = path.join(projectDirectory, "项目主页.md");
+  const missingAttachment = path.join(projectDirectory, "原始材料", "用户已删除.pdf");
+  fs.mkdirSync(projectDirectory, { recursive: true });
+  fs.writeFileSync(projectPage, `---
+entity_type: "project"
+project_id: "prj_materializer_stale_document"
+company_name: "物化附件已删除项目"
+domain: "AI"
+subdomains: ["Agent"]
+status: "待交流"
+---
+# 物化附件已删除项目
+`);
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const version = 1_700_000_000_000;
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_materializer_stale_document", "物化附件已删除项目", "物化附件已删除项目",
+    "AI", '["Agent"]', "待交流", "", "", "[]", "[]", "", null,
+    version, projectPage, version, version
+  );
+  repository.database.prepare(`
+    INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, 'project', ?, '原始材料', '用户已删除', ?, ?, ?)
+  `).run(
+    "doc_materializer_stale_document",
+    "prj_materializer_stale_document",
+    missingAttachment,
+    version,
+    version
+  );
+
+  const patched = repository.updateDatabaseRecordPatch({
+    entityType: "project",
+    recordId: "prj_materializer_stale_document",
+    expectedUpdatedAt: version,
+    mutationId: "mutation-materializer-stale-document",
+    changes: { status: "已交流" }
+  });
+  assert.equal(patched.materialization, "pending");
+  const materialized = repository.materializeDatabaseRecord(
+    "project",
+    "prj_materializer_stale_document"
+  );
+  assert.equal(materialized.materialized, true);
+  assert.equal(materialized.path, projectPage);
+  assert.equal(repository.listPendingMaterializations().length, 0);
+  assert.equal(fs.existsSync(missingAttachment), false);
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_materializer_stale_document").path,
+    missingAttachment
+  );
+  assert.match(fs.readFileSync(projectPage, "utf8"), /status: "已交流"/);
+});
+
+test("entity rename recovery scans only canonical homepages, not project materials", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-identity-scan-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const libraryDir = path.join(root, "domi工作区");
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "目标项目");
+  const otherProjectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "其他项目");
+  const personDirectory = path.join(libraryDir, "4.人脉库", "目标人物");
+  const projectPage = path.join(projectDirectory, "项目主页.md");
+  const otherProjectPage = path.join(otherProjectDirectory, "项目主页.md");
+  const personPage = path.join(personDirectory, "人物主页.md");
+  const decoyPage = path.join(projectDirectory, "原始材料", "复制目录", "项目主页.md");
+  fs.mkdirSync(path.dirname(decoyPage), { recursive: true });
+  fs.mkdirSync(otherProjectDirectory, { recursive: true });
+  fs.mkdirSync(personDirectory, { recursive: true });
+  fs.writeFileSync(projectPage, '---\nentity_type: "project"\nproject_id: "prj_scan_target"\n---\n');
+  fs.writeFileSync(otherProjectPage, '---\nentity_type: "project"\nproject_id: "prj_scan_other"\n---\n');
+  fs.writeFileSync(personPage, '---\nentity_type: "person"\nperson_id: "per_scan_target"\n---\n');
+  fs.writeFileSync(decoyPage, '---\nentity_type: "project"\nproject_id: "prj_scan_target"\n---\n');
+  for (let index = 0; index < 100; index += 1) {
+    fs.writeFileSync(
+      path.join(projectDirectory, "原始材料", `大附件索引-${index}.txt`),
+      "不会被目录重连扫描读取\n"
+    );
+  }
+
+  const originalReadFileSync = fs.readFileSync;
+  const readPaths = [];
+  fs.readFileSync = function trackedReadFileSync(filePath, ...args) {
+    readPaths.push(path.resolve(String(filePath)));
+    return originalReadFileSync.call(fs, filePath, ...args);
+  };
+  let projectCandidates;
+  let personCandidates;
+  try {
+    projectCandidates = scanManagedEntityIdentityCandidates(
+      libraryDir,
+      "project",
+      "prj_scan_target"
+    );
+    personCandidates = scanManagedEntityIdentityCandidates(
+      libraryDir,
+      "person",
+      "per_scan_target"
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+
+  assert.deepEqual(projectCandidates.map((item) => item.documentPath), [projectPage]);
+  assert.deepEqual(personCandidates.map((item) => item.documentPath), [personPage]);
+  assert.equal(readPaths.includes(path.resolve(decoyPage)), false);
+  assert.equal(
+    readPaths.every((item) => ["项目主页.md", "人物主页.md"].includes(path.basename(item))),
+    true
+  );
+  assert.equal(readPaths.some((item) => /大附件索引/.test(item)), false);
+});
+
+test("local repository relinks uniquely renamed project and person directories by frontmatter ID", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-relink-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const oldProjectDirectory = path.join(
+    libraryDir,
+    "3.项目库",
+    "消费科技",
+    "可穿戴",
+    "20260715-Mist-AI可穿戴-A"
+  );
+  const newProjectDirectory = path.join(
+    path.dirname(oldProjectDirectory),
+    "20260715-Mist labs-AI可穿戴-A"
+  );
+  const oldPersonDirectory = path.join(libraryDir, "4.人脉库", "莫子皓");
+  const newPersonDirectory = path.join(libraryDir, "4.人脉库", "莫子皓-补充资料");
+  const oldProjectPage = path.join(oldProjectDirectory, "项目主页.md");
+  const oldProjectMaterial = path.join(oldProjectDirectory, "原始材料", "BP.pdf");
+  const oldPersonPage = path.join(oldPersonDirectory, "人物主页.md");
+  const oldPersonMinutes = path.join(oldPersonDirectory, "纪要", "20260801-交流纪要.md");
+  fs.mkdirSync(path.dirname(oldProjectMaterial), { recursive: true });
+  fs.mkdirSync(path.dirname(oldPersonMinutes), { recursive: true });
+  fs.writeFileSync(oldProjectMaterial, "%PDF-1.4\n");
+  fs.writeFileSync(oldPersonMinutes, "# 交流纪要\n");
+  fs.writeFileSync(oldProjectPage, `---
+entity_type: "project"
+project_id: "prj_external_rename"
+company_name: "Mist"
+domain: "消费科技"
+subdomains: ["可穿戴"]
+last_updated_at: "2026-08-01T00:00:00.000Z"
+---
+# Mist
+`);
+  fs.writeFileSync(oldPersonPage, `---
+entity_type: "person"
+person_id: "per_external_rename"
+name: "莫子皓"
+---
+# 莫子皓
+`);
+
+  let repository = new LocalDomiRepository({ databasePath, libraryDir });
+  const baseline = repository.reindexWorkspace();
+  assert.equal(baseline.projects.created, 1);
+  assert.equal(baseline.people.created, 1);
+  const now = Date.now();
+  repository.database.prepare(`
+    INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "doc_external_project",
+    "project",
+    "prj_external_rename",
+    "原始材料",
+    "BP",
+    oldProjectMaterial,
+    now,
+    now
+  );
+  repository.database.prepare(`
+    INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "doc_external_person",
+    "person",
+    "per_external_rename",
+    "交流纪要",
+    "20260801-交流纪要",
+    oldPersonMinutes,
+    now,
+    now
+  );
+  repository.close();
+
+  fs.renameSync(oldProjectDirectory, newProjectDirectory);
+  fs.renameSync(oldPersonDirectory, newPersonDirectory);
+  fs.mkdirSync(oldProjectDirectory, { recursive: true });
+  fs.mkdirSync(oldPersonDirectory, { recursive: true });
+  repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+
+  assert.equal(
+    repository.recordDirectory("project", "prj_external_rename"),
+    newProjectDirectory
+  );
+  assert.equal(
+    repository.database.prepare("SELECT document_path FROM projects WHERE id = ?")
+      .get("prj_external_rename").document_path,
+    path.join(newProjectDirectory, "项目主页.md")
+  );
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_external_project").path,
+    path.join(newProjectDirectory, "原始材料", "BP.pdf")
+  );
+
+  const reindexed = repository.reindexWorkspace();
+  assert.equal(reindexed.people.relinked, 1);
+  assert.equal(repository.listProjects().length, 1, "ID-first reindex must not insert a second project");
+  assert.equal(repository.listPeople().length, 1, "an old empty person shell must not become a ghost record");
+  assert.equal(repository.listProjects()[0].name, "Mist");
+  assert.equal(
+    repository.recordDirectory("person", "per_external_rename"),
+    newPersonDirectory
+  );
+  assert.equal(
+    repository.database.prepare("SELECT document_path FROM people WHERE id = ?")
+      .get("per_external_rename").document_path,
+    path.join(newPersonDirectory, "人物主页.md")
+  );
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_external_person").path,
+    path.join(newPersonDirectory, "纪要", "20260801-交流纪要.md")
+  );
+  assert.deepEqual(
+    repository.listPeople()[0].interactionDocuments.map((document) => document.title),
+    ["20260801-交流纪要"]
+  );
+});
+
+test("project rename recovery falls back beyond the old subdomain when needed", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-relink-fallback-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const sourceDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "跨领域项目");
+  const targetDirectory = path.join(libraryDir, "3.项目库", "消费科技", "可穿戴", "跨领域项目新目录");
+  const sourcePage = path.join(sourceDirectory, "项目主页.md");
+  fs.mkdirSync(sourceDirectory, { recursive: true });
+  fs.writeFileSync(sourcePage, `---
+entity_type: "project"
+project_id: "prj_cross_domain_rename"
+company_name: "跨领域项目"
+---
+# 跨领域项目
+`);
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const now = Date.now();
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_cross_domain_rename", "跨领域项目", "跨领域项目", "AI", '["Agent"]',
+    "待交流", "", "", "[]", "[]", "", null, now, sourcePage, now, now
+  );
+  fs.mkdirSync(path.dirname(targetDirectory), { recursive: true });
+  fs.renameSync(sourceDirectory, targetDirectory);
+
+  assert.equal(
+    repository.recordDirectory("project", "prj_cross_domain_rename"),
+    targetDirectory
+  );
+  assert.equal(
+    repository.database.prepare("SELECT document_path FROM projects WHERE id = ?")
+      .get("prj_cross_domain_rename").document_path,
+    path.join(targetDirectory, "项目主页.md")
+  );
+});
+
+test("local repository fails closed when the same frontmatter ID exists in two directories", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-relink-conflict-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectRoot = path.join(libraryDir, "3.项目库", "消费科技", "可穿戴");
+  const firstDirectory = path.join(projectRoot, "Mist labs");
+  const secondDirectory = path.join(projectRoot, "20260715-Mist labs-AI可穿戴-A");
+  const pageContent = `---
+entity_type: "project"
+project_id: "prj_duplicate_directory"
+company_name: "Mist labs"
+domain: "消费科技"
+subdomains: ["可穿戴"]
+---
+# Mist labs
+`;
+  fs.mkdirSync(path.join(firstDirectory, "原始材料"), { recursive: true });
+  fs.mkdirSync(secondDirectory, { recursive: true });
+  fs.writeFileSync(path.join(firstDirectory, "项目主页.md"), pageContent);
+  fs.writeFileSync(path.join(secondDirectory, "项目主页.md"), pageContent);
+  const firstMaterial = path.join(firstDirectory, "原始材料", "BP.pdf");
+  fs.writeFileSync(firstMaterial, "%PDF-1.4\n");
+
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const now = Date.now();
+  const originalDocumentPath = path.join(firstDirectory, "项目主页.md");
+  const originalMaterialPath = path.join(firstDirectory, "原始材料", "索引存在但文件缺失.pdf");
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_duplicate_directory", "Mist labs", "mistlabs", "消费科技", '["可穿戴"]',
+    "已交流", "A", "", "[]", "[]", "", null, now,
+    originalDocumentPath, now, now
+  );
+  repository.database.prepare(`
+    INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, 'project', ?, '原始材料', 'BP', ?, ?, ?)
+  `).run("doc_duplicate_directory", "prj_duplicate_directory", originalMaterialPath, now, now);
+
+  const isConflict = (error) => {
+    assert.equal(error.code, "DOMI_ENTITY_DIRECTORY_CONFLICT");
+    assert.match(error.message, /多个带相同内部 ID/);
+    return true;
+  };
+  assert.throws(
+    () => repository.recordDirectory("project", "prj_duplicate_directory"),
+    isConflict
+  );
+  assert.throws(() => repository.reindexWorkspace(), isConflict);
+  assert.equal(
+    repository.database.prepare("SELECT document_path FROM projects WHERE id = ?")
+      .get("prj_duplicate_directory").document_path,
+    originalDocumentPath
+  );
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_duplicate_directory").path,
+    originalMaterialPath
+  );
+  assert.equal(repository.listProjects().length, 1);
+});
+
+test("background materialization never creates a target when its source directory disappeared", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-materializer-source-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const sourceDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "旧项目名");
+  const movedDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "Finder改名");
+  const targetDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "新项目名");
+  const sourcePage = path.join(sourceDirectory, "项目主页.md");
+  const sourceMaterial = path.join(sourceDirectory, "原始材料", "BP.pdf");
+  const missingSourceMaterial = path.join(sourceDirectory, "原始材料", "用户已删除.pdf");
+  fs.mkdirSync(path.dirname(sourceMaterial), { recursive: true });
+  fs.writeFileSync(sourceMaterial, "%PDF-1.4\n");
+  fs.writeFileSync(sourcePage, `---
+entity_type: "project"
+project_id: "prj_materializer_source"
+company_name: "旧项目名"
+domain: "AI"
+subdomains: ["Agent"]
+---
+# 旧项目名
+`);
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const version = 1_700_000_000_000;
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_materializer_source", "旧项目名", "旧项目名", "AI", '["Agent"]',
+    "待交流", "", "", "[]", "[]", "", null, version, sourcePage, version, version
+  );
+  repository.database.prepare(`
+    INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, 'project', ?, '原始材料', 'BP', ?, ?, ?)
+  `).run("doc_materializer_source", "prj_materializer_source", sourceMaterial, version, version);
+  repository.database.prepare(`
+    INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, 'project', ?, '原始材料', '用户已删除', ?, ?, ?)
+  `).run(
+    "doc_materializer_missing_source",
+    "prj_materializer_source",
+    missingSourceMaterial,
+    version,
+    version
+  );
+
+  const patched = repository.updateDatabaseRecordPatch({
+    entityType: "project",
+    recordId: "prj_materializer_source",
+    expectedUpdatedAt: version,
+    mutationId: "mutation-materializer-source-missing",
+    changes: { name: "新项目名" }
+  });
+  assert.equal(patched.materialization, "pending");
+  fs.renameSync(sourceDirectory, movedDirectory);
+  fs.mkdirSync(sourceDirectory, { recursive: true });
+
+  assert.throws(
+    () => repository.materializeDatabaseRecord("project", "prj_materializer_source"),
+    (error) => {
+      assert.equal(error.code, "DOMI_MATERIALIZATION_SOURCE_MISSING");
+      return true;
+    }
+  );
+  assert.equal(fs.existsSync(targetDirectory), false);
+  assert.equal(fs.existsSync(path.join(movedDirectory, "原始材料", "BP.pdf")), true);
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_materializer_source").path,
+    sourceMaterial,
+    "a failed materializer must not rebase document indexes"
+  );
+  assert.equal(repository.listPendingMaterializations()[0].attempts, 1);
+
+  fs.rmdirSync(sourceDirectory);
+  fs.mkdirSync(targetDirectory, { recursive: true });
+  fs.writeFileSync(path.join(targetDirectory, "项目主页.md"), `---
+entity_type: "project"
+project_id: "prj_wrong_target"
+---
+# 错误目标
+`);
+  assert.throws(
+    () => repository.materializeDatabaseRecord("project", "prj_materializer_source"),
+    (error) => {
+      assert.equal(error.code, "DOMI_MATERIALIZATION_TARGET_CONFLICT");
+      return true;
+    }
+  );
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_materializer_source").path,
+    sourceMaterial
+  );
+  fs.rmSync(targetDirectory, { recursive: true, force: true });
+  fs.renameSync(movedDirectory, targetDirectory);
+  const recovered = repository.materializeDatabaseRecord(
+    "project",
+    "prj_materializer_source"
+  );
+  assert.equal(recovered.materialized, true);
+  assert.equal(repository.listPendingMaterializations().length, 0);
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_materializer_source").path,
+    path.join(targetDirectory, "原始材料", "BP.pdf")
+  );
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_materializer_missing_source").path,
+    path.join(targetDirectory, "原始材料", "用户已删除.pdf"),
+    "crash recovery rebases a stale historical attachment index without requiring the file"
+  );
+  assert.equal(
+    fs.existsSync(path.join(targetDirectory, "原始材料", "用户已删除.pdf")),
+    false
+  );
+});
+
+test("pending materialization relink rebases documents from its real source directory", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-pending-relink-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const sourceDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "Pending旧名");
+  const manualDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "Finder最终名");
+  const sourcePage = path.join(sourceDirectory, "项目主页.md");
+  const sourceMaterial = path.join(sourceDirectory, "原始材料", "BP.pdf");
+  fs.mkdirSync(path.dirname(sourceMaterial), { recursive: true });
+  fs.writeFileSync(sourceMaterial, "%PDF-1.4\n");
+  fs.writeFileSync(sourcePage, `---
+entity_type: "project"
+project_id: "prj_pending_external_rename"
+company_name: "Pending旧名"
+---
+# Pending旧名
+`);
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const version = 1_700_000_000_000;
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_pending_external_rename", "Pending旧名", "pending旧名", "AI", '["Agent"]',
+    "待交流", "", "", "[]", "[]", "", null, version, sourcePage, version, version
+  );
+  repository.database.prepare(`
+    INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, 'project', ?, '原始材料', 'BP', ?, ?, ?)
+  `).run(
+    "doc_pending_external_rename",
+    "prj_pending_external_rename",
+    sourceMaterial,
+    version,
+    version
+  );
+  repository.updateDatabaseRecordPatch({
+    entityType: "project",
+    recordId: "prj_pending_external_rename",
+    expectedUpdatedAt: version,
+    mutationId: "mutation-pending-external-rename",
+    changes: { name: "Pending新名" }
+  });
+  fs.renameSync(sourceDirectory, manualDirectory);
+
+  assert.equal(
+    repository.recordDirectory("project", "prj_pending_external_rename"),
+    manualDirectory
+  );
+  assert.equal(
+    repository.database.prepare("SELECT path FROM documents WHERE id = ?")
+      .get("doc_pending_external_rename").path,
+    path.join(manualDirectory, "原始材料", "BP.pdf")
+  );
+  const pending = repository.database.prepare(`
+    SELECT source_path, target_path FROM repository_materializations
+    WHERE entity_type = 'project' AND record_id = ?
+  `).get("prj_pending_external_rename");
+  assert.equal(pending.source_path, path.join(manualDirectory, "项目主页.md"));
+  assert.equal(pending.target_path, path.join(manualDirectory, "项目主页.md"));
+  assert.equal(
+    repository.materializeDatabaseRecord("project", "prj_pending_external_rename").materialized,
     true
   );
 });
@@ -1763,6 +2562,32 @@ test("local database editor updates records, managed Markdown and safe directory
     "旧来源", "", "", 5, 6, "待核验", "继续观察", 1, newsPath, version, version
   );
 
+  assert.throws(
+    () => repository.updateProject({
+      recordId: "prj_edit",
+      expectedUpdatedAt: version,
+      name: "20260630-示例主体-专题-A",
+      domain: "AI",
+      subdomains: ["Agent"],
+      status: "待交流",
+      rating: "",
+      notes: "",
+      cities: [],
+      investors: [],
+      financingHistory: "",
+      latestValuationUsd100m: null
+    }),
+    (error) => error?.code === "DOMI_PROJECT_NAME_REVIEW_REQUIRED"
+      && /公司名称应只填写主体名/.test(error.message)
+  );
+  assert.equal(fs.existsSync(path.join(
+    libraryDir,
+    "3.项目库",
+    "AI",
+    "Agent",
+    "20260630-示例主体-专题-A"
+  )), false);
+
   const updatedProject = repository.updateProject({
     recordId: "prj_edit",
     expectedUpdatedAt: version,
@@ -1870,6 +2695,22 @@ test("field patches commit canonical SQLite state before background Markdown mat
     version, projectPath, version, version
   );
 
+  assert.throws(
+    () => repository.updateDatabaseRecordPatch({
+      entityType: "project",
+      recordId: "prj_patch",
+      expectedUpdatedAt: version,
+      mutationId: "mutation-project-archive-title",
+      changes: { name: "20260701-示例主体-研究-B" }
+    }),
+    (error) => error?.code === "DOMI_PROJECT_NAME_REVIEW_REQUIRED"
+  );
+  assert.equal(
+    repository.database.prepare("SELECT name FROM projects WHERE id = ?").get("prj_patch").name,
+    "Patch项目"
+  );
+  assert.equal(repository.listPendingMaterializations().length, 0);
+
   const patched = repository.updateDatabaseRecordPatch({
     entityType: "project",
     recordId: "prj_patch",
@@ -1926,6 +2767,7 @@ test("field patches commit canonical SQLite state before background Markdown mat
   assert.equal(materialized.materialized, true);
   assert.equal(repository.listPendingMaterializations().length, 0);
   assert.match(fs.readFileSync(projectPath, "utf8"), /新的单元格摘要/);
+  assert.match(fs.readFileSync(projectPath, "utf8"), /last_updated_at: "20\d\d-/);
   assert.match(fs.readFileSync(projectPath, "utf8"), /必须保留/);
 
   const renamed = repository.updateDatabaseRecordPatch({
@@ -1965,6 +2807,90 @@ test("field patches commit canonical SQLite state before background Markdown mat
       changes: { rating: "S" }
     }),
     /其他流程更新/
+  );
+});
+
+test("legacy archive names block unrelated project writes and Markdown materialization", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-legacy-project-name-write-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => repository.close());
+  const version = 1_700_000_000_000;
+  const archiveName = "20260630-示例主体-技术专题-A";
+  const projectPage = path.join(
+    libraryDir,
+    "3.项目库",
+    "AI",
+    "Agent",
+    archiveName,
+    "项目主页.md"
+  );
+  repository.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_legacy_archive_name", archiveName, "20260630示例主体技术专题a",
+    "AI", '["Agent"]', "待交流", "A", "旧摘要", "[]", "[]", "", null,
+    version, projectPage, version, version
+  );
+
+  assert.throws(
+    () => repository.updateDatabaseRecordPatch({
+      entityType: "project",
+      recordId: "prj_legacy_archive_name",
+      expectedUpdatedAt: version,
+      mutationId: "mutation-legacy-project-notes",
+      changes: { notes: "不得写入的新摘要" }
+    }),
+    (error) => error?.code === "DOMI_PROJECT_NAME_REVIEW_REQUIRED"
+  );
+  assert.throws(
+    () => repository.updateProject({
+      recordId: "prj_legacy_archive_name",
+      expectedUpdatedAt: version,
+      name: archiveName,
+      domain: "AI",
+      subdomains: ["Agent"],
+      status: "深度跟踪",
+      rating: "A",
+      notes: "不得写入的新摘要",
+      cities: [],
+      investors: [],
+      financingHistory: "",
+      latestValuationUsd100m: null
+    }),
+    (error) => error?.code === "DOMI_PROJECT_NAME_REVIEW_REQUIRED"
+  );
+  assert.deepEqual(
+    { ...repository.database.prepare("SELECT notes, status, updated_at FROM projects WHERE id = ?")
+      .get("prj_legacy_archive_name") },
+    { notes: "旧摘要", status: "待交流", updated_at: version }
+  );
+  assert.equal(repository.listPendingMaterializations().length, 0);
+  assert.equal(fs.existsSync(projectPage), false);
+
+  repository.database.prepare(`
+    INSERT INTO repository_materializations (
+      entity_type, record_id, mutation_id, source_path, target_path,
+      attempts, last_error, enqueued_at, updated_at
+    ) VALUES ('project', ?, ?, '', ?, 0, '', ?, ?)
+  `).run("prj_legacy_archive_name", "legacy-pending", projectPage, version, version);
+  assert.throws(
+    () => repository.materializeDatabaseRecord("project", "prj_legacy_archive_name"),
+    (error) => error?.code === "DOMI_PROJECT_NAME_REVIEW_REQUIRED"
+  );
+  assert.equal(fs.existsSync(projectPage), false);
+  assert.deepEqual(
+    { ...repository.database.prepare(`
+      SELECT attempts, last_error FROM repository_materializations
+      WHERE entity_type = 'project' AND record_id = ?
+    `).get("prj_legacy_archive_name") },
+    { attempts: 0, last_error: "" }
   );
 });
 
