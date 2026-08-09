@@ -360,6 +360,8 @@ export default function SetupCenter({
         // 该字符串和 workflow 都刻意不包含外部数据关键词。助手只解释已脱敏状态，
         // 不应触发外部访问授权的系统模态框。
         requestText: "诊断当前连接引导",
+        requestOrigin: "programmatic",
+        userInstructionText: "",
         ephemeral: true,
         background: false,
         allowUserInput: false,
@@ -503,6 +505,8 @@ export default function SetupCenter({
           "该结果由 domi 作为私密输出接收，只保存到本机 Application Support，不写入任务产物或日志。"
         ].join("\n"),
         requestText: "检测 Outlook 发送账号",
+        requestOrigin: "programmatic",
+        userInstructionText: "",
         ephemeral: true,
         background: true,
         privateOutput: true,
@@ -677,6 +681,8 @@ export default function SetupCenter({
           "最终只报告：已完成的检查/修复、当前连接状态、仍需用户做的动作。"
         ].join("\n"),
         requestText: "诊断并协助完成 PLAUD 连接",
+        requestOrigin: "programmatic",
+        userInstructionText: "",
         ephemeral: true,
         background: false,
         workflowId: "plaud-connection-assist",
