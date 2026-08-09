@@ -4369,6 +4369,7 @@ class DomiIntegration {
           projects: {
             name: "本地项目库",
             total: local.projects.length,
+            needsNameReview: Number(local.workspaceIndex?.projects?.needsNameReview) || 0,
             localLibraryDir: projectSource.localLibraryDir,
             localDatabasePath: projectSource.localDatabasePath
           },

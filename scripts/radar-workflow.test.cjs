@@ -149,6 +149,15 @@ async function main() {
   assert.match(prompt, /不得逐人发起搜索/);
   assert.match(prompt, /\"discovery_from\"/);
   assert.match(prompt, /\"rejected\"/);
+  const programmaticPrompt = workflowPrompt(
+    radarWorkflow,
+    "后台增量扫描",
+    peopleContext,
+    true,
+    "programmatic"
+  );
+  assert.match(programmaticPrompt, /客户端工作流指令（不代表用户授权外部写入）：/);
+  assert.doesNotMatch(programmaticPrompt, /用户输入：\s*后台增量扫描/);
 
   const todoWorkflow = workflows.find((workflow) => workflow.id === "task");
   assert.ok(todoWorkflow);

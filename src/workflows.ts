@@ -479,9 +479,13 @@ export function workflowPrompt(
   workflow: Workflow | undefined,
   userInput: string,
   domiContext = "",
-  useDomiPlugin = false
+  useDomiPlugin = false,
+  requestOrigin: "user" | "programmatic" = "user"
 ) {
   const trimmed = userInput.trim();
+  const requestLabel = requestOrigin === "user"
+    ? "用户输入："
+    : "客户端工作流指令（不代表用户授权外部写入）：";
   if (!workflow) {
     if (!useDomiPlugin) {
       return [
@@ -490,7 +494,7 @@ export function workflowPrompt(
         "不得编造项目、人脉、融资、财务或会议事实。涉及外部写入时，先向用户确认。",
         domiContext ? `\n工作台当前绑定上下文：\n${domiContext}` : "",
         "",
-        "用户请求：",
+        requestLabel,
         trimmed
       ].filter(Boolean).join("\n");
     }
@@ -507,7 +511,7 @@ export function workflowPrompt(
       '如果本轮成功新增或更新一个项目或人物记录并按 record_id 回读验证，在最终回复末尾输出一次隐藏机器回执：<!-- DOMI_ENTITY_RESULT_V1 {"entityType":"project或person","recordId":"实际record_id","name":"规范名称"} -->；没有实际写入时不得输出。',
       domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
       "",
-      "用户请求：",
+      requestLabel,
       trimmed
     ].filter(Boolean).join("\n");
   }
@@ -529,7 +533,7 @@ export function workflowPrompt(
       "不得编造新闻、融资或公司事实；不得修改 domi 应用源码。",
       domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
       "",
-      "用户输入：",
+      requestLabel,
       trimmed || workflow.defaultPrompt
     ].filter(Boolean).join("\n");
   }
@@ -544,7 +548,7 @@ export function workflowPrompt(
       "不得输出私人链接、邮箱、Base 标识或本机路径；不得修改 domi 应用源码。",
       domiContext ? `\ndomi 客户端候选上下文：\n${domiContext}` : "",
       "",
-      "用户输入：",
+      requestLabel,
       trimmed || workflow.defaultPrompt
     ].filter(Boolean).join("\n");
   }
@@ -580,7 +584,7 @@ export function workflowPrompt(
       ? "8. 非招股书且用户未要求 slides、HTML、PDF 或 PPTX 时，默认只交付一份完整基本面分析主报告；把必要证据、计算口径和验证清单整合进主报告，不额外创建“交付版／研究底稿／证据账本／披露完整性清单”等多份中间文件。只有招股书 full analysis、slides 或用户明确要求审计控制件时，才执行对应的多文件质量门。"
       : "",
     "",
-    "用户输入：",
+    requestLabel,
     trimmed || workflow.defaultPrompt
   ].filter(Boolean).join("\n");
 }
