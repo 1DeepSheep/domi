@@ -365,9 +365,34 @@ assert.match(
   "Moving entity search must preserve local-index refresh and project/person navigation."
 );
 assert.match(
+  sidebarEntitySearch,
+  /onKeyDown=\{handleDomiSearchKeyDown\}[\s\S]*?role="combobox"[\s\S]*?aria-autocomplete="list"[\s\S]*?aria-activedescendant=/,
+  "Sidebar entity search must expose keyboard-driven combobox semantics."
+);
+assert.match(
+  app,
+  /domiSearchComposingRef\.current[\s\S]*?nativeEvent\.isComposing[\s\S]*?keyCode === 229[\s\S]*?event\.key === "Escape"[\s\S]*?event\.key === "ArrowDown" \|\| event\.key === "ArrowUp"[\s\S]*?event\.key !== "Enter"/,
+  "Sidebar entity keyboard handling must support arrows, Enter and Escape without opening during IME composition."
+);
+assert.match(
+  sidebarEntitySearch,
+  /role="listbox"[\s\S]*?role="option"[\s\S]*?aria-selected=\{domiSearchResolvedActiveKey === optionKey\}/,
+  "Sidebar entity results must expose selected listbox options."
+);
+assert.match(
+  sidebarEntitySearch,
+  /domiSearchError[\s\S]*?className="domi-search-error" role="alert"/,
+  "Entity search failures must remain visible beside the search results."
+);
+assert.match(
   styles,
   /\.sidebar-entity-search\s*\{[\s\S]*?flex:\s*0 0 auto[\s\S]*?\.sidebar-domi-search-results\s*\{[\s\S]*?max-height:[\s\S]*?overflow-y:\s*auto/,
   "Sidebar entity results must remain bounded and independently scrollable."
+);
+assert.match(
+  styles,
+  /\.domi-result-group button\[aria-selected="true"\]\s*\{[\s\S]*?background:\s*var\(--selected\)/,
+  "Keyboard-selected entity results must be visibly highlighted."
 );
 const recordingExchangePanelIndex = app.indexOf('<section className={`panel-section ${openSections.domi');
 const recordingExchangePanel = app.slice(recordingExchangePanelIndex, recordingExchangePanelIndex + 500);
@@ -535,20 +560,10 @@ assert.doesNotMatch(
   /workspacePath/,
   "A failed entity repair must not leak the demo, task or stale directory as a writable fallback."
 );
-assert.equal(
-  (app.match(/loadDomiEntityMaterials/g) || []).length,
-  1,
-  "Recursive entity material loading must remain confined to the asynchronous overview refresh."
-);
 assert.doesNotMatch(
   app,
-  /async function openDomiProject[\s\S]*?loadDomiEntityMaterials[\s\S]*?async function openDomiPerson/,
-  "Opening a project must not block on the recursive materials scan."
-);
-assert.doesNotMatch(
-  app,
-  /async function openDomiPerson[\s\S]*?loadDomiEntityMaterials[\s\S]*?function updateActiveThread/,
-  "Opening a person must not block on the recursive materials scan."
+  /async function openDomiEntityDocuments[\s\S]*?loadDomiEntityMaterials[\s\S]*?async function openDomiProject/,
+  "Opening an entity homepage must use the canonical document tree instead of a recursive material scan."
 );
 assert.match(
   workflows,
@@ -579,6 +594,46 @@ assert.match(
   app,
   /documentLibrarySearchMatches[\s\S]*?moveDocumentLibrarySearchSelection[\s\S]*?event\.key === "ArrowDown" \|\| event\.key === "ArrowUp"[\s\S]*?openActiveDocumentLibrarySearchResult/,
   "Document-library search must support keyboard selection and opening."
+);
+assert.match(
+  main,
+  /async function resolveMarkdownImagePreview[\s\S]*?currentDocumentLibraryLocation\(\)\.rootPath[\s\S]*?resolveMarkdownImagePath\([^;]*?\{ rootPath \}\)/,
+  "Markdown image preview must allow sibling assets only through the host-selected document-library root."
+);
+assert.match(
+  main,
+  /function copyMarkdownDocument[\s\S]*?currentDocumentLibraryLocation\(\)\.rootPath[\s\S]*?buildMarkdownClipboardPayload\(\{[\s\S]*?rootPath/,
+  "Copying rich Markdown must use the same trusted library boundary as image preview."
+);
+assert.match(
+  main,
+  /async function saveMarkdownImage[\s\S]*?currentDocumentLibraryLocation\(\)\.rootPath[\s\S]*?savePastedMarkdownImage\(\{ \.\.\.request, rootPath \}\)/,
+  "Saving a pasted Markdown image must use the host-selected document-library boundary."
+);
+assert.match(
+  main,
+  /getAppSettings\(\)\.save\(settingsRequest\)[\s\S]*?\["storageBackend", "localLibraryDir", "localRepositoryDir"\][\s\S]*?allowedMarkdownAssetPaths\.clear\(\)/,
+  "Changing the document library must revoke preview URLs authorized for the previous library."
+);
+assert.match(
+  styles,
+  /\.sidebar-document-library \.document-library-tree \{[\s\S]*?overflow-x: auto;[\s\S]*?overflow-y: auto;[\s\S]*?overscroll-behavior-x: contain;/,
+  "The sidebar document tree must expose native horizontal and vertical scrolling without moving its toolbar."
+);
+assert.match(
+  styles,
+  /\.sidebar-document-library \.document-library-node-row \{[\s\S]*?width: max-content;[\s\S]*?min-width: 100%;[\s\S]*?grid-template-columns: 12px 17px max-content;/,
+  "Long sidebar document names must create real horizontal overflow while short rows still fill the viewport."
+);
+assert.match(
+  styles,
+  /\.sidebar-document-library \.document-library-node-name \{[\s\S]*?overflow: visible;[\s\S]*?text-overflow: clip;/,
+  "Sidebar document names must remain fully available through horizontal scrolling instead of being ellipsized."
+);
+assert.match(
+  app,
+  /selected\?\.scrollIntoView\(\{ block: "nearest", inline: "nearest" \}\)/,
+  "Keyboard selection in the document tree must reveal the chosen row on both axes."
 );
 assert.match(
   app,
@@ -1002,17 +1057,17 @@ assert.match(
   "Todo-board sync must refresh the data snapshot, keep the selected Max/Fast defaults, pass candidates to a temporary background Todo Skill run, and then reread the active backend document."
 );
 assert.doesNotMatch(
-  app.match(/async function syncManagedTasks\([^)]*\)[\s\S]*?\n  async function refreshDomiEntityOverview/)?.[0] || "",
+  app.match(/async function syncManagedTasks\([^)]*\)[\s\S]*?\n  async function resolveDomiEntityWorkspacePath/)?.[0] || "",
   /createProjectWorkspace|setThreads|executeSuggestion/,
   "Todo-board sync must not create a project workspace or a visible conversation task."
 );
 assert.match(
-  app.match(/async function syncManagedTasks\([^)]*\)[\s\S]*?\n  async function refreshDomiEntityOverview/)?.[0] || "",
+  app.match(/async function syncManagedTasks\([^)]*\)[\s\S]*?\n  async function resolveDomiEntityWorkspacePath/)?.[0] || "",
   /Promise\.race\([\s\S]*?resultOrTimeout\.kind === "timeout"[\s\S]*?await workbench\.stopCodex\(runId\)[\s\S]*?await refreshDomiTaskBoard\(\{ silent: true, fresh: true \}\)[\s\S]*?超过 8 分钟/,
   "Todo-board sync must await safe interruption of an overlong background run before rereading the ledger."
 );
 assert.match(
-  app.match(/async function syncManagedTasks\([^)]*\)[\s\S]*?\n  async function refreshDomiEntityOverview/)?.[0] || "",
+  app.match(/async function syncManagedTasks\([^)]*\)[\s\S]*?\n  async function resolveDomiEntityWorkspacePath/)?.[0] || "",
   /workbench\.listDomiTasks\(\{ fresh: true \}\)[\s\S]*?resultOrTimeout\.kind === "ledger"[\s\S]*?setDomiTaskBoard\(resultOrTimeout\.snapshot\)[\s\S]*?await refreshDomiTaskBoard\(\{ fresh: true \}\)[\s\S]*?updateSyncPhase\("completed"/,
   "Todo-board sync must detect a freshly written ledger and refresh the board without waiting for the background report to finish."
 );
@@ -1423,10 +1478,34 @@ assert.match(
   /const currentThreads = flushAssistantDeltas\(\)[\s\S]*?function flushAssistantDeltas\(\): Thread\[\][\s\S]*?threadsRef\.current = nextSnapshot/,
   "A close-time persistence snapshot must synchronously include buffered assistant deltas."
 );
+const entitySearchOpenStart = app.indexOf("async function openDomiEntityDocuments(");
+const entitySearchOpenEnd = app.indexOf("function updateActiveThread", entitySearchOpenStart);
+assert.ok(entitySearchOpenStart >= 0 && entitySearchOpenEnd > entitySearchOpenStart);
+const entitySearchOpen = app.slice(entitySearchOpenStart, entitySearchOpenEnd);
+assert.match(
+  entitySearchOpen,
+  /domiEntityOpenRequestRef\.current[\s\S]*?navigateWorkspace\("documents", true\)[\s\S]*?loadDomiEntityWorkspace\(\{[\s\S]*?recordId: entity\.recordId[\s\S]*?repairMissing: true[\s\S]*?workspaceViewRef\.current !== "documents"[\s\S]*?entityPrimaryDocumentPath\([\s\S]*?documentLibraryExpansionPath[\s\S]*?openMarkdown\(homepageResource, undefined, requestId\)[\s\S]*?requestId !== domiEntityOpenRequestRef\.current/,
+  "Sidebar entity search must open the canonical homepage and expand its document folder by record id."
+);
+assert.doesNotMatch(
+  entitySearchOpen,
+  /navigateWorkspace\("conversation"\)|selectThread\(|activateThreadNow\(|setThreads\(|refreshDomiEntityOverview/,
+  "Sidebar entity search must never create, reuse or activate a conversation."
+);
 assert.match(
   app,
-  /async function openDomiProject\(project: DomiProject\) \{\s*if \(!await navigateWorkspace\("conversation"\)\) return;[\s\S]*?async function openDomiPerson\(person: DomiPerson\) \{\s*if \(!await navigateWorkspace\("conversation"\)\) return;/,
-  "Opening a project or person for the first time must visibly enter its conversation."
+  /function openDocumentLibraryNode[\s\S]*?cancelPendingDomiEntityOpen\(\)[\s\S]*?async function openMarkdown\([\s\S]*?entityOpenRequestId\?: number[\s\S]*?entityOpenRequestId === undefined[\s\S]*?entityOpenRequestId !== domiEntityOpenRequestRef\.current/,
+  "Manual document navigation must cancel a slower pending entity-search open."
+);
+assert.match(
+  app,
+  /async function navigateWorkspace\([\s\S]*?preserveDomiEntityOpen = false[\s\S]*?if \(!preserveDomiEntityOpen\) cancelPendingDomiEntityOpen\(\)/,
+  "Leaving or reselecting a workspace must cancel stale entity-search navigation by default."
+);
+assert.match(
+  app,
+  /const result = await workbench\.readMarkdown\(\{ resource, basePath \}\);[\s\S]*?entityOpenRequestId !== undefined[\s\S]*?entityOpenRequestId !== domiEntityOpenRequestRef\.current[\s\S]*?markdownDocumentRef\.current = result\.document/,
+  "A canceled entity homepage read must be rejected before it can replace the active document."
 );
 assert.match(
   app,

@@ -1159,7 +1159,8 @@ async function saveMarkdownDocument(request) {
 
 async function resolveMarkdownImagePreview(request) {
   try {
-    const resolved = resolveMarkdownImagePath(request?.documentPath, request?.source);
+    const rootPath = currentDocumentLibraryLocation().rootPath;
+    const resolved = resolveMarkdownImagePath(request?.documentPath, request?.source, { rootPath });
     if (allowedMarkdownAssetPaths.size >= 2_000) allowedMarkdownAssetPaths.clear();
     allowedMarkdownAssetPaths.add(resolved);
     return {
@@ -1173,7 +1174,8 @@ async function resolveMarkdownImagePreview(request) {
 
 async function saveMarkdownImage(request) {
   try {
-    const asset = await savePastedMarkdownImage(request);
+    const rootPath = currentDocumentLibraryLocation().rootPath;
+    const asset = await savePastedMarkdownImage({ ...request, rootPath });
     const resolved = fs.realpathSync(asset.path);
     if (allowedMarkdownAssetPaths.size >= 2_000) allowedMarkdownAssetPaths.clear();
     allowedMarkdownAssetPaths.add(resolved);
@@ -1191,9 +1193,11 @@ async function saveMarkdownImage(request) {
 
 function copyMarkdownDocument(request) {
   try {
+    const rootPath = currentDocumentLibraryLocation().rootPath;
     const payload = buildMarkdownClipboardPayload({
       documentPath: request?.documentPath,
-      markdown: request?.markdown
+      markdown: request?.markdown,
+      rootPath
     });
     clipboard.write({
       text: payload.text,
@@ -2525,6 +2529,12 @@ async function saveRuntimeSettings(request) {
     const result = getAppSettings().save(settingsRequest);
     if (dataConnectionChanged) {
       serviceCoordinator.invalidate("domi:lark-status");
+    }
+    if (["storageBackend", "localLibraryDir", "localRepositoryDir"].some(
+      (key) => Object.prototype.hasOwnProperty.call(settingsRequest, key)
+        && settingsRequest[key] !== current[key]
+    )) {
+      allowedMarkdownAssetPaths.clear();
     }
     getUpdateService().configureChannel(result.settings.updateChannel);
     const warning = current.storageBackend === "feishu"

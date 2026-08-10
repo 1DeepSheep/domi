@@ -121,7 +121,6 @@ import {
   DomiPlaudSnapshot,
   DomiPlaudSyncResult,
   DomiProject,
-  DomiEntityMaterials,
   DomiSnapshot,
   DomiTask,
   DomiTaskBoardSnapshot,
@@ -137,6 +136,13 @@ import {
   UpdateStatus
 } from "./env";
 import { sidebarUpdateEntry } from "./update-entry";
+import {
+  documentLibraryExpansionPath,
+  documentLibraryHasDocumentPath,
+  entityPrimaryDocumentPath,
+  nextSidebarSearchKey,
+  validSidebarSearchKey
+} from "./sidebar-search-navigation";
 import {
   quickStartWorkflows,
   radarDiscoveryWindow,
@@ -161,6 +167,10 @@ const RadarSourceManager = lazy(() => import("./RadarSourceManager"));
 
 type Role = "user" | "assistant" | "system";
 type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents";
+
+type DomiSearchOption =
+  | { key: string; kind: "project"; record: DomiProject }
+  | { key: string; kind: "person"; record: DomiPerson };
 
 type WorkspaceScrollPosition = {
   key: string;
@@ -1690,109 +1700,6 @@ function plaudQueueSummary(snapshot: DomiPlaudSnapshot) {
   return parts.length ? parts.join(" · ") : "队列已清";
 }
 
-function markdownLink(label: string, resource: string) {
-  const safeLabel = label.replace(/([\\\[\]])/g, "\\$1");
-  const target = resource.trim();
-  if (/^https?:\/\//i.test(target)) return `[${safeLabel}](${target})`;
-  if (/^[a-z0-9.-]+\.(?:feishu|larksuite)\.cn\//i.test(target)) {
-    return `[${safeLabel}](https://${target})`;
-  }
-  return `[${safeLabel}](<${target.replace(/>/g, "%3E")}>)`;
-}
-
-function isOpenableResource(resource: string) {
-  return /^(?:https?:\/\/|file:\/\/|\/)/i.test(resource.trim())
-    || /^[a-z0-9.-]+\.(?:feishu|larksuite)\.cn\//i.test(resource.trim());
-}
-
-function projectOverview(
-  project: DomiProject,
-  materials?: DomiEntityMaterials,
-  materialError?: string
-) {
-  const lines = [
-    `## ${project.name} · 项目资料`,
-    "",
-    "| 项目字段 | 当前信息 |",
-    "| --- | --- |",
-    `| 领域 | ${project.domain || "未填写"} |`,
-    `| 子领域 | ${project.subdomains.join("、") || "未填写"} |`,
-    `| 进展状态 | ${project.status || "未填写"} |`,
-    `| 项目评级 | ${project.rating || "未填写"} |`,
-    `| 城市 | ${project.cities?.join("、") || "未填写"} |`,
-    `| 投资机构 | ${project.investors?.join("、") || "未填写"} |`,
-    `| 入库时间 | ${project.createdAt ? new Date(project.createdAt).toLocaleString("zh-CN") : "未填写"} |`,
-    `| 最后更新 | ${project.lastFollowup ? new Date(project.lastFollowup).toLocaleDateString("zh-CN") : "未填写"} |`,
-    "",
-    "### 库内入口"
-  ];
-  if (project.link && isOpenableResource(project.link)) {
-    lines.push(`- ${markdownLink("飞书 Wiki 项目文档", project.link)}`);
-  } else if (project.link) {
-    lines.push(`- 关联文档记录：${project.link}`);
-  } else {
-    lines.push("- 飞书 Wiki：尚未关联");
-  }
-  if (materials?.searchRoot) lines.push(`- ${markdownLink("打开本地资料库", materials.searchRoot)}`);
-  if (project.notes) lines.push("", "### Notes", "", project.notes);
-  lines.push("", `### 关联材料${materials ? `（${materials.files.length}）` : ""}`);
-  if (materialError) {
-    lines.push(`> 本地材料检索失败：${materialError}`);
-  } else if (!materials?.files.length) {
-    lines.push("> 暂未按项目名称匹配到本地文件；可以继续让 Codex 按别名、主体名或创始人补查。");
-  } else {
-    for (const file of materials.files) {
-      const details = [file.kind, file.size ? formatFileSize(file.size) : ""].filter(Boolean).join(" · ");
-      lines.push(`- ${markdownLink(file.name, file.path)}${details ? `  \n  ${details}` : ""}`);
-    }
-  }
-  lines.push("", "> 以上内容来自 domi 已同步记录和本地资料库；点击 PDF 或 Markdown 会在右栏打开。");
-  return lines.join("\n");
-}
-
-function personOverview(
-  person: DomiPerson,
-  materials?: DomiEntityMaterials,
-  materialError?: string
-) {
-  const lines = [
-    `## ${person.name} · 人脉资料`,
-    "",
-    "| 人脉字段 | 当前信息 |",
-    "| --- | --- |",
-    `| 所属组织与身份 | ${person.organization || "未填写"} |`,
-    `| 类型 | ${person.types.join("、") || "未填写"} |`,
-    `| 关系进展 | ${cleanPeopleStatus(person.status)} |`,
-    `| 人脉评级 | ${person.rating || "未填写"} |`,
-    `| 入库时间 | ${person.createdAt ? new Date(person.createdAt).toLocaleString("zh-CN") : "未填写"} |`,
-    `| 最后联系 | ${person.lastContact ? new Date(person.lastContact).toLocaleDateString("zh-CN") : "未填写"} |`,
-    `| 城市 | ${person.cities.join("、") || "未填写"} |`,
-    "",
-    "### 库内入口"
-  ];
-  if (person.link && isOpenableResource(person.link)) {
-    lines.push(`- ${markdownLink("People 人脉记录或关联文档", person.link)}`);
-  } else if (person.link) {
-    lines.push(`- 关联记录：${person.link}`);
-  } else {
-    lines.push("- People 链接：尚未关联");
-  }
-  if (materials?.searchRoot) lines.push(`- ${markdownLink("打开本地资料库", materials.searchRoot)}`);
-  lines.push("", `### 关联材料${materials ? `（${materials.files.length}）` : ""}`);
-  if (materialError) {
-    lines.push(`> 本地材料检索失败：${materialError}`);
-  } else if (!materials?.files.length) {
-    lines.push("> 暂未按姓名匹配到本地文件；可以继续让 Codex 按公司、项目或别名补查。");
-  } else {
-    for (const file of materials.files) {
-      const details = [file.kind, file.size ? formatFileSize(file.size) : ""].filter(Boolean).join(" · ");
-      lines.push(`- ${markdownLink(file.name, file.path)}${details ? `  \n  ${details}` : ""}`);
-    }
-  }
-  lines.push("", "> 以上内容来自 domi 已同步记录和本地投资资料；点击 PDF 或 Markdown 会在右栏打开。");
-  return lines.join("\n");
-}
-
 function domiContextForThread(snapshot: DomiSnapshot | null, thread: Thread) {
   if (!snapshot || !thread.externalRecordId || !thread.externalType) return "";
   if (thread.externalType === "project") {
@@ -1922,6 +1829,8 @@ function App() {
   const [domiSyncing, setDomiSyncing] = useState(false);
   const [domiError, setDomiError] = useState("");
   const [domiQuery, setDomiQuery] = useState("");
+  const [domiSearchError, setDomiSearchError] = useState("");
+  const [domiSearchActiveKey, setDomiSearchActiveKey] = useState("");
   const [databaseSnapshot, setDatabaseSnapshot] = useState<DomiDatabaseSnapshot | null>(null);
   const [databaseWorkspaceTab, setDatabaseWorkspaceTab] = useState<DatabaseWorkspaceTab>("project");
   const [databaseEntityType, setDatabaseEntityType] = useState<DatabaseEntityType>("project");
@@ -2114,6 +2023,9 @@ function App() {
   const podcastArchiveRunIdsRef = useRef(new Set<string>());
   const appSettingsRef = useRef(appSettings);
   const localSearchRefreshAtRef = useRef(0);
+  const domiSearchComposingRef = useRef(false);
+  const domiSearchOptionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const domiEntityOpenRequestRef = useRef(0);
   const documentSearchRefreshAtRef = useRef(0);
   const documentLibraryRequestRef = useRef(0);
   const documentLibraryTreeRef = useRef<HTMLDivElement>(null);
@@ -2309,7 +2221,11 @@ function App() {
     });
   }
 
-  async function navigateWorkspace(view: WorkspaceView): Promise<boolean> {
+  async function navigateWorkspace(
+    view: WorkspaceView,
+    preserveDomiEntityOpen = false
+  ): Promise<boolean> {
+    if (!preserveDomiEntityOpen) cancelPendingDomiEntityOpen();
     if (view === workspaceViewRef.current) return true;
     if (
       workspaceViewRef.current === "data"
@@ -2963,10 +2879,9 @@ function App() {
     0
   );
 
-  const deferredDomiQuery = useDeferredValue(domiQuery);
   const deferredDatabaseQuery = useDeferredValue(databaseQuery);
   const domiSearchResults = useMemo(() => {
-    const query = deferredDomiQuery.trim().toLocaleLowerCase("zh-CN");
+    const query = domiQuery.trim().toLocaleLowerCase("zh-CN");
     if (!query || !domiSnapshot) return { projects: [], people: [] };
     const projects = domiSnapshot.projects
       .filter((project) =>
@@ -2993,7 +2908,37 @@ function App() {
       )
       .slice(0, 5);
     return { projects, people };
-  }, [deferredDomiQuery, domiSnapshot]);
+  }, [domiQuery, domiSnapshot]);
+  const domiSearchOptions = useMemo<DomiSearchOption[]>(() => [
+    ...domiSearchResults.projects.map((record) => ({
+      key: `project:${record.recordId}`,
+      kind: "project" as const,
+      record
+    })),
+    ...domiSearchResults.people.map((record) => ({
+      key: `person:${record.recordId}`,
+      kind: "person" as const,
+      record
+    }))
+  ], [domiSearchResults]);
+  const domiSearchOptionKeys = useMemo(
+    () => domiSearchOptions.map((option) => option.key),
+    [domiSearchOptions]
+  );
+  const domiSearchResolvedActiveKey = validSidebarSearchKey(
+    domiSearchOptionKeys,
+    domiSearchActiveKey
+  );
+
+  useEffect(() => {
+    if (domiSearchActiveKey === domiSearchResolvedActiveKey) return;
+    setDomiSearchActiveKey(domiSearchResolvedActiveKey);
+  }, [domiSearchActiveKey, domiSearchResolvedActiveKey]);
+
+  useEffect(() => {
+    if (!domiSearchActiveKey) return;
+    domiSearchOptionRefs.current.get(domiSearchActiveKey)?.scrollIntoView({ block: "nearest" });
+  }, [domiSearchActiveKey]);
 
   const hasConversation = activeThread.messages.some((message) => message.role === "user")
     || Boolean(activeThread.externalType && activeThread.messages.length);
@@ -6138,40 +6083,6 @@ function App() {
     }
   }
 
-  async function refreshDomiEntityOverview(
-    threadId: string,
-    entityType: "project" | "person",
-    entity: DomiProject | DomiPerson
-  ) {
-    const overviewId = `domi-overview-${entityType}-${entity.recordId}`;
-    const loadingMessage: Message = {
-      id: overviewId,
-      role: "assistant",
-      status: "running",
-      content: `正在整理“${entity.name}”的库内信息、关联文档和本地资料…`
-    };
-    setThreads((current) => current.map((thread) => {
-      if (thread.id !== threadId) return thread;
-      const retained = thread.messages.filter((message, index) =>
-        message.id !== overviewId
-        && !(index === 0 && message.role === "assistant" && message.status === "idle" && message.content.startsWith("已绑定"))
-      );
-      return { ...thread, messages: [loadingMessage, ...retained] };
-    }));
-
-    const result = await workbench.loadDomiEntityMaterials({
-      entityType,
-      recordId: entity.recordId
-    });
-    const content = entityType === "project"
-      ? projectOverview(entity as DomiProject, result.materials, result.ok ? undefined : result.error)
-      : personOverview(entity as DomiPerson, result.materials, result.ok ? undefined : result.error);
-    patchMessage(overviewId, {
-      content,
-      status: result.ok ? "done" : "error"
-    });
-  }
-
   async function resolveDomiEntityWorkspacePath(
     entityType: "project" | "person",
     recordId: string,
@@ -6240,94 +6151,200 @@ function App() {
     };
   }
 
-  async function openDomiProject(project: DomiProject) {
-    if (!await navigateWorkspace("conversation")) return;
-    const entityWorkspacePath = await resolveDomiEntityWorkspacePath("project", project.recordId);
-    const existing = threads.find(
-      (thread) => thread.externalType === "project" && thread.externalRecordId === project.recordId
-    );
-    if (existing) {
-      if (entityWorkspacePath && existing.workspacePath !== entityWorkspacePath) {
-        patchThread(existing.id, { workspacePath: entityWorkspacePath });
-      }
-      await selectThread(existing.id);
-      setDomiQuery("");
-      void refreshDomiEntityOverview(existing.id, "project", project);
+  function cancelPendingDomiEntityOpen() {
+    domiEntityOpenRequestRef.current += 1;
+  }
+
+  function clearDomiEntitySearch(cancelPendingOpen = true) {
+    if (cancelPendingOpen) cancelPendingDomiEntityOpen();
+    setDomiQuery("");
+    setDomiSearchError("");
+    setDomiSearchActiveKey("");
+  }
+
+  function openDomiSearchOption(option: DomiSearchOption) {
+    if (option.kind === "project") {
+      void openDomiProject(option.record);
       return;
     }
-    const projectId = `domi-project-${project.recordId}`;
-    const nextThread: Thread = {
-      id: createId("thread"),
-      projectId,
-      workspacePath: entityWorkspacePath || codexStatus?.workspacePath,
-      title: project.name,
-      project: [project.domain, project.subdomains[0], project.status].filter(Boolean).join(" · "),
-      updatedAt: nowLabel(),
-      lastActiveAt: Date.now(),
-      pinned: project.rating === "S",
-      manualTitle: true,
-      externalType: "project",
-      externalRecordId: project.recordId,
-      timeline: [],
-      lastUsage: null,
-      messages: []
-    };
-    threadsRef.current = [
-      nextThread,
-      ...threadsRef.current.filter((thread) => thread.id !== nextThread.id)
-    ];
-    setThreads((current) => [
-      nextThread,
-      ...current.filter((thread) => thread.id !== nextThread.id)
-    ]);
-    activateThreadNow(nextThread.id);
-    setDomiQuery("");
-    void refreshDomiEntityOverview(nextThread.id, "project", project);
+    void openDomiPerson(option.record);
+  }
+
+  function handleDomiSearchKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (
+      domiSearchComposingRef.current
+      || event.nativeEvent.isComposing
+      || event.keyCode === 229
+    ) return;
+
+    if (event.key === "Escape") {
+      if (!domiQuery) return;
+      event.preventDefault();
+      event.stopPropagation();
+      clearDomiEntitySearch();
+      return;
+    }
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (!domiSearchOptions.length) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setDomiSearchActiveKey(nextSidebarSearchKey(
+        domiSearchOptionKeys,
+        domiSearchResolvedActiveKey,
+        event.key === "ArrowDown" ? "next" : "previous"
+      ));
+      return;
+    }
+
+    if (event.key !== "Enter") return;
+    const activeOption = domiSearchOptions.find(
+      (option) => option.key === domiSearchResolvedActiveKey
+    )
+      || domiSearchOptions[0];
+    if (!activeOption) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openDomiSearchOption(activeOption);
+  }
+
+  function localPathFromDocumentResource(resource: string) {
+    const value = String(resource || "").trim();
+    if (value.startsWith("/")) return value;
+    try {
+      const url = new URL(value);
+      return url.protocol === "file:" ? decodeURIComponent(url.pathname) : "";
+    } catch {
+      return "";
+    }
+  }
+
+  async function openDomiEntityDocuments(
+    entityType: "project" | "person",
+    entity: DomiProject | DomiPerson
+  ) {
+    const requestId = ++domiEntityOpenRequestRef.current;
+    setDomiSearchError("");
+    if (appSettingsRef.current?.storageBackend === "feishu") {
+      if (!entity.link) {
+        const message = `“${entity.name}”尚未关联可打开的资料主页。`;
+        setDomiError(message);
+        setDomiSearchError(message);
+        return;
+      }
+      const opened = await workbench.openResource(entity.link);
+      if (requestId !== domiEntityOpenRequestRef.current) return;
+      if (!opened.ok) {
+        const message = opened.error || `无法打开“${entity.name}”的飞书资料主页。`;
+        setDomiError(message);
+        setDomiSearchError(message);
+        return;
+      }
+      clearDomiEntitySearch(false);
+      return;
+    }
+    if (!await navigateWorkspace("documents", true)) return;
+    if (requestId !== domiEntityOpenRequestRef.current) return;
+
+    setDocumentLibrarySidebarExpanded(true);
+    setThreadMenuId(null);
+    setRightPanelOpen(false);
+    setDocumentLibraryQuery("");
+    setDocumentLibrarySearchActivePath("");
+    setDocumentLibraryError("");
+
+    const resolved = await workbench.loadDomiEntityWorkspace({
+      entityType,
+      recordId: entity.recordId,
+      repairMissing: true
+    });
+    if (
+      requestId !== domiEntityOpenRequestRef.current
+      || workspaceViewRef.current !== "documents"
+    ) return;
+    if (resolved.snapshot) {
+      domiSnapshotRef.current = resolved.snapshot;
+      setDomiSnapshot(resolved.snapshot);
+    }
+    if (!resolved.ok || !resolved.workspacePath) {
+      const message = resolved.error || `无法定位“${entity.name}”唯一且可访问的资料目录。`;
+      setDocumentLibraryError(message);
+      setDomiSearchError(message);
+      return;
+    }
+
+    const latestEntity = entityType === "project"
+      ? resolved.snapshot?.projects.find((item) => item.recordId === entity.recordId)
+      : resolved.snapshot?.people.find((item) => item.recordId === entity.recordId);
+    const indexedDocumentPath = localPathFromDocumentResource(latestEntity?.link || entity.link);
+    const homepageResource = entityPrimaryDocumentPath(
+      resolved.workspacePath,
+      entityType,
+      indexedDocumentPath
+    );
+    if (!homepageResource) {
+      const message = `“${entity.name}”的资料目录缺少规范主页。`;
+      setDocumentLibraryError(message);
+      setDomiSearchError(message);
+      return;
+    }
+    let library = documentLibrary;
+    let expansionPath = library
+      ? documentLibraryExpansionPath(library.nodes, resolved.workspacePath)
+      : null;
+    if (!library || expansionPath === null) {
+      const refreshed = await refreshDocumentLibrary({
+        silent: Boolean(library),
+        force: Boolean(library)
+      });
+      if (
+        requestId !== domiEntityOpenRequestRef.current
+        || workspaceViewRef.current !== "documents"
+      ) return;
+      if (refreshed) library = refreshed;
+      expansionPath = library
+        ? documentLibraryExpansionPath(library.nodes, resolved.workspacePath)
+        : null;
+    }
+
+    if (!library) return;
+    if (!documentLibraryHasDocumentPath(library.nodes, homepageResource)) {
+      const message = `“${entity.name}”的资料目录中没有找到可打开的规范主页或已索引主文档。`;
+      setDocumentLibraryError(message);
+      setDomiSearchError(message);
+      return;
+    }
+    clearDomiEntitySearch(false);
+
+    setDocumentLibrarySelectedFolder(resolved.workspacePath);
+    if (expansionPath) {
+      setDocumentLibraryExpandedPaths((current) => {
+        const next = new Set(current);
+        expansionPath?.forEach((path) => next.add(path));
+        return next;
+      });
+    }
+
+    if (
+      requestId !== domiEntityOpenRequestRef.current
+      || workspaceViewRef.current !== "documents"
+    ) return;
+    await openMarkdown(homepageResource, undefined, requestId);
+    if (
+      requestId !== domiEntityOpenRequestRef.current
+      || workspaceViewRef.current !== "documents"
+    ) return;
+    setRightPanelOpen(false);
+    const homepagePath = localPathFromDocumentResource(homepageResource);
+    if (homepagePath) scrollDocumentLibrarySearchSelectionIntoView(homepagePath);
+  }
+
+  async function openDomiProject(project: DomiProject) {
+    await openDomiEntityDocuments("project", project);
   }
 
   async function openDomiPerson(person: DomiPerson) {
-    if (!await navigateWorkspace("conversation")) return;
-    const entityWorkspacePath = await resolveDomiEntityWorkspacePath("person", person.recordId);
-    const existing = threads.find(
-      (thread) => thread.externalType === "person" && thread.externalRecordId === person.recordId
-    );
-    if (existing) {
-      if (entityWorkspacePath && existing.workspacePath !== entityWorkspacePath) {
-        patchThread(existing.id, { workspacePath: entityWorkspacePath });
-      }
-      await selectThread(existing.id);
-      setDomiQuery("");
-      void refreshDomiEntityOverview(existing.id, "person", person);
-      return;
-    }
-    const projectId = `domi-person-${person.recordId}`;
-    const nextThread: Thread = {
-      id: createId("thread"),
-      projectId,
-      workspacePath: entityWorkspacePath || codexStatus?.workspacePath,
-      title: person.name,
-      project: [person.organization, cleanPeopleStatus(person.status)].filter(Boolean).join(" · "),
-      updatedAt: nowLabel(),
-      lastActiveAt: Date.now(),
-      pinned: false,
-      manualTitle: true,
-      externalType: "person",
-      externalRecordId: person.recordId,
-      timeline: [],
-      lastUsage: null,
-      messages: []
-    };
-    threadsRef.current = [
-      nextThread,
-      ...threadsRef.current.filter((thread) => thread.id !== nextThread.id)
-    ];
-    setThreads((current) => [
-      nextThread,
-      ...current.filter((thread) => thread.id !== nextThread.id)
-    ]);
-    activateThreadNow(nextThread.id);
-    setDomiQuery("");
-    void refreshDomiEntityOverview(nextThread.id, "person", person);
+    await openDomiEntityDocuments("person", person);
   }
 
   function updateActiveThread(mutator: (thread: Thread) => Thread) {
@@ -8287,9 +8304,7 @@ function App() {
       setDocumentLibraryError(message);
       return null;
     } finally {
-      if (!options.silent && requestId === documentLibraryRequestRef.current) {
-        setDocumentLibraryLoading(false);
-      }
+      if (requestId === documentLibraryRequestRef.current) setDocumentLibraryLoading(false);
     }
   }
 
@@ -8330,7 +8345,7 @@ function App() {
       const selected = rows
         ? [...rows].find((row) => row.dataset.documentLibraryPath === path)
         : null;
-      selected?.scrollIntoView({ block: "nearest" });
+      selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
     });
   }
 
@@ -8371,6 +8386,7 @@ function App() {
   }
 
   function beginDocumentLibraryCreate(kind: "folder" | "markdown") {
+    cancelPendingDomiEntityOpen();
     setDocumentLibraryCreateKind(kind);
     setDocumentLibraryCreateName("");
     setDocumentLibraryCreateError("");
@@ -8425,6 +8441,7 @@ function App() {
 
   function openDocumentLibraryNode(node: DocumentLibraryNode, parentPath: string) {
     if (node.kind === "folder") {
+      cancelPendingDomiEntityOpen();
       toggleDocumentLibraryFolder(node.path);
       return;
     }
@@ -8450,13 +8467,26 @@ function App() {
     setRightPanelOpen(origin.previousRightPanelOpen);
   }
 
-  async function openMarkdown(resource: string, basePath?: string) {
+  async function openMarkdown(
+    resource: string,
+    basePath?: string,
+    entityOpenRequestId?: number
+  ) {
+    if (entityOpenRequestId === undefined) {
+      cancelPendingDomiEntityOpen();
+    } else if (entityOpenRequestId !== domiEntityOpenRequestRef.current) {
+      return;
+    }
     rememberDocumentPreviewOrigin();
     const currentDocument = markdownDocumentRef.current;
     if (currentDocument && markdownDraftRef.current !== currentDocument.content) {
       const saved = await saveOpenMarkdown();
       if (!saved) return;
     }
+    if (
+      entityOpenRequestId !== undefined
+      && entityOpenRequestId !== domiEntityOpenRequestRef.current
+    ) return;
 
     const requestId = ++markdownOpenRequestRef.current;
     pdfOpenRequestRef.current += 1;
@@ -8466,7 +8496,7 @@ function App() {
     setMarkdownRenaming(false);
     setMarkdownTitleEditing(false);
     setMarkdownTitleDraft("");
-    if (workspaceView !== "documents") setRightPanelOpen(true);
+    if (workspaceViewRef.current !== "documents") setRightPanelOpen(true);
     setPdfDocument(null);
     setPdfError("");
     setPdfRequestLabel("");
@@ -8481,7 +8511,13 @@ function App() {
     setMarkdownError("");
     try {
       const result = await workbench.readMarkdown({ resource, basePath });
-      if (requestId !== markdownOpenRequestRef.current) return;
+      if (
+        requestId !== markdownOpenRequestRef.current
+        || (
+          entityOpenRequestId !== undefined
+          && entityOpenRequestId !== domiEntityOpenRequestRef.current
+        )
+      ) return;
       if (!result.ok || !result.document) {
         setMarkdownError(result.error || "无法读取 Markdown 文件。");
         return;
@@ -8492,7 +8528,13 @@ function App() {
       setMarkdownDraft(result.document.content);
       setMarkdownRequestLabel(result.document.path);
     } catch (error) {
-      if (requestId !== markdownOpenRequestRef.current) return;
+      if (
+        requestId !== markdownOpenRequestRef.current
+        || (
+          entityOpenRequestId !== undefined
+          && entityOpenRequestId !== domiEntityOpenRequestRef.current
+        )
+      ) return;
       reportDocumentOperation("读取 Markdown", error);
       setMarkdownError(describeOperationError(error, "无法读取 Markdown 文件。"));
     } finally {
@@ -8501,6 +8543,7 @@ function App() {
   }
 
   async function openPdf(resource: string, basePath?: string, ignoreDirty = false) {
+    cancelPendingDomiEntityOpen();
     rememberDocumentPreviewOrigin();
     const currentDocument = markdownDocumentRef.current;
     if (
@@ -8520,7 +8563,7 @@ function App() {
     setMarkdownRenaming(false);
     setMarkdownTitleEditing(false);
     setMarkdownTitleDraft("");
-    if (workspaceView !== "documents") setRightPanelOpen(true);
+    if (workspaceViewRef.current !== "documents") setRightPanelOpen(true);
     setMarkdownDocument(null);
     setMarkdownDraft("");
     markdownDocumentRef.current = null;
@@ -8769,6 +8812,7 @@ function App() {
   }
 
   async function closeMarkdown(options: { restoreOrigin?: boolean } = {}) {
+    cancelPendingDomiEntityOpen();
     const currentDocument = markdownDocumentRef.current;
     if (currentDocument && markdownDraftRef.current !== currentDocument.content) {
       const saved = await saveOpenMarkdown();
@@ -8834,6 +8878,7 @@ function App() {
   }
 
   function closePdf(options: { restoreOrigin?: boolean } = {}) {
+    cancelPendingDomiEntityOpen();
     pdfOpenRequestRef.current += 1;
     setPdfDocument(null);
     setPdfError("");
@@ -9169,6 +9214,7 @@ function App() {
           <input
             value={documentLibraryQuery}
             onChange={(event) => {
+              cancelPendingDomiEntityOpen();
               setDocumentLibraryQuery(event.target.value);
               setDocumentLibrarySearchActivePath("");
             }}
@@ -9186,6 +9232,7 @@ function App() {
               }
               if (event.key === "Escape" && documentLibraryQuery) {
                 event.preventDefault();
+                cancelPendingDomiEntityOpen();
                 setDocumentLibraryQuery("");
                 setDocumentLibrarySearchActivePath("");
               }
@@ -9197,6 +9244,7 @@ function App() {
             <button
               type="button"
               onClick={() => {
+                cancelPendingDomiEntityOpen();
                 setDocumentLibraryQuery("");
                 setDocumentLibrarySearchActivePath("");
               }}
@@ -9241,7 +9289,10 @@ function App() {
           }`}
           type="button"
           onClick={() => {
-            if (rootPath) setDocumentLibrarySelectedFolder(rootPath);
+            if (rootPath) {
+              cancelPendingDomiEntityOpen();
+              setDocumentLibrarySelectedFolder(rootPath);
+            }
           }}
           disabled={!rootPath}
           title={rootPath}
@@ -11757,18 +11808,36 @@ function App() {
 
         <div className="sidebar-entity-search" role="search">
           <div className="domi-entity-search">
-            <Search size={14} />
+            <Search size={14} aria-hidden="true" />
             <input
               value={domiQuery}
-              onChange={(event) => setDomiQuery(event.target.value)}
+              onChange={(event) => {
+                cancelPendingDomiEntityOpen();
+                setDomiSearchError("");
+                setDomiQuery(event.target.value);
+              }}
               onFocus={refreshLocalIndexForSearch}
+              onKeyDown={handleDomiSearchKeyDown}
+              onCompositionStart={() => {
+                domiSearchComposingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                domiSearchComposingRef.current = false;
+              }}
               placeholder="搜索项目或人脉"
               aria-label="搜索 domi 项目或人脉"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={Boolean(domiQuery.trim())}
+              aria-controls="sidebar-domi-search-results"
+              aria-activedescendant={domiSearchResolvedActiveKey
+                ? `sidebar-domi-search-option-${domiSearchOptionKeys.indexOf(domiSearchResolvedActiveKey)}`
+                : undefined}
             />
             {domiQuery && (
               <button
                 type="button"
-                onClick={() => setDomiQuery("")}
+                onClick={() => clearDomiEntitySearch()}
                 title="清除搜索"
                 aria-label="清除项目或人脉搜索"
               >
@@ -11778,31 +11847,80 @@ function App() {
           </div>
 
           {domiQuery.trim() && (
-            <div className="domi-search-results sidebar-domi-search-results">
+            <div
+              className="domi-search-results sidebar-domi-search-results"
+              id="sidebar-domi-search-results"
+              role="listbox"
+              aria-label="项目和人脉搜索结果"
+            >
               {domiSearchResults.projects.length > 0 && (
-                <div className="domi-result-group">
-                  <span>项目</span>
-                  {domiSearchResults.projects.map((project) => (
-                    <button type="button" key={project.recordId} onClick={() => openDomiProject(project)}>
-                      <strong>{project.name}</strong>
-                      <small>{[project.domain, project.status, project.rating].filter(Boolean).join(" · ")}</small>
-                    </button>
-                  ))}
+                <div
+                  className="domi-result-group"
+                  role="group"
+                  aria-labelledby="domi-project-results-label"
+                >
+                  <span id="domi-project-results-label">项目</span>
+                  {domiSearchResults.projects.map((project, index) => {
+                    const optionKey = `project:${project.recordId}`;
+                    return (
+                      <button
+                        type="button"
+                        key={project.recordId}
+                        id={`sidebar-domi-search-option-${index}`}
+                        role="option"
+                        aria-selected={domiSearchResolvedActiveKey === optionKey}
+                        tabIndex={-1}
+                        ref={(element) => {
+                          if (element) domiSearchOptionRefs.current.set(optionKey, element);
+                          else domiSearchOptionRefs.current.delete(optionKey);
+                        }}
+                        onPointerEnter={() => setDomiSearchActiveKey(optionKey)}
+                        onClick={() => openDomiProject(project)}
+                      >
+                        <strong>{project.name}</strong>
+                        <small>{[project.domain, project.status, project.rating].filter(Boolean).join(" · ")}</small>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
               {domiSearchResults.people.length > 0 && (
-                <div className="domi-result-group">
-                  <span>人脉</span>
-                  {domiSearchResults.people.map((person) => (
-                    <button type="button" key={person.recordId} onClick={() => openDomiPerson(person)}>
-                      <strong>{person.name}</strong>
-                      <small>{[person.organization, person.rating].filter(Boolean).join(" · ")}</small>
-                    </button>
-                  ))}
+                <div
+                  className="domi-result-group"
+                  role="group"
+                  aria-labelledby="domi-people-results-label"
+                >
+                  <span id="domi-people-results-label">人脉</span>
+                  {domiSearchResults.people.map((person, index) => {
+                    const optionIndex = domiSearchResults.projects.length + index;
+                    const optionKey = `person:${person.recordId}`;
+                    return (
+                      <button
+                        type="button"
+                        key={person.recordId}
+                        id={`sidebar-domi-search-option-${optionIndex}`}
+                        role="option"
+                        aria-selected={domiSearchResolvedActiveKey === optionKey}
+                        tabIndex={-1}
+                        ref={(element) => {
+                          if (element) domiSearchOptionRefs.current.set(optionKey, element);
+                          else domiSearchOptionRefs.current.delete(optionKey);
+                        }}
+                        onPointerEnter={() => setDomiSearchActiveKey(optionKey)}
+                        onClick={() => openDomiPerson(person)}
+                      >
+                        <strong>{person.name}</strong>
+                        <small>{[person.organization, person.rating].filter(Boolean).join(" · ")}</small>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
               {domiSearchResults.projects.length === 0 && domiSearchResults.people.length === 0 && (
                 <div className="empty-state">没有匹配的项目或人脉</div>
+              )}
+              {domiSearchError && (
+                <div className="domi-search-error" role="alert">{domiSearchError}</div>
               )}
             </div>
           )}
