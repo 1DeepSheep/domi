@@ -30,6 +30,7 @@ import {
   type DatabaseCellNavigation,
   type DatabaseCellOption
 } from "./DatabaseCellEditors";
+import { formatDatabaseCellDisplayText } from "./display-text";
 import {
   gridCellClickIntent,
   isCurrentGridCellGeneration,
@@ -242,7 +243,11 @@ function displayValue<T extends DatabaseRecord>(
   }
   if (column.kind === "date") return dateLabel(value);
   if (value == null || value === "") return <span className="database-grid-empty">—</span>;
-  return <span className={column.kind === "longtext" ? "database-grid-clamped" : ""}>{String(value)}</span>;
+  return (
+    <span className={column.kind === "longtext" ? "database-grid-clamped" : ""}>
+      {formatDatabaseCellDisplayText(value)}
+    </span>
+  );
 }
 
 function parsePastedValue<T extends DatabaseRecord>(
@@ -357,7 +362,9 @@ const GridCell = memo(function GridCell<T extends DatabaseRecord>({
         error ? "failed" : ""
       ].filter(Boolean).join(" ")}
       style={style}
-      title={error || (column.kind === "longtext" ? plainTextValue(value, column.kind) : undefined)}
+      title={error || (column.kind === "longtext"
+        ? formatDatabaseCellDisplayText(plainTextValue(value, column.kind))
+        : undefined)}
       onPointerDown={(event) => {
         if (event.button !== 0) return;
         onActivate(position, event.shiftKey);

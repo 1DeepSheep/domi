@@ -19,6 +19,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { choiceSelectionWithValue } from "./grid-model";
+import { formatDatabaseCellDisplayText } from "./display-text";
 
 export type DatabaseCellKind =
   | "text"
@@ -241,7 +242,7 @@ export function DatabaseLongTextViewer({
   onEdit?: () => void;
   onFollowUpClick?: (target: HTMLElement) => void;
 }) {
-  const text = value == null ? "" : String(value);
+  const text = formatDatabaseCellDisplayText(value);
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;

@@ -135,6 +135,10 @@ import {
   RadarSourceSnapshot,
   UpdateStatus
 } from "./env";
+import {
+  type DomiModelPolicyRunKind,
+  resolveDomiModelPolicy
+} from "./model-policy";
 import { sidebarUpdateEntry } from "./update-entry";
 import {
   documentLibraryExpansionPath,
@@ -2563,6 +2567,25 @@ function App() {
     ? codexStatus?.configuredServiceTier || "standard"
     : serviceTier;
 
+  function resolveRunModelPolicy(
+    workflowId?: string,
+    options: {
+      runKind?: DomiModelPolicyRunKind;
+      model?: string;
+      reasoningEffort?: string;
+      serviceTier?: string;
+    } = {}
+  ) {
+    return resolveDomiModelPolicy({
+      workflowId,
+      runKind: options.runKind,
+      models: codexStatus?.models,
+      userModel: options.model ?? model,
+      userReasoningEffort: options.reasoningEffort ?? reasoningEffort,
+      userServiceTier: options.serviceTier ?? serviceTier
+    });
+  }
+
   const deferredThreadQuery = useDeferredValue(threadQuery);
   const displayedThreads = useMemo(() => {
     const query = deferredThreadQuery.trim().toLocaleLowerCase("zh-CN");
@@ -4829,6 +4852,7 @@ function App() {
       return latest;
     };
     try {
+      const runModelPolicy = resolveRunModelPolicy(radarWorkflow.id);
       const result = await workbench.runCodex({
         runId,
         prompt: workflowPrompt(radarWorkflow, requestText, priorityPeopleContext, true, "programmatic"),
@@ -4840,9 +4864,9 @@ function App() {
         allowUserInput: false,
         workflowId: radarWorkflow.id,
         webSearch: true,
-        model,
-        reasoningEffort,
-        serviceTier,
+        model: runModelPolicy.model,
+        reasoningEffort: runModelPolicy.reasoningEffort,
+        serviceTier: runModelPolicy.serviceTier,
         workspacePath: activeThread.workspacePath
       });
       window.clearInterval(pollingTimer);
@@ -4976,6 +5000,9 @@ function App() {
     podcastArchiveRunIdsRef.current.add(job.id);
     try {
       const archiveRunId = createId("podcast-archive");
+      const runModelPolicy = resolveRunModelPolicy(routerWorkflow.id, {
+        runKind: "podcast-archive"
+      });
       const archiveResult = await workbench.runCodex({
         runId: archiveRunId,
         prompt: workflowPrompt(routerWorkflow, requestText, "播客处理必须使用 PLAUD 文字稿，并遵守唯一主归档规则。", true, "programmatic"),
@@ -4987,9 +5014,9 @@ function App() {
         allowUserInput: false,
         workflowId: routerWorkflow.id,
         webSearch: true,
-        model,
-        reasoningEffort,
-        serviceTier,
+        model: runModelPolicy.model,
+        reasoningEffort: runModelPolicy.reasoningEffort,
+        serviceTier: runModelPolicy.serviceTier,
         workspacePath: appSettingsRef.current?.localRepositoryDir
           || codexStatus?.workspacePath
           || activeThread.workspacePath
@@ -5953,6 +5980,7 @@ function App() {
         currentSnapshot?.people
       );
       updateSyncPhase("generating", "Todo Skill 正在排序并维护待办事项文档");
+      const runModelPolicy = resolveRunModelPolicy(todoWorkflow.id);
       const runPromise = workbench.runCodex({
           runId,
           prompt: workflowPrompt(todoWorkflow, requestText, recentEntriesContext, true, "programmatic"),
@@ -5963,9 +5991,9 @@ function App() {
           background: true,
           allowUserInput: false,
           workflowId: todoWorkflow.id,
-          model,
-          reasoningEffort,
-          serviceTier,
+          model: runModelPolicy.model,
+          reasoningEffort: runModelPolicy.reasoningEffort,
+          serviceTier: runModelPolicy.serviceTier,
           workspacePath: activeThread.workspacePath
         });
       const isFreshLedger = (snapshot: DomiTaskBoardSnapshot | null) => {
@@ -7355,6 +7383,11 @@ function App() {
     if (!messageText) {
       return;
     }
+    const runModelPolicy = resolveRunModelPolicy(workflow?.id, {
+      model: options.model,
+      reasoningEffort: options.reasoningEffort,
+      serviceTier: options.serviceTier
+    });
     const assertRepositoryIdentityUnchanged = () => {
       const currentIdentity = queueRepositoryIdentity(appSettingsRef.current);
       if (
@@ -7458,9 +7491,9 @@ function App() {
         requestOrigin,
         userInstructionText,
         useDomiPlugin,
-        model: options.model ?? model,
-        reasoningEffort: options.reasoningEffort ?? reasoningEffort,
-        serviceTier: options.serviceTier ?? serviceTier,
+        model: runModelPolicy.model,
+        reasoningEffort: runModelPolicy.reasoningEffort,
+        serviceTier: runModelPolicy.serviceTier,
         createdAt: Date.now(),
         repositoryIdentity: options.repositoryIdentitySnapshot
       };
@@ -7599,9 +7632,9 @@ function App() {
         ),
         workflowId: workflow?.id || (useDomiPlugin ? "domi-analyst" : undefined),
         webSearch: Boolean(workflow?.webSearch),
-        model: options.model ?? model,
-        reasoningEffort: options.reasoningEffort ?? reasoningEffort,
-        serviceTier: options.serviceTier ?? serviceTier,
+        model: runModelPolicy.model,
+        reasoningEffort: runModelPolicy.reasoningEffort,
+        serviceTier: runModelPolicy.serviceTier,
         background: options.background,
         workspacePath: execution.workspacePath,
         externalType: execution.externalType,
@@ -7789,6 +7822,19 @@ function App() {
     const messageText = rawInput || workflow?.defaultPrompt || (queuedAttachments.length ? "请分析所附材料" : "");
     if (!messageText) return;
 
+    const runModelPolicy = (() => {
+      try {
+        return resolveRunModelPolicy(workflow?.id);
+      } catch (error) {
+        setThreadAttachmentError(
+          queueThread.id,
+          error instanceof Error ? error.message : String(error)
+        );
+        return null;
+      }
+    })();
+    if (!runModelPolicy) return;
+
     const queuedSubmission: QueuedSubmission = {
       id: createId("queue"),
       threadId: queueThread.id,
@@ -7799,9 +7845,9 @@ function App() {
       requestOrigin: queuedRequestOrigin,
       userInstructionText: queuedUserInstructionText,
       useDomiPlugin: domiPluginEnabled,
-      model,
-      reasoningEffort,
-      serviceTier,
+      model: runModelPolicy.model,
+      reasoningEffort: runModelPolicy.reasoningEffort,
+      serviceTier: runModelPolicy.serviceTier,
       createdAt: Date.now(),
       repositoryIdentity: queueRepositoryIdentity(appSettingsRef.current)
     };

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { formatDatabaseCellDisplayText } from "../src/database/display-text.ts";
 import {
   GRID_ROW_HEIGHTS,
   applyGridMutations,
@@ -56,6 +57,17 @@ const rows = [
   { name: "曼孚科技", rating: "S", system: "2026-08-06" },
   { name: "AutoTrust AI", rating: "B", system: "2026-08-05" }
 ];
+
+test("database display converts only simple br tags into visual line breaks", () => {
+  const source = "第一段<br>第二段<BR/>第三段<br />第四段<script>alert(1)</script>";
+  assert.equal(
+    formatDatabaseCellDisplayText(source),
+    "第一段\n第二段\n第三段\n第四段<script>alert(1)</script>"
+  );
+  assert.equal(formatDatabaseCellDisplayText("<strong>原样文本</strong>"), "<strong>原样文本</strong>");
+  assert.equal(formatDatabaseCellDisplayText(null), "");
+  assert.equal(source.includes("<br>"), true, "display formatting must not mutate the stored value");
+});
 
 test("cell click intent keeps spreadsheet selection, expansion and editing distinct", () => {
   assert.equal(gridCellClickIntent("text", 1, true), "select");
