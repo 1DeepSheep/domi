@@ -540,7 +540,7 @@ export function workflowPrompt(
   if (workflow.id === "task") {
     return [
       "你正在 domi 投资工作台后台运行待办事项同步，底层是本地 Codex。",
-      "采用 domi 插件中的 $domi:todo，并执行该 Skill 的客户端快速同步路径。完整读取 Todo Skill、suggestion-rules 和 todo-ledger-schema；不要先加载 domi Router，也不要加载与当前后端无关的通用技能。",
+      "采用 domi 插件中的 $domi:todo，并执行该 Skill 的客户端快速同步路径（紧凑执行）。完整读取 Todo Skill；本轮已有 DOMI_TODO_CLIENT_SNAPSHOT_V1 与已校验的后端事实，不再读取 suggestion-rules、todo-ledger-schema、storage-backends、domi Router 或其他通用技能。Todo Skill 的紧凑路径已经包含本轮所需的完整门槛与账本约束。",
       "客户端已先刷新项目与人脉。若上下文包含 DOMI_TODO_CLIENT_SNAPSHOT_V1，直接使用其中的新入库和 A/S 长期跟进候选；不得为这些分类再次全量读取项目表或人脉表。仅对关键节点日期、已核验关联动态、字段歧义或账本消歧做最小范围读取。",
       "客户端候选最后一列已经提供价值证据摘要；摘要足以解释下一步动作时，禁止再点读项目或人物记录。",
       "当前待办账本只读取一次，完成去重与排序后单次写入，再单次回读验证。保持完整规则、证据门槛和 12 项配额，不得用减少判断维度换取速度。",

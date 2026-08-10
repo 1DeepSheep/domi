@@ -9,6 +9,7 @@ const {
   LOCAL_TODO_DOCUMENT_NAME
 } = require("./document-library.cjs");
 const { LocalDomiRepository, resolveHomePath } = require("./local-domi-repository.cjs");
+const { runLocalDomiSync } = require("./local-domi-sync-runner.cjs");
 const { LocalToFeishuMigration } = require("./local-to-feishu-migration.cjs");
 const { FeishuMarkdownPublisher } = require("./feishu-markdown-publisher.cjs");
 const { resolveBundledLarkRuntime } = require("./lark-runtime.cjs");
@@ -1136,6 +1137,7 @@ class DomiIntegration {
     plaudBroker,
     podcastCacheDir,
     radarSourceService,
+    localSyncRunner,
     execFileFactory,
     sleep
   }) {
@@ -1146,6 +1148,8 @@ class DomiIntegration {
     this.larkCli = this.resolveLarkCli();
     this.materialIndexCache = new Map();
     this.databaseMaterializationQueues = new Map();
+    this.localSyncPromises = new Map();
+    this.localSyncRunner = localSyncRunner || runLocalDomiSync;
     this.larkCommandQueue = new TaskQueue(2);
     this.larkStatusCache = {
       value: null,
@@ -1541,6 +1545,21 @@ class DomiIntegration {
     } catch (error) {
       repository.close();
       throw error;
+    }
+  }
+
+  async syncLocalRepository(source) {
+    const key = `${path.resolve(source.localDatabasePath)}\n${path.resolve(source.localLibraryDir)}`;
+    const active = this.localSyncPromises.get(key);
+    if (active) return active;
+    const pending = Promise.resolve().then(() => this.localSyncRunner(source));
+    this.localSyncPromises.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.localSyncPromises.get(key) === pending) {
+        this.localSyncPromises.delete(key);
+      }
     }
   }
 
@@ -4351,15 +4370,7 @@ class DomiIntegration {
     const projectSource = this.readProjectConfig();
     const health = await this.status(plugin);
     if (projectSource.backend === "local") {
-      const local = this.withLocalRepository(projectSource, (repository) => {
-        const workspaceIndex = repository.reindexWorkspace();
-        return {
-          repositoryHealth: repository.health(),
-          workspaceIndex,
-          projects: repository.listProjects(),
-          people: repository.listPeople()
-        };
-      });
+      const local = await this.syncLocalRepository(projectSource);
       const snapshot = {
         version: 1,
         backend: "local",

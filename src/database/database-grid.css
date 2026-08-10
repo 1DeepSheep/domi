@@ -271,6 +271,7 @@ body.database-column-resizing * {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   text-overflow: ellipsis;
+  white-space: pre-line;
 }
 
 .database-grid-empty {
