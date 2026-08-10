@@ -68,6 +68,32 @@ function isInsideDirectory(directoryPath, candidatePath) {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
+function markdownImageBoundary(documentPath, rootPath) {
+  const normalizedDocumentPath = path.normalize(documentPath);
+  const documentDirectory = path.dirname(normalizedDocumentPath);
+  let allowedDirectory = documentDirectory;
+  if (rootPath !== undefined && rootPath !== null && rootPath !== "") {
+    if (typeof rootPath !== "string" || !path.isAbsolute(rootPath)) {
+      throw new Error("Markdown 图片资料库路径无效。");
+    }
+    const configuredRoot = path.normalize(rootPath);
+    if (isInsideDirectory(configuredRoot, normalizedDocumentPath)) {
+      allowedDirectory = configuredRoot;
+    }
+  }
+  return { normalizedDocumentPath, documentDirectory, allowedDirectory };
+}
+
+function verifiedMarkdownImageBoundary(documentPath, rootPath) {
+  const boundary = markdownImageBoundary(documentPath, rootPath);
+  const allowedDirectoryRealPath = fs.realpathSync(boundary.allowedDirectory);
+  const documentRealPath = fs.realpathSync(boundary.normalizedDocumentPath);
+  if (!isInsideDirectory(allowedDirectoryRealPath, documentRealPath)) {
+    throw new Error("Markdown 文档实际位置不在允许的资料库范围内。");
+  }
+  return { ...boundary, allowedDirectoryRealPath, documentRealPath };
+}
+
 function resolveMarkdownImagePath(documentPath, source, options = {}) {
   if (typeof documentPath !== "string" || !path.isAbsolute(documentPath)) {
     throw new Error("Markdown 文档路径无效。");
@@ -91,20 +117,29 @@ function resolveMarkdownImagePath(documentPath, source, options = {}) {
       : path.resolve(path.dirname(documentPath), pathOnly);
   }
 
-  const documentDirectory = path.dirname(path.normalize(documentPath));
-  if (!isInsideDirectory(documentDirectory, candidate)) {
-    throw new Error("为保护本地文件，只加载 Markdown 所在文件夹内的图片。");
+  const { normalizedDocumentPath, documentDirectory, allowedDirectory } = markdownImageBoundary(
+    documentPath,
+    options.rootPath
+  );
+  if (!isInsideDirectory(allowedDirectory, candidate)) {
+    throw new Error(
+      allowedDirectory === documentDirectory
+        ? "为保护本地文件，只加载 Markdown 所在文件夹内的图片。"
+        : "为保护本地文件，只加载当前资料库内的图片。"
+    );
   }
   if (!SUPPORTED_IMAGE_EXTENSIONS.has(path.extname(candidate).toLowerCase())) {
     throw new Error("仅支持 PNG、JPEG、GIF 和 WebP 图片。");
   }
 
   if (options.mustExist !== false) {
-    const documentRealPath = fs.realpathSync(documentPath);
-    const documentDirectoryRealPath = path.dirname(documentRealPath);
+    const { allowedDirectoryRealPath } = verifiedMarkdownImageBoundary(
+      normalizedDocumentPath,
+      options.rootPath
+    );
     const candidateRealPath = fs.realpathSync(candidate);
-    if (!isInsideDirectory(documentDirectoryRealPath, candidateRealPath)) {
-      throw new Error("图片实际位置不在 Markdown 所在文件夹内。");
+    if (!isInsideDirectory(allowedDirectoryRealPath, candidateRealPath)) {
+      throw new Error("图片实际位置不在允许的资料库范围内。");
     }
     const stat = fs.statSync(candidateRealPath);
     if (!stat.isFile()) throw new Error("图片地址不是文件。");
@@ -131,6 +166,7 @@ async function savePastedMarkdownImage(request) {
   }
   const documentStat = await fs.promises.stat(documentPath);
   if (!documentStat.isFile()) throw new Error("Markdown 文档不存在。");
+  const boundary = verifiedMarkdownImageBoundary(documentPath, request?.rootPath);
 
   const buffer = Buffer.from(request?.data || []);
   if (!buffer.length) throw new Error("剪贴板图片为空。");
@@ -143,8 +179,12 @@ async function savePastedMarkdownImage(request) {
     throw new Error("仅支持 PNG、JPEG、GIF 和 WebP 图片；SVG 与 TIFF 暂不写入文档。");
   }
 
-  const assetDirectory = markdownAssetDirectory(documentPath);
+  const assetDirectory = markdownAssetDirectory(boundary.normalizedDocumentPath);
   await fs.promises.mkdir(assetDirectory, { recursive: true });
+  const assetDirectoryRealPath = await fs.promises.realpath(assetDirectory);
+  if (!isInsideDirectory(boundary.allowedDirectoryRealPath, assetDirectoryRealPath)) {
+    throw new Error("图片附件目录实际位置不在允许的资料库范围内。");
+  }
   const name = makeAssetFileName(buffer, mimeType);
   const targetPath = path.join(assetDirectory, name);
 
@@ -152,23 +192,36 @@ async function savePastedMarkdownImage(request) {
     await fs.promises.writeFile(targetPath, buffer, { flag: "wx", mode: 0o644 });
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
+    const existingStat = await fs.promises.lstat(targetPath);
+    if (!existingStat.isFile() || existingStat.isSymbolicLink()) {
+      throw new Error("图片附件发生不安全的文件名冲突，请检查 assets 目录。");
+    }
+    const existingRealPath = await fs.promises.realpath(targetPath);
+    if (!isInsideDirectory(boundary.allowedDirectoryRealPath, existingRealPath)) {
+      throw new Error("图片附件实际位置不在允许的资料库范围内。");
+    }
     const existing = await fs.promises.readFile(targetPath);
     if (!existing.equals(buffer)) {
       throw new Error("图片附件发生文件名冲突，请重新粘贴。");
     }
   }
+  const targetRealPath = await fs.promises.realpath(targetPath);
+  if (!isInsideDirectory(boundary.allowedDirectoryRealPath, targetRealPath)) {
+    await fs.promises.rm(targetPath, { force: true }).catch(() => undefined);
+    throw new Error("图片附件实际位置不在允许的资料库范围内。");
+  }
 
   return {
     path: targetPath,
     name,
-    relativePath: path.relative(path.dirname(documentPath), targetPath).split(path.sep).join("/"),
+    relativePath: path.relative(boundary.documentDirectory, targetPath).split(path.sep).join("/"),
     mimeType,
     size: buffer.length
   };
 }
 
-function localImageDataUrl(documentPath, source, clipboardBudget) {
-  const imagePath = resolveMarkdownImagePath(documentPath, source);
+function localImageDataUrl(documentPath, source, clipboardBudget, rootPath) {
+  const imagePath = resolveMarkdownImagePath(documentPath, source, { rootPath });
   if (clipboardBudget.count >= MAX_CLIPBOARD_IMAGES) {
     throw new Error(`单次最多复制 ${MAX_CLIPBOARD_IMAGES} 张图片。`);
   }
@@ -211,7 +264,7 @@ function buildMarkdownClipboardPayload(request) {
       return `<img src="${escapeHtml(source)}" alt="${alt}"${titleAttribute}>`;
     }
     try {
-      const dataUrl = localImageDataUrl(documentPath, source, budget);
+      const dataUrl = localImageDataUrl(documentPath, source, budget, request?.rootPath);
       return `<img src="${dataUrl}" alt="${alt}"${titleAttribute}>`;
     } catch {
       missingImageCount += 1;

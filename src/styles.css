@@ -540,13 +540,18 @@ body.panel-resizing .main-grid {
 .sidebar-document-library .document-library-tree {
   max-height: min(318px, 34vh);
   flex: 1 1 auto;
+  overflow-x: auto;
+  overflow-y: auto;
+  overscroll-behavior-x: contain;
   padding: 1px 1px 7px;
   scrollbar-gutter: auto;
 }
 
 .sidebar-document-library .document-library-node-row {
+  width: max-content;
+  min-width: 100%;
   min-height: 29px;
-  grid-template-columns: 12px 17px minmax(0, 1fr);
+  grid-template-columns: 12px 17px max-content;
   gap: 3px;
   padding: 3px 5px 3px calc(2px + var(--tree-indent, 0px));
 }
@@ -556,7 +561,9 @@ body.panel-resizing .main-grid {
 }
 
 .sidebar-document-library .document-library-node-name {
+  overflow: visible;
   font-size: var(--text-caption);
+  text-overflow: clip;
 }
 
 .sidebar-document-library .document-library-empty-folder {
@@ -2358,6 +2365,7 @@ body.panel-resizing .main-grid {
 
 .document-library-tree::-webkit-scrollbar {
   width: 8px;
+  height: 8px;
 }
 
 .document-library-tree::-webkit-scrollbar-thumb {
@@ -5260,6 +5268,20 @@ body.panel-resizing .main-grid {
 
 .domi-result-group button:hover {
   background: var(--hover);
+}
+
+.domi-result-group button[aria-selected="true"] {
+  background: var(--selected);
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.domi-search-error {
+  border-top: 1px solid var(--line);
+  color: var(--danger);
+  padding: 8px 11px;
+  font-family: var(--font-cn);
+  font-size: var(--text-caption);
+  line-height: 1.45;
 }
 
 .domi-result-group strong,
