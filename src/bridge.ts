@@ -21,7 +21,7 @@ const browserFallback: Window["workbench"] = {
   loadSettings: async () => ({
     ok: true,
     settings: {
-      version: 7,
+      version: 9,
       onboardingComplete: true,
       authMode: "chatgpt",
       apiBaseUrl: "",
@@ -47,6 +47,7 @@ const browserFallback: Window["workbench"] = {
       localRepositoryDir: "",
       localDatabasePath: "",
       externalAccessMode: "always",
+      radarFollowedDomains: ["AI", "半导体", "智能出行", "前沿科技", "具身智能&机器人"],
       updateChannel: "stable"
     },
     hasApiKey: false,
@@ -56,7 +57,7 @@ const browserFallback: Window["workbench"] = {
   saveSettings: async (request) => ({
     ok: true,
     settings: {
-      version: 7,
+      version: 9,
       onboardingComplete: Boolean(request.onboardingComplete),
       authMode: request.authMode === "relay" ? "relay" : "chatgpt",
       apiBaseUrl: request.authMode === "relay" ? request.apiBaseUrl || "" : "",
@@ -84,6 +85,9 @@ const browserFallback: Window["workbench"] = {
       localRepositoryDir: request.localRepositoryDir || "",
       localDatabasePath: request.localDatabasePath || "",
       externalAccessMode: request.externalAccessMode === "ask" ? "ask" : "always",
+      radarFollowedDomains: Array.isArray(request.radarFollowedDomains)
+        ? request.radarFollowedDomains
+        : ["AI", "半导体", "智能出行", "前沿科技", "具身智能&机器人"],
       updateChannel: request.updateChannel === "beta" ? "beta" : "stable"
     },
     hasApiKey: false,

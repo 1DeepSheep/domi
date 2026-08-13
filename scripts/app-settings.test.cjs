@@ -6,8 +6,17 @@ const test = require("node:test");
 const { AppSettingsService } = require("../electron/app-settings.cjs");
 const {
   normalizeCalendarRecipients,
+  normalizeRadarFollowedDomains,
   parseCalendarRecipients
 } = require("../electron/app-settings.cjs");
+
+test("radar followed domains are ordered, deduplicated and may pause all collection", () => {
+  assert.deepEqual(normalizeRadarFollowedDomains(["生物医药", "AI", "AI", "未知"]), ["AI", "生物医药"]);
+  assert.deepEqual(normalizeRadarFollowedDomains([]), []);
+  assert.deepEqual(normalizeRadarFollowedDomains(undefined), [
+    "AI", "半导体", "智能出行", "前沿科技", "具身智能&机器人"
+  ]);
+});
 
 function createStateStore(initialSettings = {}, initialUpdatedAt = null) {
   let settings = { ...initialSettings };
@@ -221,7 +230,10 @@ test("legacy OneDrive settings migrate to the generic local library directory", 
       version: 1,
       oneDriveProjectDir: "~/Library/CloudStorage/Legacy/Projects"
     }).load();
-    assert.equal(migrated.settings.version, 8);
+    assert.equal(migrated.settings.version, 9);
+    assert.deepEqual(migrated.settings.radarFollowedDomains, [
+      "AI", "半导体", "智能出行", "前沿科技", "具身智能&机器人"
+    ]);
     assert.equal(migrated.settings.localLibraryDir, "~/Library/CloudStorage/Legacy/Projects");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -327,7 +339,7 @@ test("existing onboarded users keep PLAUD enabled after settings migration", () 
       ...completeLocalConfig(root),
       plaudConnectionMode: undefined
     }).load();
-    assert.equal(migrated.settings.version, 8);
+    assert.equal(migrated.settings.version, 9);
     assert.equal(migrated.settings.plaudConnectionMode, "enabled");
     assert.equal(migrated.settings.plaudBrowser, "chrome");
   } finally {

@@ -3470,6 +3470,119 @@ body.panel-resizing .main-grid {
   font-weight: 600;
 }
 
+.weekly-news-domain-manager-wrap {
+  position: relative;
+}
+
+.weekly-news-domain-manager-button {
+  border-color: #d9b3a5;
+  color: var(--accent-strong);
+  background: #fffaf8;
+  font-weight: 600;
+}
+
+.weekly-news-domain-manager {
+  position: absolute;
+  z-index: 30;
+  top: 38px;
+  right: 0;
+  width: 326px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.98);
+  padding: 15px;
+  box-shadow: 0 14px 36px rgba(31, 29, 27, 0.14);
+  backdrop-filter: blur(14px);
+}
+
+.weekly-news-domain-manager-heading,
+.weekly-news-domain-manager-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.weekly-news-domain-manager-heading strong,
+.weekly-news-domain-manager-heading small {
+  display: block;
+  font-family: var(--font-cn);
+}
+
+.weekly-news-domain-manager-heading strong {
+  font-size: 14px;
+}
+
+.weekly-news-domain-manager-heading small,
+.weekly-news-domain-manager > p {
+  margin-top: 3px;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.weekly-news-domain-manager-heading > button {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.weekly-news-domain-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin-top: 15px;
+}
+
+.weekly-news-domain-options label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-cn);
+  font-size: 11px;
+}
+
+.weekly-news-domain-options input {
+  accent-color: var(--accent-strong);
+}
+
+.weekly-news-domain-manager > p {
+  margin-bottom: 13px;
+}
+
+.weekly-news-domain-manager-actions button {
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--accent-strong);
+  background: transparent;
+  padding: 0 10px;
+  font-family: var(--font-cn);
+  font-size: 11px;
+}
+
+.weekly-news-domain-manager-actions button.primary {
+  color: #fff;
+  background: var(--accent-strong);
+}
+
+.weekly-news-domain-manager-actions button:disabled {
+  opacity: 0.55;
+}
+
+.weekly-news-followed-summary {
+  margin-top: 12px;
+  color: var(--accent-strong);
+  font-family: var(--font-cn);
+  font-size: 10px;
+}
+
 .weekly-news-refresh {
   width: 32px;
   padding: 0;

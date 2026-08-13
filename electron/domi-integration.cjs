@@ -24,6 +24,10 @@ const execFileAsync = promisify(execFile);
 const CACHE_KEY = "snapshot-v1";
 const WEEKLY_NEWS_CACHE_KEY = "weekly-news-v1";
 const WEEKLY_NEWS_RADAR_CHECKPOINT_KEY = "weekly-news-radar-checkpoint-v1";
+const RADAR_DOMAINS = Object.freeze([
+  "AI", "半导体", "智能出行", "前沿科技", "具身智能&机器人", "消费", "生物医药"
+]);
+const LEGACY_RADAR_DOMAINS = Object.freeze(RADAR_DOMAINS.slice(0, 5));
 const TASK_BOARD_CACHE_KEY_PREFIX = "task-board-v1";
 const TASK_BOARD_MARKER = "domi-task-board-v1";
 const TASK_DOCUMENT_TITLE = "1.待办事项";
@@ -3094,6 +3098,7 @@ class DomiIntegration {
     return {
       ...cached.value,
       radarCheckedThrough: this.loadWeeklyNewsRadarCheckpoint(),
+      radarCheckedThroughByDomain: this.loadWeeklyNewsRadarCheckpoints(),
       ok: true,
       fromCache: true,
       cachedAt: cached.updatedAt
@@ -3101,8 +3106,25 @@ class DomiIntegration {
   }
 
   loadWeeklyNewsRadarCheckpoint() {
+    return Math.max(0, ...Object.values(this.loadWeeklyNewsRadarCheckpoints()));
+  }
+
+  loadWeeklyNewsRadarCheckpoints() {
     const cached = this.stateStore.loadCache(WEEKLY_NEWS_RADAR_CHECKPOINT_KEY);
-    return normalizedEpochMs(cached?.value?.checkedThrough);
+    const value = cached?.value || {};
+    const domains = {};
+    if (value.domains && typeof value.domains === "object") {
+      for (const domain of RADAR_DOMAINS) {
+        const checkpoint = normalizedEpochMs(value.domains[domain]);
+        if (checkpoint) domains[domain] = checkpoint;
+      }
+      return domains;
+    }
+    const legacy = normalizedEpochMs(value.checkedThrough);
+    if (legacy) {
+      for (const domain of LEGACY_RADAR_DOMAINS) domains[domain] = legacy;
+    }
+    return domains;
   }
 
   recordWeeklyNewsRadarCheckpoint(request = {}) {
@@ -3113,12 +3135,23 @@ class DomiIntegration {
     if (checkedThrough > Date.now() + 5 * 60 * 1000) {
       return { ok: false, error: "行业雷达返回的检查水位晚于当前时间。" };
     }
-    const previous = this.loadWeeklyNewsRadarCheckpoint();
-    const radarCheckedThrough = Math.max(previous, checkedThrough);
+    const selectedDomains = Array.isArray(request.domains)
+      ? RADAR_DOMAINS.filter((domain) => request.domains.includes(domain))
+      : LEGACY_RADAR_DOMAINS;
+    if (!selectedDomains.length) {
+      return { ok: false, error: "行业雷达没有提供本轮关注领域。" };
+    }
+    const domains = this.loadWeeklyNewsRadarCheckpoints();
+    for (const domain of selectedDomains) {
+      domains[domain] = Math.max(Number(domains[domain]) || 0, checkedThrough);
+    }
+    const radarCheckedThrough = Math.max(0, ...Object.values(domains));
     this.stateStore.saveCache(WEEKLY_NEWS_RADAR_CHECKPOINT_KEY, {
-      checkedThrough: radarCheckedThrough
+      version: 2,
+      checkedThrough: radarCheckedThrough,
+      domains
     });
-    return { ok: true, radarCheckedThrough };
+    return { ok: true, radarCheckedThrough, radarCheckedThroughByDomain: domains };
   }
 
   async weeklyNews(request = {}) {
@@ -3130,6 +3163,7 @@ class DomiIntegration {
     const rangeStart = new Date(rangeEnd.getTime() - days * 24 * 60 * 60 * 1000);
     const cachedPage = this.loadWeeklyNewsCache(days, page);
     const radarCheckedThrough = this.loadWeeklyNewsRadarCheckpoint();
+    const radarCheckedThroughByDomain = this.loadWeeklyNewsRadarCheckpoints();
     const localSnapshot = (error = "") => {
       const items = this.stateStore.listNews({
         rangeStart: rangeStart.getTime(),
@@ -3149,6 +3183,7 @@ class DomiIntegration {
         checkedAt: cachedPage?.checkedAt || 0,
         contentUpdatedAt: cachedPage?.contentUpdatedAt || cachedPage?.syncedAt || cachedPage?.cachedAt || 0,
         radarCheckedThrough,
+        radarCheckedThroughByDomain,
         syncedAt: cachedPage?.contentUpdatedAt || cachedPage?.syncedAt || cachedPage?.cachedAt || 0,
         rangeStart: rangeStart.getTime(),
         rangeEnd: rangeEnd.getTime(),
@@ -3188,6 +3223,7 @@ class DomiIntegration {
           checkedAt: timestamps.checkedAt,
           contentUpdatedAt: timestamps.contentUpdatedAt,
           radarCheckedThrough,
+          radarCheckedThroughByDomain,
           syncedAt: timestamps.contentUpdatedAt,
           contentChanged: timestamps.changed,
           rangeStart: rangeStart.getTime(),
@@ -3292,6 +3328,7 @@ class DomiIntegration {
         checkedAt: timestamps.checkedAt,
         contentUpdatedAt: timestamps.contentUpdatedAt,
         radarCheckedThrough,
+        radarCheckedThroughByDomain,
         syncedAt: timestamps.contentUpdatedAt,
         contentChanged: timestamps.changed,
         rangeStart: rangeStart.getTime(),
