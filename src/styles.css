@@ -4136,6 +4136,38 @@ body.panel-resizing .main-grid {
   text-decoration-color: currentColor;
 }
 
+.message-markdown .message-file-citation {
+  display: inline-flex;
+  max-width: min(100%, 520px);
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid rgba(67, 113, 143, 0.2);
+  border-radius: 7px;
+  background: rgba(67, 113, 143, 0.08);
+  color: #326b91;
+  line-height: 1.45;
+  text-decoration: none;
+  vertical-align: text-bottom;
+}
+
+.message-markdown .message-file-citation svg {
+  flex: 0 0 auto;
+}
+
+.message-markdown .message-file-citation span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-markdown .message-file-citation:hover {
+  border-color: rgba(47, 111, 153, 0.34);
+  background: rgba(67, 113, 143, 0.13);
+  color: #235f86;
+}
+
 .message-markdown strong {
   color: #252523;
   font-weight: 650;
