@@ -42,6 +42,7 @@ import {
   Settings,
   Sparkles,
   Square,
+  Target,
   TerminalSquare,
   Trash2,
   UsersRound,
@@ -158,11 +159,17 @@ import {
   workflows
 } from "./workflows";
 import {
-  FOLLOWED_PROJECT_TAXONOMY_PROMPT,
   PROJECT_DOMAIN_SUBDOMAINS,
   projectDomainsForNews,
-  projectSubdomainsForNews
+  projectSubdomainsForNews,
+  radarTaxonomyPrompt
 } from "./investmentTaxonomy";
+import {
+  LEGACY_RADAR_DEFAULT_DOMAINS,
+  RADAR_DOMAIN_ORDER,
+  type RadarDomain,
+  normalizeRadarDomains
+} from "./radar-domains";
 
 const RichMarkdownEditor = lazy(() => import("./RichMarkdownEditor"));
 const SetupCenter = lazy(() => import("./SetupCenter"));
@@ -1520,24 +1527,23 @@ function clamp(value: number, minimum: number, maximum: number) {
 }
 
 const ratingWeight: Record<string, number> = { S: 4, A: 3, B: 2, C: 1 };
-const FOLLOWED_NEWS_DOMAINS = ["AI", "半导体", "智能出行", "前沿科技", "具身智能&机器人"];
-
-function followedDomainsForNews(item: DomiNewsItem) {
+function followedDomainsForNews(item: DomiNewsItem, followedDomains: readonly string[]) {
   return projectDomainsForNews(item.domains, item.subdomains)
-    .filter((domain) => FOLLOWED_NEWS_DOMAINS.includes(domain));
+    .filter((domain) => followedDomains.includes(domain));
 }
 
-function isFollowedNewsItem(item: DomiNewsItem) {
-  return followedDomainsForNews(item).length > 0;
+function isFollowedNewsItem(item: DomiNewsItem, followedDomains: readonly string[]) {
+  return followedDomainsForNews(item, followedDomains).length > 0;
 }
 
 function newsMatchesTaxonomyFilter(
   item: DomiNewsItem,
   domain: string,
+  followedDomains: readonly string[],
   subdomain = "全部"
 ) {
   if (domain === "全部") return subdomain === "全部";
-  if (!followedDomainsForNews(item).includes(domain)) return false;
+  if (!followedDomainsForNews(item, followedDomains).includes(domain)) return false;
   return subdomain === "全部"
     || projectSubdomainsForNews(item.subdomains, domain).includes(subdomain);
 }
@@ -1874,6 +1880,9 @@ function App() {
     readWeeklyNewsAutomationState
   );
   const [radarSourceManagerOpen, setRadarSourceManagerOpen] = useState(false);
+  const [radarDomainManagerOpen, setRadarDomainManagerOpen] = useState(false);
+  const [radarDomainDraft, setRadarDomainDraft] = useState<RadarDomain[]>([]);
+  const [radarDomainSaving, setRadarDomainSaving] = useState(false);
   const [radarSourceSnapshot, setRadarSourceSnapshot] = useState<RadarSourceSnapshot | null>(null);
   const [assistantInteractions, setAssistantInteractions] = useState<AssistantInteraction[]>([]);
   const [domiTaskBoard, setDomiTaskBoard] = useState<DomiTaskBoardSnapshot | null>(null);
@@ -2831,21 +2840,24 @@ function App() {
     + failedTaskThreads.length
     + runningTaskThreads.length;
 
-  const weeklyNewsDomains = FOLLOWED_NEWS_DOMAINS;
+  const weeklyNewsDomains = useMemo(() => normalizeRadarDomains(
+    appSettings?.radarFollowedDomains,
+    LEGACY_RADAR_DEFAULT_DOMAINS
+  ), [appSettings?.radarFollowedDomains]);
   const followedWeeklyNews = useMemo(() => {
     const borrowedFromThisPage = weeklyNewsPage > 0
       ? weeklyNewsBorrowedByPage[weeklyNewsPage - 1]
       : undefined;
     return (weeklyNews?.items || []).filter((item) =>
       item.recordId !== borrowedFromThisPage
-        && isFollowedNewsItem(item)
+        && isFollowedNewsItem(item, weeklyNewsDomains)
     );
   }, [weeklyNews, weeklyNewsBorrowedByPage, weeklyNewsPage]);
   const weeklyNewsSubdomains = useMemo(() => {
     if (weeklyNewsDomain === "全部") return [];
     const counts = new Map<string, number>();
     followedWeeklyNews.forEach((item) => {
-      if (!followedDomainsForNews(item).includes(weeklyNewsDomain)) return;
+      if (!followedDomainsForNews(item, weeklyNewsDomains).includes(weeklyNewsDomain)) return;
       projectSubdomainsForNews(item.subdomains, weeklyNewsDomain).forEach((subdomain) => {
         counts.set(subdomain, (counts.get(subdomain) || 0) + 1);
       });
@@ -2855,11 +2867,11 @@ function App() {
       .sort((left, right) =>
         right.count - left.count || left.name.localeCompare(right.name, "zh-CN")
       );
-  }, [followedWeeklyNews, weeklyNewsDomain]);
+  }, [followedWeeklyNews, weeklyNewsDomain, weeklyNewsDomains]);
   const visibleWeeklyNews = useMemo(() => followedWeeklyNews
     .filter((item) => weeklyNewsDomain === "全部"
-      || newsMatchesTaxonomyFilter(item, weeklyNewsDomain, weeklyNewsSubdomain)),
-  [followedWeeklyNews, weeklyNewsDomain, weeklyNewsSubdomain]);
+      || newsMatchesTaxonomyFilter(item, weeklyNewsDomain, weeklyNewsDomains, weeklyNewsSubdomain)),
+  [followedWeeklyNews, weeklyNewsDomain, weeklyNewsDomains, weeklyNewsSubdomain]);
   const weeklyNewsFreshRecordIdSet = useMemo(
     () => new Set(weeklyNewsFreshRecordIds),
     [weeklyNewsFreshRecordIds]
@@ -2872,6 +2884,7 @@ function App() {
         && !newsMatchesTaxonomyFilter(
           weeklyNewsContinuation,
           weeklyNewsDomain,
+          weeklyNewsDomains,
           weeklyNewsSubdomain
         )
       )
@@ -2887,6 +2900,7 @@ function App() {
     visibleWeeklyNews,
     weeklyNewsContinuation,
     weeklyNewsDomain,
+    weeklyNewsDomains,
     weeklyNewsSubdomain,
     weeklyNewsFreshRecordIdSet
   ]);
@@ -3098,7 +3112,7 @@ function App() {
   }, [plaudEnabled, selectedWorkflow?.requiresPlaud]);
 
   useEffect(() => {
-    if (weeklyNewsDomain !== "全部" && !weeklyNewsDomains.includes(weeklyNewsDomain)) {
+    if (weeklyNewsDomain !== "全部" && !weeklyNewsDomains.some((domain) => domain === weeklyNewsDomain)) {
       setWeeklyNewsDomain("全部");
       setWeeklyNewsSubdomain("全部");
     }
@@ -4710,14 +4724,16 @@ function App() {
         : undefined;
       const eligibleItems = (result.items || []).filter((item) =>
         item.recordId !== borrowedFromThisPage
-          && isFollowedNewsItem(item)
+          && isFollowedNewsItem(item, weeklyNewsDomains)
       );
       let continuation: DomiNewsItem | null = null;
 
       if (result.ok && result.hasOlder && eligibleItems.length % 2 === 1) {
         try {
           const olderResult = await workbench.listWeeklyNews({ days: 7, limit: 100, page: resultPage + 1 });
-          continuation = (olderResult.items || []).find(isFollowedNewsItem) || null;
+          continuation = (olderResult.items || []).find((item) =>
+            isFollowedNewsItem(item, weeklyNewsDomains)
+          ) || null;
         } catch {
           continuation = null;
         }
@@ -4773,6 +4789,14 @@ function App() {
       setWeeklyNewsError("未找到 domi 行业雷达工作流。 ");
       return { status: "failed" };
     }
+    const radarDomainsSnapshot = normalizeRadarDomains(
+      appSettingsRef.current?.radarFollowedDomains,
+      LEGACY_RADAR_DEFAULT_DOMAINS
+    );
+    if (!radarDomainsSnapshot.length) {
+      setWeeklyNewsNotice("行业雷达已暂停：请先在“关注领域”中至少选择一个领域");
+      return { status: "skipped" };
+    }
 
     weeklyNewsScanningRef.current = true;
     setWeeklyNewsScanning(true);
@@ -4787,7 +4811,13 @@ function App() {
     setWeeklyNewsScanStage("正在建立增量检索水位");
     const now = Date.now();
     const currentWeeklyNews = weeklyNewsLatestSnapshotRef.current || weeklyNewsSnapshotRef.current;
-    const lastRadarCheckpoint = Number(currentWeeklyNews?.radarCheckedThrough || 0);
+    const checkpointsByDomain = currentWeeklyNews?.radarCheckedThroughByDomain || {};
+    const selectedCheckpoints = radarDomainsSnapshot
+      .map((domain) => Number(checkpointsByDomain[domain]) || 0)
+      .filter((checkpoint) => checkpoint > 0);
+    const lastRadarCheckpoint = selectedCheckpoints.length === radarDomainsSnapshot.length
+      ? Math.min(...selectedCheckpoints)
+      : 0;
     const { discoveryFrom, checkedAfter } = radarDiscoveryWindow(now, lastRadarCheckpoint);
     const priorityPeopleContext = radarPriorityPeopleContext(domiSnapshot?.people || []);
     const configuredSourceLines = (radarSourceSnapshot?.sources || [])
@@ -4800,11 +4830,14 @@ function App() {
       });
     const requestText = [
       radarWorkflow.defaultPrompt,
-      FOLLOWED_PROJECT_TAXONOMY_PROMPT,
+      `followed_domains=${JSON.stringify(radarDomainsSnapshot)}`,
+      `本轮设置修订快照只包含以上 ${radarDomainsSnapshot.length} 个关注领域；不得搜索、返回、归档或通知其他领域。`,
+      radarTaxonomyPrompt(radarDomainsSnapshot),
       configuredSourceLines.length
         ? `用户在本机配置了以下重点信源。本轮优先检查并交叉核验，但仍需遵守来源可信度、时效性和去重规则：\n${configuredSourceLines.join("\n")}`
         : "用户尚未配置自定义重点信源，按默认公开来源执行。",
-      `本轮发现窗口起点：${new Date(discoveryFrom).toISOString()}；上次成功检查水位：${checkedAfter ? new Date(checkedAfter).toISOString() : "无"}；本轮检查截止：${new Date(now).toISOString()}。`,
+      `各领域上次成功水位：${JSON.stringify(Object.fromEntries(radarDomainsSnapshot.map((domain) => [domain, checkpointsByDomain[domain] ? new Date(checkpointsByDomain[domain]).toISOString() : null])))}。`,
+      `本轮统一发现窗口起点：${new Date(discoveryFrom).toISOString()}；最早有效检查水位：${checkedAfter ? new Date(checkedAfter).toISOString() : "无"}；本轮检查截止：${new Date(now).toISOString()}。`,
       "发现窗口包含重叠回看：窗口内水位之前发布但此前未收录的迟索引事件仍可新增；必须靠事件ID、规范标题、主体和关键事实去重，不能只按发布时间过滤。",
       "如果整个发现窗口没有达到收录标准的新事件，直接返回 added=0，不要为了凑数量扩大到更早日期，也不要重复扫描全部重点对象。"
     ].join("\n");
@@ -4820,7 +4853,7 @@ function App() {
           if (!snapshot?.ok) return;
           const addedItems = (snapshot.items || []).filter((item) =>
             !knownRecordIds.has(item.recordId)
-              && isFollowedNewsItem(item)
+              && isFollowedNewsItem(item, weeklyNewsDomains)
           );
           if (!addedItems.length) return;
           setWeeklyNewsFreshRecordIds(addedItems.map((item) => item.recordId));
@@ -4876,7 +4909,7 @@ function App() {
         const partial = await readLatestWithRetry(1);
         const partialAdded = (partial?.items || []).filter((item) =>
           !knownRecordIds.has(item.recordId)
-            && isFollowedNewsItem(item)
+            && isFollowedNewsItem(item, weeklyNewsDomains)
         );
         if (partialAdded.length > 0) {
           setWeeklyNewsFreshRecordIds(partialAdded.map((item) => item.recordId));
@@ -4891,17 +4924,23 @@ function App() {
       let checkpointWarning = "";
       if (parsedRadarCheckpoint) {
         const checkpointResult = await workbench.saveWeeklyNewsCheckpoint({
-          checkedThrough: parsedRadarCheckpoint
+          checkedThrough: parsedRadarCheckpoint,
+          domains: radarDomainsSnapshot
         });
         if (checkpointResult.ok && checkpointResult.radarCheckedThrough) {
           if (weeklyNewsLatestSnapshotRef.current) {
             weeklyNewsLatestSnapshotRef.current = {
               ...weeklyNewsLatestSnapshotRef.current,
-              radarCheckedThrough: checkpointResult.radarCheckedThrough
+              radarCheckedThrough: checkpointResult.radarCheckedThrough,
+              radarCheckedThroughByDomain: checkpointResult.radarCheckedThroughByDomain
             };
           }
           setWeeklyNews((current) => current
-            ? { ...current, radarCheckedThrough: checkpointResult.radarCheckedThrough }
+            ? {
+              ...current,
+              radarCheckedThrough: checkpointResult.radarCheckedThrough,
+              radarCheckedThroughByDomain: checkpointResult.radarCheckedThroughByDomain
+            }
             : current);
         } else {
           checkpointWarning = "；检索水位保存失败，下次仍会回看最近 72 小时";
@@ -4911,7 +4950,9 @@ function App() {
       }
       const refreshed = await readLatestWithRetry();
       if (!refreshed?.ok) return { status: "failed" };
-      const latestItems = (refreshed.items || []).filter(isFollowedNewsItem);
+      const latestItems = (refreshed.items || []).filter((item) =>
+        isFollowedNewsItem(item, weeklyNewsDomains)
+      );
       const addedItems = hasLatestBaseline
         ? latestItems.filter((item) => !knownRecordIds.has(item.recordId))
         : [];
@@ -5047,6 +5088,38 @@ function App() {
     await workbench.showNotification({ title, body });
   }
 
+  function openRadarDomainManager() {
+    setRadarDomainDraft([...weeklyNewsDomains]);
+    setRadarDomainManagerOpen(true);
+  }
+
+  function toggleRadarDomainDraft(domain: RadarDomain) {
+    setRadarDomainDraft((current) => current.includes(domain)
+      ? current.filter((item) => item !== domain)
+      : RADAR_DOMAIN_ORDER.filter((item) => item === domain || current.includes(item))
+    );
+  }
+
+  async function saveRadarDomainPreferences() {
+    if (radarDomainSaving) return;
+    setRadarDomainSaving(true);
+    setWeeklyNewsError("");
+    const normalized = normalizeRadarDomains(radarDomainDraft, []);
+    try {
+      const result = await saveAppSettings({ radarFollowedDomains: normalized });
+      if (!result.ok) {
+        setWeeklyNewsError(result.error || "关注领域保存失败。 ");
+        return;
+      }
+      setRadarDomainManagerOpen(false);
+      setWeeklyNewsNotice(normalized.length
+        ? `已关注 ${normalized.join("、")}；下一轮 Radar 按新范围搜集`
+        : "已暂停行业雷达；历史动态仍保留");
+    } finally {
+      setRadarDomainSaving(false);
+    }
+  }
+
   async function runAutomaticWeeklyNewsSync() {
     if (weeklyNewsReadInFlightRef.current || weeklyNewsScanningRef.current) return false;
     const previous = weeklyNewsLatestSnapshotRef.current;
@@ -5057,7 +5130,7 @@ function App() {
     if (previous?.ok) {
       const addedItems = (result.items || []).filter((item) =>
         !previousRecordIds.has(item.recordId)
-          && isFollowedNewsItem(item)
+          && isFollowedNewsItem(item, weeklyNewsDomains)
       );
       if (addedItems.length > 0) {
         setWeeklyNewsFreshRecordIds(addedItems.map((item) => item.recordId));
@@ -5121,6 +5194,17 @@ function App() {
         updateWeeklyNewsAutomation({
           phase: "idle",
           nextRadarAt: Date.now() + WEEKLY_NEWS_RADAR_INTERVAL_MS
+        });
+        return;
+      }
+      if (!normalizeRadarDomains(
+        appSettingsRef.current.radarFollowedDomains,
+        LEGACY_RADAR_DEFAULT_DOMAINS
+      ).length) {
+        updateWeeklyNewsAutomation({
+          phase: "idle",
+          nextRadarAt: Date.now() + WEEKLY_NEWS_RADAR_INTERVAL_MS,
+          retryAttempt: 0
         });
         return;
       }
@@ -9908,6 +9992,44 @@ function App() {
             </div>
           </div>
           <div className="weekly-news-actions">
+            <div className="weekly-news-domain-manager-wrap">
+              <button
+                className="weekly-news-source weekly-news-domain-manager-button"
+                type="button"
+                onClick={openRadarDomainManager}
+                aria-expanded={radarDomainManagerOpen}
+                aria-haspopup="dialog"
+              >
+                <Target size={13} />关注领域 {weeklyNewsDomains.length}/{RADAR_DOMAIN_ORDER.length}
+              </button>
+              {radarDomainManagerOpen && (
+                <div className="weekly-news-domain-manager" role="dialog" aria-label="Radar 关注领域">
+                  <div className="weekly-news-domain-manager-heading">
+                    <div><strong>Radar 关注领域</strong><small>仅搜集已选择领域的新动态</small></div>
+                    <button type="button" aria-label="关闭关注领域设置" onClick={() => setRadarDomainManagerOpen(false)}><X size={15} /></button>
+                  </div>
+                  <div className="weekly-news-domain-options">
+                    {RADAR_DOMAIN_ORDER.map((domain) => (
+                      <label key={domain}>
+                        <input
+                          type="checkbox"
+                          checked={radarDomainDraft.includes(domain)}
+                          onChange={() => toggleRadarDomainDraft(domain)}
+                        />
+                        <span>{domain}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <p>未选择领域将停止后续搜集，历史动态仍保留。</p>
+                  <div className="weekly-news-domain-manager-actions">
+                    <button type="button" onClick={() => setRadarDomainDraft([...RADAR_DOMAIN_ORDER])}>全选</button>
+                    <button type="button" className="primary" disabled={radarDomainSaving} onClick={() => void saveRadarDomainPreferences()}>
+                      {radarDomainSaving ? "保存中" : "应用，下轮生效"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
             <button
               className="weekly-news-source weekly-news-source-manager"
               type="button"
@@ -9943,7 +10065,13 @@ function App() {
           </div>
         </div>
 
-        {weeklyNewsDomains.length > 1 && (
+        <div className="weekly-news-followed-summary">
+          {weeklyNewsDomains.length
+            ? <>当前搜集：{weeklyNewsDomains.join("、")}</>
+            : <>行业雷达已暂停，历史动态仍保留</>}
+        </div>
+
+        {weeklyNewsDomains.length > 0 && (
           <div className="weekly-news-taxonomy">
             <div className="weekly-news-filters" role="tablist" aria-label="按行业领域筛选">
               {["全部", ...weeklyNewsDomains].map((domain) => (
@@ -9982,7 +10110,7 @@ function App() {
                   >
                     全部子领域
                     <small>{followedWeeklyNews.filter(
-                      (item) => followedDomainsForNews(item).includes(weeklyNewsDomain)
+                      (item) => followedDomainsForNews(item, weeklyNewsDomains).includes(weeklyNewsDomain)
                     ).length}</small>
                   </button>
                   {weeklyNewsSubdomains.map((subdomain) => (
@@ -10024,7 +10152,7 @@ function App() {
         {displayedWeeklyNews.length > 0 && (
           <div className="weekly-news-grid">
             {displayedWeeklyNews.map((item) => {
-              const itemFollowedDomains = followedDomainsForNews(item);
+              const itemFollowedDomains = followedDomainsForNews(item, weeklyNewsDomains);
               const followedDomain = weeklyNewsDomain !== "全部"
                 && itemFollowedDomains.includes(weeklyNewsDomain)
                 ? weeklyNewsDomain
@@ -10159,6 +10287,7 @@ function App() {
         name,
         subdomains: [...subdomains]
       }));
+    const selectableTaxonomyDomains = taxonomyDomains.filter((item) => item.name !== "消费科技");
     const selectedTaxonomyDomain = taxonomyDomains.find((item) => item.name === classificationDomain);
     const classificationSubdomainValues = splitDatabaseList(classificationSubdomains);
     const unknownClassificationSubdomain = classificationSubdomainValues.find((item) =>
@@ -10307,7 +10436,12 @@ function App() {
       ...(databaseSnapshot?.projects || []).map((project) => project.status)
     ]);
     const ratingOptions = databaseGridOptions(["S", "A", "B", "C"]);
-    const domainOptions = databaseGridOptions(taxonomyDomains.map((item) => item.name));
+    const domainOptions = databaseGridOptions([
+      ...selectableTaxonomyDomains.map((item) => item.name),
+      ...(databaseSnapshot?.projects || [])
+        .map((project) => project.domain)
+        .filter((domain) => domain === "消费科技")
+    ]);
     const subdomainOptions = databaseGridOptions(taxonomyDomains.flatMap((item) => item.subdomains));
     const cityOptions = databaseGridOptions([
       ...(databaseSnapshot?.projects || []).flatMap((project) => project.cities || []),
@@ -10323,7 +10457,7 @@ function App() {
       (databaseSnapshot?.people || []).map((person) => person.status)
     );
     const newsDomainOptions = databaseGridOptions([
-      ...taxonomyDomains.map((item) => item.name),
+      ...selectableTaxonomyDomains.map((item) => item.name),
       ...(databaseSnapshot?.news || []).flatMap((item) => item.domains || [])
     ]);
     const newsSubdomainOptions = databaseGridOptions([
@@ -10663,7 +10797,7 @@ function App() {
                         }}
                       >
                         <option value="">请选择</option>
-                        {taxonomyDomains.map((item) => <option key={item.name}>{item.name}</option>)}
+                        {selectableTaxonomyDomains.map((item) => <option key={item.name}>{item.name}</option>)}
                       </select>
                     </label>
                     <label className="classification-subdomain-field">
@@ -11410,7 +11544,7 @@ function App() {
                       setClassificationDomain(parentDomain);
                     }}
                   >
-                    {taxonomyDomains.map((item) => <option key={item.name}>{item.name}</option>)}
+                    {selectableTaxonomyDomains.map((item) => <option key={item.name}>{item.name}</option>)}
                   </select>
                 </label>
                 <label className="classification-create-main">

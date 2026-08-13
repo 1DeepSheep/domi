@@ -1041,7 +1041,7 @@ assert.equal(
 );
 assert.match(
   taxonomy,
-  /import canonicalTaxonomy from "\.\.\/shared\/investment-taxonomy\.json"/,
+  /import canonicalTaxonomy from "\.\.\/shared\/investment-taxonomy\.json" with \{ type: "json" \}/,
   "The renderer must consume the same canonical taxonomy file as the local repository."
 );
 assert.match(
@@ -1051,8 +1051,28 @@ assert.match(
 );
 assert.match(
   app,
-  /radarWorkflow\.defaultPrompt,\s*FOLLOWED_PROJECT_TAXONOMY_PROMPT,/,
+  /radarWorkflow\.defaultPrompt,[\s\S]*?followed_domains=[\s\S]*?radarTaxonomyPrompt\(radarDomainsSnapshot\)/,
   "Future radar scans must validate classifications against the same project taxonomy."
+);
+assert.match(
+  app,
+  /关注领域 \{weeklyNewsDomains\.length\}\/\{RADAR_DOMAIN_ORDER\.length\}[\s\S]*?应用，下轮生效/,
+  "Industry news must expose a versioned followed-domain control instead of conflating view filters with collection scope."
+);
+assert.match(
+  app,
+  /selectableTaxonomyDomains = taxonomyDomains\.filter\(\(item\) => item\.name !== "消费科技"\)/,
+  "Legacy 消费科技 records may remain readable, but new taxonomy choices must use 消费."
+);
+assert.match(
+  app,
+  /if \(!radarDomainsSnapshot\.length\)[\s\S]*?return \{ status: "skipped" \}/,
+  "An empty followed-domain set must stop before starting a model-backed radar run."
+);
+assert.match(
+  app,
+  /if \(!normalizeRadarDomains\([\s\S]*?radarFollowedDomains,[\s\S]*?\)\.length\) \{[\s\S]*?nextRadarAt: Date\.now\(\) \+ WEEKLY_NEWS_RADAR_INTERVAL_MS/,
+  "Paused radar preferences must not create automatic retry churn."
 );
 assert.match(
   styles,

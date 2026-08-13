@@ -575,11 +575,13 @@ export type DomiWeeklyNewsRequest = {
 
 export type DomiWeeklyNewsCheckpointRequest = {
   checkedThrough: number;
+  domains?: string[];
 };
 
 export type DomiWeeklyNewsCheckpointResult = {
   ok: boolean;
   radarCheckedThrough?: number;
+  radarCheckedThroughByDomain?: Record<string, number>;
   error?: string;
 };
 
@@ -964,6 +966,7 @@ export type DomiWeeklyNewsSnapshot = {
   checkedAt?: number;
   contentUpdatedAt?: number;
   radarCheckedThrough?: number;
+  radarCheckedThroughByDomain?: Record<string, number>;
   contentChanged?: boolean;
   rangeStart?: number;
   rangeEnd?: number;
@@ -1217,7 +1220,7 @@ export type CodexCheckResult = {
 };
 
 export type AppSettings = {
-  version: 7;
+  version: 9;
   onboardingComplete: boolean;
   authMode: "chatgpt" | "relay";
   apiBaseUrl: string;
@@ -1243,6 +1246,7 @@ export type AppSettings = {
   localRepositoryDir: string;
   localDatabasePath: string;
   externalAccessMode: "always" | "ask";
+  radarFollowedDomains: Array<"AI" | "半导体" | "智能出行" | "前沿科技" | "具身智能&机器人" | "消费" | "生物医药">;
   updateChannel: "stable" | "beta";
 };
 

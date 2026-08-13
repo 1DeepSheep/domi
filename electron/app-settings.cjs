@@ -10,6 +10,22 @@ const {
 const SETTINGS_KEY = "runtime";
 const EMAIL_PATTERN = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 const MAX_CALENDAR_RECIPIENTS = 50;
+const RADAR_DOMAINS = Object.freeze([
+  "AI",
+  "半导体",
+  "智能出行",
+  "前沿科技",
+  "具身智能&机器人",
+  "消费",
+  "生物医药"
+]);
+const LEGACY_RADAR_DEFAULT_DOMAINS = Object.freeze(RADAR_DOMAINS.slice(0, 5));
+
+function normalizeRadarFollowedDomains(value) {
+  if (!Array.isArray(value)) return [...LEGACY_RADAR_DEFAULT_DOMAINS];
+  const selected = new Set(value.map((item) => String(item || "").trim()));
+  return RADAR_DOMAINS.filter((domain) => selected.has(domain));
+}
 
 function parseCalendarRecipients(value = "") {
   const entries = String(value || "")
@@ -45,7 +61,7 @@ function normalizeCalendarRecipients(value = "") {
 }
 
 const defaultSettings = Object.freeze({
-  version: 8,
+  version: 9,
   onboardingComplete: false,
   authMode: "chatgpt",
   apiBaseUrl: "",
@@ -71,6 +87,7 @@ const defaultSettings = Object.freeze({
   localRepositoryDir: "",
   localDatabasePath: "",
   externalAccessMode: "always",
+  radarFollowedDomains: [...LEGACY_RADAR_DEFAULT_DOMAINS],
   updateChannel: "stable"
 });
 
@@ -141,7 +158,7 @@ function normalizeSettings(value = {}) {
       : "unconfigured";
   const authMode = version >= 5 && value.authMode === "relay" ? "relay" : "chatgpt";
   return {
-    version: 8,
+    version: 9,
     onboardingComplete: Boolean(value.onboardingComplete),
     authMode,
     apiBaseUrl: authMode === "relay" ? String(value.apiBaseUrl || "").trim() : "",
@@ -170,6 +187,7 @@ function normalizeSettings(value = {}) {
     localRepositoryDir,
     localDatabasePath,
     externalAccessMode: value.externalAccessMode === "ask" ? "ask" : "always",
+    radarFollowedDomains: normalizeRadarFollowedDomains(value.radarFollowedDomains),
     updateChannel: value.updateChannel === "beta" ? "beta" : "stable"
   };
 }
@@ -458,6 +476,7 @@ module.exports = {
   defaultSettings,
   domiConfigKeys,
   normalizeCalendarRecipients,
+  normalizeRadarFollowedDomains,
   normalizeSettings,
   parseCalendarRecipients,
   validateDomiConfig

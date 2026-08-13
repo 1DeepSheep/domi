@@ -1136,18 +1136,47 @@ test("weekly news radar checkpoint is independent and monotonic", () => {
   });
   const firstCheckpoint = Date.now() - 60_000;
   assert.deepEqual(integration.recordWeeklyNewsRadarCheckpoint({
-    checkedThrough: firstCheckpoint
+    checkedThrough: firstCheckpoint,
+    domains: ["AI", "生物医药"]
   }), {
     ok: true,
-    radarCheckedThrough: firstCheckpoint
+    radarCheckedThrough: firstCheckpoint,
+    radarCheckedThroughByDomain: { AI: firstCheckpoint, 生物医药: firstCheckpoint }
   });
   assert.deepEqual(integration.recordWeeklyNewsRadarCheckpoint({
-    checkedThrough: firstCheckpoint - 60_000
+    checkedThrough: firstCheckpoint - 60_000,
+    domains: ["AI"]
   }), {
     ok: true,
-    radarCheckedThrough: firstCheckpoint
+    radarCheckedThrough: firstCheckpoint,
+    radarCheckedThroughByDomain: { AI: firstCheckpoint, 生物医药: firstCheckpoint }
   });
   assert.equal(integration.loadWeeklyNewsRadarCheckpoint(), firstCheckpoint);
+  assert.deepEqual(integration.loadWeeklyNewsRadarCheckpoints(), {
+    AI: firstCheckpoint,
+    生物医药: firstCheckpoint
+  });
+});
+
+test("legacy weekly news checkpoint migrates only the five previously followed domains", () => {
+  const legacy = Date.now() - 30_000;
+  const stateStore = {
+    loadCache: () => ({ value: { checkedThrough: legacy }, updatedAt: Date.now() }),
+    saveCache: () => undefined
+  };
+  const integration = new DomiIntegration({
+    stateStore,
+    plaudOutputDir: "/tmp/domi-test",
+    playwrightNodeModules: "/tmp"
+  });
+  assert.deepEqual(integration.loadWeeklyNewsRadarCheckpoints(), {
+    AI: legacy,
+    半导体: legacy,
+    智能出行: legacy,
+    前沿科技: legacy,
+    "具身智能&机器人": legacy
+  });
+  assert.equal(integration.loadWeeklyNewsRadarCheckpoints().生物医药, undefined);
 });
 
 test("Feishu record reads retry transient EOF errors and reduce page payload size", async () => {
@@ -3181,6 +3210,17 @@ test("classification review keeps evidence roles separate and applies local form
   );
   assert.match(reviews[0].reason, /项目自身材料|人工选择/);
 
+  assert.throws(
+    () => repository.applyProjectClassification({
+      action: "apply",
+      recordId: "prj_classification",
+      expectedUpdatedAt: version,
+      domain: "消费科技",
+      subdomains: ["可穿戴"]
+    }),
+    /仅用于兼容旧项目.*请选择“消费”/
+  );
+
   const applied = repository.applyProjectClassification({
     action: "apply",
     recordId: "prj_classification",
@@ -3201,6 +3241,20 @@ test("classification review keeps evidence roles separate and applies local form
   assert.equal(fs.existsSync(originalDirectory), false);
   assert.match(fs.readFileSync(path.join(classifiedDirectory, "项目主页.md"), "utf8"), /边缘智能/);
   assert.equal(repository.listClassificationReviews().length, 0);
+
+  assert.throws(
+    () => repository.updateProject({
+      recordId: "prj_classification",
+      expectedUpdatedAt: applied.record.updatedAt,
+      name: applied.record.name,
+      domain: "消费科技",
+      subdomains: ["可穿戴"],
+      status: applied.record.status,
+      rating: applied.record.rating,
+      notes: applied.record.notes
+    }),
+    /仅用于兼容旧项目.*请选择“消费”/
+  );
 
   const undone = repository.applyProjectClassification({
     action: "undo",
