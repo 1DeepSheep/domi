@@ -1280,7 +1280,7 @@ const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().to
 
 const NEW_THREAD_TITLE = "新的投资任务";
 const NEW_THREAD_PROJECT = "未命名项目";
-const NEW_THREAD_GREETING = "新对话已创建。选择一个 workflow，或直接输入你要 Codex 完成的投资任务。";
+const LEGACY_NEW_THREAD_GREETING = "新对话已创建。选择一个 workflow，或直接输入你要 Codex 完成的投资任务。";
 const NEW_THREAD_MODEL = "default";
 const NEW_THREAD_REASONING_EFFORT = "max";
 const NEW_THREAD_SERVICE_TIER = "priority";
@@ -1375,7 +1375,7 @@ function isUnusedDraftThread(thread: Thread) {
     && thread.messages.every((message) =>
       message.role === "assistant"
       && message.status === "idle"
-      && message.content === NEW_THREAD_GREETING
+      && message.content === LEGACY_NEW_THREAD_GREETING
     );
 }
 
@@ -1755,14 +1755,7 @@ const initialThreads: Thread[] = [
     manualTitle: false,
     timeline: [],
     lastUsage: null,
-    messages: [
-      {
-        id: "assistant-initial",
-        role: "assistant",
-        status: "idle",
-        content: NEW_THREAD_GREETING
-      }
-    ]
+    messages: []
   }
 ];
 
@@ -8107,14 +8100,7 @@ function App() {
         manualTitle: false,
         timeline: [],
         lastUsage: null,
-        messages: [
-          {
-            id: createId("assistant"),
-            role: "assistant",
-            content: NEW_THREAD_GREETING,
-            status: "idle"
-          }
-        ]
+        messages: []
       };
       threadsRef.current = [
         nextThread,

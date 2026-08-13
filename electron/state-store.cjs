@@ -6,7 +6,7 @@ const CURRENT_DATABASE_SCHEMA = 2;
 const MAX_DATABASE_BACKUPS = 3;
 const NEW_THREAD_TITLE = "新的投资任务";
 const NEW_THREAD_PROJECT = "未命名项目";
-const NEW_THREAD_GREETING = "新对话已创建。选择一个 workflow，或直接输入你要 Codex 完成的投资任务。";
+const LEGACY_NEW_THREAD_GREETING = "新对话已创建。选择一个 workflow，或直接输入你要 Codex 完成的投资任务。";
 
 function backupDatabase(database, databasePath, fromVersion) {
   database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
@@ -57,7 +57,7 @@ function isUnusedDraftThread(thread) {
     && messages.every((message) =>
       message?.role === "assistant"
       && message?.status === "idle"
-      && message?.content === NEW_THREAD_GREETING
+      && message?.content === LEGACY_NEW_THREAD_GREETING
     );
 }
 
@@ -250,7 +250,11 @@ class WorkbenchStateStore {
     const projectId = String(thread?.projectId || `project-${id}`);
     const project = String(thread?.project || NEW_THREAD_PROJECT);
     const messages = Array.isArray(thread?.messages)
-      ? thread.messages.map((message) => recoverInterrupted && message?.status === "running" ? {
+      ? thread.messages.filter((message) => !(
+          message?.role === "assistant"
+          && message?.status === "idle"
+          && message?.content === LEGACY_NEW_THREAD_GREETING
+        )).map((message) => recoverInterrupted && message?.status === "running" ? {
           ...message,
           status: "error",
           content: message.content || "上次运行在 domi 关闭时中断。"

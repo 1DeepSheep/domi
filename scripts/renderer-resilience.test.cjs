@@ -16,6 +16,7 @@ const editorBoundary = read("src/MarkdownEditorErrorBoundary.tsx");
 const sectionBoundary = read("src/SectionErrorBoundary.tsx");
 const env = read("src/env.d.ts");
 const main = read("electron/main.cjs");
+const stateStore = read("electron/state-store.cjs");
 const entityWorkspaceRecovery = read("electron/entity-workspace-recovery.cjs");
 const feishuDocumentIntent = read("electron/feishu-document-intent.cjs");
 const workspaceBoundary = read("electron/workspace-boundary.cjs");
@@ -1948,6 +1949,24 @@ assert.match(
   app,
   /if \(!accepted && result && "queued" in result && result\.queued\)[\s\S]*?return;/,
   "The queue pump must recognize an intentionally retained item without pausing or deleting it."
+);
+assert.match(
+  app,
+  /const initialThreads:[\s\S]*?messages: \[\]/,
+  "A new task must start without a fake assistant greeting message."
+);
+const createThreadStart = app.indexOf("const nextThread: Thread = {");
+const createThreadEnd = app.indexOf("threadsRef.current = [", createThreadStart);
+assert.ok(createThreadStart >= 0 && createThreadEnd > createThreadStart);
+assert.match(
+  app.slice(createThreadStart, createThreadEnd),
+  /messages: \[\]/,
+  "Creating another task must not add a greeting that is rendered as a completed answer."
+);
+assert.match(
+  stateStore,
+  /message\?\.content === LEGACY_NEW_THREAD_GREETING[\s\S]*?\.map\(\(message\) => recoverInterrupted/,
+  "Loading an existing task must remove the legacy greeting without touching real answers."
 );
 
 console.log("renderer resilience checks passed");
