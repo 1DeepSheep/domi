@@ -176,6 +176,7 @@ test("reopening an untouched new-task draft does not create a task workspace", (
     store = new WorkbenchStateStore({ databasePath, projectsDir });
     const loaded = store.load({ activeThreadId: "", threads: [] });
     assert.equal(loaded.state.threads[0].workspacePath, workspacePath);
+    assert.deepEqual(loaded.state.threads[0].messages, []);
     assert.deepEqual(fs.readdirSync(projectsDir), []);
   } finally {
     store.close();
