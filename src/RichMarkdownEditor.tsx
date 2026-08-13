@@ -34,6 +34,7 @@ type RichMarkdownEditorProps = {
   onChange: (markdown: string) => void;
   onBlur?: () => void;
   onCopyDocument?: () => void;
+  onOpenDocument?: (resource: string) => void;
 };
 
 const MARKDOWN_CHANGE_PUBLISH_DELAY_MS = 120;
@@ -198,7 +199,9 @@ function runEditorCommand(
 }
 
 function splitFrontmatter(markdown: string) {
-  const match = markdown.match(/^(\uFEFF?---\r?\n[\s\S]*?\r?\n---\r?\n?)/);
+  const match = markdown.match(
+    /^(\uFEFF?(?:<!-- domi:managed:start -->\r?\n)?---\r?\n[\s\S]*?\r?\n---\r?\n?)/
+  );
   return {
     frontmatter: match?.[1] || "",
     body: match ? markdown.slice(match[1].length) : markdown
@@ -441,7 +444,8 @@ export default function RichMarkdownEditor({
   markdown,
   onChange,
   onBlur,
-  onCopyDocument
+  onCopyDocument,
+  onOpenDocument
 }: RichMarkdownEditorProps) {
   const { frontmatter, body } = useMemo(() => splitFrontmatter(markdown), [markdown]);
   const preparedBody = useMemo(() => prepareMarkdownForEditor(body), [body]);
@@ -653,7 +657,7 @@ export default function RichMarkdownEditor({
         link: {
           openOnClick: false,
           autolink: true,
-          protocols: ["domi-wiki", "domi-callout"]
+          protocols: ["domi-wiki", "domi-callout", "domi-folder"]
         }
       }),
       TableKit.configure({
@@ -698,6 +702,41 @@ export default function RichMarkdownEditor({
         return true;
       },
       handleDOMEvents: {
+        click: (_view, event) => {
+          const element = event.target instanceof Element
+            ? event.target.closest<HTMLAnchorElement>("a[href]")
+            : null;
+          const href = element?.getAttribute("href")?.trim() || "";
+          if (!href) return false;
+          if (href === "domi-folder:current") {
+            event.preventDefault();
+            const separator = Math.max(documentPath.lastIndexOf("/"), documentPath.lastIndexOf("\\"));
+            const directory = separator > 0 ? documentPath.slice(0, separator) : "";
+            if (directory) void workbench.openResource(directory);
+            return true;
+          }
+          if (/^https?:\/\//i.test(href)) {
+            event.preventDefault();
+            void workbench.openResource(href);
+            return true;
+          }
+          if (!href.startsWith("#") && !/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+            event.preventDefault();
+            try {
+              const baseUrl = new URL(`file://${encodeURI(documentPath)}`);
+              const target = decodeURIComponent(new URL(href, baseUrl).pathname);
+              if (/\.(?:md|markdown|pdf)$/i.test(target) && onOpenDocument) {
+                onOpenDocument(target);
+              } else {
+                void workbench.openResource(target);
+              }
+            } catch {
+              // Keep malformed links editable instead of opening an unintended path.
+            }
+            return true;
+          }
+          return false;
+        },
         copy: (view, event) => {
           if (!onCopyDocument) return false;
           const { from, to } = view.state.selection;
