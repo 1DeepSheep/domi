@@ -2769,6 +2769,10 @@ test("field patches commit canonical SQLite state before background Markdown mat
   assert.match(fs.readFileSync(projectPath, "utf8"), /新的单元格摘要/);
   assert.match(fs.readFileSync(projectPath, "utf8"), /last_updated_at: "20\d\d-/);
   assert.match(fs.readFileSync(projectPath, "utf8"), /必须保留/);
+  assert.match(fs.readFileSync(projectPath, "utf8"), /\[打开项目目录\]\(domi-folder:current\)/);
+  assert.match(fs.readFileSync(projectPath, "utf8"), /## 投资摘要[\s\S]*?## 项目概览[\s\S]*?\| 项目字段 \| 当前信息 \|/);
+  assert.match(fs.readFileSync(projectPath, "utf8"), /## 融资与估值[\s\S]*?## 相关材料/);
+  assert.doesNotMatch(fs.readFileSync(projectPath, "utf8"), /PLAUD文字稿/);
 
   const renamed = repository.updateDatabaseRecordPatch({
     entityType: "project",
@@ -2808,6 +2812,65 @@ test("field patches commit canonical SQLite state before background Markdown mat
     }),
     /其他流程更新/
   );
+});
+
+test("existing project homepages upgrade once to the readable decision layout", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-readable-homepage-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "domi-repository.sqlite3");
+  const libraryDir = path.join(root, "domi工作区");
+  const projectDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "旧主页项目");
+  const projectPath = path.join(projectDirectory, "项目主页.md");
+  const version = 1_700_000_000_000;
+  fs.mkdirSync(projectDirectory, { recursive: true });
+  fs.writeFileSync(projectPath, `<!-- domi:managed:start -->
+---
+domi_schema: 6
+entity_type: "project"
+project_id: "prj_readable"
+company_name: "旧主页项目"
+---
+# 旧主页项目
+
+## 项目状态
+
+- 领域：AI
+<!-- domi:managed:end -->
+
+## 用户补充
+
+必须保留。
+`);
+  const first = new LocalDomiRepository({ databasePath, libraryDir });
+  first.database.prepare(`
+    INSERT INTO projects (
+      id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+      cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+      last_updated_at, document_path, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "prj_readable", "旧主页项目", "旧主页项目", "AI", '["Agent"]', "已交流", "B",
+    "可快速阅读的投资摘要", '["上海"]', '[]', "暂无历史融资", null,
+    version, projectPath, version, version
+  );
+  first.database.prepare(
+    "DELETE FROM repository_meta WHERE key = 'readable_project_homepage_v1'"
+  ).run();
+  first.close();
+
+  const reopened = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => reopened.close());
+  const upgraded = fs.readFileSync(projectPath, "utf8");
+  assert.match(upgraded, /\[打开项目目录\]\(domi-folder:current\)/);
+  assert.match(upgraded, /## 投资摘要[\s\S]*?可快速阅读的投资摘要/);
+  assert.match(upgraded, /## 用户补充[\s\S]*?必须保留/);
+  assert.equal(
+    reopened.database.prepare("SELECT updated_at FROM projects WHERE id = ?").get("prj_readable").updated_at,
+    version
+  );
+  const firstHash = fs.readFileSync(projectPath, "utf8");
+  reopened.upgradeReadableProjectHomepages();
+  assert.equal(fs.readFileSync(projectPath, "utf8"), firstHash);
 });
 
 test("legacy archive names block unrelated project writes and Markdown materialization", (t) => {

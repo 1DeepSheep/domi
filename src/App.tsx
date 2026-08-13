@@ -9056,6 +9056,7 @@ function App() {
                   markdown={markdownDraft}
                   onCopyDocument={() => void copyOpenMarkdown()}
                   onBlur={() => void saveOpenMarkdown()}
+                  onOpenDocument={openDocument}
                   onChange={(content) => {
                     markdownAutoSaveRetryRef.current = 0;
                     markdownDraftRef.current = content;

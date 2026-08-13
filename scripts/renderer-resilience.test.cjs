@@ -11,6 +11,7 @@ function read(relativePath) {
 const app = read("src/App.tsx");
 const setupCenter = read("src/SetupCenter.tsx");
 const editor = read("src/RichMarkdownEditor.tsx");
+const messageContent = read("src/MessageContent.tsx");
 const editorBoundary = read("src/MarkdownEditorErrorBoundary.tsx");
 const sectionBoundary = read("src/SectionErrorBoundary.tsx");
 const env = read("src/env.d.ts");
@@ -29,6 +30,32 @@ const databaseGrid = read("src/database/DatabaseGrid.tsx");
 const databaseCellEditors = read("src/database/DatabaseCellEditors.tsx");
 const databaseGridStyles = read("src/database/database-grid.css");
 const appConfirmDialog = read("src/AppConfirmDialog.tsx");
+
+assert.match(
+  messageContent,
+  /remarkPlugins=\{\[remarkGfm, remarkCodexFileCitations\]\}/,
+  "Assistant messages must turn Codex file citation markers into material links."
+);
+assert.match(
+  editor,
+  /domi:managed:start[\s\S]*?frontmatter: match\?\.\[1\]/,
+  "Managed entity frontmatter must remain in Markdown for stable IDs while staying hidden from the rich editor."
+);
+assert.match(
+  editor,
+  /protocols: \["domi-wiki", "domi-callout", "domi-folder"\][\s\S]*?href === "domi-folder:current"[\s\S]*?workbench\.openResource\(directory\)/,
+  "Project homepages must expose a safe shortcut that opens only the current entity directory."
+);
+assert.match(
+  messageContent,
+  /const citationPath = codexFileCitationPath\(href\)[\s\S]*?isLocalMarkdownResource\(target\) \|\| isLocalPdfResource\(target\)[\s\S]*?onOpenDocument\(target\)[\s\S]*?workbench\.openResource\(target\)/,
+  "Material citations must open Markdown and PDF inside domi while delegating other files and folders to the system."
+);
+assert.match(
+  styles,
+  /\.message-markdown \.message-file-citation\s*\{[\s\S]*?display:\s*inline-flex[\s\S]*?text-decoration:\s*none/,
+  "Material citations must render as compact, recognizable links rather than exposing internal marker text."
+);
 
 assert.equal(
   (setupCenter.match(/requestOrigin: "programmatic"/g) || []).length,
