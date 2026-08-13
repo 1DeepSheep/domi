@@ -1,8 +1,13 @@
 import { memo } from "react";
+import { FileText } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { workbench } from "./bridge";
 import { isLocalMarkdownResource, isLocalPdfResource } from "./document-resources";
+import {
+  codexFileCitationPath,
+  remarkCodexFileCitations
+} from "./message-citations";
 
 type MessageContentMessage = {
   role: "user" | "assistant" | "system";
@@ -34,8 +39,9 @@ const MessageContent = memo(function MessageContent({
   return (
     <div className="message-text message-markdown">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkCodexFileCitations]}
         urlTransform={(url, key, node) => {
+          if (key === "href" && codexFileCitationPath(url)) return url;
           if (
             key === "href"
             && (isLocalMarkdownResource(url) || isLocalPdfResource(url))
@@ -43,23 +49,29 @@ const MessageContent = memo(function MessageContent({
           return defaultUrlTransform(url);
         }}
         components={{
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              title={href}
-              onClick={(event) => {
-                event.preventDefault();
-                if (!href) return;
-                if (isLocalMarkdownResource(href) || isLocalPdfResource(href)) {
-                  onOpenDocument(href);
-                } else {
-                  void workbench.openResource(href);
-                }
-              }}
-            >
-              {children}
-            </a>
-          )
+          a: ({ href, children, title }) => {
+            const citationPath = codexFileCitationPath(href);
+            const target = citationPath || href || "";
+            return (
+              <a
+                href={href}
+                title={citationPath || title || href}
+                className={citationPath ? "message-file-citation" : undefined}
+                onClick={(event) => {
+                  event.preventDefault();
+                  if (!target) return;
+                  if (isLocalMarkdownResource(target) || isLocalPdfResource(target)) {
+                    onOpenDocument(target);
+                  } else {
+                    void workbench.openResource(target);
+                  }
+                }}
+              >
+                {citationPath && <FileText size={14} aria-hidden="true" />}
+                <span>{children}</span>
+              </a>
+            );
+          }
         }}
       >
         {displayContent}

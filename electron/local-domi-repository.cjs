@@ -74,6 +74,7 @@ const DATABASE_PATCH_FIELDS = Object.freeze({
 });
 const LEGACY_BULK_IMPORT_MIN = 20;
 const LEGACY_BULK_INTAKE_MIGRATION_KEY = "legacy_bulk_intake_v1";
+const READABLE_PROJECT_HOMEPAGE_MIGRATION_KEY = "readable_project_homepage_v1";
 const CLASSIFICATION_REVIEW_STATUSES = new Set(["pending", "deferred", "confirmed"]);
 const CANONICAL_PROJECT_DOMAINS = new Set(Object.keys(CANONICAL_PROJECT_TAXONOMY));
 const CLASSIFICATION_KEYWORD_RULES = [
@@ -945,14 +946,26 @@ function atomicWriteText(filePath, content) {
   }
 }
 
+function readableDate(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || !Number.isFinite(date.getTime())) return "未填写";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  }).format(date);
+}
+
 function renderProjectManagedBlock(project) {
   const latestValuation = project.latestValuationUsd100m === null
     ? "未填写"
     : `${project.latestValuationUsd100m} 亿美元`;
   const financingHistory = project.financingHistory || "未填写";
-  const updatedAt = project.lastUpdatedAt
-    ? new Date(project.lastUpdatedAt).toISOString()
-    : "";
+  const updatedAt = project.lastUpdatedAt ? new Date(project.lastUpdatedAt).toISOString() : "";
+  const domainLabel = [project.domain, ...project.subdomains].filter(Boolean).join(" · ") || "未分类";
+  const statusLabel = project.status || "待交流";
+  const ratingLabel = project.rating ? `${project.rating} 级` : "未评级";
   return `<!-- domi:managed:start -->
 ---
 domi_schema: ${LOCAL_REPOSITORY_SCHEMA}
@@ -971,23 +984,37 @@ last_updated_at: ${JSON.stringify(updatedAt)}
 
 # ${project.name}
 
-## 项目状态
+> ${domainLabel} · ${statusLabel} · ${ratingLabel} · 更新于 ${readableDate(project.lastUpdatedAt)}
 
-- 领域：${project.domain || "未分类"}
-- 子领域：${project.subdomains.join("、") || "未分类"}
-- 进展：${project.status || "待交流"}
-- 评级：${project.rating || "未评级"}
-- 城市：${project.cities.join("、") || "未填写"}
-- 投资机构：${project.investors.join("、") || "未填写"}
-- 最新估值：${latestValuation}
+[打开项目目录](domi-folder:current)
 
-## 历史融资
+## 投资摘要
+
+${project.notes || "暂无投资摘要。建议补充项目定位、核心产品、团队、商业进展、投资亮点、主要风险与下一步核实事项。"}
+
+## 项目概览
+
+| 项目字段 | 当前信息 |
+| --- | --- |
+| 领域 | ${project.domain || "未分类"} |
+| 子领域 | ${project.subdomains.join("、") || "未分类"} |
+| 进展状态 | ${statusLabel} |
+| 项目评级 | ${project.rating || "未评级"} |
+| 城市 | ${project.cities.join("、") || "未填写"} |
+| 关注机构 | ${project.investors.join("、") || "未填写"} |
+| 入库时间 | ${readableDate(project.createdAt)} |
+| 最后更新 | ${readableDate(project.lastUpdatedAt)} |
+
+## 融资与估值
+
+- 最新已完成轮次投后估值：${latestValuation}
 
 ${financingHistory}
 
-## 结构化摘要
+## 相关材料
 
-${project.notes || "未填写"}
+- [在 Finder 中查看项目全部材料](domi-folder:current)
+- 会议纪要、投资快评、深度研究、BP / Datapack 与 IC 材料均保留在项目目录中。
 <!-- domi:managed:end -->`;
 }
 
@@ -1363,6 +1390,7 @@ class LocalDomiRepository {
       );
     }
     this.reconcileLegacyBulkIntakeTimestamps();
+    this.upgradeReadableProjectHomepages();
   }
 
   close() {
@@ -1380,6 +1408,52 @@ class LocalDomiRepository {
       localLibraryDir: this.libraryDir,
       schemaVersion: Number(schema?.value || 0)
     };
+  }
+
+  upgradeReadableProjectHomepages() {
+    if (this.database.prepare(
+      "SELECT 1 FROM repository_meta WHERE key = ?"
+    ).get(READABLE_PROJECT_HOMEPAGE_MIGRATION_KEY)) return { updated: 0, skipped: 0 };
+
+    const rows = this.database.prepare(`
+      SELECT id, name, domain, subdomains_json, status, rating, notes,
+        cities_json, investors_json, financing_history, latest_valuation_usd_100m,
+        last_updated_at, document_path, created_at, updated_at
+      FROM projects
+      ORDER BY id
+    `).all();
+    let updated = 0;
+    let skipped = 0;
+    for (const row of rows) {
+      const documentPath = String(row.document_path || "").trim();
+      if (
+        !documentPath
+        || !managedEntityPageMatches(documentPath, "project", row.id, { allowMissingId: true })
+      ) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const previous = fs.readFileSync(documentPath, "utf8");
+        atomicWriteText(
+          documentPath,
+          replaceManagedBlock(previous, renderProjectManagedBlock(projectRow(row)))
+        );
+        updated += 1;
+      } catch {
+        skipped += 1;
+      }
+    }
+    this.database.prepare(`
+      INSERT INTO repository_meta (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(
+      READABLE_PROJECT_HOMEPAGE_MIGRATION_KEY,
+      JSON.stringify({ updated, skipped }),
+      Date.now()
+    );
+    return { updated, skipped };
   }
 
   cleanupStructuralGhostProjects() {
@@ -3051,6 +3125,7 @@ class LocalDomiRepository {
       investors,
       financingHistory: String(request.financingHistory || "").trim(),
       latestValuationUsd100m,
+      createdAt: row.created_at || null,
       lastUpdatedAt: now
     };
     const targetDirectory = this.projectDirectory(project);
