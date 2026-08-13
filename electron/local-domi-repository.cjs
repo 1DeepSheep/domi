@@ -77,6 +77,7 @@ const LEGACY_BULK_INTAKE_MIGRATION_KEY = "legacy_bulk_intake_v1";
 const READABLE_PROJECT_HOMEPAGE_MIGRATION_KEY = "readable_project_homepage_v1";
 const CLASSIFICATION_REVIEW_STATUSES = new Set(["pending", "deferred", "confirmed"]);
 const CANONICAL_PROJECT_DOMAINS = new Set(Object.keys(CANONICAL_PROJECT_TAXONOMY));
+const LEGACY_CONSUMER_TECH_DOMAIN = "消费科技";
 const CLASSIFICATION_KEYWORD_RULES = [
   { domain: "AI", subdomain: "AI视频", keywords: ["视频生成", "视频模型", "数字人", "文生视频"] },
   { domain: "AI", subdomain: "AI社交", keywords: ["ai社交", "社交产品", "社交网络", "陌生人社交"] },
@@ -2459,6 +2460,9 @@ class LocalDomiRepository {
       domain = String(review.previous_domain || "").trim() || "_未分类";
       subdomains = parseList(review.previous_subdomains_json);
     } else {
+      if (domain === LEGACY_CONSUMER_TECH_DOMAIN) {
+        throw new Error("“消费科技”仅用于兼容旧项目；新分类请选择“消费”。");
+      }
       if (!CANONICAL_PROJECT_DOMAINS.has(domain)) {
         throw new Error("一级领域必须从现有正式领域中选择。");
       }
@@ -3087,6 +3091,12 @@ class LocalDomiRepository {
     }
 
     const domain = String(request.domain || "").trim() || "_未分类";
+    if (
+      domain === LEGACY_CONSUMER_TECH_DOMAIN
+      && String(row.domain || "").trim() !== LEGACY_CONSUMER_TECH_DOMAIN
+    ) {
+      throw new Error("“消费科技”仅用于兼容旧项目；新分类请选择“消费”。");
+    }
     const subdomains = stringList(request.subdomains);
     const status = normalizedProjectStatus(request.status);
     const rating = normalizedRating(request.rating);
