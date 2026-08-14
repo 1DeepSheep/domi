@@ -2069,10 +2069,6 @@ body.panel-resizing .main-grid {
   color: #2d9b5f;
 }
 
-.new-task-suggestions > button[data-workflow="quick-discussion"] > svg {
-  color: #d7662f;
-}
-
 .new-task-suggestions > button > span {
   display: flex;
   min-width: 0;

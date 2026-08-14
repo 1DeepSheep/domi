@@ -4,6 +4,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { workbench } from "./bridge";
 import { isLocalMarkdownResource, isLocalPdfResource } from "./document-resources";
+import { stripDomiEntityResultMarker } from "./entity-routing";
 import {
   codexFileCitationPath,
   remarkCodexFileCitations
@@ -34,7 +35,9 @@ const MessageContent = memo(function MessageContent({
     return <div className="message-text">{message.content}</div>;
   }
 
-  const displayContent = humanizeMessageStates(message.content);
+  const displayContent = humanizeMessageStates(
+    stripDomiEntityResultMarker(message.content)
+  );
 
   return (
     <div className="message-text message-markdown">

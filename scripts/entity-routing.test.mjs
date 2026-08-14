@@ -10,6 +10,7 @@ import {
   parseDomiEntityResult,
   projectNameNeedsReview,
   projectMentionMatches,
+  stripDomiEntityResultMarker,
   shouldBindProjectToSourceConversation
 } from "../src/entity-routing.ts";
 
@@ -239,6 +240,27 @@ test("entity result parser accepts the stable hidden marker", () => {
     ),
     { entityType: "project", recordId: "project-new", name: "新项目" }
   );
+});
+
+test("verified entity result receipts stay machine-readable but are hidden from message display", () => {
+  const content = [
+    "入库文件：项目档案与投资快评。",
+    "",
+    '<!-- DOMI_ENTITY_RESULT_V1 {"entityType":"project","recordId":"project-new","name":"新项目"} -->'
+  ].join("\n");
+  assert.equal(stripDomiEntityResultMarker(content), "入库文件：项目档案与投资快评。");
+  assert.deepEqual(parseDomiEntityResult(content), {
+    entityType: "project",
+    recordId: "project-new",
+    name: "新项目"
+  });
+});
+
+test("message display never deletes malformed receipts or ordinary JSON", () => {
+  const malformed = '<!-- DOMI_ENTITY_RESULT_V1 {"entityType":"project","recordId":"project-new"} -->';
+  const ordinary = '核验数据：{"entityType":"project","recordId":"project-new","name":"新项目"}';
+  assert.equal(stripDomiEntityResultMarker(malformed), malformed);
+  assert.equal(stripDomiEntityResultMarker(ordinary), ordinary);
 });
 
 test("entity result parser rejects archive titles as canonical project names", () => {

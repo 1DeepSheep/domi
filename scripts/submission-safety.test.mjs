@@ -6,7 +6,8 @@ import {
   quarantineDuplicateCodexThreadOwnership,
   reconcileCommittedAttachmentPaths,
   recoveryCodexThreadId,
-  resumableCodexThreadId
+  resumableCodexThreadId,
+  taskConversationCodexThreadId
 } from "../src/submission-safety.ts";
 
 const attachment = (path, name = path.split("/").pop()) => ({ path, name, size: 1 });
@@ -51,6 +52,48 @@ test("only the sole local owner may resume a canonical Codex conversation", () =
     { id: "b", codexThreadId: "remote-1" }
   ];
   assert.equal(resumableCodexThreadId(duplicated, "a", "remote-1", false), undefined);
+});
+
+test("one local task continues its latest assistant conversation across isolated file execution", () => {
+  const threads = [{
+    id: "a",
+    codexThreadId: "canonical-old",
+    messages: [
+      { role: "assistant" },
+      { role: "assistant", executionCodexThreadId: "execution-latest" }
+    ]
+  }];
+
+  assert.equal(taskConversationCodexThreadId(threads, "a"), "execution-latest");
+});
+
+test("a later ordinary assistant turn keeps the canonical task conversation", () => {
+  const threads = [{
+    id: "a",
+    codexThreadId: "canonical-latest",
+    messages: [
+      { role: "assistant", executionCodexThreadId: "execution-old" },
+      { role: "assistant" }
+    ]
+  }];
+
+  assert.equal(taskConversationCodexThreadId(threads, "a"), "canonical-latest");
+});
+
+test("task conversation continuation fails closed on cross-task ownership or quarantine", () => {
+  const duplicated = [
+    { id: "a", codexThreadId: "shared", messages: [{ role: "assistant" }] },
+    { id: "b", codexThreadId: "shared", messages: [] }
+  ];
+  assert.equal(taskConversationCodexThreadId(duplicated, "a"), undefined);
+  assert.equal(taskConversationCodexThreadId([
+    {
+      id: "a",
+      codexThreadId: "blocked",
+      quarantinedCodexThreadIds: ["blocked"],
+      messages: [{ role: "assistant" }]
+    }
+  ], "a"), undefined);
 });
 
 test("duplicate canonical owners are all quarantined before either can resume", () => {

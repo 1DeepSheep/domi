@@ -265,7 +265,7 @@ export const workflows: Workflow[] = [
     description: "联网检索关注领域的最新行业事件，完成原文核验、事件去重与评分，并更新行业信息追踪。",
     output: "已核验的行业事件、评分、原文链接和简洁归档结果",
     defaultPrompt:
-      "请以 quick_scan 增量模式更新 domi 首页行业动态：严格使用调用方提供的 followed_domains 关注领域快照，不得自行扩大范围。使用 48 小时重叠回看发现迟发、迟索引内容，整体最长最近 72 小时；各领域成功水位只用于标记增量，不得直接截断发现窗口。直接使用本机重点项目快照、调用方提供的 A/S 重点人物别名索引和缓存分类，不重新读取完整项目库、人脉库或完整 schema；先一次性读取时间窗内既有事件建立去重索引，再并发检索本轮已关注领域。每轮必须完成一次中文专业科技媒体定向扫源，覆盖 DeepTech 深科技，并为对话、访谈、专访、公开观点等投资论点信号预留候选位。仅对宽搜已出现明确信号的重点对象做定向补查，不逐一扫描全部重点名单。完成原文核验、实体归一、事件级去重与评分后写入当前资料库的行业事件库，最后一次性回读验证并输出带候选/拒绝统计的 RADAR_RESULT。目标在 6 分钟内完成；没有合格增量也必须正常完成并返回 added=0。",
+      "请以 quick_scan 增量模式更新 domi 首页行业动态：严格使用调用方提供的 followed_domains 关注领域快照，不得自行扩大范围。使用 48 小时重叠回看发现迟发、迟索引内容，整体最长最近 72 小时；各领域成功水位只用于标记增量，不得直接截断发现窗口。直接使用本机重点项目快照、调用方提供的 A/S 重点人物别名索引和缓存分类，不重新读取完整项目库、人脉库或完整 schema；先一次性读取时间窗内既有事件建立去重索引，再并发检索本轮已关注领域。每个关注领域至少完成一组明确针对该领域的检索，不能用未覆盖该领域的泛化查询代替；每轮必须完成一次中文专业科技媒体定向扫源，覆盖 DeepTech 深科技，并逐个尝试已启用的重点信源，为对话、访谈、专访、公开观点等投资论点信号预留候选位。仅对宽搜已出现明确信号的重点对象做定向补查，不逐一扫描全部重点名单。完成原文核验、实体归一、事件级去重与评分后写入当前资料库的行业事件库，最后一次性回读验证并输出带候选、拒绝和逐领域覆盖统计的 RADAR_RESULT。未真正完成检索的领域必须如实报告，客户端不会推进其水位。目标在 6 分钟内完成；没有合格增量也必须正常完成并返回 added=0。",
     hidden: true,
     webSearch: true
   },
@@ -341,18 +341,6 @@ export const workflows: Workflow[] = [
     quickStart: true,
     hidden: true,
     webSearch: true
-  },
-  {
-    id: "quick-discussion",
-    title: "快速讨论",
-    shortTitle: "讨论",
-    skill: "$domi:domi-router",
-    description: "立即开始本机录音，停止后自动串联 PLAUD、纪要、核心要点和跟进事项。",
-    output: "PLAUD 文字稿、结构化纪要、核心要点和跟进事项",
-    defaultPrompt:
-      "开始 domi 快速讨论工作流：立即使用 mac-recording 以 workflow-kind quick-discussion 开始本机录音，不要先运行 doctor 或 status。用户停止录音后，继续执行 PLAUD 文字稿、ASR Notes 结构化纪要、核心要点和跟进事项。",
-    hidden: true,
-    requiresPlaud: true
   },
   {
     id: "meeting-note",
@@ -529,7 +517,7 @@ export function workflowPrompt(
       "你正在 domi 投资工作台中运行，底层是本地 Codex。",
       "采用 domi 插件中的 $domi:investment-radar，并严格执行该 Skill 的 quick_scan 快速增量路径。只需读取 quick_scan 明确要求的最小引用集；不要先加载 domi Router、sourcing 全文、完整 Watching List 或 People 表。",
       "本轮是首页手动刷新：先建立一份覆盖重叠回看窗口的既有事件去重索引，再并发搜索；A/S 重点人物别名索引只用于匹配与消歧，有直接事件信号时才补查对象。每轮必须完成 DeepTech 深科技等中文专业媒体扫源，并为深度访谈/公开观点类投资论点信号预留候选位。把耗时控制在 6 分钟内，达到 12 条高质量候选或 8 条合格新增后停止扩展搜索。",
-      "写入后进行一次批量回读；执行结束必须输出一行机器可读结果：RADAR_RESULT {\"added\":0,\"updated\":0,\"unchanged\":0,\"failed\":0,\"checked_through\":\"ISO-8601\",\"discovery_from\":\"ISO-8601\",\"candidates\":0,\"rejected\":{\"duplicate\":0,\"not_event\":0,\"unverified\":0,\"unavailable\":0,\"out_of_scope\":0}}。没有新增不是失败。",
+      "写入后进行一次批量回读；执行结束必须输出一行机器可读结果：RADAR_RESULT {\"added\":0,\"updated\":0,\"unchanged\":0,\"failed\":0,\"checked_through\":\"ISO-8601\",\"discovery_from\":\"ISO-8601\",\"candidates\":0,\"rejected\":{\"duplicate\":0,\"not_event\":0,\"unverified\":0,\"unavailable\":0,\"out_of_scope\":0},\"coverage\":{\"searched_domains\":[],\"queries_by_domain\":{},\"deeptech_checked\":false,\"configured_sources_attempted\":0,\"configured_sources_failed\":0}}。候选总数必须与处理及拒绝项合计一致；没有新增不是失败。",
       "不得编造新闻、融资或公司事实；不得修改 domi 应用源码。",
       domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
       "",
