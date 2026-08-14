@@ -92,7 +92,7 @@ import {
   quarantineDuplicateCodexThreadOwnership,
   reconcileCommittedAttachmentPaths,
   recoveryCodexThreadId,
-  resumableCodexThreadId
+  taskConversationCodexThreadId
 } from "./submission-safety";
 import {
   DatabaseGrid,
@@ -170,6 +170,11 @@ import {
   type RadarDomain,
   normalizeRadarDomains
 } from "./radar-domains";
+import { parseRadarResult, radarRejectionSummary } from "./radar-result";
+import {
+  pendingPlaudContinuation,
+  plaudContinuationPrompt
+} from "./plaud-continuation";
 
 const RichMarkdownEditor = lazy(() => import("./RichMarkdownEditor"));
 const SetupCenter = lazy(() => import("./SetupCenter"));
@@ -857,6 +862,7 @@ type Thread = {
   codexThreadId?: string;
   quarantinedCodexThreadIds?: string[];
   projectId: string;
+  plaudFileId?: string;
   workspacePath?: string;
   title: string;
   project: string;
@@ -876,6 +882,9 @@ type SubmitToCodexOptions = {
   thread?: Thread;
   useDomiPlugin?: boolean;
   displayText?: string;
+  workflowContinuation?: boolean;
+  resumeCodexThreadId?: string;
+  privateCodexContinuation?: boolean;
   attachments?: LocalAttachment[];
   activeDocumentPath?: string;
   requestOrigin?: "user" | "programmatic";
@@ -912,6 +921,10 @@ type QueuedSubmission = {
   threadId: string;
   input: string;
   workflowId?: string;
+  displayText?: string;
+  workflowContinuation?: boolean;
+  resumeCodexThreadId?: string;
+  privateCodexContinuation?: boolean;
   attachments: LocalAttachment[];
   activeDocumentPath?: string;
   requestOrigin?: "user" | "programmatic";
@@ -994,6 +1007,14 @@ function readQueuedSubmissions(): Record<string, QueuedSubmission[]> {
           && Array.isArray(candidate.attachments)
           && (candidate.activeDocumentPath === undefined
             || typeof candidate.activeDocumentPath === "string")
+          && (candidate.displayText === undefined
+            || typeof candidate.displayText === "string")
+          && (candidate.workflowContinuation === undefined
+            || typeof candidate.workflowContinuation === "boolean")
+          && (candidate.resumeCodexThreadId === undefined
+            || typeof candidate.resumeCodexThreadId === "string")
+          && (candidate.privateCodexContinuation === undefined
+            || typeof candidate.privateCodexContinuation === "boolean")
           && (candidate.requestOrigin === undefined
             || candidate.requestOrigin === "user"
             || candidate.requestOrigin === "programmatic")
@@ -1622,25 +1643,6 @@ function weeklyNewsScanStageFromOutput(output: string) {
   return "domi 行业雷达正在运行";
 }
 
-function radarCheckpointFromOutput(output: string) {
-  const lines = String(output || "").split(/\r?\n/).reverse();
-  for (const line of lines) {
-    const markerIndex = line.indexOf("RADAR_RESULT");
-    if (markerIndex < 0) continue;
-    const jsonStart = line.indexOf("{", markerIndex);
-    const jsonEnd = line.lastIndexOf("}");
-    if (jsonStart < 0 || jsonEnd <= jsonStart) continue;
-    try {
-      const result = JSON.parse(line.slice(jsonStart, jsonEnd + 1)) as { checked_through?: unknown };
-      const checkedThrough = Date.parse(String(result.checked_through || ""));
-      if (Number.isFinite(checkedThrough) && checkedThrough > 0) return checkedThrough;
-    } catch {
-      // Ignore malformed status lines and keep looking for an earlier valid result.
-    }
-  }
-  return null;
-}
-
 function plaudItemStatus(item: DomiPlaudItem) {
   if (item.queueStage === "managed") return "已生成并入库";
   if (item.queueStage === "notes_non_project") return "纪要已生成";
@@ -1790,7 +1792,6 @@ const workflowIconMap: Record<string, typeof FileText> = {
   "people-intake": UsersRound,
   "project-research": Search,
   "project-intake": Database,
-  "quick-discussion": Mic,
   "meeting-note": FileText,
   "investment-review": ClipboardList,
   "ic-memo": BriefcaseBusiness,
@@ -3420,6 +3421,8 @@ function App() {
           );
           continue;
         }
+        // Heal legacy split-context tasks after ownership is proven unique.
+        patchThread(thread.id, { codexThreadId: recoveryThreadId });
         let reboundRunId = "";
         try {
           let result = await workbench.recoverCodexThread(recoveryThreadId);
@@ -3599,6 +3602,10 @@ function App() {
       void submitToCodex(workflow, queued.input, {
         thread: targetThread,
         useDomiPlugin: queued.useDomiPlugin,
+        displayText: queued.displayText,
+        workflowContinuation: queued.workflowContinuation,
+        resumeCodexThreadId: queued.resumeCodexThreadId,
+        privateCodexContinuation: queued.privateCodexContinuation,
         attachments: queued.attachments,
         activeDocumentPath: queued.activeDocumentPath,
         requestOrigin: queued.requestOrigin === "user" ? "user" : "programmatic",
@@ -4836,6 +4843,8 @@ function App() {
       configuredSourceLines.length
         ? `用户在本机配置了以下重点信源。本轮优先检查并交叉核验，但仍需遵守来源可信度、时效性和去重规则：\n${configuredSourceLines.join("\n")}`
         : "用户尚未配置自定义重点信源，按默认公开来源执行。",
+      `覆盖硬约束：每个 followed_domains 领域至少完成 1 组明确针对该领域的检索；不得用同一条泛化查询为未出现的领域记完成。DeepTech 深科技必须尝试定向扫源；${configuredSourceLines.length ? `本轮 ${configuredSourceLines.length} 个已启用重点信源必须逐个尝试` : "本轮没有已启用重点信源"}。未完成的领域或信源必须如实写入 coverage，禁止推进其水位。`,
+      "RADAR_RESULT 必须额外包含 coverage：{\"searched_domains\":[规范领域],\"queries_by_domain\":{\"规范领域\":非负整数},\"deeptech_checked\":true|false,\"configured_sources_attempted\":非负整数,\"configured_sources_failed\":非负整数}。searched_domains 只能列出真正完成至少一组领域检索的领域；检索失败或未执行时不得列入。",
       `各领域上次成功水位：${JSON.stringify(Object.fromEntries(radarDomainsSnapshot.map((domain) => [domain, checkpointsByDomain[domain] ? new Date(checkpointsByDomain[domain]).toISOString() : null])))}。`,
       `本轮统一发现窗口起点：${new Date(discoveryFrom).toISOString()}；最早有效检查水位：${checkedAfter ? new Date(checkedAfter).toISOString() : "无"}；本轮检查截止：${new Date(now).toISOString()}。`,
       "发现窗口包含重叠回看：窗口内水位之前发布但此前未收录的迟索引事件仍可新增；必须靠事件ID、规范标题、主体和关键事实去重，不能只按发布时间过滤。",
@@ -4920,12 +4929,16 @@ function App() {
         );
         return { status: "failed", addedItems: partialAdded };
       }
-      const parsedRadarCheckpoint = radarCheckpointFromOutput(result.output);
+      const parsedRadarResult = parseRadarResult(
+        result.output,
+        radarDomainsSnapshot,
+        configuredSourceLines.length
+      );
       let checkpointWarning = "";
-      if (parsedRadarCheckpoint) {
+      if (parsedRadarResult?.checkedThrough && parsedRadarResult.checkpointDomains.length) {
         const checkpointResult = await workbench.saveWeeklyNewsCheckpoint({
-          checkedThrough: parsedRadarCheckpoint,
-          domains: radarDomainsSnapshot
+          checkedThrough: parsedRadarResult.checkedThrough,
+          domains: parsedRadarResult.checkpointDomains
         });
         if (checkpointResult.ok && checkpointResult.radarCheckedThrough) {
           if (weeklyNewsLatestSnapshotRef.current) {
@@ -4945,8 +4958,19 @@ function App() {
         } else {
           checkpointWarning = "；检索水位保存失败，下次仍会回看最近 72 小时";
         }
+        if (parsedRadarResult.incompleteDomains.length) {
+          checkpointWarning += `；${parsedRadarResult.incompleteDomains.join("、")}未完成，本轮未推进这些领域的水位`;
+        }
+        const sourceCoverageIssues = parsedRadarResult.coverageIssues.filter((issue) =>
+          !issue.startsWith("未完整检索：")
+        );
+        if (sourceCoverageIssues.length) {
+          checkpointWarning += `；${sourceCoverageIssues.join("；")}`;
+        }
+      } else if (parsedRadarResult?.checkedThrough) {
+        checkpointWarning = `；覆盖记录未通过校验，所有领域均未推进水位${parsedRadarResult.coverageIssues.length ? `（${parsedRadarResult.coverageIssues.join("；")}）` : ""}`;
       } else {
-        checkpointWarning = "；本轮未返回检索水位，下次仍会回看最近 72 小时";
+        checkpointWarning = "；本轮未返回可验证的覆盖记录和检索水位，下次仍会回看最近 72 小时";
       }
       const refreshed = await readLatestWithRetry();
       if (!refreshed?.ok) return { status: "failed" };
@@ -4961,11 +4985,24 @@ function App() {
         hour: "2-digit",
         minute: "2-digit"
       }).format(Date.now());
+      const rejectionSummary = parsedRadarResult
+        ? radarRejectionSummary(parsedRadarResult)
+        : "";
+      const candidateSummary = parsedRadarResult?.candidates
+        ? `；发现候选 ${parsedRadarResult.candidates} 条${rejectionSummary ? `（${rejectionSummary}）` : ""}`
+        : "";
+      const incompleteCoverage = Boolean(
+        !parsedRadarResult
+        || parsedRadarResult.incompleteDomains.length
+        || !parsedRadarResult.checkpointDomains.length
+      );
       setWeeklyNewsNotice(
         hasLatestBaseline
           ? addedItems.length > 0
             ? `${completedAt} 更新完成：新增 ${addedItems.length} 条，已置顶显示${checkpointWarning}`
-            : `${completedAt} 扫描完成：本次没有符合筛选条件的新动态${checkpointWarning}`
+            : incompleteCoverage
+              ? `${completedAt} 本轮检索未完整完成${candidateSummary}${checkpointWarning}`
+              : `${completedAt} 扫描完成${candidateSummary}，没有达到收录门槛的新动态${checkpointWarning}`
           : `${completedAt} 扫描完成：已显示最新一周的行业动态${checkpointWarning}`
       );
       if (!automatic) {
@@ -5530,6 +5567,7 @@ function App() {
         targetThread = {
           id: createId("thread"),
           projectId,
+          plaudFileId: item.fileId,
           workspacePath: workspaceResult.ok ? workspaceResult.workspacePath : codexStatus?.workspacePath,
           title: `${item.fileName} 纪要`,
           project: "PLAUD · 纪要入库",
@@ -5552,6 +5590,9 @@ function App() {
           targetThread as Thread,
           ...current.filter((thread) => thread.id !== targetThread!.id)
         ]);
+      } else if (targetThread.plaudFileId !== item.fileId) {
+        targetThread = { ...targetThread, plaudFileId: item.fileId };
+        patchThread(targetThread.id, { plaudFileId: item.fileId });
       }
 
       const targetAlreadyRunning = Boolean(activeRunsByThread[targetThread.id])
@@ -6826,6 +6867,7 @@ function App() {
       const recoveredMessage = recovered?.message;
 
       if (recoveredThread && recoveredMessage) {
+        patchThread(recoveredThread.id, { codexThreadId: payload.threadId });
         context = {
           threadId: recoveredThread.id,
           assistantMessageId: recoveredMessage.id,
@@ -6910,9 +6952,10 @@ function App() {
         patchMessage(context.assistantMessageId, {
           executionCodexThreadId: payload.threadId
         });
-      } else {
-        patchThread(context.threadId, { codexThreadId: payload.threadId });
       }
+      // One local task always owns one continuous Codex conversation. Entity
+      // isolation constrains files and finalization, not conversational memory.
+      patchThread(context.threadId, { codexThreadId: payload.threadId });
       addTimeline(context.threadId, {
         runId: payload.runId,
         title: payload.summary || "Codex 对话已连接",
@@ -7438,6 +7481,9 @@ function App() {
     let targetThread = sourceThread;
     const useDomiPlugin = options.useDomiPlugin ?? domiPluginEnabled;
     const submittedInput = overrideInput ?? input;
+    const submittedComposerInput = options.workflowContinuation
+      ? options.displayText || submittedInput
+      : submittedInput;
     const rawInput = submittedInput.trim();
     const requestOrigin = options.requestOrigin === "user" ? "user" : "programmatic";
     const userInstructionText = requestOrigin === "user"
@@ -7552,6 +7598,10 @@ function App() {
         threadId: targetThread.id,
         input: messageText,
         workflowId: workflow?.id,
+        displayText: options.displayText,
+        workflowContinuation: options.workflowContinuation,
+        resumeCodexThreadId: options.resumeCodexThreadId,
+        privateCodexContinuation: options.privateCodexContinuation,
         attachments: selectedAttachments,
         activeDocumentPath: options.activeDocumentPath,
         requestOrigin,
@@ -7574,9 +7624,9 @@ function App() {
       if (!options.preserveComposer) {
         clearSubmittedComposerDraft(
           sourceThread.id,
-          submittedInput,
+          submittedComposerInput,
           selectedAttachments,
-          workflow?.id
+          options.workflowContinuation ? undefined : workflow?.id
         );
       }
       return;
@@ -7602,6 +7652,26 @@ function App() {
         message: `检测到 ${quarantinedOwnership.quarantinedThreadIds.length} 个本地任务共用 Codex 对话；已隔离旧对话，本轮将新建独立会话。`
       });
     }
+    const resumeCodexThreadId = String(options.resumeCodexThreadId || "").trim();
+    if (resumeCodexThreadId) {
+      if (targetThread.quarantinedCodexThreadIds?.includes(resumeCodexThreadId)) {
+        throw new Error("等待补充信息的 Codex 会话已被安全隔离，无法续接；本次输入已保留。");
+      }
+      const continuationOwners = codexThreadOwnerIds(
+        threadsRef.current,
+        resumeCodexThreadId
+      );
+      if (continuationOwners.length !== 1 || continuationOwners[0] !== targetThread.id) {
+        throw new Error("等待补充信息的 Codex 会话归属不唯一；为避免串线，本次输入已保留。");
+      }
+    }
+    // Resolve continuity before appending the new running assistant message;
+    // this also heals legacy tasks whose latest completed turn used a private
+    // execution id different from the older canonical id.
+    const existingTaskConversationId = taskConversationCodexThreadId(
+      threadsRef.current,
+      targetThread.id
+    );
     const displayText = options.displayText?.trim() || messageText;
 
     const runId = createId("run");
@@ -7609,12 +7679,15 @@ function App() {
     const userMessage: Message = {
       id: createId("user"),
       role: "user",
-      content: workflow ? `启动「${workflow.title}」：${displayText}` : displayText,
+      content: workflow && !options.workflowContinuation
+        ? `启动「${workflow.title}」：${displayText}`
+        : displayText,
       workflowId: workflow?.id,
       attachments: selectedAttachments
     };
 
     const assistantId = createId("assistant");
+    const privateCodexExecution = execution.isolated || options.privateCodexContinuation === true;
     const assistantMessage: Message = {
       id: assistantId,
       role: "assistant",
@@ -7624,7 +7697,7 @@ function App() {
       runId,
       runStartedAt,
       entityFinalizationMode: execution.entityFinalizationMode,
-      entityExecutionIsolated: execution.isolated
+      entityExecutionIsolated: privateCodexExecution
     };
 
     appendMessageToThread(targetThread.id, userMessage);
@@ -7632,9 +7705,9 @@ function App() {
     if (!options.preserveComposer) {
       clearSubmittedComposerDraft(
         sourceThread.id,
-        submittedInput,
+        submittedComposerInput,
         selectedAttachments,
-        workflow?.id
+        options.workflowContinuation ? undefined : workflow?.id
       );
     }
     patchThread(targetThread.id, { timeline: [], lastUsage: null, hasUnreadCompletion: false });
@@ -7649,7 +7722,7 @@ function App() {
       knownPersonIds: effectiveDomiSnapshot?.people.map((person) => person.recordId),
       queuedSubmission: routedQueuedSubmission,
       entityFinalizationMode: execution.entityFinalizationMode,
-      entityExecutionIsolated: execution.isolated
+      entityExecutionIsolated: privateCodexExecution
     });
     setActiveRunsByThread((current) => ({ ...current, [targetThread.id]: runId }));
     options.onAccepted?.(routedQueuedSubmission);
@@ -7662,11 +7735,20 @@ function App() {
           "- 只有完成写入、按 record_id 回读并输出 DOMI_ENTITY_RESULT_V1 后，客户端才会把本轮附件归入该已验证实体。"
         ].join("\n")
       : "";
+    const conversationContinuationNotice = targetThread.messages.length > 0
+      ? [
+          "同一任务连续对话规则：",
+          "- 这是左侧当前任务中的后续消息，必须结合该任务此前的用户输入、追问、补充信息和执行结果理解，不得当成新建普通对话。",
+          "- 简短的人名、项目名、参会人、目的、纠正或“继续”等输入，默认是在补充或修正上一轮尚未完成的工作。",
+          "- 仅当用户明确更换主题或主动选择新的工作流时，才按新任务意图转向；不要要求用户重复已经在本任务中提供的信息。"
+        ].join("\n")
+      : "";
     const basePrompt = workflowPrompt(
       workflow,
       messageText,
       [
         domiContextForThread(effectiveDomiSnapshot, targetThread),
+        conversationContinuationNotice,
         executionNotice
       ].filter(Boolean).join("\n\n"),
       useDomiPlugin,
@@ -7687,15 +7769,9 @@ function App() {
         userInstructionText,
         activeDocumentPath: options.activeDocumentPath,
         attachmentPaths: selectedAttachments.map((attachment) => attachment.path),
-        // An isolated entity turn must not resume the source task's remote
-        // Codex conversation. Its new remote thread id is stored only on this
-        // assistant turn and never replaces the source task identity.
-        threadId: resumableCodexThreadId(
-          threadsRef.current,
-          sourceThread.id,
-          targetThread.codexThreadId,
-          execution.isolated
-        ),
+        // A left-sidebar task is one continuous conversation. Filesystem and
+        // entity finalization may be isolated without splitting model context.
+        threadId: resumeCodexThreadId || existingTaskConversationId,
         workflowId: workflow?.id || (useDomiPlugin ? "domi-analyst" : undefined),
         webSearch: Boolean(workflow?.webSearch),
         model: runModelPolicy.model,
@@ -7743,14 +7819,15 @@ function App() {
           kind: "codex-run",
           message: "Codex 启动结果命中了另一任务持有的对话标识；已拒绝重新绑定。"
         });
-      } else if (execution.isolated) {
-        patchMessage(assistantId, { executionCodexThreadId: result.threadId });
-        const context = runContextRef.current.get(runId);
-        if (context) {
-          context.executionCodexThreadId = result.threadId;
-          runContextRef.current.set(runId, context);
-        }
       } else {
+        if (privateCodexExecution) {
+          patchMessage(assistantId, { executionCodexThreadId: result.threadId });
+          const context = runContextRef.current.get(runId);
+          if (context) {
+            context.executionCodexThreadId = result.threadId;
+            runContextRef.current.set(runId, context);
+          }
+        }
         patchThread(targetThread.id, { codexThreadId: result.threadId });
       }
     }
@@ -7814,7 +7891,26 @@ function App() {
     const submittedInput = input;
     const submittedAttachments = [...attachments];
     const submittedActiveDocumentPath = selectedDocumentLibraryPath || undefined;
-    const submittedWorkflow = selectedWorkflow;
+    const plaudContinuation = !selectedWorkflow
+      ? pendingPlaudContinuation(sourceThread, plaudSnapshot?.items || [])
+      : null;
+    const submittedWorkflow = plaudContinuation
+      ? workflows.find((workflow) => workflow.id === "domi-router")
+      : selectedWorkflow;
+    const submittedRequest = plaudContinuation
+      ? plaudContinuationPrompt(
+          plaudNotesWorkflowRequest(plaudContinuation.item),
+          submittedInput
+        )
+      : submittedInput;
+    const continuationOptions = plaudContinuation
+      ? {
+          displayText: submittedInput,
+          workflowContinuation: true,
+          resumeCodexThreadId: plaudContinuation.executionCodexThreadId,
+          privateCodexContinuation: Boolean(plaudContinuation.executionCodexThreadId)
+        }
+      : {};
     if (attachmentImportCount > 0) {
       setThreadAttachmentError(sourceThreadId, "附件仍在导入，请等待完成后再发送。");
       return;
@@ -7823,12 +7919,13 @@ function App() {
     const threadHasActiveRun = Boolean(activeRunsByThread[sourceThreadId])
       || [...runContextRef.current.values()].some((context) => context.threadId === sourceThreadId);
     if (threadHasActiveRun) {
-      enqueueSubmission(submittedWorkflow, submittedInput, {
+      enqueueSubmission(submittedWorkflow, submittedRequest, {
         thread: sourceThread,
         attachments: submittedAttachments,
         activeDocumentPath: submittedActiveDocumentPath,
         requestOrigin: "user",
-        userInstructionText: submittedInput.trim()
+        userInstructionText: submittedInput.trim(),
+        ...continuationOptions
       });
       return;
     }
@@ -7836,12 +7933,13 @@ function App() {
       submissionStartingThreadIdsRef.current.has(sourceThreadId)
       || queueStartingThreadIdsRef.current.has(sourceThreadId)
     ) return;
-    void submitToCodex(submittedWorkflow, submittedInput, {
+    void submitToCodex(submittedWorkflow, submittedRequest, {
       thread: sourceThread,
       attachments: submittedAttachments,
       activeDocumentPath: submittedActiveDocumentPath,
       requestOrigin: "user",
       userInstructionText: submittedInput.trim(),
+      ...continuationOptions,
       useDomiPlugin: domiPluginEnabled,
       model,
       reasoningEffort,
@@ -7866,6 +7964,10 @@ function App() {
       activeDocumentPath?: string;
       requestOrigin?: "user" | "programmatic";
       userInstructionText?: string;
+      displayText?: string;
+      workflowContinuation?: boolean;
+      resumeCodexThreadId?: string;
+      privateCodexContinuation?: boolean;
     } = {}
   ) {
     if (attachmentImportCount > 0) {
@@ -7906,6 +8008,10 @@ function App() {
       threadId: queueThread.id,
       input: messageText,
       workflowId: workflow?.id,
+      displayText: options.displayText,
+      workflowContinuation: options.workflowContinuation,
+      resumeCodexThreadId: options.resumeCodexThreadId,
+      privateCodexContinuation: options.privateCodexContinuation,
       attachments: [...queuedAttachments],
       activeDocumentPath: queuedActiveDocumentPath,
       requestOrigin: queuedRequestOrigin,
@@ -11864,20 +11970,6 @@ function App() {
                   </div>
                 )}
               </div>
-              {variant === "dock" && plaudEnabled && (
-                <button
-                  className="composer-mic-button"
-                  type="button"
-                  onClick={() => {
-                    const workflow = visibleQuickStartWorkflows.find((item) => item.id === "quick-discussion");
-                    if (workflow) chooseWorkflow(workflow);
-                  }}
-                  title="快速讨论"
-                  aria-label="选择快速讨论工作流"
-                >
-                  <Mic size={18} />
-                </button>
-              )}
               <button
                 className="send-button"
                 type="submit"
