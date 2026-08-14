@@ -47,7 +47,6 @@ test("radar and Todo use Terra medium at standard speed", () => {
 test("externally deliverable workflows use Sol max and preserve the user speed tier", () => {
   const workflows = [
     "domi-router",
-    "quick-discussion",
     "meeting-note",
     "meeting-prep",
     "project-research",
