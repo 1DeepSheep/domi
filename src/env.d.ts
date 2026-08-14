@@ -127,7 +127,7 @@ declare global {
         request?: DomiPlaudConnectionRequest
       ) => Promise<DomiPlaudConnectionResult>;
       listPlaud: (request?: DomiPlaudListRequest) => Promise<DomiPlaudSnapshot>;
-      syncPlaud: (request?: DomiPlaudSyncRequest) => Promise<DomiPlaudSyncResult>;
+      syncPlaud: () => Promise<DomiPlaudSyncResult>;
       renamePlaud: (request: DomiPlaudRenameRequest) => Promise<DomiPlaudRenameResult>;
       deletePlaud: (request: DomiPlaudDeleteRequest) => Promise<DomiPlaudDeleteResult>;
       loadDomiEntityWorkspace: (
@@ -1113,14 +1113,8 @@ export type DomiPlaudSnapshot = {
   error?: string;
 };
 
-export type DomiPlaudSyncRequest = {
-  confirmed?: boolean;
-};
-
 export type DomiPlaudSyncResult = {
   ok: boolean;
-  requiresConfirmation?: boolean;
-  pendingCount?: number;
   generatedCount?: number;
   recoveredCount?: number;
   failedCount?: number;

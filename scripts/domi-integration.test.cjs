@@ -3587,11 +3587,49 @@ test("PLAUD sync never submits generation from a stale cached list", async () =>
     throw new Error("stale PLAUD data must not trigger mutations");
   };
 
-  const result = await integration.syncPlaud({ confirmed: true });
+  const result = await integration.syncPlaud();
 
   assert.equal(result.ok, false);
   assert.equal(result.snapshot.stale, true);
   assert.match(result.error, /远端读取/);
+});
+
+test("PLAUD sync directly processes every pending recording without a count confirmation threshold", async () => {
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => null,
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test"
+  });
+  let queueReads = 0;
+  integration.plaudQueue = async () => {
+    queueReads += 1;
+    return queueReads === 1
+      ? { ok: true, stale: false, pendingCount: 11, items: [] }
+      : { ok: true, stale: false, pendingCount: 0, items: [] };
+  };
+  integration.stopPlaudBackgroundSession = async () => undefined;
+  integration.plaudPaths = () => ({ script: "/tmp/plaud.js" });
+  let syncArgs = null;
+  integration.runJson = async (_command, args) => {
+    syncArgs = args;
+    return {
+      results: Array.from({ length: 11 }, (_unused, index) => ({
+        ok: true,
+        fileId: `recording-${index + 1}`
+      })),
+      manifestPath: "/tmp/domi-test/manifest.json"
+    };
+  };
+
+  const result = await integration.syncPlaud();
+
+  assert.deepEqual(syncArgs?.slice(0, 3), ["/tmp/plaud.js", "sync-pending", "11"]);
+  assert.equal(result.ok, true);
+  assert.equal(result.generatedCount, 11);
+  assert.equal(result.failedCount, 0);
+  assert.equal(queueReads, 2);
 });
 
 test("PLAUD queue requests later pages without duplicating local workflow-only records", async () => {
