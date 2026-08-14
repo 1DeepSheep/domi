@@ -3914,11 +3914,11 @@ ipcMain.handle("domi:plaud-list", async (_event, request) => {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
-ipcMain.handle("domi:plaud-sync", async (_event, request) => {
+ipcMain.handle("domi:plaud-sync", async () => {
   try {
     const result = await serviceCoordinator.run(
       "domi:plaud-sync",
-      () => getDomiIntegration().syncPlaud(request),
+      () => getDomiIntegration().syncPlaud(),
       { force: true, allowStale: false, isSuccess: (value) => value?.ok !== false }
     );
     serviceCoordinator.invalidate("domi:plaud-list");

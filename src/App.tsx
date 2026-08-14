@@ -5461,7 +5461,7 @@ function App() {
     return request;
   }
 
-  async function syncPlaudQueue(confirmed = false): Promise<DomiPlaudSyncResult | null> {
+  async function syncPlaudQueue(): Promise<DomiPlaudSyncResult | null> {
     if (appSettings?.plaudConnectionMode !== "enabled") return null;
     if (plaudSyncPromiseRef.current) return plaudSyncPromiseRef.current;
     if (plaudListPromiseRef.current) return null;
@@ -5472,18 +5472,7 @@ function App() {
     setPlaudNotice("");
     const request = (async (): Promise<DomiPlaudSyncResult | null> => {
       try {
-        let result = await workbench.syncPlaud({ confirmed });
-        if (result.requiresConfirmation) {
-          const count = result.pendingCount || 0;
-          const approved = await requestConfirmation({
-            title: "生成全部 PLAUD 文字稿？",
-            message: `PLAUD 中有 ${count} 条录音尚未生成文字稿。`,
-            detail: "继续后会把这些录音一次性提交给 PLAUD 生成，现有本地纪要不会受影响。",
-            confirmLabel: "全部生成"
-          });
-          if (!approved) return result;
-          result = await workbench.syncPlaud({ confirmed: true });
-        }
+        const result = await workbench.syncPlaud();
         if (result.snapshot) setPlaudSnapshot(result.snapshot);
         if (!result.ok) {
           setPlaudError(result.error || "PLAUD 同步或文字稿生成失败。 ");

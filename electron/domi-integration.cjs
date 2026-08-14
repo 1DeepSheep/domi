@@ -2230,7 +2230,7 @@ class DomiIntegration {
     };
   }
 
-  async syncPlaud(request = {}) {
+  async syncPlaud() {
     const current = await this.plaudQueue();
     if (!current.ok) return current;
     if (current.stale) {
@@ -2245,10 +2245,6 @@ class DomiIntegration {
         error: recovery
       };
     }
-    if (current.pendingCount > 10 && !request.confirmed) {
-      return { ok: false, requiresConfirmation: true, pendingCount: current.pendingCount, snapshot: current };
-    }
-
     // The plugin CLI uses the same dedicated Profile for generation/download.
     // Release the long-lived headless reader first so one Profile never has two
     // owners. The final snapshot lazily starts a fresh broker again.
