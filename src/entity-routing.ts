@@ -186,11 +186,12 @@ export function entityFinalizationModeForSourceConversation(
   return source.externalType ? "archive-only" as const : "bind-source" as const;
 }
 
+const DOMI_ENTITY_RESULT_MARKER_PATTERN =
+  /(?:<!--\s*)?DOMI_ENTITY_RESULT(?:_V1)?\s*:?\s*(\{[^\r\n]*\})(?:\s*-->)?/i;
+
 export function parseDomiEntityResult(output: string): DomiEntityResult | null {
   const text = String(output || "");
-  const marker = text.match(
-    /(?:<!--\s*)?DOMI_ENTITY_RESULT(?:_V1)?\s*:?\s*(\{[^\r\n]*\})(?:\s*-->)?/i
-  );
+  const marker = text.match(DOMI_ENTITY_RESULT_MARKER_PATTERN);
   if (!marker) return null;
   try {
     const parsed = JSON.parse(marker[1]) as Partial<DomiEntityResult>;
@@ -204,4 +205,20 @@ export function parseDomiEntityResult(output: string): DomiEntityResult | null {
   } catch {
     return null;
   }
+}
+
+export function stripDomiEntityResultMarker(output: string) {
+  const text = String(output || "");
+  const marker = text.match(DOMI_ENTITY_RESULT_MARKER_PATTERN);
+  // Only hide a receipt that passes the same strict parser used for entity
+  // binding. Malformed or unsafe markers remain visible for diagnosis instead
+  // of silently deleting user-facing text.
+  if (!marker || marker.index === undefined || !parseDomiEntityResult(marker[0])) {
+    return text;
+  }
+  const before = text.slice(0, marker.index);
+  const after = text.slice(marker.index + marker[0].length);
+  return after.trim()
+    ? `${before}${after}`
+    : before.trimEnd();
 }

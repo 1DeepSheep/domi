@@ -38,6 +38,11 @@ assert.match(
   "Assistant messages must turn Codex file citation markers into material links."
 );
 assert.match(
+  messageContent,
+  /stripDomiEntityResultMarker\(message\.content\)/,
+  "Verified entity receipts must remain available to binding logic without leaking into assistant messages."
+);
+assert.match(
   editor,
   /domi:managed:start[\s\S]*?frontmatter: match\?\.\[1\]/,
   "Managed entity frontmatter must remain in Markdown for stable IDs while staying hidden from the rich editor."
@@ -527,7 +532,7 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /const sourceThread = activeThread[\s\S]*?submitToCodex\(submittedWorkflow, submittedInput, \{[\s\S]*?thread: sourceThread[\s\S]*?\.catch\(\(error\)[\s\S]*?setThreadAttachmentError\(sourceThreadId, `本次消息未能发送/,
+  /const sourceThread = activeThread[\s\S]*?submitToCodex\(submittedWorkflow, submittedRequest, \{[\s\S]*?thread: sourceThread[\s\S]*?\.catch\(\(error\)[\s\S]*?setThreadAttachmentError\(sourceThreadId, `本次消息未能发送/,
   "Unexpected submission preflight failures must be visible and retryable instead of becoming unhandled rejections."
 );
 assert.match(
@@ -1224,9 +1229,6 @@ assert.match(
   "The schedule composer must expose common attendees as explicit multi-select shortcuts."
 );
 const taskWorkflowSource = workflows.match(/id:\s*"task"[\s\S]*?(?=\n  \{|\n\];)/)?.[0] || "";
-const quickDiscussionWorkflowSource = workflows.match(
-  /id:\s*"quick-discussion"[\s\S]*?(?=\n  \{|\n\];)/
-)?.[0] || "";
 assert.match(
   taskWorkflowSource,
   /hidden:\s*true/,
@@ -1238,9 +1240,14 @@ assert.doesNotMatch(
   "Todo sync belongs in the todo board rather than the four home-page shortcuts."
 );
 assert.doesNotMatch(
-  quickDiscussionWorkflowSource,
-  /quickStart:\s*true/,
-  "Quick discussion must not displace one of the four home-page shortcuts."
+  workflows,
+  /id:\s*"quick-discussion"/,
+  "domi must not expose a workflow that starts a local microphone recording."
+);
+assert.doesNotMatch(
+  app,
+  /选择快速讨论工作流|data-workflow="quick-discussion"/,
+  "The composer must not expose a local recording shortcut."
 );
 assert.match(
   app,
@@ -1757,8 +1764,18 @@ assert.match(
 );
 assert.match(
   app,
-  /let execution: SubmissionExecutionContext = binding\.execution \|\|[\s\S]*?threadId: resumableCodexThreadId\([\s\S]*?sourceThread\.id,[\s\S]*?targetThread\.codexThreadId,[\s\S]*?execution\.isolated[\s\S]*?workspacePath: execution\.workspacePath[\s\S]*?externalType: execution\.externalType[\s\S]*?externalRecordId: execution\.externalRecordId/,
-  "An isolated turn must start a new remote Codex conversation while retaining only the local source task identity."
+  /let execution: SubmissionExecutionContext = binding\.execution \|\|[\s\S]*?const existingTaskConversationId = taskConversationCodexThreadId\([\s\S]*?targetThread\.id[\s\S]*?threadId: resumeCodexThreadId \|\| existingTaskConversationId[\s\S]*?workspacePath: execution\.workspacePath[\s\S]*?externalType: execution\.externalType[\s\S]*?externalRecordId: execution\.externalRecordId/,
+  "Every turn in one local task must resume its unique Codex conversation while entity files remain independently scoped."
+);
+assert.match(
+  app,
+  /const conversationContinuationNotice = targetThread\.messages\.length > 0[\s\S]*?这是左侧当前任务中的后续消息[\s\S]*?不得当成新建普通对话[\s\S]*?默认是在补充或修正上一轮尚未完成的工作[\s\S]*?conversationContinuationNotice/,
+  "Every follow-up in an existing sidebar task must be interpreted using that task's prior conversational logic."
+);
+assert.match(
+  app,
+  /const resumeCodexThreadId = String\(options\.resumeCodexThreadId[\s\S]*?codexThreadOwnerIds\([\s\S]*?continuationOwners\.length !== 1 \|\| continuationOwners\[0\] !== targetThread\.id[\s\S]*?等待补充信息的 Codex 会话归属不唯一/,
+  "A staged workflow may resume its private Codex conversation only when the current local task is its unique owner."
 );
 assert.match(
   app,
@@ -1772,13 +1789,13 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /if \(payload\.type === "thread" && payload\.threadId\) \{[\s\S]*?if \(context\.entityExecutionIsolated\)[\s\S]*?executionCodexThreadId: payload\.threadId[\s\S]*?else \{[\s\S]*?patchThread\(context\.threadId, \{ codexThreadId: payload\.threadId \}\)/,
-  "A thread event from isolated execution must be stored on the turn, never overwrite the source conversation's Codex identity."
+  /if \(payload\.type === "thread" && payload\.threadId\) \{[\s\S]*?if \(context\.entityExecutionIsolated\)[\s\S]*?executionCodexThreadId: payload\.threadId[\s\S]*?patchThread\(context\.threadId, \{ codexThreadId: payload\.threadId \}\)/,
+  "An isolated filesystem turn must retain its recovery id and also keep the local task on one canonical Codex conversation."
 );
 assert.match(
   app,
-  /if \(result\.threadId\) \{[\s\S]*?if \(execution\.isolated\)[\s\S]*?patchMessage\(assistantId, \{ executionCodexThreadId: result\.threadId \}\)[\s\S]*?else \{[\s\S]*?patchThread\(targetThread\.id, \{ codexThreadId: result\.threadId \}\)/,
-  "The run-start response must keep an isolated Codex thread id on the turn instead of rebinding the source conversation."
+  /if \(result\.threadId\) \{[\s\S]*?if \(privateCodexExecution\)[\s\S]*?patchMessage\(assistantId, \{ executionCodexThreadId: result\.threadId \}\)[\s\S]*?patchThread\(targetThread\.id, \{ codexThreadId: result\.threadId \}\)/,
+  "The run-start response must preserve private recovery metadata while canonically continuing the same local task."
 );
 assert.match(
   app,
@@ -1840,8 +1857,8 @@ assert.match(
 );
 assert.match(
   app,
-  /const assistantMessage: Message = \{[\s\S]*?entityFinalizationMode: execution\.entityFinalizationMode,[\s\S]*?entityExecutionIsolated: execution\.isolated[\s\S]*?runContextRef\.current\.set\(runId,[\s\S]*?entityFinalizationMode: execution\.entityFinalizationMode,[\s\S]*?entityExecutionIsolated: execution\.isolated/,
-  "Entity isolation and finalization policy must survive both live completion and persisted assistant recovery."
+  /const privateCodexExecution = execution\.isolated \|\| options\.privateCodexContinuation === true[\s\S]*?const assistantMessage: Message = \{[\s\S]*?entityFinalizationMode: execution\.entityFinalizationMode,[\s\S]*?entityExecutionIsolated: privateCodexExecution[\s\S]*?runContextRef\.current\.set\(runId,[\s\S]*?entityFinalizationMode: execution\.entityFinalizationMode,[\s\S]*?entityExecutionIsolated: privateCodexExecution/,
+  "Entity isolation and private staged-workflow continuation must survive both live completion and persisted assistant recovery."
 );
 assert.match(
   app,

@@ -33,7 +33,6 @@ const ECONOMY_WORKFLOW_IDS = new Set([
 
 const PREMIUM_WORKFLOW_IDS = new Set([
   "domi-router",
-  "quick-discussion",
   "meeting-note",
   "meeting-prep",
   "project-research",

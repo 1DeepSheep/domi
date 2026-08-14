@@ -83,6 +83,46 @@ export function resumableCodexThreadId(
     : undefined;
 }
 
+/**
+ * Resolve the single remote Codex conversation that represents one local task.
+ *
+ * Entity/file execution may be isolated, but that must not split the user's
+ * visible task into multiple conversational contexts. For legacy tasks that
+ * already contain a private execution id, the most recent assistant turn is
+ * preferred and becomes the task's canonical conversation on the next event.
+ */
+export function taskConversationCodexThreadId(
+  threads: ReadonlyArray<{
+    id: string;
+    codexThreadId?: string;
+    quarantinedCodexThreadIds?: string[];
+    messages?: ReadonlyArray<{
+      role?: string;
+      executionCodexThreadId?: string;
+    }>;
+  }>,
+  sourceThreadId: string
+) {
+  const source = threads.find((thread) => thread.id === sourceThreadId);
+  if (!source) return undefined;
+  const latestAssistant = [...(source.messages || [])]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  const candidates = [
+    latestAssistant?.executionCodexThreadId,
+    source.codexThreadId
+  ];
+  for (const rawCandidate of candidates) {
+    const candidate = String(rawCandidate || "").trim();
+    if (!candidate || source.quarantinedCodexThreadIds?.includes(candidate)) continue;
+    const ownerIds = codexThreadOwnerIds(threads, candidate);
+    if (ownerIds.length === 1 && ownerIds[0] === sourceThreadId) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 export function quarantineDuplicateCodexThreadOwnership<
   T extends {
     id: string;

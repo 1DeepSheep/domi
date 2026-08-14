@@ -140,7 +140,6 @@ const externalDomiWorkflows = new Map([
   ["people-intake", "使用 domi 人物研究入库工作流检索公开信息、查重并更新当前人脉库"],
   ["project-research", "使用 domi Router 读取内部项目材料、当前文档库与公开信息源，完成项目只读研究"],
   ["project-intake", "使用 domi Router 完成项目研究、投资快评，并更新当前项目库"],
-  ["quick-discussion", "使用 domi Router 调用本机麦克风、PLAUD 与本地文件，生成讨论纪要和跟进事项"],
   ["investment-radar", "联网检索和核验最新行业新闻，并更新当前行业事件库"],
   ["task", "读取项目、人脉、行业动态和 1.待办事项文档，并更新待办事项与状态"],
   ["schedule", "整理主题、时间和地点，并向用户指定的一个或多个参会人发送 Outlook 日程邀请"],
@@ -3013,7 +3012,7 @@ async function runCodex(sender, payload) {
       };
     }
     if (
-      ["domi-router", "quick-discussion", "plaud-connection-assist"].includes(String(payload?.workflowId || ""))
+      ["domi-router", "plaud-connection-assist"].includes(String(payload?.workflowId || ""))
       || /\bPLAUD\b/i.test(prompt)
     ) {
       // Codex PLAUD skills own the same private Profile. Release the renderer's
