@@ -2050,11 +2050,15 @@ function App() {
   const markdownDocumentRef = useRef(markdownDocument);
   const pdfDocumentRef = useRef(pdfDocument);
   const databaseDraftRef = useRef(databaseDraft);
+  const databaseEntityTypeRef = useRef(databaseEntityType);
+  const databaseSelectedIdRef = useRef(databaseSelectedId);
+  const classificationSelectedIdRef = useRef(classificationSelectedId);
   const databaseAutoSaveTimerRef = useRef<number | null>(null);
   const databaseAutoSaveQueuedRef = useRef<DatabaseDraft | null>(null);
   const databaseAutoSaveInFlightRef = useRef(false);
   const databaseAutoSaveRetryTimerRef = useRef<number | null>(null);
   const databaseAutoSaveRetryRef = useRef(0);
+  const databaseRefreshInFlightRef = useRef<Promise<DomiDatabaseSnapshot | null> | null>(null);
   const databasePatchQueuesRef = useRef(new Map<string, Promise<void>>());
   const databaseCanonicalRecordsRef = useRef(
     new Map<string, DomiProject | DomiPerson | DomiNewsItem>()
@@ -2096,6 +2100,9 @@ function App() {
   markdownDocumentRef.current = markdownDocument;
   pdfDocumentRef.current = pdfDocument;
   databaseDraftRef.current = databaseDraft;
+  databaseEntityTypeRef.current = databaseEntityType;
+  databaseSelectedIdRef.current = databaseSelectedId;
+  classificationSelectedIdRef.current = classificationSelectedId;
   weeklyNewsSnapshotRef.current = weeklyNews;
   weeklyNewsPageRef.current = weeklyNewsPage;
   weeklyNewsLoadingRef.current = weeklyNewsLoading;
@@ -4148,43 +4155,58 @@ function App() {
     );
   }
 
-  async function refreshDatabase(options: { preserveSelection?: boolean } = {}) {
-    if (databaseLoading) return null;
-    if (!await flushDatabaseAutoSaveAndWait()) {
-      setDatabaseError("当前资料库修改尚未安全保存，刷新已取消并保留草稿。");
-      return null;
-    }
-    setDatabaseLoading(true);
-    setDatabaseError("");
-    try {
-      const result = await workbench.listDomiDatabase();
-      setDatabaseSnapshot(result);
-      if (!result.ok) {
-        setDatabaseError(result.error || "资料库读取失败。");
+  function refreshDatabase(options: { preserveSelection?: boolean } = {}) {
+    if (databaseRefreshInFlightRef.current) return databaseRefreshInFlightRef.current;
+    const request = (async (): Promise<DomiDatabaseSnapshot | null> => {
+      let loadingStarted = false;
+      try {
+        if (!await flushDatabaseAutoSaveAndWait()) {
+          setDatabaseError("当前资料库修改尚未安全保存，刷新已取消并保留草稿。");
+          return null;
+        }
+        setDatabaseLoading(true);
+        loadingStarted = true;
+        setDatabaseError("");
+        const result = await workbench.listDomiDatabase({ fresh: true });
+        setDatabaseSnapshot(result);
+        if (!result.ok) {
+          setDatabaseError(result.error || "资料库读取失败。");
+          return result;
+        }
+        const currentEntityType = databaseEntityTypeRef.current;
+        const records = databaseRecords(result, currentEntityType);
+        const preferredId = options.preserveSelection ? databaseSelectedIdRef.current : "";
+        const selected = records.find((item) => item.recordId === preferredId) || records[0];
+        setDatabaseSelectedId(selected?.recordId || "");
+        setDatabaseEditingId("");
+        setDatabaseExpandedCell(null);
+        setDatabaseVisibleLimit(100);
+        setDatabaseDraft(
+          selected ? databaseDraftForRecord(currentEntityType, selected) : null
+        );
+        const reviews = result.classificationReviews || [];
+        const preferredReviewId = options.preserveSelection
+          ? classificationSelectedIdRef.current
+          : "";
+        const selectedReview = reviews.find((item) => item.project.recordId === preferredReviewId)
+          || reviews[0];
+        setClassificationDraftFromReview(selectedReview);
         return result;
+      } catch (error) {
+        setDatabaseError(error instanceof Error ? error.message : String(error));
+        return null;
+      } finally {
+        if (loadingStarted) setDatabaseLoading(false);
       }
-      const records = databaseRecords(result, databaseEntityType);
-      const preferredId = options.preserveSelection ? databaseSelectedId : "";
-      const selected = records.find((item) => item.recordId === preferredId) || records[0];
-      setDatabaseSelectedId(selected?.recordId || "");
-      setDatabaseEditingId("");
-      setDatabaseExpandedCell(null);
-      setDatabaseVisibleLimit(100);
-      setDatabaseDraft(
-        selected ? databaseDraftForRecord(databaseEntityType, selected) : null
-      );
-      const reviews = result.classificationReviews || [];
-      const preferredReviewId = options.preserveSelection ? classificationSelectedId : "";
-      const selectedReview = reviews.find((item) => item.project.recordId === preferredReviewId)
-        || reviews[0];
-      setClassificationDraftFromReview(selectedReview);
-      return result;
-    } catch (error) {
-      setDatabaseError(error instanceof Error ? error.message : String(error));
-      return null;
-    } finally {
-      setDatabaseLoading(false);
-    }
+    })();
+    databaseRefreshInFlightRef.current = request;
+    const clearRequest = () => {
+      if (databaseRefreshInFlightRef.current === request) {
+        databaseRefreshInFlightRef.current = null;
+      }
+    };
+    void request.then(clearRequest, clearRequest);
+    return request;
   }
 
   async function switchDatabaseEntity(entityType: DatabaseEntityType) {
@@ -6552,6 +6574,46 @@ function App() {
     });
   }
 
+  function updateConnectionRecoveryTimeline(
+    threadId: string,
+    runId: string,
+    recovering: boolean,
+    detail?: string
+  ) {
+    setThreads((current) => {
+      const index = current.findIndex((thread) => thread.id === threadId);
+      if (index < 0) return current;
+      const thread = current[index];
+      const timeline = thread.timeline || [];
+      const recoveryIndex = timeline.findIndex(
+        (item) => item.runId === runId && item.status === "reconnecting"
+      );
+      if (!recovering && recoveryIndex < 0) return current;
+
+      const nextTimeline = [...timeline];
+      if (recoveryIndex >= 0) {
+        nextTimeline[recoveryIndex] = {
+          ...nextTimeline[recoveryIndex],
+          title: recovering ? "连接波动，正在恢复" : "连接已恢复",
+          detail: detail || (recovering ? "Codex 正在自动重连" : "任务已继续执行"),
+          status: recovering ? "reconnecting" : "done"
+        };
+      } else {
+        nextTimeline.unshift({
+          id: createId("timeline"),
+          runId,
+          title: "连接波动，正在恢复",
+          detail: detail || "Codex 正在自动重连",
+          kind: "event",
+          status: "reconnecting"
+        });
+      }
+      const next = current.slice();
+      next[index] = { ...thread, timeline: nextTimeline.slice(0, 18) };
+      return next;
+    });
+  }
+
   function pauseThreadQueueAfterTerminal(context: RunContext) {
     const currentState = queuedSubmissionsByThreadRef.current;
     const existing = currentState[context.threadId] || [];
@@ -6985,6 +7047,26 @@ function App() {
         kind: "event",
         status: "done"
       });
+      return;
+    }
+
+    if (payload.type === "reconnecting") {
+      updateConnectionRecoveryTimeline(
+        context.threadId,
+        payload.runId,
+        true,
+        payload.summary
+      );
+      return;
+    }
+
+    if (payload.type === "reconnected") {
+      updateConnectionRecoveryTimeline(
+        context.threadId,
+        payload.runId,
+        false,
+        payload.summary
+      );
       return;
     }
 
@@ -8538,7 +8620,7 @@ function App() {
     setThreadMenuId(null);
     if (view !== "data") return;
     setRightPanelOpen(false);
-    if (!databaseSnapshot && !databaseLoading) void refreshDatabase();
+    void refreshDatabase({ preserveSelection: true });
   }
 
   function refreshDocumentIndexForSearch() {

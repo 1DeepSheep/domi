@@ -138,6 +138,24 @@ async function main() {
     assert.match(clipboard.html, /data:image\/png;base64,/);
     assert.doesNotMatch(clipboard.html, /project: domi/, "frontmatter should not enter rich clipboard HTML");
 
+    const emphasized = buildMarkdownClipboardPayload({
+      documentPath,
+      markdown: "普通文字，++需要重点关注的投资判断++。"
+    });
+    assert.match(
+      emphasized.html,
+      /<u style="text-decoration:underline;text-underline-offset:2px;">需要重点关注的投资判断<\/u>/,
+      "domi underline markdown must remain underlined in rich clipboard HTML"
+    );
+    assert.doesNotMatch(emphasized.html, /\+\+需要重点关注的投资判断\+\+/);
+
+    const literalUnderlineSyntax = buildMarkdownClipboardPayload({
+      documentPath,
+      markdown: "`++代码示例++`"
+    });
+    assert.match(literalUnderlineSyntax.html, /<code>\+\+代码示例\+\+<\/code>/);
+    assert.doesNotMatch(literalUnderlineSyntax.html, /<u\b/);
+
     const missing = buildMarkdownClipboardPayload({
       documentPath,
       markdown: "![缺失图片](assets/not-found.png)"
