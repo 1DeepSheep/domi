@@ -34,7 +34,10 @@ const {
 } = require("./app-settings.cjs");
 const { UpdateService } = require("./update-service.cjs");
 const { ServiceCoordinator } = require("./service-coordinator.cjs");
-const { classifyCodexTurnStatus } = require("./codex-turn-status.cjs");
+const {
+  classifyCodexTurnStatus,
+  codexReconnectNotice
+} = require("./codex-turn-status.cjs");
 const { isSelectedCodexConnectionReady } = require("./codex-protocol.cjs");
 const {
   codexRunExecutionMode,
@@ -2154,7 +2157,19 @@ function handleCodexNotification(method, params) {
   run.eventCount += 1;
   armRunIdleTimeout(run);
 
+  const markConnectionRecovered = () => {
+    if (!run.connectionRecoveryActive) return;
+    run.connectionRecoveryActive = false;
+    publishCodexEvent(run.sender, run.runId, {
+      type: "reconnected",
+      threadId: run.threadId,
+      turnId: run.turnId,
+      summary: "连接已恢复，任务继续执行"
+    });
+  };
+
   if (method === "turn/started") {
+    markConnectionRecovered();
     run.turnId = params.turnId || run.turnId;
     publishCodexEvent(run.sender, run.runId, {
       type: "started",
@@ -2166,6 +2181,7 @@ function handleCodexNotification(method, params) {
   }
 
   if (method === "item/agentMessage/delta") {
+    markConnectionRecovered();
     run.output += params.delta || "";
     publishCodexEvent(run.sender, run.runId, {
       type: "assistant-delta",
@@ -2177,6 +2193,7 @@ function handleCodexNotification(method, params) {
   }
 
   if (method === "thread/tokenUsage/updated") {
+    markConnectionRecovered();
     const usage = usageFromNotification(params);
     if (usage) {
       publishCodexEvent(run.sender, run.runId, {
@@ -2190,6 +2207,7 @@ function handleCodexNotification(method, params) {
   }
 
   if (method === "item/started" || method === "item/completed") {
+    markConnectionRecovered();
     const item = describeItem(params.item);
     if (method === "item/completed" && params.item?.type === "agentMessage") {
       run.output = params.item.text || run.output;
@@ -2210,6 +2228,19 @@ function handleCodexNotification(method, params) {
   }
 
   if (method === "error") {
+    const reconnect = codexReconnectNotice(params);
+    if (reconnect) {
+      run.connectionRecoveryActive = true;
+      publishCodexEvent(run.sender, run.runId, {
+        type: "reconnecting",
+        threadId: run.threadId,
+        turnId: run.turnId,
+        summary: reconnect.summary,
+        attempt: reconnect.attempt,
+        total: reconnect.total
+      });
+      return;
+    }
     const message = params.error?.message || params.message || "Codex 执行出错。";
     publishCodexEvent(run.sender, run.runId, {
       type: "json",
@@ -2229,8 +2260,10 @@ function handleCodexNotification(method, params) {
     if (run.stopRequested) {
       finishRun(run, "stopped");
     } else if (status === "completed") {
+      markConnectionRecovered();
       finishRun(run, "completed");
     } else if (status === "stopped") {
+      markConnectionRecovered();
       finishRun(run, "stopped");
     } else {
       finishRun(run, "failed", {
@@ -3597,12 +3630,13 @@ ipcMain.handle("workspace:open", async (_event, requestedWorkspacePath) => {
 });
 
 ipcMain.handle("domi:cache", () => getDomiIntegration().loadCache());
-ipcMain.handle("domi:database-list", async () => {
+ipcMain.handle("domi:database-list", async (_event, request = {}) => {
   try {
     return await serviceCoordinator.run(
       "domi:database-list",
       () => getDomiIntegration().databaseSnapshot(),
       {
+        force: request?.fresh === true,
         ttlMs: 5_000,
         retries: 0,
         allowStale: false,

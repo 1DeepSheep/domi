@@ -88,7 +88,7 @@ declare global {
       ) => Promise<FeishuSetupStatus>;
       provisionFeishuSetup: () => Promise<FeishuSetupProvisionResult>;
       syncDomi: () => Promise<DomiSyncResult>;
-      listDomiDatabase: () => Promise<DomiDatabaseSnapshot>;
+      listDomiDatabase: (request?: { fresh?: boolean }) => Promise<DomiDatabaseSnapshot>;
       updateDomiDatabaseRecord: (
         request: DomiDatabaseUpdateRequest
       ) => Promise<DomiDatabaseUpdateResult>;
@@ -1527,6 +1527,8 @@ export type CodexEventPayload = {
     | "thread"
     | "started"
     | "compatibility"
+    | "reconnecting"
+    | "reconnected"
     | "assistant-delta"
     | "usage"
     | "json"
@@ -1541,6 +1543,8 @@ export type CodexEventPayload = {
   threadId?: string;
   turnId?: string;
   summary?: string;
+  attempt?: number | null;
+  total?: number | null;
   text?: string;
   error?: string;
   code?: number;
