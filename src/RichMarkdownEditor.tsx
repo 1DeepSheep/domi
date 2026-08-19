@@ -658,6 +658,11 @@ export default function RichMarkdownEditor({
           openOnClick: false,
           autolink: true,
           protocols: ["domi-wiki", "domi-callout", "domi-folder"]
+        },
+        underline: {
+          HTMLAttributes: {
+            style: "text-decoration: underline;"
+          }
         }
       }),
       TableKit.configure({

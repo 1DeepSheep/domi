@@ -33,6 +33,17 @@ const databaseGridStyles = read("src/database/database-grid.css");
 const appConfirmDialog = read("src/AppConfirmDialog.tsx");
 
 assert.match(
+  main,
+  /const reconnect = codexReconnectNotice\(params\)[\s\S]*?type: "reconnecting"[\s\S]*?return;[\s\S]*?type: "turn\.failed"/,
+  "Recoverable Codex reconnect notices must stay running instead of being exposed as terminal task failures."
+);
+assert.match(
+  app,
+  /payload\.type === "reconnecting"[\s\S]*?updateConnectionRecoveryTimeline[\s\S]*?payload\.type === "reconnected"[\s\S]*?updateConnectionRecoveryTimeline/,
+  "The renderer must show recoverable connection state separately and clear it when task events resume."
+);
+
+assert.match(
   messageContent,
   /remarkPlugins=\{\[remarkGfm, remarkCodexFileCitations\]\}/,
   "Assistant messages must turn Codex file citation markers into material links."
@@ -51,6 +62,11 @@ assert.match(
   editor,
   /protocols: \["domi-wiki", "domi-callout", "domi-folder"\][\s\S]*?href === "domi-folder:current"[\s\S]*?workbench\.openResource\(directory\)/,
   "Project homepages must expose a safe shortcut that opens only the current entity directory."
+);
+assert.match(
+  editor,
+  /underline:\s*\{[\s\S]*?HTMLAttributes:\s*\{[\s\S]*?style:\s*"text-decoration: underline;"/,
+  "Selected rich Markdown text must copy underline as portable HTML instead of a domi-only visual style."
 );
 assert.match(
   messageContent,
@@ -1566,6 +1582,31 @@ assert.match(
   app,
   /async function openDocumentLibrary\(\)[\s\S]*?if \(!await navigateWorkspace\("documents"\)\) return;[\s\S]*?async function openPrimaryWorkspace\(view: "tasks" \| "news" \| "data"\)[\s\S]*?if \(!await navigateWorkspace\(view\)\) return;/,
   "Sidebar UI state must change only after the current page has safely completed navigation."
+);
+assert.match(
+  app,
+  /function refreshDatabase\([^)]*\)[\s\S]*?databaseRefreshInFlightRef\.current[\s\S]*?flushDatabaseAutoSaveAndWait\(\)[\s\S]*?listDomiDatabase\(\{ fresh: true \}\)[\s\S]*?databaseRefreshInFlightRef\.current = null/,
+  "Database refreshes must be fresh, single-flight and wait for pending edits before replacing the snapshot."
+);
+assert.match(
+  app,
+  /async function openPrimaryWorkspace\(view: "tasks" \| "news" \| "data"\)[\s\S]*?if \(view !== "data"\) return;[\s\S]*?refreshDatabase\(\{ preserveSelection: true \}\)/,
+  "Every database workspace open must refresh while preserving the current selection."
+);
+assert.match(
+  preload,
+  /listDomiDatabase: \(request\) => ipcRenderer\.invoke\("domi:database-list", request\)/,
+  "The renderer must forward the fresh database-read request to the main process."
+);
+assert.match(
+  main,
+  /ipcMain\.handle\("domi:database-list", async \(_event, request = \{\}\)[\s\S]*?force: request\?\.fresh === true[\s\S]*?ttlMs: 5_000/,
+  "An explicit database refresh must bypass the main-process TTL cache."
+);
+assert.match(
+  env,
+  /listDomiDatabase: \(request\?: \{ fresh\?: boolean \}\) => Promise<DomiDatabaseSnapshot>/,
+  "The preload database refresh contract must expose the fresh-read option."
 );
 
 const deleteThreadStart = app.indexOf("function deleteThread(thread: Thread)");

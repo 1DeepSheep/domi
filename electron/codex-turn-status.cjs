@@ -10,4 +10,31 @@ function classifyCodexTurnStatus(turnStatus, hasActiveRun = false) {
   return "unknown";
 }
 
-module.exports = { classifyCodexTurnStatus };
+function codexReconnectNotice(params = {}) {
+  const message = String(
+    params?.error?.message
+      || params?.message
+      || ""
+  ).trim();
+  const match = message.match(
+    /\b(?:reconnecting|retrying)(?:\s*(?:\.{2,}|\u2026)\s*)?\s*(\d+)\s*\/\s*(\d+)\b/i
+  );
+  const explicitlyRetrying = params?.willRetry === true
+    || params?.retrying === true
+    || params?.error?.willRetry === true
+    || params?.error?.retrying === true;
+  if (!match && !explicitlyRetrying) return null;
+
+  const attempt = match ? Number(match[1]) : null;
+  const total = match ? Number(match[2]) : null;
+  return {
+    message,
+    attempt: Number.isFinite(attempt) ? attempt : null,
+    total: Number.isFinite(total) ? total : null,
+    summary: attempt && total
+      ? `连接波动，正在自动恢复（${attempt}/${total}）`
+      : "连接波动，正在自动恢复"
+  };
+}
+
+module.exports = { classifyCodexTurnStatus, codexReconnectNotice };
