@@ -2,7 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { fileURLToPath } = require("node:url");
-const { marked, Renderer } = require("marked");
+const { Marked, Renderer } = require("marked");
 
 const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_CLIPBOARD_IMAGE_BYTES = 40 * 1024 * 1024;
@@ -242,6 +242,40 @@ function splitFrontmatter(markdown) {
   return match ? String(markdown).slice(match[1].length) : String(markdown || "");
 }
 
+function markdownClipboardParser(renderer) {
+  const parser = new Marked();
+  parser.use({
+    extensions: [{
+      name: "underline",
+      level: "inline",
+      start(source) {
+        return source.indexOf("++");
+      },
+      tokenizer(source) {
+        const match = /^(\+\+)([\s\S]+?)(\+\+)/.exec(source);
+        if (!match) return undefined;
+        const text = match[2].trim();
+        return {
+          type: "underline",
+          raw: match[0],
+          text,
+          tokens: this.lexer.inlineTokens(text)
+        };
+      },
+      renderer(token) {
+        return `<u style="text-decoration:underline;text-underline-offset:2px;">${this.parser.parseInline(token.tokens || [])}</u>`;
+      }
+    }]
+  });
+  parser.setOptions({
+    async: false,
+    breaks: false,
+    gfm: true,
+    renderer
+  });
+  return parser;
+}
+
 function buildMarkdownClipboardPayload(request) {
   const documentPath = String(request?.documentPath || "");
   const markdown = typeof request?.markdown === "string" ? request.markdown : "";
@@ -273,12 +307,7 @@ function buildMarkdownClipboardPayload(request) {
   };
 
   const body = splitFrontmatter(markdown);
-  const rendered = marked.parse(body, {
-    async: false,
-    breaks: false,
-    gfm: true,
-    renderer
-  });
+  const rendered = markdownClipboardParser(renderer).parse(body);
   const html = [
     "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;",
     "font-size:15px;line-height:1.7;color:#292926;\">",
