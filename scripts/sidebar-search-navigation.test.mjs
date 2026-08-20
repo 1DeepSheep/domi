@@ -52,6 +52,14 @@ test("entity search accepts a legacy indexed document only inside the verified w
   );
   assert.equal(
     entityPrimaryDocumentPath(
+      "/library/3.项目库/AI/旧项目",
+      "project",
+      "/library/3.项目库/AI/旧项目/路演材料.pdf"
+    ),
+    "/library/3.项目库/AI/旧项目/路演材料.pdf"
+  );
+  assert.equal(
+    entityPrimaryDocumentPath(
       "/library/3.项目库/AI/已改名项目",
       "project",
       "/library/3.项目库/AI/旧目录/项目主页.md"

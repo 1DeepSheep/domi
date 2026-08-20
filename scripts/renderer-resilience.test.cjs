@@ -21,6 +21,8 @@ const entityWorkspaceRecovery = read("electron/entity-workspace-recovery.cjs");
 const feishuDocumentIntent = read("electron/feishu-document-intent.cjs");
 const workspaceBoundary = read("electron/workspace-boundary.cjs");
 const preload = read("electron/preload.cjs");
+const documentSearchIndex = read("electron/document-search-index.cjs");
+const documentSearchWorker = read("electron/document-search-worker.cjs");
 const taxonomy = read("src/investmentTaxonomy.ts");
 const canonicalTaxonomy = JSON.parse(read("shared/investment-taxonomy.json"));
 const styles = read("src/styles.css");
@@ -400,18 +402,58 @@ assert.ok(
   newTaskIndex >= 0
     && sidebarEntitySearchIndex > newTaskIndex
     && sidebarPrimaryNavIndex > sidebarEntitySearchIndex,
-  "Project and people search must sit below New Task and above the primary sidebar navigation."
+  "Project, people and document search must sit below New Task and above the primary sidebar navigation."
 );
 assert.equal(
-  (app.match(/aria-label="搜索 domi 项目或人脉"/g) || []).length,
+  (app.match(/aria-label="搜索 domi 项目、人脉或文档"/g) || []).length,
   1,
-  "Project and people search must have one authoritative sidebar input."
+  "Project, people and document search must have one authoritative sidebar input."
 );
 const sidebarEntitySearch = app.slice(sidebarEntitySearchIndex, sidebarPrimaryNavIndex);
 assert.match(
   sidebarEntitySearch,
   /value=\{domiQuery\}[\s\S]*?onFocus=\{refreshLocalIndexForSearch\}[\s\S]*?openDomiProject\(project\)[\s\S]*?openDomiPerson\(person\)/,
   "Moving entity search must preserve local-index refresh and project/person navigation."
+);
+assert.match(
+  sidebarEntitySearch,
+  /文档提及[\s\S]*?domiDocumentSearch\.results\.map[\s\S]*?openDomiDocumentSearchResult\(document\)/,
+  "Sidebar search must distinguish document mentions and open the source document."
+);
+assert.match(
+  app,
+  /searchDocumentLibrary\(\{ query, limit: 8 \}\)[\s\S]*?result\.indexing[\s\S]*?setTimeout/,
+  "Document mention search must debounce and refresh partial background-index results."
+);
+assert.match(
+  app,
+  /const sourceQuery = domiQuery\.trim\(\)[\s\S]*?openDocument\(result\.path, sourceQuery\)[\s\S]*?initialSearchQuery=\{markdownInitialSearchQuery\}/,
+  "Opening a Markdown mention must carry the query into the editor for immediate highlighting."
+);
+assert.match(
+  editor,
+  /initialSearchQuery[\s\S]*?onCreate:[\s\S]*?setSearchOpen\(true\)[\s\S]*?refreshSearch\(current, initialSearchQuery, 0\)/,
+  "The Markdown editor must reveal and highlight the matched document text after search navigation."
+);
+assert.match(
+  preload,
+  /searchDocumentLibrary:[\s\S]*?document-library:search/,
+  "The renderer bridge must expose the local document search index."
+);
+assert.match(
+  main,
+  /DocumentSearchService[\s\S]*?document-search\.sqlite3[\s\S]*?document-library:search/,
+  "Document content search must use an isolated local cache instead of scanning in the renderer."
+);
+assert.match(
+  documentSearchIndex,
+  /tokenize='trigram'[\s\S]*?is_transcript[\s\S]*?MAX_MARKDOWN_BYTES/,
+  "The search cache must use trigram FTS, suppress raw transcripts by default, and bound Markdown reads."
+);
+assert.match(
+  documentSearchWorker,
+  /yieldToMessages[\s\S]*?fs\.promises\.opendir[\s\S]*?entry\.isSymbolicLink\(\)[\s\S]*?await yieldToMessages\(\)/,
+  "Indexing must run incrementally off the main thread and reject symbolic-link traversal."
 );
 assert.match(
   sidebarEntitySearch,
@@ -1033,6 +1075,11 @@ assert.match(
 );
 assert.match(
   main,
+  /CODEX_VERSION_CHECK_TIMEOUT_MS[\s\S]*?CODEX_HEALTH_REQUEST_TIMEOUT_MS[\s\S]*?execFileAsync\(binary, \["--version"\][\s\S]*?timeout: CODEX_VERSION_CHECK_TIMEOUT_MS[\s\S]*?client\.request\("model\/list"[\s\S]*?timeoutMs: CODEX_HEALTH_REQUEST_TIMEOUT_MS[\s\S]*?codex-check-performance/,
+  "Codex version and App Server readiness probes must stay bounded and emit stage timings."
+);
+assert.match(
+  main,
   /researchCachePromise = prepareProjectResearchCache[\s\S]*?repositoryContextPromise = Promise\.resolve[\s\S]*?larkContextPromise = larkRuntimeContext[\s\S]*?threadPromise = client\.start\(\)\.then[\s\S]*?Promise\.all\(\[[\s\S]*?threadPromise,[\s\S]*?repositoryContextPromise,[\s\S]*?larkContextPromise,[\s\S]*?researchCachePromise/,
   "Codex startup, repository context, external-connection preflight, and research cache preparation must run concurrently."
 );
@@ -1147,8 +1194,8 @@ assert.match(
 );
 assert.match(
   app,
-  /const status = await workbench\.checkCodex\(\)[\s\S]*?if \(!status\.pluginSetup\?\.ok\)[\s\S]*?await Promise\.allSettled\(\[[\s\S]*?refreshDomi\(\)[\s\S]*?refreshDomiTaskBoard[\s\S]*?refreshWeeklyNews/,
-  "Initial integration sync must wait for the bundled plugin check, then refresh independent data, todo and news sources concurrently."
+  /const statusPromise = workbench\.checkCodex\(\)\.then[\s\S]*?const dataRefreshPromise = Promise\.allSettled\(\[[\s\S]*?refreshDomi\(\)[\s\S]*?refreshDomiTaskBoard[\s\S]*?refreshWeeklyNews[\s\S]*?Promise\.all\(\[statusPromise, dataRefreshPromise\]\)[\s\S]*?if \(!status\.pluginSetup\?\.ok\)/,
+  "Initial integration sync must refresh independent data, todo and news sources alongside Codex readiness."
 );
 assert.match(
   app,
@@ -1555,8 +1602,8 @@ assert.ok(entitySearchOpenStart >= 0 && entitySearchOpenEnd > entitySearchOpenSt
 const entitySearchOpen = app.slice(entitySearchOpenStart, entitySearchOpenEnd);
 assert.match(
   entitySearchOpen,
-  /domiEntityOpenRequestRef\.current[\s\S]*?navigateWorkspace\("documents", true\)[\s\S]*?loadDomiEntityWorkspace\(\{[\s\S]*?recordId: entity\.recordId[\s\S]*?repairMissing: true[\s\S]*?workspaceViewRef\.current !== "documents"[\s\S]*?entityPrimaryDocumentPath\([\s\S]*?documentLibraryExpansionPath[\s\S]*?openMarkdown\(homepageResource, undefined, requestId\)[\s\S]*?requestId !== domiEntityOpenRequestRef\.current/,
-  "Sidebar entity search must open the canonical homepage and expand its document folder by record id."
+  /domiEntityOpenRequestRef\.current[\s\S]*?navigateWorkspace\("documents", true\)[\s\S]*?loadDomiEntityWorkspace\(\{[\s\S]*?recordId: entity\.recordId[\s\S]*?repairMissing: true[\s\S]*?entityPrimaryDocumentPath\([\s\S]*?documentLibraryExpansionPath[\s\S]*?previewDomiDatabaseRecord\(\{[\s\S]*?safeFallbackPath === fallbackPath[\s\S]*?isLocalPdfResource\(homepageResource\)[\s\S]*?openPdf\(homepageResource, undefined, false, requestId\)[\s\S]*?openMarkdown\(homepageResource, undefined, requestId\)/,
+  "Sidebar entity search must prefer the canonical homepage, safely fall back to an indexed Markdown or PDF, and expand its document folder by record id."
 );
 assert.doesNotMatch(
   entitySearchOpen,
@@ -1577,6 +1624,16 @@ assert.match(
   app,
   /const result = await workbench\.readMarkdown\(\{ resource, basePath \}\);[\s\S]*?entityOpenRequestId !== undefined[\s\S]*?entityOpenRequestId !== domiEntityOpenRequestRef\.current[\s\S]*?markdownDocumentRef\.current = result\.document/,
   "A canceled entity homepage read must be rejected before it can replace the active document."
+);
+assert.match(
+  app,
+  /async function openPdf\([\s\S]*?entityOpenRequestId\?: number[\s\S]*?const result = await workbench\.readPdf\(\{ resource, basePath \}\);[\s\S]*?entityOpenRequestId !== domiEntityOpenRequestRef\.current[\s\S]*?setPdfDocument\(result\.document\)/,
+  "A canceled entity PDF fallback must be rejected before it can replace the active document."
+);
+assert.match(
+  app,
+  /documentLibraryNotice[\s\S]*?className="document-library-notice" role="status"/,
+  "A legacy fallback must explain that the canonical entity homepage is still missing."
 );
 assert.match(
   app,

@@ -59,6 +59,7 @@ const {
   ensureDocumentLibraryStructure,
   listDocumentLibrary
 } = require("./document-library.cjs");
+const { DocumentSearchService } = require("./document-search-service.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
 const { normalizeLocalDocumentResource } = require("./document-resource.cjs");
 const { prepareApplicationBrandPaths } = require("./brand-migration.cjs");
@@ -128,6 +129,8 @@ const NON_ARCHIVED_WORKFLOWS = new Set([
 const allowedMarkdownAssetPaths = new Set();
 const CODEX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const CODEX_CHECK_CACHE_TTL_MS = 60 * 1000;
+const CODEX_VERSION_CHECK_TIMEOUT_MS = 10_000;
+const CODEX_HEALTH_REQUEST_TIMEOUT_MS = 20_000;
 const LARK_STATUS_CACHE_TTL_MS = 5 * 60 * 1000;
 const DOCUMENT_LIBRARY_CACHE_TTL_MS = 60 * 1000;
 let documentLibraryCache = {
@@ -135,6 +138,7 @@ let documentLibraryCache = {
   expiresAt: 0,
   snapshot: null
 };
+let documentSearchService = null;
 const externalDomiWorkflows = new Map([
   ["domi-analyst", "使用 domi-AI分析师，并可能读取当前 domi 资料库"],
   ["domi-router", "访问 PLAUD、domi 恢复队列和当前资料库，并可能按工作流更新记录"],
@@ -798,6 +802,35 @@ function currentDocumentLibraryLocation() {
   return location;
 }
 
+function getDocumentSearchService() {
+  if (!documentSearchService) {
+    documentSearchService = new DocumentSearchService({
+      databasePath: path.join(app.getPath("cache"), "domi", "document-search.sqlite3")
+    });
+  }
+  return documentSearchService;
+}
+
+function searchDocumentLibrary(request = {}) {
+  try {
+    const location = currentDocumentLibraryLocation();
+    return getDocumentSearchService().search(location.rootPath, {
+      query: String(request?.query || ""),
+      limit: request?.limit,
+      includeTranscripts: request?.includeTranscripts === true
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      results: [],
+      indexing: false,
+      indexedCount: 0,
+      lastIndexedAt: 0,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 function invalidateDocumentLibraryCache() {
   documentLibraryCache = {
     key: "",
@@ -822,6 +855,7 @@ function readDocumentLibrary(request = {}) {
       ...listDocumentLibrary(location.rootPath),
       structured: location.initializeStructure
     };
+    getDocumentSearchService().scheduleIndex(location.rootPath, request?.force === true);
     documentLibraryCache = {
       key: cacheKey,
       expiresAt: Date.now() + DOCUMENT_LIBRARY_CACHE_TTL_MS,
@@ -1144,6 +1178,8 @@ async function saveMarkdownDocument(request) {
       await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
     }
     const nextStat = await fs.promises.stat(resolved);
+    const location = currentDocumentLibraryLocation();
+    getDocumentSearchService().updateFile(location.rootPath, resolved);
     return {
       ok: true,
       document: {
@@ -2313,8 +2349,10 @@ function resetCodexClient() {
 }
 
 async function runCodexCheck() {
+  const startedAt = Date.now();
   ensureDemoWorkspace();
   await ensureCodexRuntimeReady();
+  const runtimeReadyAt = Date.now();
   const loaded = getAppSettings().load();
   let detectedPath = "";
   let detectedVersion = "";
@@ -2330,35 +2368,40 @@ async function runCodexCheck() {
     runtime = getCodexRuntime();
     const binary = resolveCodexBinary(runtime.codexPath);
     detectedPath = binary;
-    const versionResult = await execFileAsync(binary, ["--version"], {
-      env: codexEnvironment(runtime.env)
-    });
-    detectedVersion = String(versionResult.stdout || "").trim();
-    let pluginSetup = null;
-    try {
-      pluginSetup = await getDomiPluginManager().ensure({
+    const environment = codexEnvironment(runtime.env);
+    const pluginSetupPromise = getDomiPluginManager().ensure({
         binary,
-        env: codexEnvironment(runtime.env),
+        env: environment,
         enabled: app.isPackaged || process.env.DOMI_INSTALL_BUNDLED_PLUGIN === "1"
-      });
-      if (pluginSetup.updated) resetCodexClient();
-    } catch (error) {
-      pluginSetup = {
+      }).catch((error) => ({
         ok: false,
         error: error instanceof Error ? error.message : String(error)
-      };
-    }
+      }));
+    const [versionResult, pluginSetup] = await Promise.all([
+      execFileAsync(binary, ["--version"], {
+        env: environment,
+        timeout: CODEX_VERSION_CHECK_TIMEOUT_MS
+      }),
+      pluginSetupPromise
+    ]);
+    detectedVersion = String(versionResult.stdout || "").trim();
+    if (pluginSetup.updated) resetCodexClient();
+    const pluginReadyAt = Date.now();
     const client = getCodexClient();
     const [accountResult, modelResult, configResult] = await Promise.all([
       runtime.authMode === "chatgpt"
-        ? client.request("account/read", { refreshToken: false })
+        ? client.request("account/read", { refreshToken: false }, {
+            timeoutMs: CODEX_HEALTH_REQUEST_TIMEOUT_MS
+          })
         : Promise.resolve({ account: null, requiresOpenaiAuth: false }),
       client.request("model/list", {
         cursor: null,
         limit: 50,
         includeHidden: false
-      }),
-      client.request("config/read", { includeLayers: false })
+      }, { timeoutMs: CODEX_HEALTH_REQUEST_TIMEOUT_MS }),
+      client.request("config/read", { includeLayers: false }, {
+        timeoutMs: CODEX_HEALTH_REQUEST_TIMEOUT_MS
+      })
     ]);
     const account = accountResult?.account || null;
     const config = configResult?.config || {};
@@ -2371,7 +2414,7 @@ async function runCodexCheck() {
       relayCredentialStored: runtime.hasApiKey
     });
 
-    return {
+    const result = {
       ok: authenticated,
       path: binary,
       version: detectedVersion,
@@ -2409,7 +2452,21 @@ async function runCodexCheck() {
           ? "中转站凭据未就绪，请重新保存配置并测试；无需登录 ChatGPT。"
           : "请先登录 ChatGPT Codex。"
     };
+    appendRuntimeLog("codex-check-performance", {
+      outcome: result.ok ? "ready" : "not-ready",
+      runtimeMs: runtimeReadyAt - startedAt,
+      pluginMs: pluginReadyAt - runtimeReadyAt,
+      appServerMs: Date.now() - pluginReadyAt,
+      totalMs: Date.now() - startedAt
+    });
+    return result;
   } catch (error) {
+    appendRuntimeLog("codex-check-performance", {
+      outcome: "failed",
+      runtimeMs: runtimeReadyAt - startedAt,
+      totalMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error)
+    });
     return {
       ok: false,
       path: detectedPath,
@@ -3459,6 +3516,7 @@ app.on("before-quit", (event) => {
     const remaining = await drainRunPostProcessing();
     appendRuntimeLog("app-postprocess-drained", { remaining });
     await domiIntegration?.shutdownAllPlaudOperations("app-quit");
+    await documentSearchService?.close();
     updateService?.stop();
     codexClient?.close();
     if (remaining === 0) stateStore?.close();
@@ -3569,6 +3627,7 @@ ipcMain.handle("markdown:open-external", (_event, resource) =>
   openMarkdownExternally(resource)
 );
 ipcMain.handle("document-library:list", (_event, request) => readDocumentLibrary(request));
+ipcMain.handle("document-library:search", (_event, request) => searchDocumentLibrary(request));
 ipcMain.handle("document-library:create", (_event, request) =>
   createDocumentLibraryItem(request)
 );

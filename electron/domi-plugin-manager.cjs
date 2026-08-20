@@ -11,6 +11,41 @@ const {
 const execFileAsync = promisify(execFile);
 const MARKETPLACE_NAME = "domi-managed";
 const PLUGIN_ID = `domi@${MARKETPLACE_NAME}`;
+const DEFAULT_REMOTE_STARTUP_BUDGET_MS = 1_500;
+const DEFAULT_CODEX_PLUGIN_COMMAND_TIMEOUT_MS = 20_000;
+
+async function checkRemoteWithinBudget(updater, budgetMs = DEFAULT_REMOTE_STARTUP_BUDGET_MS) {
+  const timeoutMs = Math.max(0, Number(budgetMs) || 0);
+  const checkPromise = Promise.resolve().then(() => updater.check());
+  if (!timeoutMs) return checkPromise;
+  const timedOut = Symbol("remote-plugin-check-timeout");
+  let timer;
+  const result = await Promise.race([
+    checkPromise,
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(timedOut), timeoutMs);
+    })
+  ]);
+  if (timer) clearTimeout(timer);
+  if (result !== timedOut) return result;
+
+  // The signed update continues into its atomic cache, but Codex readiness no
+  // longer waits on GitHub or a slow proxy. A later check installs that cached
+  // candidate before starting a new App Server.
+  void checkPromise.catch(() => undefined);
+  let candidate = null;
+  try {
+    candidate = updater.cachedCandidate?.() || null;
+  } catch {
+    candidate = null;
+  }
+  return {
+    ok: true,
+    checked: false,
+    candidate,
+    reason: "background-refresh"
+  };
+}
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -68,7 +103,9 @@ class DomiPluginManager {
     bundledLockPath,
     clientVersion = "0.0.0",
     remoteUpdater = null,
-    remoteUpdateEnabled = true
+    remoteUpdateEnabled = true,
+    remoteStartupBudgetMs = DEFAULT_REMOTE_STARTUP_BUDGET_MS,
+    codexCommandTimeoutMs = DEFAULT_CODEX_PLUGIN_COMMAND_TIMEOUT_MS
   }) {
     this.userDataPath = userDataPath;
     this.bundledPluginRoot = bundledPluginRoot;
@@ -79,6 +116,11 @@ class DomiPluginManager {
       "domi-plugin-transaction.json"
     );
     this.remoteUpdateEnabled = remoteUpdateEnabled;
+    this.remoteStartupBudgetMs = Math.max(0, Number(remoteStartupBudgetMs) || 0);
+    this.codexCommandTimeoutMs = Math.max(
+      1_000,
+      Number(codexCommandTimeoutMs) || DEFAULT_CODEX_PLUGIN_COMMAND_TIMEOUT_MS
+    );
     this.remoteUpdater = remoteUpdater || new DomiPluginUpdater({
       marketplaceRoot: this.marketplaceRoot,
       clientVersion
@@ -142,7 +184,7 @@ class DomiPluginManager {
   async runCodex(binary, args, env) {
     const { stdout } = await execFileAsync(binary, args, {
       env,
-      timeout: 120000,
+      timeout: this.codexCommandTimeoutMs,
       maxBuffer: 16 * 1024 * 1024
     });
     if (!stdout.trim()) return {};
@@ -262,7 +304,7 @@ class DomiPluginManager {
     if (!bundledInfo) return { ok: false, skipped: true, error: "安装包未包含 domi 插件。" };
     const installedInfo = this.installedInfo();
     const remoteResult = this.remoteUpdateEnabled
-      ? await this.remoteUpdater.check()
+      ? await checkRemoteWithinBudget(this.remoteUpdater, this.remoteStartupBudgetMs)
       : { ok: true, checked: false, candidate: null, reason: "disabled" };
     const info = selectPreferredCandidate([
       bundledInfo,
@@ -356,9 +398,12 @@ class DomiPluginManager {
 }
 
 module.exports = {
+  DEFAULT_CODEX_PLUGIN_COMMAND_TIMEOUT_MS,
+  DEFAULT_REMOTE_STARTUP_BUDGET_MS,
   DomiPluginManager,
   MARKETPLACE_NAME,
   PLUGIN_ID,
+  checkRemoteWithinBudget,
   compareVersions,
   selectPreferredCandidate
 };
