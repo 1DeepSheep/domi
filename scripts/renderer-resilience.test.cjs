@@ -713,6 +713,21 @@ assert.match(
 );
 assert.match(
   styles,
+  /\.sidebar-primary-nav \{[\s\S]*?min-height: 0;[\s\S]*?flex: 0 1 auto;[\s\S]*?overflow: hidden;/,
+  "The primary sidebar navigation must shrink before it can overlap the fixed footer."
+);
+assert.match(
+  styles,
+  /\.sidebar-document-section\.open \{[\s\S]*?flex: 1 1 auto;[\s\S]*?\.sidebar-document-library \{[\s\S]*?min-height: 0;[\s\S]*?flex: 1 1 auto;/,
+  "An expanded document library must consume only the available sidebar height."
+);
+assert.match(
+  styles,
+  /\.sidebar-thread-section \{[\s\S]*?min-height: 64px;[\s\S]*?flex: 1 1 150px;[\s\S]*?overflow: hidden;/,
+  "Recent conversations must retain a visible heading without painting over Codex status."
+);
+assert.match(
+  styles,
   /\.sidebar-document-library \.document-library-node-row \{[\s\S]*?width: max-content;[\s\S]*?min-width: 100%;[\s\S]*?grid-template-columns: 12px 17px max-content;/,
   "Long sidebar document names must create real horizontal overflow while short rows still fill the viewport."
 );
