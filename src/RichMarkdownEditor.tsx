@@ -35,6 +35,7 @@ type RichMarkdownEditorProps = {
   onBlur?: () => void;
   onCopyDocument?: () => void;
   onOpenDocument?: (resource: string) => void;
+  initialSearchQuery?: string;
 };
 
 const MARKDOWN_CHANGE_PUBLISH_DELAY_MS = 120;
@@ -445,7 +446,8 @@ export default function RichMarkdownEditor({
   onChange,
   onBlur,
   onCopyDocument,
-  onOpenDocument
+  onOpenDocument,
+  initialSearchQuery = ""
 }: RichMarkdownEditorProps) {
   const { frontmatter, body } = useMemo(() => splitFrontmatter(markdown), [markdown]);
   const preparedBody = useMemo(() => prepareMarkdownForEditor(body), [body]);
@@ -763,6 +765,13 @@ export default function RichMarkdownEditor({
       if (!current.isDestroyed) {
         editorRef.current = current;
         hydratingRef.current = false;
+        if (initialSearchQuery.trim()) {
+          setSearchOpen(true);
+          searchOpenRef.current = true;
+          window.requestAnimationFrame(() => {
+            refreshSearch(current, initialSearchQuery, 0);
+          });
+        }
       }
     },
     onDestroy: () => {

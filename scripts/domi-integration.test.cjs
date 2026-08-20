@@ -2799,7 +2799,9 @@ test("field patches commit canonical SQLite state before background Markdown mat
   assert.match(fs.readFileSync(projectPath, "utf8"), /last_updated_at: "20\d\d-/);
   assert.match(fs.readFileSync(projectPath, "utf8"), /必须保留/);
   assert.match(fs.readFileSync(projectPath, "utf8"), /\[打开项目目录\]\(domi-folder:current\)/);
-  assert.match(fs.readFileSync(projectPath, "utf8"), /## 投资摘要[\s\S]*?## 项目概览[\s\S]*?\| 项目字段 \| 当前信息 \|/);
+  assert.match(fs.readFileSync(projectPath, "utf8"), /## 投资摘要[\s\S]*?## 项目概览[\s\S]*?- \*\*分类\*\*：AI · Agent/);
+  assert.match(fs.readFileSync(projectPath, "utf8"), /- \*\*进展\*\*：待交流 · \*\*评级\*\*：A/);
+  assert.doesNotMatch(fs.readFileSync(projectPath, "utf8"), /\| 项目字段 \| 当前信息 \|/);
   assert.match(fs.readFileSync(projectPath, "utf8"), /## 融资与估值[\s\S]*?## 相关材料/);
   assert.doesNotMatch(fs.readFileSync(projectPath, "utf8"), /PLAUD文字稿/);
 
@@ -2883,7 +2885,7 @@ company_name: "旧主页项目"
     version, projectPath, version, version
   );
   first.database.prepare(
-    "DELETE FROM repository_meta WHERE key = 'readable_project_homepage_v1'"
+    "DELETE FROM repository_meta WHERE key = 'readable_project_homepage_v2'"
   ).run();
   first.close();
 
@@ -2892,6 +2894,9 @@ company_name: "旧主页项目"
   const upgraded = fs.readFileSync(projectPath, "utf8");
   assert.match(upgraded, /\[打开项目目录\]\(domi-folder:current\)/);
   assert.match(upgraded, /## 投资摘要[\s\S]*?可快速阅读的投资摘要/);
+  assert.match(upgraded, /## 项目概览[\s\S]*?- \*\*分类\*\*：AI · Agent/);
+  assert.match(upgraded, /- \*\*城市\*\*：上海 · \*\*关注机构\*\*：未填写/);
+  assert.doesNotMatch(upgraded, /\| 项目字段 \| 当前信息 \|/);
   assert.match(upgraded, /## 用户补充[\s\S]*?必须保留/);
   assert.equal(
     reopened.database.prepare("SELECT updated_at FROM projects WHERE id = ?").get("prj_readable").updated_at,

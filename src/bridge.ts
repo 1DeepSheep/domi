@@ -279,6 +279,14 @@ const browserFallback: Window["workbench"] = {
     scannedAt: Date.now(),
     error: "请在 Electron 窗口中读取本地文档库。"
   }),
+  searchDocumentLibrary: async (_request) => ({
+    ok: false,
+    results: [],
+    indexing: false,
+    indexedCount: 0,
+    lastIndexedAt: 0,
+    error: "请在 Electron 窗口中搜索本地文档库。"
+  }),
   createDocumentLibraryEntry: async () => ({
     ok: false,
     error: "请在 Electron 窗口中新建本地文档。"

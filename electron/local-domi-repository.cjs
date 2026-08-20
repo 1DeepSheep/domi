@@ -74,7 +74,7 @@ const DATABASE_PATCH_FIELDS = Object.freeze({
 });
 const LEGACY_BULK_IMPORT_MIN = 20;
 const LEGACY_BULK_INTAKE_MIGRATION_KEY = "legacy_bulk_intake_v1";
-const READABLE_PROJECT_HOMEPAGE_MIGRATION_KEY = "readable_project_homepage_v1";
+const READABLE_PROJECT_HOMEPAGE_MIGRATION_KEY = "readable_project_homepage_v2";
 const CLASSIFICATION_REVIEW_STATUSES = new Set(["pending", "deferred", "confirmed"]);
 const CANONICAL_PROJECT_DOMAINS = new Set(Object.keys(CANONICAL_PROJECT_TAXONOMY));
 const LEGACY_CONSUMER_TECH_DOMAIN = "消费科技";
@@ -995,16 +995,10 @@ ${project.notes || "暂无投资摘要。建议补充项目定位、核心产品
 
 ## 项目概览
 
-| 项目字段 | 当前信息 |
-| --- | --- |
-| 领域 | ${project.domain || "未分类"} |
-| 子领域 | ${project.subdomains.join("、") || "未分类"} |
-| 进展状态 | ${statusLabel} |
-| 项目评级 | ${project.rating || "未评级"} |
-| 城市 | ${project.cities.join("、") || "未填写"} |
-| 关注机构 | ${project.investors.join("、") || "未填写"} |
-| 入库时间 | ${readableDate(project.createdAt)} |
-| 最后更新 | ${readableDate(project.lastUpdatedAt)} |
+- **分类**：${project.domain || "未分类"} · ${project.subdomains.join("、") || "未分类"}
+- **进展**：${statusLabel} · **评级**：${project.rating || "未评级"}
+- **城市**：${project.cities.join("、") || "未填写"} · **关注机构**：${project.investors.join("、") || "未填写"}
+- **入库时间**：${readableDate(project.createdAt)} · **最后更新**：${readableDate(project.lastUpdatedAt)}
 
 ## 融资与估值
 

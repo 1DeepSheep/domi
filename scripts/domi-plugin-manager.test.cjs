@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const {
   DomiPluginManager,
+  checkRemoteWithinBudget,
   compareVersions,
   selectPreferredCandidate
 } = require("../electron/domi-plugin-manager.cjs");
@@ -98,4 +99,31 @@ try {
   fs.rmSync(temporaryRoot, { recursive: true, force: true });
 }
 
-console.log("domi plugin manager tests passed.");
+async function verifyBoundedRemoteStartup() {
+  let resolveCheck;
+  const cachedCandidate = { source: "remote-release", manifest: { version: "cached" } };
+  const updater = {
+    cachedCandidate: () => cachedCandidate,
+    check: () => new Promise((resolve) => {
+      resolveCheck = resolve;
+    })
+  };
+  const startedAt = Date.now();
+  const result = await checkRemoteWithinBudget(updater, 30);
+  assert.ok(Date.now() - startedAt < 250);
+  assert.equal(result.reason, "background-refresh");
+  assert.equal(result.candidate, cachedCandidate);
+  resolveCheck({ ok: true, checked: true, candidate: null });
+
+  const immediate = await checkRemoteWithinBudget({
+    check: async () => ({ ok: true, checked: true, candidate: null })
+  }, 1_000);
+  assert.equal(immediate.checked, true);
+}
+
+verifyBoundedRemoteStartup()
+  .then(() => console.log("domi plugin manager tests passed."))
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

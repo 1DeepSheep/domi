@@ -127,6 +127,8 @@ import {
   DomiTaskBoardSnapshot,
   DomiWeeklyNewsSnapshot,
   DocumentLibraryNode,
+  DocumentLibrarySearchMatch,
+  DocumentLibrarySearchResult,
   DocumentLibrarySnapshot,
   LocalAttachment,
   MarkdownDocument,
@@ -186,7 +188,8 @@ type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents";
 
 type DomiSearchOption =
   | { key: string; kind: "project"; record: DomiProject }
-  | { key: string; kind: "person"; record: DomiPerson };
+  | { key: string; kind: "person"; record: DomiPerson }
+  | { key: string; kind: "document"; record: DocumentLibrarySearchMatch };
 
 type WorkspaceScrollPosition = {
   key: string;
@@ -1835,6 +1838,13 @@ function App() {
   const [domiQuery, setDomiQuery] = useState("");
   const [domiSearchError, setDomiSearchError] = useState("");
   const [domiSearchActiveKey, setDomiSearchActiveKey] = useState("");
+  const [domiDocumentSearch, setDomiDocumentSearch] = useState<DocumentLibrarySearchResult>({
+    ok: true,
+    results: [],
+    indexing: false,
+    indexedCount: 0,
+    lastIndexedAt: 0
+  });
   const [databaseSnapshot, setDatabaseSnapshot] = useState<DomiDatabaseSnapshot | null>(null);
   const [databaseWorkspaceTab, setDatabaseWorkspaceTab] = useState<DatabaseWorkspaceTab>("project");
   const [databaseEntityType, setDatabaseEntityType] = useState<DatabaseEntityType>("project");
@@ -1898,6 +1908,7 @@ function App() {
   const [documentLibrary, setDocumentLibrary] = useState<DocumentLibrarySnapshot | null>(null);
   const [documentLibraryLoading, setDocumentLibraryLoading] = useState(false);
   const [documentLibraryError, setDocumentLibraryError] = useState("");
+  const [documentLibraryNotice, setDocumentLibraryNotice] = useState("");
   const [documentLibraryQuery, setDocumentLibraryQuery] = useState("");
   const [documentLibrarySearchActivePath, setDocumentLibrarySearchActivePath] = useState("");
   const [documentLibraryExpandedPaths, setDocumentLibraryExpandedPaths] = useState<Set<string>>(
@@ -1958,6 +1969,7 @@ function App() {
   );
   const [markdownDocument, setMarkdownDocument] = useState<MarkdownDocument | null>(null);
   const [markdownDraft, setMarkdownDraft] = useState("");
+  const [markdownInitialSearchQuery, setMarkdownInitialSearchQuery] = useState("");
   const [markdownLoading, setMarkdownLoading] = useState(false);
   const [markdownSaving, setMarkdownSaving] = useState(false);
   const [markdownExternalOpening, setMarkdownExternalOpening] = useState(false);
@@ -2032,6 +2044,7 @@ function App() {
   const localSearchRefreshAtRef = useRef(0);
   const domiSearchComposingRef = useRef(false);
   const domiSearchOptionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const domiDocumentSearchRequestRef = useRef(0);
   const domiEntityOpenRequestRef = useRef(0);
   const documentSearchRefreshAtRef = useRef(0);
   const documentLibraryRequestRef = useRef(0);
@@ -2957,8 +2970,13 @@ function App() {
       key: `person:${record.recordId}`,
       kind: "person" as const,
       record
+    })),
+    ...domiDocumentSearch.results.map((record) => ({
+      key: `document:${record.path}`,
+      kind: "document" as const,
+      record
     }))
-  ], [domiSearchResults]);
+  ], [domiDocumentSearch.results, domiSearchResults]);
   const domiSearchOptionKeys = useMemo(
     () => domiSearchOptions.map((option) => option.key),
     [domiSearchOptions]
@@ -2977,6 +2995,59 @@ function App() {
     if (!domiSearchActiveKey) return;
     domiSearchOptionRefs.current.get(domiSearchActiveKey)?.scrollIntoView({ block: "nearest" });
   }, [domiSearchActiveKey]);
+
+  useEffect(() => {
+    const query = domiQuery.trim();
+    const requestId = ++domiDocumentSearchRequestRef.current;
+    if ([...query].length < 2) {
+      setDomiDocumentSearch({
+        ok: true,
+        results: [],
+        indexing: false,
+        indexedCount: 0,
+        lastIndexedAt: 0
+      });
+      return;
+    }
+    setDomiDocumentSearch((current) => ({
+      ...current,
+      ok: true,
+      results: [],
+      error: undefined
+    }));
+    let stopped = false;
+    let pollHandle: number | undefined;
+    const search = async () => {
+      try {
+        const result = await workbench.searchDocumentLibrary({ query, limit: 8 });
+        if (stopped || requestId !== domiDocumentSearchRequestRef.current) return;
+        setDomiDocumentSearch(result);
+        if (result.indexing) {
+          pollHandle = window.setTimeout(() => {
+            void search();
+          }, 700);
+        }
+      } catch (error) {
+        if (stopped || requestId !== domiDocumentSearchRequestRef.current) return;
+        setDomiDocumentSearch({
+          ok: false,
+          results: [],
+          indexing: false,
+          indexedCount: 0,
+          lastIndexedAt: 0,
+          error: describeOperationError(error, "无法搜索本地文档内容。")
+        });
+      }
+    };
+    const debounceHandle = window.setTimeout(() => {
+      void search();
+    }, 160);
+    return () => {
+      stopped = true;
+      window.clearTimeout(debounceHandle);
+      if (pollHandle !== undefined) window.clearTimeout(pollHandle);
+    };
+  }, [domiQuery]);
 
   const hasConversation = activeThread.messages.some((message) => message.role === "user")
     || Boolean(activeThread.externalType && activeThread.messages.length);
@@ -3073,22 +3144,26 @@ function App() {
         if (cachedTasks.configured || cachedTasks.tasks.length > 0) {
           setDomiTaskBoard(cachedTasks);
         }
-        const status = await workbench.checkCodex();
-        setCodexStatus(status);
+        // Repository-backed views do not depend on Codex. Refresh them while
+        // the runtime/plugin check is in flight so startup stays useful even
+        // when the network is slow.
+        const statusPromise = workbench.checkCodex().then((status) => {
+          if (!cancelled) setCodexStatus(status);
+          return status;
+        });
+        const dataRefreshPromise = Promise.allSettled([
+          refreshDomi(),
+          refreshDomiTaskBoard({ silent: Boolean(cachedTasks.tasks.length) }),
+          refreshWeeklyNews(0, { silent: hasCachedNews, preserveView: true })
+        ]);
+        const [status] = await Promise.all([statusPromise, dataRefreshPromise]);
         if (!status.pluginSetup?.ok) {
           const pluginError = status.pluginSetup?.error
             || "domi 插件尚未准备完成，请在 Codex 连接中重新检测。";
           setDomiError(pluginError);
           setDomiTaskError(pluginError);
           setWeeklyNewsError(pluginError);
-          return;
         }
-
-        await Promise.allSettled([
-          refreshDomi(),
-          refreshDomiTaskBoard({ silent: Boolean(cachedTasks.tasks.length) }),
-          refreshWeeklyNews(0, { silent: hasCachedNews, preserveView: true })
-        ]);
       } finally {
         if (!cancelled) setWeeklyNewsAutomationReady(true);
       }
@@ -6310,6 +6385,7 @@ function App() {
 
   function cancelPendingDomiEntityOpen() {
     domiEntityOpenRequestRef.current += 1;
+    setDocumentLibraryNotice("");
   }
 
   function clearDomiEntitySearch(cancelPendingOpen = true) {
@@ -6324,7 +6400,46 @@ function App() {
       void openDomiProject(option.record);
       return;
     }
-    void openDomiPerson(option.record);
+    if (option.kind === "person") {
+      void openDomiPerson(option.record);
+      return;
+    }
+    void openDomiDocumentSearchResult(option.record);
+  }
+
+  async function openDomiDocumentSearchResult(result: DocumentLibrarySearchMatch) {
+    const sourceQuery = domiQuery.trim();
+    cancelPendingDomiEntityOpen();
+    setDomiSearchError("");
+    if (!await navigateWorkspace("documents", true)) return;
+    setDocumentLibrarySidebarExpanded(true);
+    setThreadMenuId(null);
+    setRightPanelOpen(false);
+    setDocumentLibraryQuery("");
+    setDocumentLibrarySearchActivePath("");
+    let library = documentLibrary;
+    let expansionPath = library
+      ? documentLibraryExpansionPath(library.nodes, result.path)
+      : null;
+    if (!library || expansionPath === null) {
+      library = await refreshDocumentLibrary({ silent: Boolean(library) });
+      expansionPath = library
+        ? documentLibraryExpansionPath(library.nodes, result.path)
+        : null;
+    }
+    if (workspaceViewRef.current !== "documents") return;
+    if (expansionPath) {
+      setDocumentLibraryExpandedPaths((current) => {
+        const next = new Set(current);
+        expansionPath.forEach((folderPath) => next.add(folderPath));
+        return next;
+      });
+      const separatorIndex = Math.max(result.path.lastIndexOf("/"), result.path.lastIndexOf("\\"));
+      if (separatorIndex > 0) setDocumentLibrarySelectedFolder(result.path.slice(0, separatorIndex));
+    }
+    clearDomiEntitySearch(false);
+    openDocument(result.path, sourceQuery);
+    scrollDocumentLibrarySearchSelectionIntoView(result.path);
   }
 
   function handleDomiSearchKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
@@ -6382,6 +6497,7 @@ function App() {
   ) {
     const requestId = ++domiEntityOpenRequestRef.current;
     setDomiSearchError("");
+    setDocumentLibraryNotice("");
     if (appSettingsRef.current?.storageBackend === "feishu") {
       if (!entity.link) {
         const message = `“${entity.name}”尚未关联可打开的资料主页。`;
@@ -6434,7 +6550,7 @@ function App() {
       ? resolved.snapshot?.projects.find((item) => item.recordId === entity.recordId)
       : resolved.snapshot?.people.find((item) => item.recordId === entity.recordId);
     const indexedDocumentPath = localPathFromDocumentResource(latestEntity?.link || entity.link);
-    const homepageResource = entityPrimaryDocumentPath(
+    let homepageResource = entityPrimaryDocumentPath(
       resolved.workspacePath,
       entityType,
       indexedDocumentPath
@@ -6465,13 +6581,52 @@ function App() {
     }
 
     if (!library) return;
+    let fallbackDocumentTitle = "";
     if (!documentLibraryHasDocumentPath(library.nodes, homepageResource)) {
-      const message = `“${entity.name}”的资料目录中没有找到可打开的规范主页或已索引主文档。`;
-      setDocumentLibraryError(message);
-      setDomiSearchError(message);
-      return;
+      let preview;
+      try {
+        preview = await workbench.previewDomiDatabaseRecord({
+          entityType,
+          recordId: entity.recordId
+        });
+      } catch (error) {
+        preview = {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+      if (
+        requestId !== domiEntityOpenRequestRef.current
+        || workspaceViewRef.current !== "documents"
+      ) return;
+      const fallbackPath = localPathFromDocumentResource(preview.resource || "");
+      const safeFallbackPath = entityPrimaryDocumentPath(
+        resolved.workspacePath,
+        entityType,
+        fallbackPath
+      );
+      if (
+        preview.ok
+        && fallbackPath
+        && safeFallbackPath === fallbackPath
+        && documentLibraryHasDocumentPath(library.nodes, fallbackPath)
+      ) {
+        homepageResource = fallbackPath;
+        fallbackDocumentTitle = preview.title || fallbackPath.split(/[\\/]/).pop() || "现有资料";
+      } else {
+        const message = preview.error
+          || `“${entity.name}”的资料目录中没有找到可打开的规范主页或现有资料。`;
+        setDocumentLibraryError(message);
+        setDomiSearchError(message);
+        return;
+      }
     }
     clearDomiEntitySearch(false);
+    if (fallbackDocumentTitle) {
+      setDocumentLibraryNotice(
+        `该${entityType === "project" ? "项目" : "人物"}尚未生成规范主页，已打开现有资料“${fallbackDocumentTitle}”。`
+      );
+    }
 
     setDocumentLibrarySelectedFolder(resolved.workspacePath);
     if (expansionPath) {
@@ -6486,7 +6641,11 @@ function App() {
       requestId !== domiEntityOpenRequestRef.current
       || workspaceViewRef.current !== "documents"
     ) return;
-    await openMarkdown(homepageResource, undefined, requestId);
+    if (isLocalPdfResource(homepageResource)) {
+      await openPdf(homepageResource, undefined, false, requestId);
+    } else {
+      await openMarkdown(homepageResource, undefined, requestId);
+    }
     if (
       requestId !== domiEntityOpenRequestRef.current
       || workspaceViewRef.current !== "documents"
@@ -8763,7 +8922,8 @@ function App() {
   async function openMarkdown(
     resource: string,
     basePath?: string,
-    entityOpenRequestId?: number
+    entityOpenRequestId?: number,
+    initialSearchQuery = ""
   ) {
     if (entityOpenRequestId === undefined) {
       cancelPendingDomiEntityOpen();
@@ -8800,6 +8960,7 @@ function App() {
     markdownDocumentRef.current = null;
     markdownDraftRef.current = "";
     setMarkdownRequestLabel(resource);
+    setMarkdownInitialSearchQuery(initialSearchQuery);
     setMarkdownLoading(true);
     setMarkdownError("");
     try {
@@ -8835,8 +8996,17 @@ function App() {
     }
   }
 
-  async function openPdf(resource: string, basePath?: string, ignoreDirty = false) {
-    cancelPendingDomiEntityOpen();
+  async function openPdf(
+    resource: string,
+    basePath?: string,
+    ignoreDirty = false,
+    entityOpenRequestId?: number
+  ) {
+    if (entityOpenRequestId === undefined) {
+      cancelPendingDomiEntityOpen();
+    } else if (entityOpenRequestId !== domiEntityOpenRequestRef.current) {
+      return;
+    }
     rememberDocumentPreviewOrigin();
     const currentDocument = markdownDocumentRef.current;
     if (
@@ -8847,6 +9017,10 @@ function App() {
       const saved = await saveOpenMarkdown();
       if (!saved) return;
     }
+    if (
+      entityOpenRequestId !== undefined
+      && entityOpenRequestId !== domiEntityOpenRequestRef.current
+    ) return;
 
     const requestId = ++pdfOpenRequestRef.current;
     markdownOpenRequestRef.current += 1;
@@ -8871,7 +9045,13 @@ function App() {
     setPdfError("");
     try {
       const result = await workbench.readPdf({ resource, basePath });
-      if (requestId !== pdfOpenRequestRef.current) return;
+      if (
+        requestId !== pdfOpenRequestRef.current
+        || (
+          entityOpenRequestId !== undefined
+          && entityOpenRequestId !== domiEntityOpenRequestRef.current
+        )
+      ) return;
       if (!result.ok || !result.document) {
         setPdfError(result.error || "无法读取 PDF 文件。");
         return;
@@ -8880,7 +9060,13 @@ function App() {
       setPdfRequestLabel(result.document.path);
       setPdfFrameLoading(true);
     } catch (error) {
-      if (requestId !== pdfOpenRequestRef.current) return;
+      if (
+        requestId !== pdfOpenRequestRef.current
+        || (
+          entityOpenRequestId !== undefined
+          && entityOpenRequestId !== domiEntityOpenRequestRef.current
+        )
+      ) return;
       reportDocumentOperation("读取 PDF", error);
       setPdfError(describeOperationError(error, "无法读取 PDF 文件。"));
     } finally {
@@ -8888,12 +9074,12 @@ function App() {
     }
   }
 
-  function openDocument(resource: string) {
+  function openDocument(resource: string, initialSearchQuery = "") {
     if (isLocalPdfResource(resource)) {
       void openPdf(resource);
       return;
     }
-    void openMarkdown(resource);
+    void openMarkdown(resource, undefined, undefined, initialSearchQuery);
   }
 
   function clearMarkdownAutoSaveTimer() {
@@ -9301,6 +9487,7 @@ function App() {
                   key={`${markdownDocument.path}:${markdownOpenRequestRef.current}`}
                   documentPath={markdownDocument.path}
                   markdown={markdownDraft}
+                  initialSearchQuery={markdownInitialSearchQuery}
                   onCopyDocument={() => void copyOpenMarkdown()}
                   onBlur={() => void saveOpenMarkdown()}
                   onOpenDocument={openDocument}
@@ -9596,6 +9783,12 @@ function App() {
         </button>
 
         <div className="document-library-tree" role="tree" ref={documentLibraryTreeRef}>
+          {documentLibraryNotice && (
+            <div className="document-library-notice" role="status">
+              <FileText size={14} aria-hidden="true" />
+              <span>{documentLibraryNotice}</span>
+            </div>
+          )}
           {documentLibraryLoading && !documentLibrary && (
             <div className="document-library-state">
               <RefreshCw className="spinning" size={15} />
@@ -12154,8 +12347,8 @@ function App() {
               onCompositionEnd={() => {
                 domiSearchComposingRef.current = false;
               }}
-              placeholder="搜索项目或人脉"
-              aria-label="搜索 domi 项目或人脉"
+              placeholder="搜索项目、人脉或文档"
+              aria-label="搜索 domi 项目、人脉或文档"
               role="combobox"
               aria-autocomplete="list"
               aria-expanded={Boolean(domiQuery.trim())}
@@ -12169,7 +12362,7 @@ function App() {
                 type="button"
                 onClick={() => clearDomiEntitySearch()}
                 title="清除搜索"
-                aria-label="清除项目或人脉搜索"
+                aria-label="清除项目、人脉或文档搜索"
               >
                 <X size={13} />
               </button>
@@ -12181,7 +12374,7 @@ function App() {
               className="domi-search-results sidebar-domi-search-results"
               id="sidebar-domi-search-results"
               role="listbox"
-              aria-label="项目和人脉搜索结果"
+              aria-label="项目、人脉和文档搜索结果"
             >
               {domiSearchResults.projects.length > 0 && (
                 <div
@@ -12246,8 +12439,59 @@ function App() {
                   })}
                 </div>
               )}
-              {domiSearchResults.projects.length === 0 && domiSearchResults.people.length === 0 && (
-                <div className="empty-state">没有匹配的项目或人脉</div>
+              {domiDocumentSearch.results.length > 0 && (
+                <div
+                  className="domi-result-group domi-document-result-group"
+                  role="group"
+                  aria-labelledby="domi-document-results-label"
+                >
+                  <span id="domi-document-results-label">文档提及</span>
+                  {domiDocumentSearch.results.map((document, index) => {
+                    const optionIndex = domiSearchResults.projects.length
+                      + domiSearchResults.people.length
+                      + index;
+                    const optionKey = `document:${document.path}`;
+                    return (
+                      <button
+                        type="button"
+                        key={document.path}
+                        id={`sidebar-domi-search-option-${optionIndex}`}
+                        role="option"
+                        aria-selected={domiSearchResolvedActiveKey === optionKey}
+                        tabIndex={-1}
+                        ref={(element) => {
+                          if (element) domiSearchOptionRefs.current.set(optionKey, element);
+                          else domiSearchOptionRefs.current.delete(optionKey);
+                        }}
+                        onPointerEnter={() => setDomiSearchActiveKey(optionKey)}
+                        onClick={() => void openDomiDocumentSearchResult(document)}
+                        title={document.relativePath}
+                      >
+                        <strong>{document.name}</strong>
+                        <small className="domi-document-result-snippet">{document.snippet}</small>
+                        <small className="domi-document-result-path">
+                          {[document.kind === "pdf" ? "PDF" : "Markdown", document.line ? `第 ${document.line} 行` : "", document.relativePath]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </small>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {domiDocumentSearch.indexing && (
+                <div className="domi-search-indexing" role="status">
+                  正在后台建立文档索引，当前结果会自动补充
+                </div>
+              )}
+              {domiSearchResults.projects.length === 0
+                && domiSearchResults.people.length === 0
+                && domiDocumentSearch.results.length === 0
+                && !domiDocumentSearch.indexing && (
+                <div className="empty-state">没有匹配的项目、人脉或文档内容</div>
+              )}
+              {!domiDocumentSearch.ok && domiDocumentSearch.error && (
+                <div className="domi-search-error" role="alert">{domiDocumentSearch.error}</div>
               )}
               {domiSearchError && (
                 <div className="domi-search-error" role="alert">{domiSearchError}</div>
