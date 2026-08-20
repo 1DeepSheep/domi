@@ -98,6 +98,7 @@ Publish this local Markdown document to my Feishu knowledge base, then verify th
 - **Optional PLAUD:** read the user's own PLAUD recording queue, then continue from transcription to notes, judgment, filing, and follow-ups.
 - **Optional Feishu:** use Feishu as an external reference and publishing platform with Base, Wiki, Docs, Drive, IM, and Contact capabilities.
 - **Optional Outlook:** send calendar invitations to one or more attendees selected by the user.
+- **Optional Weixin bridge:** assign isolated Codex tasks from the owner's Weixin account and receive progress updates, long results, and real file attachments while the Mac remains online.
 - **Safe updates:** download a new release in the app, wait for active tasks to finish and state to flush safely, then restart to install.
 
 ## Local source of truth and external connections
@@ -170,6 +171,15 @@ cd domi
 npm install
 npm run dev
 ```
+
+The personal Weixin bridge is maintained in the same repository. To enable it from source:
+
+```bash
+npm run wechat:login
+npm run wechat:install
+```
+
+Credentials, tasks, and transferred media stay under `~/Library/Application Support/domi/wechat-bridge/` and never enter the repository. See [services/wechat-bridge/README.md](services/wechat-bridge/README.md) for details.
 
 `npm run dev` reads the domi plugin source from `~/plugins/domi` by default. Set `DOMI_PLUGIN_SOURCE=/absolute/path npm run dev` to use another plugin directory.
 
