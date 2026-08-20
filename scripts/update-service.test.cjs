@@ -27,7 +27,12 @@ function createFakeUpdater() {
     order: []
   };
 
-  for (const property of ["allowPrerelease", "allowDowngrade", "autoInstallOnAppQuit"]) {
+  for (const property of [
+    "allowPrerelease",
+    "allowDowngrade",
+    "autoInstallOnAppQuit",
+    "disableDifferentialDownload"
+  ]) {
     Object.defineProperty(updater, property, {
       configurable: true,
       enumerable: true,
@@ -121,7 +126,10 @@ function createHarness({
   packaged = true,
   channel = "stable",
   checkTimeoutMs = 60_000,
-  downloadTimeoutMs = 30 * 60_000
+  downloadTimeoutMs = 30 * 60_000,
+  cachedUpdateSize = 0,
+  arch = "arm64",
+  nowProvider = Date.now
 } = {}) {
   const fakeUpdater = createFakeUpdater();
   const fakeWindows = createFakeBrowserWindow();
@@ -140,6 +148,9 @@ function createHarness({
     channelProvider: () => selectedChannel,
     checkTimeoutMs,
     downloadTimeoutMs,
+    cachedUpdateSizeProvider: () => cachedUpdateSize,
+    arch,
+    nowProvider,
     setImmediateFn: (callback) => {
       immediateQueue.push(callback);
       return callback;
@@ -172,12 +183,13 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
-async function makeAvailable(harness, version = "9.9.0") {
+async function makeAvailable(harness, version = "9.9.0", infoOverrides = {}) {
   harness.updater.checkImplementation = async () => {
     harness.updater.emit("checking-for-update");
     const info = {
       version,
-      releaseDate: "2026-08-06T00:00:00.000Z"
+      releaseDate: "2026-08-06T00:00:00.000Z",
+      ...infoOverrides
     };
     harness.updater.emit("update-available", info);
     return { isUpdateAvailable: true, updateInfo: info };
@@ -382,6 +394,62 @@ test("download resolves to downloaded when the updater emits no terminal event",
   assert.equal(result.percent, 100);
   assert.equal(result.error, "");
   assert.equal(harness.values.autoInstallOnAppQuit, false);
+});
+
+test("download mode avoids wasteful differential ranges when the package size changed materially", async () => {
+  const full = createHarness({ cachedUpdateSize: 500_000_000, arch: "arm64" });
+  startListeners(full);
+  await makeAvailable(full, "9.9.0", {
+    files: [
+      { url: "domi-9.9.0.zip", size: 490_000_000 },
+      { url: "domi-9.9.0-arm64.zip", size: 300_000_000 }
+    ]
+  });
+  assert.equal(full.service.snapshot().downloadMode, "full");
+  full.updater.downloadImplementation = async () => ["/tmp/domi-update.zip"];
+  await full.service.download();
+  assert.equal(full.values.disableDifferentialDownload, true);
+
+  const differential = createHarness({ cachedUpdateSize: 310_000_000, arch: "arm64" });
+  startListeners(differential);
+  await makeAvailable(differential, "9.9.0", {
+    files: [{ url: "domi-9.9.0-arm64.zip", size: 300_000_000 }]
+  });
+  assert.equal(differential.service.snapshot().downloadMode, "differential");
+  differential.updater.downloadImplementation = async () => ["/tmp/domi-update.zip"];
+  await differential.service.download();
+  assert.equal(differential.values.disableDifferentialDownload, false);
+});
+
+test("download progress reports speed, remaining time, and a slow-network hint", async () => {
+  let now = 1_000;
+  const harness = createHarness({
+    cachedUpdateSize: 10 * 1024 * 1024,
+    nowProvider: () => now
+  });
+  startListeners(harness);
+  await makeAvailable(harness, "9.9.0", {
+    files: [{ url: "domi-9.9.0-arm64.zip", size: 10 * 1024 * 1024 }]
+  });
+  const activeDownload = deferred();
+  harness.updater.downloadImplementation = () => activeDownload.promise;
+  const download = harness.service.download();
+  await flushMicrotasks();
+
+  now += 20_000;
+  harness.updater.emit("download-progress", {
+    percent: 20,
+    transferred: 2 * 1024 * 1024,
+    total: 10 * 1024 * 1024,
+    bytesPerSecond: 200 * 1024
+  });
+  const status = harness.service.snapshot();
+  assert.equal(status.bytesPerSecond, 200 * 1024);
+  assert.equal(status.etaSeconds, 41);
+  assert.equal(status.slow, true);
+
+  activeDownload.resolve(["/tmp/domi-update.zip"]);
+  await download;
 });
 
 test("channel switch during a check ignores stale events and rechecks the new channel", async () => {

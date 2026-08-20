@@ -3,8 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-import { Codex } from "@openai/codex-sdk";
-
+import { createCodexClient } from "./codex-client.js";
 import { extractInbound, getUpdates, sendText } from "./common.js";
 import { codexInputFor, downloadInboundMedia, sendLocalAttachment } from "./media.js";
 import {
@@ -122,7 +121,8 @@ async function replyMessage(message, text) {
   });
 }
 
-const codex = new Codex();
+const codexConnection = createCodexClient();
+const codex = codexConnection.client;
 const taskManager = new TaskManager({
   codex,
   statePath: TASKS_PATH,
@@ -325,7 +325,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   });
 }
 
-log(`微信桥接已启动。权限=${fullAccess ? "全权限" : "受限"} 并发任务=2`);
+log(`微信桥接已启动。权限=${fullAccess ? "全权限" : "受限"} 并发任务=2 Codex=${codexConnection.managed ? "Domi受管Runtime" : "SDK Runtime"}`);
 while (!stopping) {
   try {
     const response = await getUpdates({

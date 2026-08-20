@@ -12,6 +12,7 @@ DEFAULT_ELECTRON_DIST="$ROOT_DIR/node_modules/electron/dist"
 RELEASE_DIR="$ROOT_DIR/release/$PACKAGE_VERSION"
 NOTARY_PROFILE="${APPLE_KEYCHAIN_PROFILE:-domi-notary}"
 RELEASE_ARCHES=(arm64 x64)
+MAX_RELEASE_ARTIFACT_BYTES="${DOMI_MAX_MAC_ARTIFACT_BYTES:-335544320}"
 
 if [[ "$OUTPUT_DIR" == "/" || "$OUTPUT_DIR" == "$HOME" || -z "$OUTPUT_DIR" ]]; then
   echo "Unsafe build output directory: $OUTPUT_DIR" >&2
@@ -178,6 +179,20 @@ NODE
   verify_macho_arch "$app_path/Contents/Resources/lark-runtime/bin/lark-cli" "$arch"
 }
 
+verify_no_duplicate_sdk_runtime() {
+  local app_path="$1"
+  local unpacked_modules="$app_path/Contents/Resources/app.asar.unpacked/node_modules"
+  local duplicate_runtime=""
+  if [[ -d "$unpacked_modules" ]]; then
+    duplicate_runtime="$(find "$unpacked_modules" -type f \
+      -path '*/@openai/codex-darwin-*/vendor/*/bin/codex' -print -quit)"
+  fi
+  if [[ -n "$duplicate_runtime" ]]; then
+    echo "Duplicate Codex SDK runtime must not be bundled: $duplicate_runtime" >&2
+    exit 1
+  fi
+}
+
 verify_packaged_app() {
   local app_path="$1"
   local arch="$2"
@@ -188,6 +203,7 @@ verify_packaged_app() {
   verify_macho_arch "$app_path/Contents/MacOS/domi" "$arch"
   verify_app_update_config "$app_path"
   verify_bundled_runtime_arch "$app_path" "$arch"
+  verify_no_duplicate_sdk_runtime "$app_path"
 }
 
 verify_release_signature() {
@@ -272,10 +288,16 @@ verify_release_artifacts() {
   local arch="$1"
   local extension
   local artifact
+  local artifact_bytes
   for extension in dmg zip; do
     artifact="$OUTPUT_DIR/domi-$PACKAGE_VERSION-$arch.$extension"
     if [[ ! -s "$artifact" || ! -s "$artifact.blockmap" ]]; then
       echo "Release artifact or blockmap is missing for $arch: $artifact" >&2
+      exit 1
+    fi
+    artifact_bytes="$(stat -f '%z' "$artifact")"
+    if (( artifact_bytes > MAX_RELEASE_ARTIFACT_BYTES )); then
+      echo "Release artifact exceeds the ${MAX_RELEASE_ARTIFACT_BYTES}-byte size budget: $artifact ($artifact_bytes bytes)" >&2
       exit 1
     fi
   done

@@ -1364,6 +1364,10 @@ export type UpdateStatus = {
   percent: number;
   transferred: number;
   total: number;
+  bytesPerSecond?: number;
+  etaSeconds?: number;
+  slow?: boolean;
+  downloadMode?: "differential" | "full";
   releaseDate: string;
   restartPending?: boolean;
   busyTaskCount?: number;
