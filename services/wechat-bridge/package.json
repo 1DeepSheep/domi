@@ -1,6 +1,6 @@
 {
   "name": "@domi/wechat-bridge",
-  "version": "0.6.38",
+  "version": "0.6.39",
   "private": true,
   "type": "module",
   "description": "domi 的本机微信消息与 Codex 任务桥接服务。",

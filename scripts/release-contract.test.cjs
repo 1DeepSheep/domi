@@ -59,6 +59,10 @@ assert.match(source, /Packaged Codex runtime archive is missing bin\/codex-code-
 assert.match(source, /Media runtime target mismatch/);
 assert.match(source, /Lark runtime target mismatch/);
 assert.match(source, /Contents\/Resources\/lark-runtime\/bin\/lark-cli/);
+assert.match(source, /Duplicate Codex SDK runtime must not be bundled/);
+assert.match(source, /codex-darwin-\*\/vendor\/\*\/bin\/codex/);
+assert.match(source, /DOMI_MAX_MAC_ARTIFACT_BYTES/);
+assert.match(source, /Release artifact exceeds the/);
 assert.match(source, /codesign --verify --deep --strict/);
 assert.match(source, /Authority=Developer ID Application:/);
 assert.match(source, /notarytool submit[\s\S]*--wait/);
@@ -81,6 +85,12 @@ assert.match(packageJson.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
 assert.equal(packageLock.version, packageJson.version);
 assert.equal(packageLock.packages[""].version, packageJson.version);
 assert.equal(packageJson.build.artifactName, "domi-${version}-${arch}.${ext}");
+for (const platform of ["darwin", "linux", "win32"]) {
+  assert.ok(
+    packageJson.build.files.includes(`!node_modules/@openai/codex-${platform}-*/**/*`),
+    `the packaged app must exclude the SDK's duplicate ${platform} Codex runtime`
+  );
+}
 const codexResource = packageJson.build.extraResources.find((item) => item.to === "codex-runtime");
 const mediaResource = packageJson.build.extraResources.find((item) => item.to === "media-runtime");
 const larkResource = packageJson.build.extraResources.find((item) => item.to === "lark-runtime");

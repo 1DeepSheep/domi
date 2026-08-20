@@ -1,6 +1,8 @@
 const { BrowserWindow } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { CancellationToken } = require("builder-util-runtime");
+const fs = require("node:fs");
+const path = require("node:path");
 
 // GitHub releases do not push an event into an already-running client. Keep the
 // background poll reasonably fresh, and also let the main process request a
@@ -10,6 +12,9 @@ const ACTIVE_CHECK_MAX_AGE_MS = 5 * 60 * 1000;
 const STARTUP_DELAY_MS = 15 * 1000;
 const CHECK_TIMEOUT_MS = 60 * 1000;
 const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
+const SLOW_DOWNLOAD_AFTER_MS = 15 * 1000;
+const SLOW_DOWNLOAD_BYTES_PER_SECOND = 300 * 1024;
+const FULL_DOWNLOAD_SIZE_CHANGE_RATIO = 0.2;
 const PUBLIC_UPDATE_FEED = Object.freeze({
   provider: "github",
   owner: "1DeepSheep",
@@ -26,6 +31,32 @@ function safeError(error) {
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]");
 }
 
+function updateFileName(file) {
+  const value = String(file?.url || file?.path || "");
+  try {
+    return decodeURIComponent(new URL(value, "https://updates.invalid/").pathname.split("/").pop() || "");
+  } catch {
+    return value.split("/").pop() || "";
+  }
+}
+
+function preferredZipSize(info, arch) {
+  const zipFiles = Array.isArray(info?.files)
+    ? info.files.filter((file) => /\.zip$/i.test(updateFileName(file)))
+    : [];
+  const selected = arch === "arm64"
+    ? zipFiles.find((file) => /-arm64\.zip$/i.test(updateFileName(file)))
+    : zipFiles.find((file) => !/-arm64\.zip$/i.test(updateFileName(file)));
+  return Math.max(0, Number((selected || zipFiles[0])?.size) || 0);
+}
+
+function preferredDownloadMode(fullSize, cachedSize) {
+  if (!fullSize) return "differential";
+  if (!cachedSize) return "full";
+  const changeRatio = Math.abs(fullSize - cachedSize) / Math.max(fullSize, cachedSize);
+  return changeRatio >= FULL_DOWNLOAD_SIZE_CHANGE_RATIO ? "full" : "differential";
+}
+
 class UpdateService {
   constructor({
     app,
@@ -35,6 +66,9 @@ class UpdateService {
     cancellationTokenFactory = () => new CancellationToken(),
     checkTimeoutMs = CHECK_TIMEOUT_MS,
     downloadTimeoutMs = DOWNLOAD_TIMEOUT_MS,
+    cachedUpdateSizeProvider,
+    arch = process.arch,
+    nowProvider = Date.now,
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
     setIntervalFn = setInterval,
@@ -48,6 +82,15 @@ class UpdateService {
     this.cancellationTokenFactory = cancellationTokenFactory;
     this.checkTimeoutMs = checkTimeoutMs;
     this.downloadTimeoutMs = downloadTimeoutMs;
+    this.cachedUpdateSizeProvider = cachedUpdateSizeProvider || (() => {
+      try {
+        return fs.statSync(path.join(this.app.getPath("cache"), "domi-updater", "update.zip")).size;
+      } catch {
+        return 0;
+      }
+    });
+    this.arch = arch;
+    this.nowProvider = nowProvider;
     this.setTimeoutFn = setTimeoutFn;
     this.clearTimeoutFn = clearTimeoutFn;
     this.setIntervalFn = setIntervalFn;
@@ -78,6 +121,10 @@ class UpdateService {
       percent: 0,
       transferred: 0,
       total: 0,
+      bytesPerSecond: 0,
+      etaSeconds: 0,
+      slow: false,
+      downloadMode: undefined,
       releaseDate: "",
       restartPending: false,
       busyTaskCount: 0,
@@ -91,7 +138,13 @@ class UpdateService {
   }
 
   publish(patch = {}) {
-    this.status = { ...this.status, ...patch };
+    const telemetryReset = patch.state && patch.state !== "downloading"
+      ? { bytesPerSecond: 0, etaSeconds: 0, slow: false }
+      : {};
+    const modeReset = ["idle", "checking", "up-to-date", "disabled"].includes(patch.state)
+      ? { downloadMode: undefined }
+      : {};
+    this.status = { ...this.status, ...telemetryReset, ...modeReset, ...patch };
     for (const win of this.browserWindow.getAllWindows()) {
       if (!win.isDestroyed()) win.webContents.send("update:status", this.snapshot());
     }
@@ -124,6 +177,24 @@ class UpdateService {
     this.candidate = null;
     this.downloadedCandidate = null;
     this.disableAutoInstall();
+  }
+
+  candidateFor(operation, info = {}) {
+    const fullSize = preferredZipSize(info, this.arch);
+    let cachedSize = 0;
+    try {
+      cachedSize = Math.max(0, Number(this.cachedUpdateSizeProvider()) || 0);
+    } catch {
+      cachedSize = 0;
+    }
+    return {
+      channel: operation.channel,
+      epoch: operation.epoch,
+      version: info.version || "",
+      releaseDate: info.releaseDate || "",
+      fullSize,
+      downloadMode: preferredDownloadMode(fullSize, cachedSize)
+    };
   }
 
   requestRecheck() {
@@ -260,12 +331,7 @@ class UpdateService {
     this.updater.on("update-available", (info) => {
       const operation = this.activeCheck;
       if (!this.isCurrentOperation(operation)) return;
-      this.candidate = {
-        channel: operation.channel,
-        epoch: operation.epoch,
-        version: info.version || "",
-        releaseDate: info.releaseDate || ""
-      };
+      this.candidate = this.candidateFor(operation, info);
       this.downloadedCandidate = null;
       this.disableAutoInstall();
       this.publish({
@@ -275,6 +341,7 @@ class UpdateService {
         percent: 0,
         transferred: 0,
         total: 0,
+        downloadMode: this.candidate.downloadMode,
         restartPending: false,
         busyTaskCount: 0,
         installing: false,
@@ -295,12 +362,26 @@ class UpdateService {
       });
     });
     this.updater.on("download-progress", (progress) => {
-      if (!this.isCurrentOperation(this.activeDownload)) return;
+      const operation = this.activeDownload;
+      if (!this.isCurrentOperation(operation)) return;
+      const transferred = Math.max(0, Number(progress.transferred || 0));
+      const total = Math.max(0, Number(progress.total || 0));
+      const bytesPerSecond = Math.max(0, Number(progress.bytesPerSecond || 0));
+      const etaSeconds = bytesPerSecond > 0 && total > transferred
+        ? Math.ceil((total - transferred) / bytesPerSecond)
+        : 0;
+      const elapsed = Math.max(0, this.nowProvider() - operation.startedAt);
       this.publish({
         state: "downloading",
         percent: Number(progress.percent || 0),
-        transferred: Number(progress.transferred || 0),
-        total: Number(progress.total || 0),
+        transferred,
+        total,
+        bytesPerSecond,
+        etaSeconds,
+        slow: elapsed >= SLOW_DOWNLOAD_AFTER_MS
+          && transferred > 0
+          && bytesPerSecond < SLOW_DOWNLOAD_BYTES_PER_SECOND,
+        downloadMode: operation.candidate.downloadMode,
         error: ""
       });
     });
@@ -349,12 +430,7 @@ class UpdateService {
     }
     const info = result?.updateInfo || result?.versionInfo || {};
     if (result?.isUpdateAvailable) {
-      this.candidate = {
-        channel: operation.channel,
-        epoch: operation.epoch,
-        version: info.version || "",
-        releaseDate: info.releaseDate || ""
-      };
+      this.candidate = this.candidateFor(operation, info);
       this.downloadedCandidate = null;
       this.disableAutoInstall();
       return this.publish({
@@ -364,6 +440,7 @@ class UpdateService {
         percent: 0,
         transferred: 0,
         total: 0,
+        downloadMode: this.candidate.downloadMode,
         restartPending: false,
         busyTaskCount: 0,
         installing: false,
@@ -527,14 +604,22 @@ class UpdateService {
       epoch: this.channelEpoch,
       candidate: { ...this.candidate },
       cancellationToken,
+      startedAt: this.nowProvider(),
       stale: false,
       timedOut: false
     };
     this.activeDownload = operation;
     this.disableAutoInstall();
+    this.updater.disableDifferentialDownload = operation.candidate.downloadMode === "full";
     this.publish({
       state: "downloading",
       percent: 0,
+      transferred: 0,
+      total: operation.candidate.fullSize || 0,
+      bytesPerSecond: 0,
+      etaSeconds: 0,
+      slow: false,
+      downloadMode: operation.candidate.downloadMode,
       restartPending: false,
       busyTaskCount: 0,
       installing: false,

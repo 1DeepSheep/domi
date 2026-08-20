@@ -45,6 +45,16 @@ test("download progress is clamped and rounded for the sidebar", () => {
     state: "downloading"
   });
   assert.equal(sidebarUpdateEntry(status("downloading", { percent: 180 }))?.detail, "100%");
+  assert.deepEqual(sidebarUpdateEntry(status("downloading", {
+    percent: 59.2,
+    bytesPerSecond: 160 * 1024,
+    etaSeconds: 14 * 60,
+    slow: true
+  })), {
+    label: "下载较慢，仍在继续",
+    detail: "59% · 160 KB/s · 约 14 分钟",
+    state: "downloading"
+  });
 });
 
 test("downloaded update explains automatic safe restart", () => {

@@ -134,3 +134,29 @@ test("follow-ups for the same task run serially and reuse its thread", async (t)
   assert.equal(maximumActiveRuns, 1);
   assert.deepEqual(resumedThreads, ["thread-shared"]);
 });
+
+test("new task numbers wrap within W001-W999 without reusing retained tasks", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-task-pool-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const manager = new TaskManager({
+    codex: {},
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
+    sendTaskText: async () => {},
+    deliverTaskResult: async () => {},
+  });
+  manager.state.nextSequence = 999;
+  manager.state.tasks.W999 = { id: "W999", senderId: "owner", status: "completed", updatedAt: "2026-08-20" };
+  manager.state.tasks.W001 = { id: "W001", senderId: "owner", status: "completed", updatedAt: "2026-08-21" };
+
+  const first = manager.createTask("owner", "循环编号");
+  assert.equal(first.id, "W002");
+  assert.equal(manager.state.nextSequence, 3);
+  delete manager.state.tasks.W001;
+  manager.state.nextSequence = 999;
+  const recycled = manager.createTask("owner", "复用空位");
+  assert.equal(recycled.id, "W001");
+  assert.equal(manager.state.nextSequence, 2);
+});
