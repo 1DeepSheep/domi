@@ -1,5 +1,18 @@
 # Third-party notices
 
+## Tencent openclaw-weixin protocol implementation
+
+domi's optional Weixin bridge contains adapted protocol, encrypted-media
+transfer, and message-shaping code from Tencent's open-source
+`openclaw-weixin` project.
+
+- Source: https://github.com/Tencent/openclaw-weixin
+- License: MIT
+- Copyright: Copyright (c) 2026 Tencent
+
+The corresponding MIT license text is included at
+`services/wechat-bridge/THIRD_PARTY_LICENSES/TENCENT_OPENCLAW_WEIXIN.txt`.
+
 ## OpenAI Codex CLI
 
 domi includes the official standalone distribution of OpenAI Codex CLI so the

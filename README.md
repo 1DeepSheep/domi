@@ -98,6 +98,7 @@ Mapping 具身智能赛道的项目和关键人物，标出值得优先认识的
 - **可选 PLAUD**：读取用户自己的 PLAUD 录音队列，转写后继续完成纪要、判断、归档与待办。
 - **可选飞书**：把飞书作为外部参考资料库和发布平台，保留完整的 Base、Wiki、Docs、Drive、IM 和 Contact 能力。
 - **可选 Outlook**：向用户指定的一个或多个参会人发送日程邀请。
+- **可选微信桥接**：从自己的微信远程布置相互隔离的 Codex 任务，接收阶段进度、长结果与真实文件附件；Mac 保持在线即可，不要求另建云端任务服务。
 - **安全更新**：发现新版本后在客户端下载；等待运行中的任务结束并完成安全落盘后，再重启安装。
 
 ## 本地主库与外部连接
@@ -170,6 +171,15 @@ cd domi
 npm install
 npm run dev
 ```
+
+个人微信桥接也与客户端源码一起维护；从源码启用时运行：
+
+```bash
+npm run wechat:login
+npm run wechat:install
+```
+
+凭证、任务和附件保存在 `~/Library/Application Support/domi/wechat-bridge/`，不会写入仓库。详细说明见 [services/wechat-bridge/README.md](services/wechat-bridge/README.md)。
 
 `npm run dev` 默认从 `~/plugins/domi` 读取 domi 插件源码。也可以通过 `DOMI_PLUGIN_SOURCE=/absolute/path npm run dev` 指定其他插件目录。
 
