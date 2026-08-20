@@ -2,6 +2,7 @@ const path = require("node:path");
 const { Worker } = require("node:worker_threads");
 
 const DEFAULT_WORKER_PATH = path.join(__dirname, "local-domi-sync-worker.cjs");
+const DEFAULT_SYNC_TIMEOUT_MS = 3 * 60 * 1000;
 
 function localSyncSource(source = {}) {
   const localDatabasePath = path.resolve(String(source.localDatabasePath || ""));
@@ -29,14 +30,28 @@ function runLocalDomiSync(source, options = {}) {
     // regression deterministic without changing production synchronization.
     testDelayMs: Math.min(Math.max(Number(options.testDelayMs) || 0, 0), 5_000)
   };
+  const timeoutMs = Math.max(100, Number(options.timeoutMs) || DEFAULT_SYNC_TIMEOUT_MS);
 
   return new Promise((resolve, reject) => {
     const worker = new WorkerClass(workerPath, { workerData });
     let settled = false;
+    const timeoutTimer = setTimeout(() => {
+      const failure = new Error(
+        `本地资料库扫描超过 ${Math.ceil(timeoutMs / 1000)} 秒，已停止本轮刷新并保留上次成功数据。`
+      );
+      failure.code = "DOMI_LOCAL_SYNC_TIMEOUT";
+      if (!settled) {
+        settled = true;
+        void Promise.resolve(worker.terminate?.()).catch(() => undefined);
+        reject(failure);
+      }
+    }, timeoutMs);
+    timeoutTimer.unref?.();
 
     const settle = (callback, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timeoutTimer);
       callback(value);
     };
 
@@ -60,6 +75,7 @@ function runLocalDomiSync(source, options = {}) {
 }
 
 module.exports = {
+  DEFAULT_SYNC_TIMEOUT_MS,
   localSyncSource,
   runLocalDomiSync
 };

@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld("workbench", {
     return () => ipcRenderer.removeListener("app:prepare-close", handler);
   },
   listDocumentLibrary: (request) => ipcRenderer.invoke("document-library:list", request),
+  searchDocumentLibrary: (request) => ipcRenderer.invoke("document-library:search", request),
   createDocumentLibraryEntry: (request) => ipcRenderer.invoke("document-library:create", request),
   readMarkdown: (request) => ipcRenderer.invoke("markdown:read", request),
   saveMarkdown: (request) => ipcRenderer.invoke("markdown:save", request),
