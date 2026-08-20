@@ -17,6 +17,7 @@ import {
 } from "./protocol.js";
 
 const TERMINAL_STATES = new Set(["completed", "failed", "canceled"]);
+const MAX_TASK_SEQUENCE = 999;
 const STATUS_LABELS = {
   queued: "排队中",
   running: "运行中",
@@ -62,7 +63,12 @@ export class TaskManager {
     this.state.tasks ||= {};
     this.state.activeBySender ||= {};
     this.state.jobs ||= [];
-    this.state.nextSequence ||= 1;
+    const restoredSequence = Number(this.state.nextSequence);
+    this.state.nextSequence = Number.isInteger(restoredSequence)
+      && restoredSequence >= 1
+      && restoredSequence <= MAX_TASK_SEQUENCE
+      ? restoredSequence
+      : 1;
     for (const task of Object.values(this.state.tasks)) {
       if (task.status === "running") {
         task.status = "interrupted";
@@ -104,13 +110,19 @@ export class TaskManager {
   }
 
   createTask(senderId, text) {
+    this.pruneTasks(senderId);
     let sequence = this.state.nextSequence;
     let taskId = canonicalTaskId(sequence);
-    while (this.state.tasks[taskId]) {
-      sequence += 1;
+    let attempts = 0;
+    while (this.state.tasks[taskId] && attempts < MAX_TASK_SEQUENCE) {
+      sequence = sequence >= MAX_TASK_SEQUENCE ? 1 : sequence + 1;
       taskId = canonicalTaskId(sequence);
+      attempts += 1;
     }
-    this.state.nextSequence = sequence + 1;
+    if (!taskId || this.state.tasks[taskId]) {
+      throw new Error("微信任务编号已用满，请先完成或取消部分旧任务。");
+    }
+    this.state.nextSequence = sequence >= MAX_TASK_SEQUENCE ? 1 : sequence + 1;
     const now = new Date().toISOString();
     const task = {
       id: taskId,

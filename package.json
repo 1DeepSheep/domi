@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "0.6.38",
+  "version": "0.6.39",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -44,7 +44,7 @@
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/instrument-sans": "^5.2.8",
     "@fontsource-variable/newsreader": "^5.2.10",
-    "@openai/codex-sdk": "0.148.0",
+    "@openai/codex-sdk": "0.145.0",
     "@tiptap/extension-image": "^3.27.4",
     "@tiptap/extension-table": "^3.27.4",
     "@tiptap/extension-task-item": "^3.27.4",
@@ -94,7 +94,10 @@
       "services/wechat-bridge/**/*",
       "shared/**/*",
       "public/domi-dock-icon.png",
-      "package.json"
+      "package.json",
+      "!node_modules/@openai/codex-darwin-*/**/*",
+      "!node_modules/@openai/codex-linux-*/**/*",
+      "!node_modules/@openai/codex-win32-*/**/*"
     ],
     "extraResources": [
       {
