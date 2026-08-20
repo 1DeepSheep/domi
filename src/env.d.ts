@@ -62,6 +62,9 @@ declare global {
       listDocumentLibrary: (
         request?: DocumentLibraryListRequest
       ) => Promise<DocumentLibrarySnapshot>;
+      searchDocumentLibrary: (
+        request: DocumentLibrarySearchRequest
+      ) => Promise<DocumentLibrarySearchResult>;
       createDocumentLibraryEntry: (
         request: DocumentLibraryCreateRequest
       ) => Promise<DocumentLibraryCreateResult>;
@@ -221,6 +224,32 @@ export type DocumentLibrarySnapshot = {
 
 export type DocumentLibraryListRequest = {
   force?: boolean;
+};
+
+export type DocumentLibrarySearchRequest = {
+  query: string;
+  limit?: number;
+  includeTranscripts?: boolean;
+};
+
+export type DocumentLibrarySearchMatch = {
+  path: string;
+  name: string;
+  relativePath: string;
+  kind: "markdown" | "pdf";
+  size: number;
+  mtimeMs: number;
+  snippet: string;
+  line?: number;
+};
+
+export type DocumentLibrarySearchResult = {
+  ok: boolean;
+  results: DocumentLibrarySearchMatch[];
+  indexing: boolean;
+  indexedCount: number;
+  lastIndexedAt: number;
+  error?: string;
 };
 
 export type DocumentLibraryCreateRequest = {

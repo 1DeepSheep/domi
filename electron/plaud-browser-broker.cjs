@@ -2,6 +2,7 @@ const { spawn } = require("node:child_process");
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 90_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 40_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 
 function sanitizedBrokerError(error) {
   const message = error instanceof Error ? error.message : String(error || "");
@@ -18,7 +19,8 @@ class PlaudSessionBroker {
     envProvider = () => ({}),
     spawnImpl = spawn,
     requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-    shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS
+    shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
+    idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
   }) {
     this.executable = executable;
     this.workerPath = workerPath;
@@ -26,6 +28,7 @@ class PlaudSessionBroker {
     this.spawnImpl = spawnImpl;
     this.requestTimeoutMs = requestTimeoutMs;
     this.shutdownTimeoutMs = shutdownTimeoutMs;
+    this.idleTimeoutMs = Math.max(1_000, Number(idleTimeoutMs) || DEFAULT_IDLE_TIMEOUT_MS);
     this.child = null;
     this.pluginRoot = "";
     this.sessionKey = "";
@@ -33,13 +36,32 @@ class PlaudSessionBroker {
     this.pending = new Map();
     this.sequence = 0;
     this.stopPromise = null;
+    this.idleTimer = null;
   }
 
   isRunning() {
     return Boolean(this.child && this.child.exitCode == null && this.child.signalCode == null);
   }
 
+  clearIdleTimer() {
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  armIdleStop() {
+    this.clearIdleTimer();
+    if (!this.isRunning() || this.pending.size > 0 || this.stopPromise) return;
+    const child = this.child;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.child !== child || this.pending.size > 0 || !this.isRunning()) return;
+      void this.stop("idle-timeout");
+    }, this.idleTimeoutMs);
+    this.idleTimer.unref?.();
+  }
+
   start(pluginRoot, sessionKey = pluginRoot) {
+    this.clearIdleTimer();
     const normalizedRoot = String(pluginRoot || "").trim();
     if (!normalizedRoot) throw new Error("PLAUD 插件目录不可用。");
     if (this.isRunning() && this.pluginRoot === normalizedRoot && this.sessionKey === sessionKey) return;
@@ -94,10 +116,12 @@ class PlaudSessionBroker {
       } else {
         request.resolve(message.result);
       }
+      this.armIdleStop();
     }
   }
 
   handleExit(error) {
+    this.clearIdleTimer();
     const child = this.child;
     this.child = null;
     this.pluginRoot = "";
@@ -112,6 +136,7 @@ class PlaudSessionBroker {
   }
 
   async request(command, args, pluginRoot, options = {}) {
+    this.clearIdleTimer();
     if (this.stopPromise) await this.stopPromise;
     const sessionKey = String(options.sessionKey || pluginRoot || "");
     if (this.isRunning() && (
@@ -140,11 +165,13 @@ class PlaudSessionBroker {
         this.pending.delete(id);
         clearTimeout(request.timer);
         request.reject(new Error(sanitizedBrokerError(error)));
+        this.armIdleStop();
       });
     });
   }
 
   async stop(reason = "shutdown") {
+    this.clearIdleTimer();
     if (this.stopPromise) return this.stopPromise;
     const child = this.child;
     if (!child || child.exitCode != null || child.signalCode != null) {
@@ -179,6 +206,7 @@ class PlaudSessionBroker {
 }
 
 module.exports = {
+  DEFAULT_IDLE_TIMEOUT_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
   PlaudSessionBroker,

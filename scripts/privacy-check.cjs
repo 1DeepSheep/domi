@@ -3,6 +3,11 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const asar = require("@electron/asar");
+const {
+  containsHardcodedSecret,
+  containsOneDriveAccountPath,
+  isForbiddenRuntimeName
+} = require("./privacy-rules.cjs");
 
 const root = path.resolve(__dirname, "..");
 const args = process.argv.slice(2);
@@ -18,16 +23,6 @@ const forbiddenExtensions = new Set([
   ".mp3", ".mp4", ".p12", ".p8", ".pem", ".provisionprofile",
   ".sqlite", ".sqlite3", ".wav"
 ]);
-const forbiddenRuntimeNames = [
-  /^\.env(?:\.|$)/i,
-  /^\.npmrc$/i,
-  /^\.privacy-terms\.local$/i,
-  /^domi-plugin-config\.json$/i,
-  /^domi\.sqlite3?(?:-.+)?$/i,
-  /^(?:Cookies|Cookies-journal|Login Data|Local State|Web Data|DevToolsActivePort)$/i,
-  /^(?:threads?|sessions?|history|runtime-state)\.json$/i,
-  /^(?:plaud|lark|feishu).*(?:session|cookie|token|credential)/i
-];
 const allowedEmailDomains = new Set([
   "example.com",
   "example.org",
@@ -62,7 +57,12 @@ function displayPath(filePath, scanRoot) {
 }
 
 function isPrivacyChecker(filePath) {
-  return new Set(["privacy-check.cjs", "public-release-check.cjs"])
+  return new Set([
+    "privacy-check.cjs",
+    "privacy-rules.cjs",
+    "privacy-rules.test.cjs",
+    "public-release-check.cjs"
+  ])
     .has(path.basename(filePath));
 }
 
@@ -83,14 +83,7 @@ function inspectContent(content, filePath, scanRoot, options = {}) {
     fail("发现本机配置的禁止公开身份标识", relative);
   }
   if (options.identityOnly) return;
-  const secretPatterns = [
-    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
-    /\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/,
-    /\bAKIA[0-9A-Z]{16}\b/,
-    /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}\b/i,
-    /\b(?:client_secret|access_token|refresh_token|api_key|authorization|cookie)\b\s*[:=]\s*["'][^"']{12,}["']/i
-  ];
-  if (secretPatterns.some((pattern) => pattern.test(content))) {
+  if (containsHardcodedSecret(content)) {
     fail("疑似硬编码密钥或登录凭据", relative);
   }
 
@@ -105,7 +98,7 @@ function inspectContent(content, filePath, scanRoot, options = {}) {
   if (/\/Users\/(?!Shared(?:\/|\b))[^/\s"'<>]+\//.test(content)) {
     fail("发现 macOS 用户绝对路径", relative);
   }
-  if (/OneDrive-[^/\s"'<>]+/.test(content)) {
+  if (containsOneDriveAccountPath(content)) {
     fail("发现 OneDrive 租户或账户路径", relative);
   }
   if (/https?:\/\/[A-Za-z0-9-]+\.(?:feishu\.cn|larksuite\.com)(?:\/|\b)/i.test(content)) {
@@ -153,7 +146,7 @@ function scanTree(scanRoot, options = {}) {
         continue;
       }
       const extension = path.extname(entry.name).toLowerCase();
-      if (forbiddenExtensions.has(extension) || forbiddenRuntimeNames.some((pattern) => pattern.test(entry.name))) {
+      if (forbiddenExtensions.has(extension) || isForbiddenRuntimeName(entry.name)) {
         fail("禁止发布运行数据或敏感文件", relative);
         continue;
       }
@@ -198,7 +191,7 @@ function scanSource() {
       }
       if (!stat.isFile()) continue;
       const extension = path.extname(relativePath).toLowerCase();
-      if (forbiddenExtensions.has(extension) || forbiddenRuntimeNames.some((pattern) => pattern.test(path.basename(relativePath)))) {
+      if (forbiddenExtensions.has(extension) || isForbiddenRuntimeName(path.basename(relativePath))) {
         fail("禁止发布运行数据或敏感文件", relativePath);
         continue;
       }
@@ -244,7 +237,7 @@ function scanHistory() {
       const extension = path.extname(relativePath).toLowerCase();
       const name = path.basename(relativePath);
       const historyPath = `${commit.slice(0, 12)}:${relativePath}`;
-      if (forbiddenExtensions.has(extension) || forbiddenRuntimeNames.some((pattern) => pattern.test(name))) {
+      if (forbiddenExtensions.has(extension) || isForbiddenRuntimeName(name)) {
         fail("Git 历史包含运行数据或敏感文件", historyPath);
         continue;
       }

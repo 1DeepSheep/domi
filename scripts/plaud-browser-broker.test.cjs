@@ -36,6 +36,10 @@ function readEvents(logPath) {
     : [];
 }
 
+function wait(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 test("PLAUD broker reuses one explicitly headless client and serializes requests", async (t) => {
   const fixture = fakePluginRoot(t);
   const broker = new PlaudSessionBroker({
@@ -79,6 +83,30 @@ test("PLAUD broker closes the old hidden client before switching browser Profile
   await broker.request("list", ["50", "0"], fixture.root, { sessionKey: "tabbit" });
   await broker.stop("test-finished");
 
+  const lifecycle = readEvents(fixture.logPath)
+    .map((event) => event.event)
+    .filter((event) => event === "init" || event === "close");
+  assert.deepEqual(lifecycle, ["init", "close", "init", "close"]);
+});
+
+test("PLAUD broker releases its hidden browser after an idle result and reconnects on demand", async (t) => {
+  const fixture = fakePluginRoot(t);
+  const broker = new PlaudSessionBroker({
+    executable: process.execPath,
+    workerPath: path.join(__dirname, "..", "electron", "plaud-worker.cjs"),
+    envProvider: () => ({ PLAUD_BROKER_TEST_LOG: fixture.logPath }),
+    requestTimeoutMs: 5_000,
+    shutdownTimeoutMs: 2_000,
+    idleTimeoutMs: 1_000
+  });
+  t.after(() => broker.stop("test-cleanup"));
+
+  await broker.request("list", ["50", "0"], fixture.root);
+  await wait(1_250);
+  assert.equal(broker.isRunning(), false);
+
+  await broker.request("list", ["50", "0"], fixture.root);
+  await broker.stop("test-finished");
   const lifecycle = readEvents(fixture.logPath)
     .map((event) => event.event)
     .filter((event) => event === "init" || event === "close");

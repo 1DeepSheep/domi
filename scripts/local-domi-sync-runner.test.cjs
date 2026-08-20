@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { performance } = require("node:perf_hooks");
+const { EventEmitter } = require("node:events");
 const { DomiIntegration } = require("../electron/domi-integration.cjs");
 const { runLocalDomiSync } = require("../electron/local-domi-sync-runner.cjs");
 
@@ -113,4 +114,27 @@ test("concurrent local sync calls share one worker reindex and preserve the snap
   assert.deepEqual(firstResult.snapshot.projects, secondResult.snapshot.projects);
   assert.equal(firstResult.snapshot.sources.projects.localDatabasePath, source.localDatabasePath);
   assert.equal(snapshots.length, 2);
+});
+
+test("a stuck local scan is terminated at the deadline instead of hanging the app", async () => {
+  let terminated = false;
+  class StuckWorker extends EventEmitter {
+    terminate() {
+      terminated = true;
+      return Promise.resolve(0);
+    }
+  }
+
+  await assert.rejects(
+    runLocalDomiSync({
+      localDatabasePath: "/tmp/domi-stuck-sync.sqlite3",
+      localLibraryDir: "/tmp/domi-stuck-library"
+    }, {
+      WorkerClass: StuckWorker,
+      timeoutMs: 40
+    }),
+    (error) => error?.code === "DOMI_LOCAL_SYNC_TIMEOUT"
+      && /保留上次成功数据/.test(error.message)
+  );
+  assert.equal(terminated, true);
 });
