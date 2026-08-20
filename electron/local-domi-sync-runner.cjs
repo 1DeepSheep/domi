@@ -46,8 +46,6 @@ function runLocalDomiSync(source, options = {}) {
         reject(failure);
       }
     }, timeoutMs);
-    timeoutTimer.unref?.();
-
     const settle = (callback, value) => {
       if (settled) return;
       settled = true;
