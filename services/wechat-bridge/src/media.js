@@ -10,6 +10,7 @@ import {
   sendMessageItem,
 } from "./common.js";
 import { INBOUND_DIR, ensurePrivateDir } from "./state.js";
+import { prepareAttachmentForWeixin } from "./markdown-pdf.js";
 
 const MAX_MEDIA_BYTES = 100 * 1024 * 1024;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
@@ -79,6 +80,11 @@ function parseAesKey(base64, hex) {
     return Buffer.from(decoded.toString("ascii"), "hex");
   }
   throw new Error("微信媒体缺少有效的解密密钥。");
+}
+
+export function encodeOutboundAesKey(key) {
+  if (!Buffer.isBuffer(key) || key.length !== 16) throw new Error("微信媒体缺少有效的加密密钥。");
+  return Buffer.from(key.toString("hex"), "utf8").toString("base64");
 }
 
 function cdnDownloadUrl(media, cdnBaseUrl) {
@@ -198,19 +204,20 @@ async function uploadBuffer({ credentials, toUserId, filePath, mediaType }) {
 }
 
 export async function sendLocalAttachment({ credentials, toUserId, contextToken, runId, filePath }) {
-  const stat = fs.statSync(filePath);
+  const deliverablePath = await prepareAttachmentForWeixin(filePath);
+  const stat = fs.statSync(deliverablePath);
   if (!stat.isFile()) throw new Error("附件路径不是文件。");
-  const fileName = safeFileName(path.basename(filePath), "attachment.bin");
+  const fileName = safeFileName(path.basename(deliverablePath), "attachment.bin");
   const isImage = IMAGE_EXTENSIONS.has(path.extname(fileName).toLowerCase());
   const uploaded = await uploadBuffer({
     credentials,
     toUserId,
-    filePath,
+    filePath: deliverablePath,
     mediaType: isImage ? 1 : 3,
   });
   const media = {
     encrypt_query_param: uploaded.downloadParam,
-    aes_key: uploaded.aeskey.toString("base64"),
+    aes_key: encodeOutboundAesKey(uploaded.aeskey),
     encrypt_type: 1,
   };
   const item = isImage
