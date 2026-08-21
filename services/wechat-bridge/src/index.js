@@ -30,6 +30,7 @@ import { TaskManager } from "./task-manager.js";
 
 migrateLegacyState();
 pruneDirectory(path.join(STATE_DIR, "inbound"), 7 * 24 * 60 * 60_000);
+pruneDirectory(path.join(STATE_DIR, "outbound-pdf"), 7 * 24 * 60 * 60_000);
 
 const credentials = readJson(CREDENTIALS_PATH, null);
 if (!credentials?.token || !credentials?.accountId) {
