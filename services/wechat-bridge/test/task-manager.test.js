@@ -209,6 +209,44 @@ test("transient transport timeouts retry the same task and recover visibly", asy
   assert.equal(sent.some((text) => text.includes("正在自动重试（1/2）") && text.includes("任务仍在处理")), true);
 });
 
+test("recoverable Codex reconnect events stay inside one CLI attempt", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-stream-reconnect-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let attempts = 0;
+  const delivered = [];
+  const manager = new TaskManager({
+    codex: {
+      startThread() {
+        return {
+          async runStreamed() {
+            attempts += 1;
+            async function* events() {
+              yield { type: "thread.started", thread_id: "thread-stream-reconnect" };
+              yield { type: "error", message: "Reconnecting... 2/5 (request timed out)" };
+              yield { type: "item.completed", item: { type: "agent_message", text: "连接恢复成功" } };
+              yield { type: "turn.completed", usage: null };
+            }
+            return { events: events() };
+          },
+        };
+      },
+    },
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
+    sendTaskText: async () => {},
+    deliverTaskResult: async (_task, response) => delivered.push(response),
+    transportRetryDelaysMs: [0, 0],
+  });
+  const task = manager.createTask("owner", "等待CLI内部恢复");
+  manager.enqueue(task, { text: "开始", codexInput: "开始" });
+  await waitFor(() => task.status === "completed");
+
+  assert.equal(attempts, 1);
+  assert.deepEqual(delivered, ["连接恢复成功"]);
+});
+
 test("exhausted transport retries keep context and hide raw reconnect errors", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-retry-exhausted-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

@@ -6,7 +6,7 @@ export const BASE_URL = "https://ilinkai.weixin.qq.com";
 export const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 export const BOT_TYPE = "3";
 export const CHANNEL_VERSION = "2.4.6";
-export const BOT_AGENT = "domi-wechat/0.6.41";
+export const BOT_AGENT = "domi-wechat/0.6.42";
 
 export const MessageItemType = Object.freeze({
   TEXT: 1,
