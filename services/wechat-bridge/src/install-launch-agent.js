@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { STATE_DIR, ensurePrivateDir, migrateLegacyState } from "./state.js";
+import { resolvedProxyEnvironment } from "./proxy-environment.js";
 
 const LABEL = "com.codex.wechat-bridge";
 const currentFile = fileURLToPath(import.meta.url);
@@ -38,6 +39,7 @@ fs.mkdirSync(launchAgentsDirectory, { recursive: true });
 fs.mkdirSync(workspace, { recursive: true });
 
 const environment = {
+  ...resolvedProxyEnvironment(process.env),
   HOME: os.homedir(),
   CODEX_WECHAT_FULL_ACCESS: process.env.CODEX_WECHAT_FULL_ACCESS || "1",
   CODEX_WECHAT_WORKDIR: workspace,

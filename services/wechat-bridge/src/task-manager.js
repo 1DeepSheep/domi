@@ -261,6 +261,8 @@ export class TaskManager {
       while (true) {
         let attemptProducedResult = false;
         let attemptStartedWork = false;
+        let attemptCompleted = false;
+        let recoverableStreamError = null;
         try {
           const thread = task.threadId
             ? this.codex.resumeThread(task.threadId, options)
@@ -292,8 +294,20 @@ export class TaskManager {
               }
             }
             if (event.type === "turn.failed") throw new Error(event.error?.message || "Codex任务失败");
-            if (event.type === "error") throw new Error(event.message || "Codex事件流中断");
+            if (event.type === "turn.completed") {
+              attemptCompleted = true;
+              continue;
+            }
+            if (event.type === "error") {
+              const streamError = new Error(event.message || "Codex事件流中断");
+              if (!isTransientTransportError(streamError)) throw streamError;
+              recoverableStreamError = streamError;
+              task.progress = "Codex连接短暂波动，正在恢复";
+              task.updatedAt = new Date().toISOString();
+              this.persist();
+            }
           }
+          if (!attemptCompleted && !attemptProducedResult && recoverableStreamError) throw recoverableStreamError;
           break;
         } catch (error) {
           const retryDelay = this.transportRetryDelaysMs[transportRetries];
