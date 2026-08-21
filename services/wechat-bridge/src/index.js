@@ -10,6 +10,8 @@ import {
   extractLocalAttachments,
   messageIdentity,
   replaceLocalAttachmentLinks,
+  requestsExistingResult,
+  splitText,
   wantsFileDelivery,
 } from "./protocol.js";
 import {
@@ -163,32 +165,39 @@ const taskManager = new TaskManager({
             response,
           );
     }
-    await sendText({
-      credentials,
-      toUserId: task.senderId,
-      contextToken: job.contextToken || task.lastContextToken,
-      runId: job.runId || task.lastRunId,
-      text: `【${task.id}】${visibleResponse}`,
-    });
-    if (!shouldSendFiles) return;
-    for (const attachment of attachments) {
-      try {
-        await sendLocalAttachment({
-          credentials,
-          toUserId: task.senderId,
-          contextToken: job.contextToken || task.lastContextToken,
-          runId: job.runId || task.lastRunId,
-          filePath: attachment.filePath,
-        });
-      } catch (error) {
+    task.delivery ||= {};
+    task.delivery.files ||= {};
+    task.delivery.textChunks ||= {};
+    if (!task.delivery.textSent) {
+      const chunks = splitText(`【${task.id}】${visibleResponse}`, 5000);
+      for (let index = 0; index < chunks.length; index += 1) {
+        if (task.delivery.textChunks[index]) continue;
+        const prefix = chunks.length > 1 ? `（${index + 1}/${chunks.length}）\n` : "";
         await sendText({
           credentials,
           toUserId: task.senderId,
           contextToken: job.contextToken || task.lastContextToken,
           runId: job.runId || task.lastRunId,
-          text: `【${task.id}】附件“${path.basename(attachment.filePath)}”发送失败：${error?.message ?? error}`,
+          text: `${prefix}${chunks[index]}`,
         });
+        task.delivery.textChunks[index] = true;
+        taskManager.persist();
       }
+      task.delivery.textSent = true;
+      taskManager.persist();
+    }
+    if (!shouldSendFiles) return;
+    for (const attachment of attachments) {
+      if (task.delivery.files[attachment.filePath]) continue;
+      await sendLocalAttachment({
+        credentials,
+        toUserId: task.senderId,
+        contextToken: job.contextToken || task.lastContextToken,
+        runId: job.runId || task.lastRunId,
+        filePath: attachment.filePath,
+      });
+      task.delivery.files[attachment.filePath] = true;
+      taskManager.persist();
     }
   },
 });
@@ -213,7 +222,7 @@ async function handleBuiltIn(message, text) {
       "直接发送任务、截图或文件即可。每项任务会获得独立编号。",
       "/status 查看桥接和最近任务",
       "/tasks 查看最近任务",
-      "/cancel W001 取消任务",
+      "/cancel W01 取消任务",
       "/new 让下一条消息创建新任务",
       "/model 查看或切换模型",
     ].join("\n"));
@@ -296,6 +305,12 @@ async function handleMessage(message) {
   const inbound = extractInbound(message);
   if (!inbound.text && !inbound.mediaItems.length) return;
   log(`收到微信消息 id=${messageIdentity(message)} media=${inbound.mediaItems.length}`);
+  taskManager.noteInboundContext(senderId, {
+    contextToken: message.context_token,
+    runId: message.run_id,
+  });
+  const preferredDeliveryTask = taskManager.referenceFromText(`${inbound.quotedText || ""}\n${inbound.text || ""}`);
+  const flushedDeliveries = await taskManager.flushPendingDeliveries(senderId, preferredDeliveryTask);
   if (inbound.text && await handleBuiltIn(message, inbound.text)) return;
 
   const { task, isNew, ambiguousTasks } = taskManager.resolveTask({
@@ -308,6 +323,10 @@ async function handleMessage(message) {
       message,
       `这条补充属于哪个任务？请在消息前加任务编号：\n${ambiguousTasks.slice(0, 5).map((entry) => `【${entry.id}】${entry.title}`).join("\n")}`,
     );
+    return;
+  }
+  if (inbound.text && requestsExistingResult(inbound.text) && task.finalResponse) {
+    if (!flushedDeliveries.includes(task.id)) await taskManager.redeliver(task, { wantsFiles: true });
     return;
   }
   try {
