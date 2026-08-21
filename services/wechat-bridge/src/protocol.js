@@ -11,11 +11,16 @@ const FOLLOW_UP_PATTERN = /^(?:继续|补充|更正|修改|修正|反馈|参会�
 const NEW_TASK_PATTERN = /^(?:请)?(?:帮我|替我)?(?:研究|分析|整理|查看|查询|查一下|搜索|创建|新建|生成|写|做|安排|发送|同步|总结|评估|比较|对比)/;
 const WAITING_PATTERN = /(?:请补充|请确认|需要你|等待你|告诉我|回复.+(?:继续|确认)|是否要|你希望|请提供|\?|？)\s*$/;
 const FILE_REQUEST_PATTERN = /(?:发|发送|给我|附件|文件|下载|完整纪要|源文件|报告|memo|pdf|markdown|md\b)/i;
+const EXISTING_RESULT_PATTERN = /(?:(?:只|仅)?(?:发送|发|给)(?:我)?[^。！？\n]{0,24}(?:已有)?(?:结果|纪要|报告|文件|附件|PDF|Markdown)|(?:结果|纪要|报告|文件|附件|PDF|Markdown)[^。！？\n]{0,24}(?:发我|给我|我看下|我看看|看下|看看|看一下|打开|下载))/i;
+const RESULT_NOUN_PREFIX = /^(?:请)?(?:把)?(?:研究)?(?:结果|纪要|报告|文件|附件|PDF|Markdown)/i;
+const RECENT_ELLIPTICAL_FOLLOW_UP_PATTERN = /^(?:那|那么|然后|接着|所以|为什么|怎么|能否|可否|可以再|还可以|有没有|再说|说下|展开|详细|具体)/;
+const RECENT_FACET_FOLLOW_UP_PATTERN = /^(?:风险|团队|融资|估值|竞争|市场|产品|技术)(?:呢|吗|怎么样|怎么看|怎么处理)?[？?。！!]*$/;
+const RECENT_FOCUS_GRACE_MS = 10 * 60_000;
 
 export function canonicalTaskId(value) {
   const number = Number(value);
-  if (!Number.isInteger(number) || number < 1 || number > 999999) return "";
-  return `W${String(number).padStart(3, "0")}`;
+  if (!Number.isInteger(number) || number < 1 || number > 20) return "";
+  return `W${String(number).padStart(2, "0")}`;
 }
 
 export function taskNumber(taskId) {
@@ -33,20 +38,36 @@ export function findTaskReference(text, tasks = {}) {
   return "";
 }
 
-export function shouldContinueActiveTask(text, activeTask) {
+export function shouldContinueActiveTask(text, activeTask, now = Date.now()) {
   if (!activeTask) return false;
   if (activeTask.status === "waiting_user") return likelyWaitingReply(text);
-  return looksLikeFollowUp(text);
+  if (looksLikeFollowUp(text) || requestsExistingResult(text)) return true;
+  const updatedAt = Date.parse(activeTask.updatedAt || "");
+  return Number.isFinite(updatedAt)
+    && now - updatedAt <= RECENT_FOCUS_GRACE_MS
+    && (RECENT_ELLIPTICAL_FOLLOW_UP_PATTERN.test(String(text || "").trim())
+      || RECENT_FACET_FOLLOW_UP_PATTERN.test(String(text || "").trim()))
+    && !looksLikeNewTask(text);
 }
 
 export function looksLikeFollowUp(text) {
   return FOLLOW_UP_PATTERN.test(String(text || "").trim());
 }
 
+export function looksLikeNewTask(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized || RESULT_NOUN_PREFIX.test(normalized)) return false;
+  return NEW_TASK_PATTERN.test(normalized);
+}
+
+export function requestsExistingResult(text) {
+  return EXISTING_RESULT_PATTERN.test(String(text || "").trim());
+}
+
 export function likelyWaitingReply(text) {
   const normalized = String(text || "").trim();
   if (!normalized) return true;
-  return looksLikeFollowUp(normalized) || !NEW_TASK_PATTERN.test(normalized);
+  return looksLikeFollowUp(normalized) || requestsExistingResult(normalized) || !looksLikeNewTask(normalized);
 }
 
 export function responseWaitsForUser(text) {

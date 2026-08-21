@@ -17,8 +17,11 @@ import {
 } from "./protocol.js";
 
 const TERMINAL_STATES = new Set(["completed", "failed", "canceled"]);
-const MAX_TASK_SEQUENCE = 999;
+const MAX_TASK_SEQUENCE = 20;
+const MAX_TERMINAL_TASKS_PER_SENDER = 10;
+const DEFAULT_RECENT_TASK_LIMIT = 5;
 const DEFAULT_TRANSPORT_RETRY_DELAYS_MS = [2_000, 5_000];
+const DEFAULT_PROGRESS_NOTIFICATION_DELAYS_MS = [3 * 60_000, 10 * 60_000];
 const STATUS_LABELS = {
   queued: "排队中",
   running: "运行中",
@@ -30,7 +33,7 @@ const STATUS_LABELS = {
 };
 
 function defaultState() {
-  return { nextSequence: 1, tasks: {}, activeBySender: {}, jobs: [] };
+  return { nextSequence: 1, tasks: {}, activeBySender: {}, contextBySender: {}, jobs: [] };
 }
 
 function cleanText(value, maximum = 400) {
@@ -54,6 +57,8 @@ export class TaskManager {
     log = () => {},
     maxConcurrent = 2,
     transportRetryDelaysMs = DEFAULT_TRANSPORT_RETRY_DELAYS_MS,
+    progressNotificationDelaysMs = DEFAULT_PROGRESS_NOTIFICATION_DELAYS_MS,
+    progressPollIntervalMs = 15_000,
   }) {
     this.codex = codex;
     this.statePath = statePath;
@@ -65,12 +70,16 @@ export class TaskManager {
     this.log = log;
     this.maxConcurrent = maxConcurrent;
     this.transportRetryDelaysMs = transportRetryDelaysMs;
+    this.progressNotificationDelaysMs = progressNotificationDelaysMs;
+    this.progressPollIntervalMs = progressPollIntervalMs;
     this.runningCount = 0;
     this.activeControllers = new Map();
     this.state = readJson(statePath, defaultState());
     this.state.tasks ||= {};
     this.state.activeBySender ||= {};
+    this.state.contextBySender ||= {};
     this.state.jobs ||= [];
+    this.normalizePersistedState();
     const restoredSequence = Number(this.state.nextSequence);
     this.state.nextSequence = Number.isInteger(restoredSequence)
       && restoredSequence >= 1
@@ -83,12 +92,134 @@ export class TaskManager {
         task.progress = "桥接服务上次退出时任务仍在运行，请发送任务编号继续。";
       }
     }
+    for (const senderId of new Set(Object.values(this.state.tasks).map((task) => task.senderId).filter(Boolean))) {
+      this.pruneTasks(senderId);
+    }
     this.persist();
     queueMicrotask(() => this.pump());
   }
 
+  normalizePersistedState() {
+    const originalTasks = Object.entries(this.state.tasks || {});
+    const originalActive = { ...(this.state.activeBySender || {}) };
+    const prioritized = originalTasks.sort(([, left], [, right]) => {
+      const leftActive = Object.values(originalActive).includes(left.id) ? 1 : 0;
+      const rightActive = Object.values(originalActive).includes(right.id) ? 1 : 0;
+      if (leftActive !== rightActive) return rightActive - leftActive;
+      const leftOpen = TERMINAL_STATES.has(left.status) ? 0 : 1;
+      const rightOpen = TERMINAL_STATES.has(right.status) ? 0 : 1;
+      if (leftOpen !== rightOpen) return rightOpen - leftOpen;
+      return String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+    });
+    const normalized = {};
+    const idMap = new Map();
+    const used = new Set();
+    for (const [legacyId, task] of prioritized) {
+      const legacyNumber = taskNumber(task.id || legacyId);
+      let nextId = legacyNumber >= 1 && legacyNumber <= MAX_TASK_SEQUENCE
+        ? canonicalTaskId(legacyNumber)
+        : "";
+      if (!nextId || used.has(nextId)) {
+        nextId = Array.from({ length: MAX_TASK_SEQUENCE }, (_, index) => canonicalTaskId(index + 1))
+          .find((candidate) => !used.has(candidate)) || "";
+      }
+      if (!nextId) continue;
+      used.add(nextId);
+      idMap.set(legacyId, nextId);
+      if (task.id) idMap.set(task.id, nextId);
+      task.id = nextId;
+      task.uid ||= crypto.randomUUID();
+      normalized[nextId] = task;
+    }
+    this.state.tasks = normalized;
+    this.state.jobs = (this.state.jobs || []).flatMap((job) => {
+      const taskId = idMap.get(job.taskId) || (normalized[job.taskId] ? job.taskId : "");
+      return taskId ? [{ ...job, taskId }] : [];
+    });
+    this.state.activeBySender = Object.fromEntries(
+      Object.entries(originalActive).flatMap(([senderId, legacyId]) => {
+        const taskId = idMap.get(legacyId) || (normalized[legacyId] ? legacyId : "");
+        return taskId ? [[senderId, taskId]] : [];
+      }),
+    );
+  }
+
   persist() {
     writeJsonPrivate(this.statePath, this.state);
+  }
+
+  noteInboundContext(senderId, { contextToken = "", runId = "" } = {}) {
+    if (!senderId || !contextToken) return;
+    this.state.contextBySender[senderId] = {
+      contextToken,
+      runId,
+      updatedAt: new Date().toISOString(),
+    };
+    this.persist();
+  }
+
+  deliveryContext(task, fallback = {}) {
+    const latest = this.state.contextBySender[task.senderId] || {};
+    return {
+      contextToken: latest.contextToken || fallback.contextToken || task.lastContextToken || "",
+      runId: latest.runId || fallback.runId || task.lastRunId || "",
+      wantsFiles: task.delivery?.wantsFiles === true,
+    };
+  }
+
+  async attemptDelivery(task, fallback = {}) {
+    if (!task?.finalResponse || task.delivery?.status !== "pending") return false;
+    try {
+      await this.deliverTaskResult(task, task.finalResponse, this.deliveryContext(task, fallback));
+      task.delivery.status = "delivered";
+      task.delivery.deliveredAt = new Date().toISOString();
+      task.delivery.error = "";
+      task.progress = task.status === "waiting_user" ? "等待用户补充" : "已完成";
+      task.updatedAt = new Date().toISOString();
+      this.pruneTasks(task.senderId);
+      this.persist();
+      return true;
+    } catch (error) {
+      task.delivery.status = "pending";
+      task.delivery.error = cleanText(error?.message ?? error, 240);
+      task.progress = "已完成，等待下一条微信消息后自动发送";
+      task.updatedAt = new Date().toISOString();
+      this.persist();
+      this.log(`任务 ${task.id} 结果已保存，微信发送暂缓：${task.delivery.error}`);
+      return false;
+    }
+  }
+
+  async flushPendingDeliveries(senderId, preferredTaskId = "", limit = 1) {
+    const pending = Object.values(this.state.tasks)
+      .filter((task) => task.senderId === senderId && task.finalResponse && task.delivery?.status === "pending")
+      .sort((left, right) => {
+        if (left.id === preferredTaskId) return -1;
+        if (right.id === preferredTaskId) return 1;
+        return String(right.updatedAt).localeCompare(String(left.updatedAt));
+      });
+    const delivered = [];
+    for (const task of pending.slice(0, Math.max(0, limit))) {
+      if (!await this.attemptDelivery(task)) break;
+      delivered.push(task.id);
+    }
+    return delivered;
+  }
+
+  async redeliver(task, { wantsFiles = true } = {}) {
+    if (!task?.finalResponse) return false;
+    task.delivery = {
+      status: "pending",
+      wantsFiles: wantsFiles || task.delivery?.wantsFiles === true,
+      textSent: false,
+      textChunks: {},
+      files: {},
+      createdAt: new Date().toISOString(),
+      deliveredAt: "",
+      error: "",
+    };
+    this.persist();
+    return this.attemptDelivery(task);
   }
 
   task(taskId) {
@@ -134,6 +265,7 @@ export class TaskManager {
     const now = new Date().toISOString();
     const task = {
       id: taskId,
+      uid: crypto.randomUUID(),
       senderId,
       title: compactTaskTitle(text),
       status: "queued",
@@ -144,6 +276,8 @@ export class TaskManager {
       turns: 0,
       pendingCount: 0,
       lastError: "",
+      finalResponse: "",
+      delivery: null,
       preference: this.preferenceFor(senderId),
     };
     this.state.tasks[taskId] = task;
@@ -166,9 +300,14 @@ export class TaskManager {
 
   pruneTasks(senderId) {
     const owned = Object.values(this.state.tasks)
-      .filter((task) => task.senderId === senderId && TERMINAL_STATES.has(task.status))
+      .filter((task) => task.senderId === senderId
+        && TERMINAL_STATES.has(task.status)
+        && task.delivery?.status !== "pending")
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-    for (const task of owned.slice(80)) delete this.state.tasks[task.id];
+    for (const task of owned.slice(MAX_TERMINAL_TASKS_PER_SENDER)) {
+      delete this.state.tasks[task.id];
+      if (this.state.activeBySender[senderId] === task.id) delete this.state.activeBySender[senderId];
+    }
   }
 
   focus(senderId, taskId) {
@@ -225,9 +364,11 @@ export class TaskManager {
 
   async safeSend(task, text, job) {
     try {
-      await this.sendTaskText(task, text, job);
+      await this.sendTaskText(task, text, this.deliveryContext(task, job));
+      return true;
     } catch (error) {
       this.log(`任务 ${task.id} 状态消息发送失败：${error?.message ?? error}`);
+      return false;
     }
   }
 
@@ -244,17 +385,17 @@ export class TaskManager {
     task.lastRunId = job.runId;
     this.persist();
 
-    let lastProgressAt = startedAt;
-    let lastProgress = "";
     let finalResponse = "";
     let transportRetries = 0;
+    let progressNoticeIndex = 0;
     const tools = new Set();
     const heartbeat = setInterval(() => {
-      if (Date.now() - lastProgressAt < 55_000) return;
-      lastProgressAt = Date.now();
+      const nextDelay = this.progressNotificationDelaysMs[progressNoticeIndex];
+      if (nextDelay === undefined || Date.now() - startedAt < nextDelay) return;
+      progressNoticeIndex += 1;
       const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 60_000));
       void this.safeSend(task, `【${task.id}】仍在处理：${task.progress}（已运行约${elapsed}分钟）`, job);
-    }, 15_000);
+    }, this.progressPollIntervalMs);
 
     try {
       const options = this.threadOptionsFor(task);
@@ -287,11 +428,6 @@ export class TaskManager {
               task.progress = progress;
               task.updatedAt = new Date().toISOString();
               this.persist();
-              if (progress !== lastProgress && Date.now() - lastProgressAt >= 20_000) {
-                lastProgress = progress;
-                lastProgressAt = Date.now();
-                await this.safeSend(task, `【${task.id}】${progress}`, job);
-              }
             }
             if (event.type === "turn.failed") throw new Error(event.error?.message || "Codex任务失败");
             if (event.type === "turn.completed") {
@@ -322,9 +458,6 @@ export class TaskManager {
           task.lastError = "";
           task.updatedAt = new Date().toISOString();
           this.persist();
-          lastProgress = task.progress;
-          lastProgressAt = Date.now();
-          await this.safeSend(task, `【${task.id}】${task.progress}，任务仍在处理。`, job);
           await new Promise((resolve) => setTimeout(resolve, retryDelay));
           if (controller.signal.aborted) throw new Error("任务已取消");
         }
@@ -334,10 +467,24 @@ export class TaskManager {
       task.status = responseWaitsForUser(finalResponse) ? "waiting_user" : "completed";
       task.progress = task.status === "waiting_user" ? "等待用户补充" : "已完成";
       task.lastError = "";
+      task.finalResponse = finalResponse;
+      task.completedAt = new Date().toISOString();
+      task.delivery = {
+        status: "pending",
+        wantsFiles: job.wantsFiles === true,
+        textSent: false,
+        textChunks: {},
+        files: {},
+        createdAt: new Date().toISOString(),
+        deliveredAt: "",
+        error: "",
+      };
       task.updatedAt = new Date().toISOString();
       this.persist();
-      await this.deliverTaskResult(task, finalResponse, job);
-      this.recordMetric(task, job, startedAt, "completed", tools);
+      const delivered = await this.attemptDelivery(task, job);
+      this.pruneTasks(task.senderId);
+      this.persist();
+      this.recordMetric(task, job, startedAt, delivered ? "completed" : "completed_pending_delivery", tools);
     } catch (error) {
       const canceled = controller.signal.aborted || task.status === "canceled";
       const transientFailure = !canceled && isTransientTransportError(error);
@@ -347,6 +494,7 @@ export class TaskManager {
         ? `网络连接暂时不可用${transportRetries ? `，已自动重试${transportRetries}次` : ""}。任务内容和上下文已保留，请回复“${task.id} 重试”继续。`
         : cleanText(error?.message ?? error, 240);
       task.updatedAt = new Date().toISOString();
+      this.pruneTasks(task.senderId);
       this.persist();
       await this.safeSend(
         task,
@@ -367,6 +515,7 @@ export class TaskManager {
   recordMetric(task, job, startedAt, status, tools) {
     appendJsonLinePrivate(this.metricsPath, {
       taskId: task.id,
+      taskUid: task.uid,
       timestamp: new Date().toISOString(),
       status,
       durationMs: Date.now() - startedAt,
@@ -387,6 +536,7 @@ export class TaskManager {
     task.progress = "已取消";
     task.pendingCount = 0;
     task.updatedAt = new Date().toISOString();
+    this.pruneTasks(senderId);
     this.persist();
     return { ok: true, task };
   }
@@ -396,10 +546,11 @@ export class TaskManager {
     task.progress = "附件准备失败";
     task.lastError = cleanText(error?.message ?? error, 240);
     task.updatedAt = new Date().toISOString();
+    this.pruneTasks(task.senderId);
     this.persist();
   }
 
-  recentTasks(senderId, limit = 8) {
+  recentTasks(senderId, limit = DEFAULT_RECENT_TASK_LIMIT) {
     return Object.values(this.state.tasks)
       .filter((task) => task.senderId === senderId)
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
@@ -413,7 +564,8 @@ export class TaskManager {
     return owned.map((task) => {
       const pending = task.pendingCount ? ` · ${task.pendingCount}条补充待处理` : "";
       const error = task.lastError ? `\n  原因：${task.lastError}` : "";
-      return `【${task.id}】${STATUS_LABELS[task.status] || task.status}${pending}\n  ${task.title}\n  ${task.progress}${error}`;
+      const delivery = task.delivery?.status === "pending" ? " · 结果待发送" : "";
+      return `【${task.id}】${STATUS_LABELS[task.status] || task.status}${pending}${delivery}\n  ${task.title}\n  ${task.progress}${error}`;
     }).join("\n\n");
   }
 

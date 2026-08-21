@@ -477,8 +477,8 @@ assert.match(
 );
 assert.match(
   styles,
-  /\.sidebar-entity-search\s*\{[\s\S]*?flex:\s*0 0 auto[\s\S]*?\.sidebar-domi-search-results\s*\{[\s\S]*?max-height:[\s\S]*?overflow-y:\s*auto/,
-  "Sidebar entity results must remain bounded and independently scrollable."
+  /\.sidebar-entity-search\s*\{[\s\S]*?flex:\s*0 0 auto[\s\S]*?\.sidebar-entity-search \.sidebar-domi-search-results\s*\{[\s\S]*?max-height:[\s\S]*?overflow-x:\s*hidden;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overscroll-behavior-y:\s*contain;/,
+  "Sidebar entity results must override the shared hidden overflow and remain independently trackpad-scrollable."
 );
 assert.match(
   styles,

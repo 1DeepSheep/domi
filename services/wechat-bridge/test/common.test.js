@@ -64,3 +64,12 @@ test("an acknowledgement failure cannot prevent the accepted task from being pre
     /try\s*{\s*await replyMessage\([\s\S]*?catch \(error\)[\s\S]*?任务仍会入队[\s\S]*?void prepareTask\(message, task, inbound\)/,
   );
 });
+
+test("result delivery checkpoints text chunks and attachments before retry", async () => {
+  const source = await import("node:fs/promises")
+    .then((fs) => fs.readFile(new URL("../src/index.js", import.meta.url), "utf8"));
+  assert.match(
+    source,
+    /task\.delivery\.textChunks \|\|= \{\}[\s\S]*?if \(task\.delivery\.textChunks\[index\]\) continue[\s\S]*?task\.delivery\.textChunks\[index\] = true[\s\S]*?if \(task\.delivery\.files\[attachment\.filePath\]\) continue[\s\S]*?task\.delivery\.files\[attachment\.filePath\] = true/,
+  );
+});
