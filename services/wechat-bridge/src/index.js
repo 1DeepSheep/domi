@@ -309,12 +309,16 @@ async function handleMessage(message) {
     );
     return;
   }
-  await replyMessage(
-    message,
-    isNew
-      ? `已收到，任务【${task.id}】开始处理：${task.title}`
-      : `已收到，补充内容已加入任务【${task.id}】：${task.title}`,
-  );
+  try {
+    await replyMessage(
+      message,
+      isNew
+        ? `已收到，任务【${task.id}】开始处理：${task.title}`
+        : `已收到，补充内容已加入任务【${task.id}】：${task.title}`,
+    );
+  } catch (error) {
+    log(`任务 ${task.id} 接收回执发送失败，但任务仍会入队：${error?.message ?? error}`);
+  }
   void prepareTask(message, task, inbound);
 }
 

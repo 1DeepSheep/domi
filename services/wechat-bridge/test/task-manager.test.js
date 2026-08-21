@@ -160,3 +160,127 @@ test("new task numbers wrap within W001-W999 without reusing retained tasks", (t
   assert.equal(recycled.id, "W001");
   assert.equal(manager.state.nextSequence, 2);
 });
+
+test("transient transport timeouts retry the same task and recover visibly", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-retry-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let attempts = 0;
+  const sent = [];
+  const delivered = [];
+  const manager = new TaskManager({
+    codex: {
+      startThread() {
+        return {
+          async runStreamed() {
+            attempts += 1;
+            async function* events() {
+              yield { type: "thread.started", thread_id: "thread-retry" };
+              if (attempts === 1) {
+                yield { type: "turn.failed", error: { message: "Reconnecting... 2/5 (request timed out)" } };
+                return;
+              }
+              yield { type: "item.completed", item: { type: "agent_message", text: "恢复成功" } };
+              yield { type: "turn.completed", usage: null };
+            }
+            return { events: events() };
+          },
+        };
+      },
+      resumeThread(threadId) {
+        assert.equal(threadId, "thread-retry");
+        return this.startThread();
+      },
+    },
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
+    sendTaskText: async (_task, text) => sent.push(text),
+    deliverTaskResult: async (_task, response) => delivered.push(response),
+    transportRetryDelaysMs: [0, 0],
+  });
+  const task = manager.createTask("owner", "网络恢复任务");
+  manager.enqueue(task, { text: "开始", codexInput: "开始" });
+  await waitFor(() => task.status === "completed");
+
+  assert.equal(attempts, 2);
+  assert.equal(task.lastError, "");
+  assert.deepEqual(delivered, ["恢复成功"]);
+  assert.equal(sent.some((text) => text.includes("正在自动重试（1/2）") && text.includes("任务仍在处理")), true);
+});
+
+test("exhausted transport retries keep context and hide raw reconnect errors", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-retry-exhausted-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let attempts = 0;
+  const sent = [];
+  const thread = {
+    async runStreamed() {
+      attempts += 1;
+      async function* events() {
+        yield { type: "thread.started", thread_id: "thread-exhausted" };
+        yield { type: "turn.failed", error: { message: "Reconnecting... 2/5 (request timed out)" } };
+      }
+      return { events: events() };
+    },
+  };
+  const manager = new TaskManager({
+    codex: { startThread: () => thread, resumeThread: () => thread },
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
+    sendTaskText: async (_task, text) => sent.push(text),
+    deliverTaskResult: async () => {},
+    transportRetryDelaysMs: [0, 0],
+  });
+  const task = manager.createTask("owner", "始终超时的任务");
+  manager.enqueue(task, { text: "开始", codexInput: "开始" });
+  await waitFor(() => task.status === "failed");
+
+  assert.equal(attempts, 3);
+  assert.equal(task.threadId, "thread-exhausted");
+  assert.equal(task.lastError.includes("已自动重试2次"), true);
+  assert.equal(task.lastError.includes(`回复“${task.id} 重试”继续`), true);
+  assert.equal(sent.at(-1).includes("Reconnecting"), false);
+});
+
+test("transport failures after work starts never repeat possible side effects", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-no-duplicate-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let attempts = 0;
+  const manager = new TaskManager({
+    codex: {
+      startThread() {
+        return {
+          async runStreamed() {
+            attempts += 1;
+            async function* events() {
+              yield { type: "thread.started", thread_id: "thread-side-effect" };
+              yield { type: "item.started", item: { type: "command_execution", command: "write result" } };
+              yield { type: "turn.failed", error: { message: "request timed out" } };
+            }
+            return { events: events() };
+          },
+        };
+      },
+      resumeThread() {
+        throw new Error("must not retry after work starts");
+      },
+    },
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
+    sendTaskText: async () => {},
+    deliverTaskResult: async () => {},
+    transportRetryDelaysMs: [0, 0],
+  });
+  const task = manager.createTask("owner", "不可重复副作用");
+  manager.enqueue(task, { text: "开始", codexInput: "开始" });
+  await waitFor(() => task.status === "failed");
+
+  assert.equal(attempts, 1);
+  assert.equal(task.lastError.includes("已自动重试"), false);
+  assert.equal(task.lastError.includes(`回复“${task.id} 重试”继续`), true);
+});
