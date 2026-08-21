@@ -6,7 +6,7 @@ export const BASE_URL = "https://ilinkai.weixin.qq.com";
 export const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 export const BOT_TYPE = "3";
 export const CHANNEL_VERSION = "2.4.6";
-export const BOT_AGENT = "domi-wechat/0.6.39";
+export const BOT_AGENT = "domi-wechat/0.6.41";
 
 export const MessageItemType = Object.freeze({
   TEXT: 1,
@@ -18,6 +18,7 @@ export const MessageItemType = Object.freeze({
 
 const APP_ID = "bot";
 const APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 6;
+const DEFAULT_SEND_RETRY_DELAYS_MS = [500, 1_500];
 
 function randomWechatUin() {
   const value = crypto.randomBytes(4).readUInt32BE(0);
@@ -43,6 +44,11 @@ function authenticatedHeaders(token) {
 
 function baseInfo() {
   return { channel_version: CHANNEL_VERSION, bot_agent: BOT_AGENT };
+}
+
+function retryableSendError(error) {
+  if (error?.name === "AbortError") return true;
+  return /(?:fetch failed|request timed out|econnreset|econnrefused|etimedout|eai_again|enetunreach|socket hang up|sendmessage HTTP (?:408|425|429|5\d\d))/i.test(String(error?.message ?? error));
 }
 
 async function fetchText(url, options, label) {
@@ -134,30 +140,49 @@ export async function getUploadUrl({ credentials, request }) {
   });
 }
 
-export async function sendMessageItem({ credentials, toUserId, contextToken, item, runId }) {
+export async function sendMessageItem({
+  credentials,
+  toUserId,
+  contextToken,
+  item,
+  runId,
+  retryDelaysMs = DEFAULT_SEND_RETRY_DELAYS_MS,
+}) {
   const clientId = `domi-wechat-${crypto.randomUUID()}`;
-  const response = await postJson({
-    baseUrl: credentials.baseUrl,
-    token: credentials.token,
-    endpoint: "ilink/bot/sendmessage",
-    body: {
-      msg: {
-        from_user_id: "",
-        to_user_id: toUserId,
-        client_id: clientId,
-        message_type: 2,
-        message_state: 2,
-        item_list: [item],
-        context_token: contextToken,
-        run_id: runId,
-      },
+  const body = {
+    msg: {
+      from_user_id: "",
+      to_user_id: toUserId,
+      client_id: clientId,
+      message_type: 2,
+      message_state: 2,
+      item_list: [item],
+      context_token: contextToken,
+      run_id: runId,
     },
-    label: "sendmessage",
-  });
-  if (response.ret && response.ret !== 0) {
-    throw new Error(`sendmessage ret=${response.ret}: ${response.errmsg ?? "unknown error"}`);
+  };
+  let attempt = 0;
+  while (true) {
+    try {
+      const response = await postJson({
+        baseUrl: credentials.baseUrl,
+        token: credentials.token,
+        endpoint: "ilink/bot/sendmessage",
+        body,
+        label: "sendmessage",
+        timeoutMs: 8_000,
+      });
+      if (response.ret && response.ret !== 0) {
+        throw new Error(`sendmessage ret=${response.ret}: ${response.errmsg ?? "unknown error"}`);
+      }
+      return { messageId: clientId };
+    } catch (error) {
+      const retryDelay = retryDelaysMs[attempt];
+      if (retryDelay === undefined || !retryableSendError(error)) throw error;
+      attempt += 1;
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+    }
   }
-  return { messageId: clientId };
 }
 
 export async function sendText({ credentials, toUserId, contextToken, text, runId }) {
