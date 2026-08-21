@@ -5,6 +5,8 @@ import process from "node:process";
 
 import { Codex } from "@openai/codex-sdk";
 
+import { resolvedProxyEnvironment } from "./proxy-environment.js";
+
 function executable(filePath) {
   try {
     fs.accessSync(filePath, fs.constants.X_OK);
@@ -23,10 +25,11 @@ export function resolveManagedCodexPath({ homeDir = os.homedir(), environment = 
   return candidates.find((candidate) => path.isAbsolute(candidate) && executable(candidate)) || "";
 }
 
-export function managedCodexEnvironment(codexPath, environment = process.env) {
+export function managedCodexEnvironment(codexPath, environment = process.env, systemProxy) {
   const inherited = Object.fromEntries(
     Object.entries(environment).filter(([, value]) => typeof value === "string"),
   );
+  Object.assign(inherited, resolvedProxyEnvironment(inherited, systemProxy));
   if (!codexPath) return inherited;
   const resolvedBinary = fs.realpathSync(codexPath);
   const packageRoot = path.resolve(path.dirname(resolvedBinary), "..");
@@ -44,7 +47,7 @@ export function createCodexClient(options = {}) {
   return {
     client: new Codex({
       codexPathOverride: codexPath,
-      env: managedCodexEnvironment(codexPath, options.environment),
+      env: managedCodexEnvironment(codexPath, options.environment, options.systemProxy),
     }),
     codexPath,
     managed: true,
