@@ -18,6 +18,7 @@ import {
 
 const TERMINAL_STATES = new Set(["completed", "failed", "canceled"]);
 const MAX_TASK_SEQUENCE = 999;
+const DEFAULT_TRANSPORT_RETRY_DELAYS_MS = [2_000, 5_000];
 const STATUS_LABELS = {
   queued: "排队中",
   running: "运行中",
@@ -36,6 +37,11 @@ function cleanText(value, maximum = 400) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, maximum);
 }
 
+function isTransientTransportError(error) {
+  const message = cleanText(error?.message ?? error, 500);
+  return /(?:reconnecting|request timed out|timed out while waiting|econnreset|econnrefused|etimedout|eai_again|enetunreach|socket hang up|network (?:error|unavailable)|connection (?:closed|lost|reset))/i.test(message);
+}
+
 export class TaskManager {
   constructor({
     codex,
@@ -47,6 +53,7 @@ export class TaskManager {
     preferenceFor,
     log = () => {},
     maxConcurrent = 2,
+    transportRetryDelaysMs = DEFAULT_TRANSPORT_RETRY_DELAYS_MS,
   }) {
     this.codex = codex;
     this.statePath = statePath;
@@ -57,6 +64,7 @@ export class TaskManager {
     this.preferenceFor = preferenceFor;
     this.log = log;
     this.maxConcurrent = maxConcurrent;
+    this.transportRetryDelaysMs = transportRetryDelaysMs;
     this.runningCount = 0;
     this.activeControllers = new Map();
     this.state = readJson(statePath, defaultState());
@@ -239,6 +247,7 @@ export class TaskManager {
     let lastProgressAt = startedAt;
     let lastProgress = "";
     let finalResponse = "";
+    let transportRetries = 0;
     const tools = new Set();
     const heartbeat = setInterval(() => {
       if (Date.now() - lastProgressAt < 55_000) return;
@@ -249,35 +258,62 @@ export class TaskManager {
 
     try {
       const options = this.threadOptionsFor(task);
-      const thread = task.threadId
-        ? this.codex.resumeThread(task.threadId, options)
-        : this.codex.startThread(options);
-      const streamed = await thread.runStreamed(job.codexInput, { signal: controller.signal });
-      for await (const event of streamed.events) {
-        if (event.type === "thread.started") {
-          task.threadId = event.thread_id;
-          this.persist();
-          continue;
-        }
-        if (event.type === "item.completed" && event.item?.type === "agent_message") {
-          finalResponse = event.item.text || finalResponse;
-          continue;
-        }
-        if ((event.type === "item.started" || event.type === "item.updated") && event.item) {
-          const progress = describeProgressItem(event.item);
-          if (!progress) continue;
-          tools.add(event.item.type);
-          task.progress = progress;
+      while (true) {
+        let attemptProducedResult = false;
+        let attemptStartedWork = false;
+        try {
+          const thread = task.threadId
+            ? this.codex.resumeThread(task.threadId, options)
+            : this.codex.startThread(options);
+          const streamed = await thread.runStreamed(job.codexInput, { signal: controller.signal });
+          for await (const event of streamed.events) {
+            if (event.type === "thread.started") {
+              task.threadId = event.thread_id;
+              this.persist();
+              continue;
+            }
+            if (event.type === "item.completed" && event.item?.type === "agent_message") {
+              finalResponse = event.item.text || finalResponse;
+              attemptProducedResult = Boolean(finalResponse);
+              continue;
+            }
+            if ((event.type === "item.started" || event.type === "item.updated") && event.item) {
+              const progress = describeProgressItem(event.item);
+              if (!progress) continue;
+              attemptStartedWork = true;
+              tools.add(event.item.type);
+              task.progress = progress;
+              task.updatedAt = new Date().toISOString();
+              this.persist();
+              if (progress !== lastProgress && Date.now() - lastProgressAt >= 20_000) {
+                lastProgress = progress;
+                lastProgressAt = Date.now();
+                await this.safeSend(task, `【${task.id}】${progress}`, job);
+              }
+            }
+            if (event.type === "turn.failed") throw new Error(event.error?.message || "Codex任务失败");
+            if (event.type === "error") throw new Error(event.message || "Codex事件流中断");
+          }
+          break;
+        } catch (error) {
+          const retryDelay = this.transportRetryDelaysMs[transportRetries];
+          const canRetry = !controller.signal.aborted
+            && retryDelay !== undefined
+            && isTransientTransportError(error)
+            && !attemptProducedResult
+            && !attemptStartedWork;
+          if (!canRetry) throw error;
+          transportRetries += 1;
+          task.progress = `网络连接不稳定，正在自动重试（${transportRetries}/${this.transportRetryDelaysMs.length}）`;
+          task.lastError = "";
           task.updatedAt = new Date().toISOString();
           this.persist();
-          if (progress !== lastProgress && Date.now() - lastProgressAt >= 20_000) {
-            lastProgress = progress;
-            lastProgressAt = Date.now();
-            await this.safeSend(task, `【${task.id}】${progress}`, job);
-          }
+          lastProgress = task.progress;
+          lastProgressAt = Date.now();
+          await this.safeSend(task, `【${task.id}】${task.progress}，任务仍在处理。`, job);
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          if (controller.signal.aborted) throw new Error("任务已取消");
         }
-        if (event.type === "turn.failed") throw new Error(event.error?.message || "Codex任务失败");
-        if (event.type === "error") throw new Error(event.message || "Codex事件流中断");
       }
       if (controller.signal.aborted) throw new Error("任务已取消");
       if (!finalResponse) finalResponse = "Codex已完成处理，但没有返回文字结果。";
@@ -290,16 +326,21 @@ export class TaskManager {
       this.recordMetric(task, job, startedAt, "completed", tools);
     } catch (error) {
       const canceled = controller.signal.aborted || task.status === "canceled";
+      const transientFailure = !canceled && isTransientTransportError(error);
       task.status = canceled ? "canceled" : "failed";
       task.progress = canceled ? "已取消" : "执行失败";
-      task.lastError = cleanText(error?.message ?? error, 240);
+      task.lastError = transientFailure
+        ? `网络连接暂时不可用${transportRetries ? `，已自动重试${transportRetries}次` : ""}。任务内容和上下文已保留，请回复“${task.id} 重试”继续。`
+        : cleanText(error?.message ?? error, 240);
       task.updatedAt = new Date().toISOString();
       this.persist();
       await this.safeSend(
         task,
         canceled
           ? `【${task.id}】已取消。`
-          : `【${task.id}】执行失败：${task.lastError || "未知错误"}`,
+          : transientFailure
+            ? `【${task.id}】${task.lastError}`
+            : `【${task.id}】执行失败：${task.lastError || "未知错误"}`,
         job,
       );
       this.recordMetric(task, job, startedAt, canceled ? "canceled" : "failed", tools);
