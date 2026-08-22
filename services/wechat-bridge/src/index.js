@@ -10,6 +10,7 @@ import {
   extractLocalAttachments,
   messageIdentity,
   replaceLocalAttachmentLinks,
+  redactInternalFileCitations,
   requestsExistingResult,
   splitText,
   wantsFileDelivery,
@@ -165,6 +166,7 @@ const taskManager = new TaskManager({
             response,
           );
     }
+    visibleResponse = redactInternalFileCitations(visibleResponse);
     task.delivery ||= {};
     task.delivery.files ||= {};
     task.delivery.textChunks ||= {};
