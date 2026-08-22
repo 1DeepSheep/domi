@@ -3599,6 +3599,135 @@ test("PLAUD sync never submits generation from a stale cached list", async () =>
   assert.match(result.error, /远端读取/);
 });
 
+test("PLAUD sync recovers a cold authorization refresh within the same click", async () => {
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => null,
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test"
+  });
+  const queueRequests = [];
+  integration.plaudQueue = async (request) => {
+    queueRequests.push(request);
+    if (queueRequests.length === 1) {
+      return {
+        ok: true,
+        stale: true,
+        retryable: true,
+        remoteStatus: "authorization_pending",
+        pendingCount: 1,
+        items: [{ fileId: "cached", fileName: "缓存录音" }]
+      };
+    }
+    return queueRequests.length === 2
+      ? { ok: true, stale: false, pendingCount: 1, items: [] }
+      : { ok: true, stale: false, pendingCount: 0, items: [] };
+  };
+  const stoppedReasons = [];
+  integration.stopPlaudBackgroundSession = async (reason) => stoppedReasons.push(reason);
+  integration.plaudPaths = () => ({ script: "/tmp/plaud.js" });
+  let generationCalls = 0;
+  integration.runJson = async (_command, args) => {
+    generationCalls += 1;
+    assert.deepEqual(args.slice(0, 3), ["/tmp/plaud.js", "sync-pending", "1"]);
+    return {
+      results: [{ ok: true, fileId: "new-recording" }],
+      manifestPath: "/tmp/domi-test/manifest.json"
+    };
+  };
+
+  const result = await integration.syncPlaud();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.generatedCount, 1);
+  assert.equal(generationCalls, 1);
+  assert.deepEqual(queueRequests, [undefined, { fresh: true }, undefined]);
+  assert.deepEqual(stoppedReasons, ["sync-read-recovery", "sync-workflow"]);
+});
+
+test("PLAUD sync retries only the final read and never repeats a completed generation", async () => {
+  const integration = new DomiIntegration({
+    stateStore: {
+      loadCache: () => null,
+      saveCache: () => undefined
+    },
+    plaudOutputDir: "/tmp/domi-test"
+  });
+  let queueReads = 0;
+  integration.plaudQueue = async () => {
+    queueReads += 1;
+    if (queueReads === 1) {
+      return { ok: true, stale: false, pendingCount: 1, items: [] };
+    }
+    if (queueReads === 2) {
+      return {
+        ok: true,
+        stale: true,
+        retryable: true,
+        remoteStatus: "verification_pending",
+        pendingCount: 1,
+        items: []
+      };
+    }
+    return { ok: true, stale: false, pendingCount: 0, items: [] };
+  };
+  const stoppedReasons = [];
+  integration.stopPlaudBackgroundSession = async (reason) => stoppedReasons.push(reason);
+  integration.plaudPaths = () => ({ script: "/tmp/plaud.js" });
+  let generationCalls = 0;
+  integration.runJson = async () => {
+    generationCalls += 1;
+    return {
+      results: [{ ok: true, fileId: "new-recording" }],
+      manifestPath: "/tmp/domi-test/manifest.json"
+    };
+  };
+
+  const result = await integration.syncPlaud();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.generatedCount, 1);
+  assert.equal(generationCalls, 1);
+  assert.equal(queueReads, 3);
+  assert.deepEqual(stoppedReasons, ["sync-workflow", "sync-read-recovery"]);
+});
+
+test("PLAUD sync never auto-retries confirmed logout, access denial or rate limits", async () => {
+  for (const remoteStatus of ["auth_required", "access_denied", "rate_limited"]) {
+    const integration = new DomiIntegration({
+      stateStore: {
+        loadCache: () => null,
+        saveCache: () => undefined
+      },
+      plaudOutputDir: "/tmp/domi-test"
+    });
+    let queueReads = 0;
+    integration.plaudQueue = async () => {
+      queueReads += 1;
+      return {
+        ok: false,
+        stale: true,
+        retryable: true,
+        remoteStatus,
+        pendingCount: 1,
+        items: []
+      };
+    };
+    integration.stopPlaudBackgroundSession = async () => {
+      throw new Error(`${remoteStatus} must not restart the PLAUD session`);
+    };
+    integration.runJson = async () => {
+      throw new Error(`${remoteStatus} must not submit PLAUD generation`);
+    };
+
+    const result = await integration.syncPlaud();
+
+    assert.equal(result.ok, false);
+    assert.equal(queueReads, 1);
+  }
+});
+
 test("PLAUD sync directly processes every pending recording without a count confirmation threshold", async () => {
   const integration = new DomiIntegration({
     stateStore: {

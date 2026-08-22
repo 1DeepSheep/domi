@@ -16,6 +16,8 @@ const RESULT_NOUN_PREFIX = /^(?:请)?(?:把)?(?:研究)?(?:结果|纪要|报告|
 const RECENT_ELLIPTICAL_FOLLOW_UP_PATTERN = /^(?:那|那么|然后|接着|所以|为什么|怎么|能否|可否|可以再|还可以|有没有|再说|说下|展开|详细|具体)/;
 const RECENT_FACET_FOLLOW_UP_PATTERN = /^(?:风险|团队|融资|估值|竞争|市场|产品|技术)(?:呢|吗|怎么样|怎么看|怎么处理)?[？?。！!]*$/;
 const RECENT_FOCUS_GRACE_MS = 10 * 60_000;
+const CODEX_FILE_CITATION_PATTERN = /:codex-file-citation\{((?:[^}"']|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')*)\}/g;
+const DELIVERABLE_FILE_EXTENSION_PATTERN = /\.(?:md|markdown|pdf|docx?|xlsx?|pptx?|txt|csv|zip)$/i;
 
 export function canonicalTaskId(value) {
   const number = Number(value);
@@ -110,6 +112,32 @@ function normalizeLinkedPath(rawPath) {
   return path.isAbsolute(value) ? path.normalize(value) : "";
 }
 
+function decodedAttributeValue(value) {
+  try {
+    return JSON.parse(`"${value}"`);
+  } catch {
+    return String(value || "").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  }
+}
+
+function parseCitationAttributes(source) {
+  const attributes = {};
+  const pattern = /([A-Za-z_][\w-]*)\s*=\s*"((?:\\.|[^"\\])*)"/g;
+  for (const match of String(source || "").matchAll(pattern)) {
+    attributes[match[1]] = decodedAttributeValue(match[2]);
+  }
+  return attributes;
+}
+
+function safeCitationLabel(attributes) {
+  const requested = String(attributes?.label || "").trim();
+  const filePath = normalizeLinkedPath(attributes?.path);
+  return (requested || (filePath ? path.basename(filePath) : "文件引用不可用"))
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .trim()
+    .slice(0, 180) || "文件引用不可用";
+}
+
 export function extractLocalAttachments(text, maximum = 3) {
   const source = String(text || "");
   const found = [];
@@ -133,6 +161,13 @@ export function extractLocalAttachments(text, maximum = 3) {
 
   const codePath = /`((?:file:\/\/)?\/[^`\n]+\.(?:md|markdown|pdf|docx?|xlsx?|pptx?|txt|csv|zip))`/gi;
   for (const match of source.matchAll(codePath)) add(match[1], path.basename(match[1]), match[0]);
+
+  for (const match of source.matchAll(CODEX_FILE_CITATION_PATTERN)) {
+    const attributes = parseCitationAttributes(match[1]);
+    const filePath = normalizeLinkedPath(attributes.path);
+    if (!filePath || !DELIVERABLE_FILE_EXTENSION_PATTERN.test(filePath)) continue;
+    add(filePath, safeCitationLabel(attributes), match[0]);
+  }
   return found;
 }
 
@@ -142,6 +177,17 @@ export function replaceLocalAttachmentLinks(text, attachments) {
     result = result.replace(attachment.fullMatch, `附件：${path.basename(attachment.filePath)}`);
   }
   return result;
+}
+
+export function redactInternalFileCitations(text) {
+  const source = String(text || "");
+  const replaced = source.replace(CODEX_FILE_CITATION_PATTERN, (_fullMatch, attributeSource) => {
+    const attributes = parseCitationAttributes(attributeSource);
+    return `文件：${safeCitationLabel(attributes)}`;
+  });
+  // Never expose a partially generated internal marker. Limit the fallback to
+  // one line so ordinary text after the malformed citation remains untouched.
+  return replaced.replace(/:codex-file-citation\{[^\r\n}]*(?:\}|$)/g, "文件引用不可用");
 }
 
 export function wantsFileDelivery(text) {
