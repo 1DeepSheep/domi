@@ -10,6 +10,7 @@ import {
   findTaskReference,
   likelyWaitingReply,
   requestsExistingResult,
+  redactInternalFileCitations,
   responseWaitsForUser,
   shouldContinueActiveTask,
   splitText,
@@ -52,4 +53,31 @@ test("existing local Markdown links become deliverable attachments", (t) => {
   const attachments = extractLocalAttachments(`[查看完整纪要](<${filePath}>)`);
   assert.equal(attachments.length, 1);
   assert.equal(attachments[0].filePath, filePath);
+});
+
+test("Codex file citations become deliverable attachments without exposing local paths", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-citation-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'UniPat（李宽） Pre A&A轮“二次”见面&Pre IC.pdf');
+  fs.writeFileSync(filePath, "pdf", "utf8");
+  const marker = `:codex-file-citation{path=${JSON.stringify(filePath)} purpose="source"}`;
+
+  const attachments = extractLocalAttachments(`完整原件：${marker}`);
+
+  assert.equal(attachments.length, 1);
+  assert.equal(attachments[0].filePath, filePath);
+  assert.equal(attachments[0].label, path.basename(filePath));
+  const visible = redactInternalFileCitations(`完整原件：${marker}`);
+  assert.equal(visible, `完整原件：文件：${path.basename(filePath)}`);
+  assert.doesNotMatch(visible, new RegExp(directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("invalid or malformed Codex file citations never leak a local path", () => {
+  const unavailablePath = path.join(path.sep, "private-home", "private", "missing.pdf");
+  const unavailable = `:codex-file-citation{path=${JSON.stringify(unavailablePath)} purpose="source"}`;
+  const malformed = `:codex-file-citation{path=${JSON.stringify(unavailablePath)}`;
+
+  assert.deepEqual(extractLocalAttachments(unavailable), []);
+  assert.equal(redactInternalFileCitations(unavailable), "文件：missing.pdf");
+  assert.equal(redactInternalFileCitations(malformed), "文件引用不可用");
 });

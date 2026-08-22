@@ -319,6 +319,23 @@ function isRetryablePlaudReadFailure(error) {
   ]).has(plaudFailureStatus(error));
 }
 
+const PLAUD_SYNC_PREFLIGHT_RECOVERY_STATUSES = new Set([
+  "verification_pending",
+  "authorization_pending",
+  "browser_unavailable",
+  "network_error",
+  "service_unavailable"
+]);
+
+function shouldRecoverPlaudSyncRead(snapshot) {
+  return Boolean(
+    snapshot
+    && snapshot.retryable
+    && (snapshot.ok === false || snapshot.stale)
+    && PLAUD_SYNC_PREFLIGHT_RECOVERY_STATUSES.has(String(snapshot.remoteStatus || ""))
+  );
+}
+
 function classifyPlaudConnectionFailure(error, browser) {
   const status = plaudFailureStatus(error);
   let guidance = "请重新检测；如果仍然失败，可以让 Codex 连接助手继续诊断。";
@@ -2230,8 +2247,22 @@ class DomiIntegration {
     };
   }
 
+  async plaudQueueForSync() {
+    let snapshot = await this.plaudQueue();
+    if (!shouldRecoverPlaudSyncRead(snapshot)) return snapshot;
+
+    // A cold managed browser can refresh its PLAUD authorization while the
+    // first list request is already failing. Rebuild only the read session and
+    // verify once more inside the same click. Generation and download commands
+    // are deliberately outside this recovery block, so no mutation is ever
+    // submitted twice.
+    await this.stopPlaudBackgroundSession("sync-read-recovery");
+    snapshot = await this.plaudQueue({ fresh: true });
+    return snapshot;
+  }
+
   async syncPlaud() {
-    const current = await this.plaudQueue();
+    const current = await this.plaudQueueForSync();
     if (!current.ok) return current;
     if (current.stale) {
       const recovery = current.remoteStatus === "auth_required"
@@ -2290,7 +2321,7 @@ class DomiIntegration {
         env: this.plaudRuntimeEnv()
       });
     }
-    const snapshot = await this.plaudQueue();
+    const snapshot = await this.plaudQueueForSync();
     const generationResults = generationResult.results || [];
     return {
       ok: snapshot.ok,
