@@ -242,6 +242,119 @@ function splitFrontmatter(markdown) {
   return match ? String(markdown).slice(match[1].length) : String(markdown || "");
 }
 
+function transformMarkdownTextOutsideCode(markdown, transform) {
+  const source = String(markdown || "");
+  const eol = source.includes("\r\n") ? "\r\n" : "\n";
+  const lines = source.split(/\r?\n/);
+  let fenceCharacter = "";
+  let fenceLength = 0;
+
+  return lines.map((line) => {
+    const fence = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      const marker = fence[1];
+      if (!fenceCharacter) {
+        fenceCharacter = marker[0];
+        fenceLength = marker.length;
+      } else if (marker[0] === fenceCharacter && marker.length >= fenceLength) {
+        fenceCharacter = "";
+        fenceLength = 0;
+      }
+      return line;
+    }
+    if (fenceCharacter) return line;
+
+    let result = "";
+    let cursor = 0;
+    while (cursor < line.length) {
+      const tickStart = line.indexOf("`", cursor);
+      if (tickStart < 0) {
+        result += transform(line.slice(cursor));
+        break;
+      }
+      result += transform(line.slice(cursor, tickStart));
+      let tickEnd = tickStart + 1;
+      while (line[tickEnd] === "`") tickEnd += 1;
+      const marker = line.slice(tickStart, tickEnd);
+      const closingTick = line.indexOf(marker, tickEnd);
+      if (closingTick < 0) {
+        result += transform(line.slice(tickStart));
+        break;
+      }
+      result += line.slice(tickStart, closingTick + marker.length);
+      cursor = closingTick + marker.length;
+    }
+    return result;
+  }).join(eol);
+}
+
+function unwrapStrongMarkdown(value) {
+  let source = String(value || "").trim();
+  while (/^\*\*[\s\S]*\*\*$/.test(source)) {
+    source = source.slice(2, -2).trim();
+  }
+  return source;
+}
+
+function underlineEmphasisContent(value) {
+  const source = unwrapStrongMarkdown(value);
+  const domiUnderline = source.match(/^\+\+([\s\S]*?)\+\+$/);
+  if (domiUnderline) {
+    return { matched: true, content: unwrapStrongMarkdown(domiUnderline[1]) };
+  }
+  const htmlUnderline = source.match(/^<u(?:\s+[^<>]*)?>\s*([\s\S]*?)\s*<\/u\s*>$/i);
+  if (htmlUnderline) {
+    return { matched: true, content: unwrapStrongMarkdown(htmlUnderline[1]) };
+  }
+  return { matched: false, content: source };
+}
+
+function markdownClipboardPlainText(markdown) {
+  return transformMarkdownTextOutsideCode(markdown, (value) => {
+    const heading = value.match(/^(\s{0,3})#{1,6}\s+([\s\S]*?)\s*#*\s*$/);
+    const emphasis = heading ? underlineEmphasisContent(heading[2]) : null;
+    const normalized = heading && emphasis?.matched
+      ? `${heading[1]}${emphasis.content}`
+      : value;
+    return normalized
+      .replace(/<br\s*\/?\s*>/gi, "\n")
+      .replace(/<\/?u(?:\s+[^<>]*)?>/gi, "")
+      .replace(/\+\+([\s\S]+?)\+\+/g, "$1");
+  });
+}
+
+const CLIPBOARD_UNDERLINE_STYLE = "text-decoration:underline;text-underline-offset:2px;";
+
+function renderSafeMarkdownHtml(text) {
+  const source = String(text || "");
+  if (/^<br\s*\/?\s*>$/i.test(source)) return "<br>";
+  if (/^<u(?:\s+[^<>]*)?>$/i.test(source)) {
+    return `<u style="${CLIPBOARD_UNDERLINE_STYLE}">`;
+  }
+  if (/^<\/u\s*>$/i.test(source)) return "</u>";
+
+  const underlineBlock = source.match(/^<u(?:\s+[^<>]*)?>\s*([\s\S]*?)\s*<\/u\s*>$/i);
+  if (underlineBlock) {
+    const content = escapeHtml(underlineBlock[1])
+      .replace(/&lt;br\s*\/?\s*&gt;/gi, "<br>")
+      .replace(/\r?\n/g, "<br>");
+    return `<u style="${CLIPBOARD_UNDERLINE_STYLE}">${content}</u>`;
+  }
+  return `<pre>${escapeHtml(source)}</pre>`;
+}
+
+function isUnderlineEmphasisHeading(token) {
+  const tokens = Array.isArray(token?.tokens) ? token.tokens : [];
+  if (tokens.length === 1) {
+    let child = tokens[0];
+    while (child?.type === "strong" && Array.isArray(child.tokens) && child.tokens.length === 1) {
+      [child] = child.tokens;
+    }
+    if (child?.type === "underline") return true;
+  }
+  return underlineEmphasisContent(token?.text).matched;
+}
+
 function markdownClipboardParser(renderer) {
   const parser = new Marked();
   parser.use({
@@ -289,7 +402,14 @@ function buildMarkdownClipboardPayload(request) {
   const budget = { count: 0, bytes: 0 };
   let missingImageCount = 0;
   const renderer = new Renderer();
-  renderer.html = ({ text }) => `<pre>${escapeHtml(text)}</pre>`;
+  renderer.html = ({ text }) => renderSafeMarkdownHtml(text);
+  renderer.heading = function renderClipboardHeading(token) {
+    const inline = this.parser.parseInline(token.tokens || []);
+    if (isUnderlineEmphasisHeading(token)) {
+      return `<p><strong>${inline}</strong></p>\n`;
+    }
+    return `<h${token.depth}>${inline}</h${token.depth}>\n`;
+  };
   renderer.image = ({ href, title, text }) => {
     const source = String(href || "");
     const alt = escapeHtml(text || "图片");
@@ -319,7 +439,7 @@ function buildMarkdownClipboardPayload(request) {
   ].join("");
 
   return {
-    text: markdown,
+    text: markdownClipboardPlainText(markdown),
     html,
     imageCount: budget.count,
     missingImageCount
