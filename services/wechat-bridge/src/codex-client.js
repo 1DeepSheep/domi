@@ -19,8 +19,8 @@ function executable(filePath) {
 export function resolveManagedCodexPath({ homeDir = os.homedir(), environment = process.env } = {}) {
   const candidates = [
     environment.CODEX_WECHAT_CODEX_PATH,
-    path.join(homeDir, ".local", "bin", "codex"),
     path.join(homeDir, ".codex", "packages", "standalone", "current", "bin", "codex"),
+    path.join(homeDir, ".local", "bin", "codex"),
   ].filter(Boolean);
   return candidates.find((candidate) => path.isAbsolute(candidate) && executable(candidate)) || "";
 }

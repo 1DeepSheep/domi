@@ -108,9 +108,11 @@ async function main() {
   assert.match(todoContext, /共 1 个项目、1 个人/);
   assert.match(todoContext, /project｜project-new｜四周内项目/);
   assert.match(todoContext, /person｜person-new｜四周内人物/);
-  assert.match(todoContext, /价值证据摘要/);
-  assert.match(todoContext, /AI；Agent；企业级智能体产品/);
-  assert.match(todoContext, /示例机构；创始人/);
+  assert.match(todoContext, /结构化证据/);
+  assert.match(todoContext, /evidence_state=complete/);
+  assert.match(todoContext, /领域=AI；子领域=Agent/);
+  assert.match(todoContext, /Notes摘录=企业级智能体产品，已有明确客户验证/);
+  assert.match(todoContext, /所属组织=示例机构；人物类型=创始人/);
   assert.doesNotMatch(todoContext.split("A/S 长期跟进候选索引")[0], /四周外项目/);
   assert.doesNotMatch(todoContext, /历史批量迁移项目/);
   assert.match(todoContext, /project｜project-old｜四周外项目｜S/);
@@ -132,6 +134,45 @@ async function main() {
     "todo context must stay bounded even when a large import is present"
   );
   assert.match(boundedTodoContext, /另有 32 个较早候选未随上下文传入/);
+
+  const criticalNextStep = "关键下一步：必须在周五前联系创始人核验现金余额";
+  const longTodoNotes = `${"前".repeat(183 - criticalNextStep.length)}${criticalNextStep}`;
+  assert.equal(longTodoNotes.length, 183);
+  const incompleteTodoContext = todoRecentEntriesContext(
+    [{
+      recordId: "project-long-notes",
+      name: "长 Notes 项目",
+      domain: "AI",
+      status: "待核验",
+      rating: "B",
+      notes: longTodoNotes,
+      createdAt: now - 60_000,
+      lastFollowup: now - 7 * 24 * 60 * 60 * 1000
+    }],
+    [],
+    now
+  );
+  assert.match(incompleteTodoContext, /evidence_state=incomplete/);
+  assert.match(incompleteTodoContext, /targeted_read_required=true/);
+  assert.match(incompleteTodoContext, /notes_truncated=true/);
+  assert.match(incompleteTodoContext, /期限=周五前/);
+  assert.match(incompleteTodoContext, /关键下一步：必须在周五前联系创始人核验现金余额/);
+  assert.match(incompleteTodoContext, /必须先按 recordId 定向读取权威项目／人物记录及完整 Notes/);
+  assert.match(incompleteTodoContext, /不得把 Notes摘录或已提取行动项单独视为充分证据/);
+
+  const ellipsisTodoContext = todoRecentEntriesContext(
+    [{
+      recordId: "project-ellipsis-notes",
+      name: "省略 Notes 项目",
+      notes: "客户反馈尚未完整披露…后续待确认现金余额",
+      createdAt: now - 120_000
+    }],
+    [],
+    now
+  );
+  assert.match(ellipsisTodoContext, /evidence_state=incomplete/);
+  assert.match(ellipsisTodoContext, /source_ellipsis=true/);
+  assert.match(ellipsisTodoContext, /targeted_read_required=true/);
 
   const radarWorkflow = workflows.find((workflow) => workflow.id === "investment-radar");
   assert.ok(radarWorkflow);
@@ -169,6 +210,9 @@ async function main() {
   );
   assert.match(todoPrompt, /客户端快速同步路径/);
   assert.match(todoPrompt, /不得为这些分类再次全量读取项目表或人脉表/);
+  assert.match(todoPrompt, /evidence_state=incomplete/);
+  assert.match(todoPrompt, /必须按 recordId 定向回读权威记录和完整 Notes 后再判断/);
+  assert.match(todoPrompt, /绝不得把截断摘录视为充分证据/);
   assert.match(todoPrompt, /不得用减少判断维度换取速度/);
 }
 

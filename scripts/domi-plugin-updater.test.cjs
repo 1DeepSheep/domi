@@ -9,7 +9,8 @@ const {
   ARCHIVE_URL_PREFIX,
   DomiPluginUpdater,
   sha256,
-  validateArchiveEntries
+  validateArchiveEntries,
+  validateRequiredPluginContracts
 } = require("../electron/domi-plugin-updater.cjs");
 
 function byteResponse(value) {
@@ -46,6 +47,22 @@ function createReleaseFixture(root) {
     path.join(pluginRoot, "skills", "domi-router", "SKILL.md"),
     "# domi router\n"
   );
+  const investmentSkillRoot = path.join(pluginRoot, "skills", "investment-analysis");
+  const investmentFiles = [
+    ["SKILL.md", "# investment analysis\n"],
+    [path.join("references", "investment-banking-slides.md"), "# slides\n"],
+    [path.join("assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"), "style: morgan-stanley\n"],
+    [path.join("assets", "slides", "style-packs", "morgan-stanley", "style.css"), "/* style */\n"],
+    [path.join("assets", "slides", "style-packs", "morgan-stanley", "templates.html"), "<section></section>\n"],
+    [path.join("scripts", "init_deck.js"), "// init\n"],
+    [path.join("scripts", "qa_deck.js"), "// qa\n"],
+    [path.join("scripts", "export_pdf.js"), "// export\n"],
+  ];
+  for (const [relativePath, content] of investmentFiles) {
+    const target = path.join(investmentSkillRoot, relativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content);
+  }
   fs.writeFileSync(path.join(pluginRoot, "fixture.txt"), "signed remote plugin\n");
 
   const archivePath = path.join(root, "domi-plugin.tar.gz");
@@ -109,6 +126,16 @@ async function run() {
     () => validateArchiveEntries("domi/../../escape"),
     /Unsafe plugin archive entry/
   );
+
+  const missingContractRoot = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plugin-contract-"));
+  try {
+    assert.throws(
+      () => validateRequiredPluginContracts(missingContractRoot),
+      /missing required contract/
+    );
+  } finally {
+    fs.rmSync(missingContractRoot, { recursive: true, force: true });
+  }
 
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plugin-updater-unit-"));
   try {

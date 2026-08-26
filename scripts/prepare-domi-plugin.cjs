@@ -75,6 +75,22 @@ function validateSource(sourceRoot) {
   if (!fs.existsSync(path.join(sourceRoot, "skills", "domi-router", "SKILL.md"))) {
     fail("缺少 domi-router Skill");
   }
+  const slidesContractFiles = [
+    ["skills", "investment-analysis", "SKILL.md"],
+    ["skills", "investment-analysis", "references", "investment-banking-slides.md"],
+    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"],
+    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style.css"],
+    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "templates.html"],
+    ["skills", "investment-analysis", "scripts", "init_deck.js"],
+    ["skills", "investment-analysis", "scripts", "qa_deck.js"],
+    ["skills", "investment-analysis", "scripts", "export_pdf.js"]
+  ];
+  for (const segments of slidesContractFiles) {
+    const requiredPath = path.join(sourceRoot, ...segments);
+    if (!fs.existsSync(requiredPath)) {
+      fail(`缺少 domi 投研 Slides 契约文件：${segments.join("/")}`);
+    }
+  }
 
   let commit = "local-uncommitted";
   try {
