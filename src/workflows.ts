@@ -88,6 +88,10 @@ type TodoRecentProject = {
   status?: string;
   rating?: string;
   notes?: string;
+  cities?: string[];
+  investors?: string[];
+  financingHistory?: string;
+  latestValuationUsd100m?: number | null;
   createdAt?: number | null;
   lastFollowup?: number | null;
 };
@@ -99,33 +103,149 @@ type TodoRecentPerson = {
   organization?: string;
   status?: string;
   rating?: string;
+  cities?: string[];
   createdAt?: number | null;
   lastContact?: number | null;
 };
 
-function todoEvidenceSummary(
+const TODO_NOTES_EXCERPT_LIMIT = 160;
+const TODO_ACTION_ITEM_LIMIT = 6;
+const TODO_DEADLINE_LIMIT = 8;
+const TODO_ACTION_ITEM_MAX_LENGTH = 240;
+const TODO_ACTION_LABEL_PATTERN = /(?:关键下一步|下一步|下一动作|后续(?:动作|安排)?|行动项|待办(?:事项)?)\s*[：:]\s*([^。！？；;\n]+)/g;
+const TODO_ACTION_CLAUSE_PATTERN = /(?:必须|需要|应当|计划|待(?:跟进|确认|核验|补充|提交|完成)|跟进|联系|约见|核验|确认|补充|提交|完成|推进|回访|发送|准备|安排|更新)/;
+const TODO_DEADLINE_PATTERN = /(?:20\d{2}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?|\d{1,2}月\d{1,2}日|(?:本|这|下)?周[一二三四五六日天]|今天|明天|后天|本月底|月底|月末|年底|年末)(?:前|之前|截止)?/gi;
+const TODO_ELLIPSIS_PATTERN = /(?:…|\.{3,}|。。。)/;
+
+function uniqueTodoValues(
+  values: string[],
+  limit: number,
+  maxLength = Number.POSITIVE_INFINITY
+) {
+  const seen = new Set<string>();
+  const unique = values.filter((value) => {
+    const normalized = singleLine(value);
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+  const bounded = unique.filter((value) => value.length <= maxLength);
+  const selected = bounded.slice(0, limit);
+  return {
+    values: selected,
+    omitted: Math.max(0, unique.length - selected.length)
+  };
+}
+
+function todoNotesEvidence(notesValue: unknown) {
+  const notes = singleLine(notesValue);
+  if (!notes) {
+    return {
+      actionItems: [] as string[],
+      deadlines: [] as string[],
+      excerpt: "",
+      incomplete: false,
+      notesTruncated: false,
+      sourceEllipsis: false,
+      omittedActionItems: 0,
+      omittedDeadlines: 0
+    };
+  }
+
+  const labelledActions = [...notes.matchAll(TODO_ACTION_LABEL_PATTERN)]
+    .map((match) => singleLine(match[0]));
+  const clauseActions = notes
+    .split(/[。！？；;]+/)
+    .map(singleLine)
+    .filter((clause) =>
+      clause.length > 0
+      && clause.length <= 240
+      && TODO_ACTION_CLAUSE_PATTERN.test(clause)
+      && !labelledActions.some((labelled) => clause.includes(labelled))
+    );
+  const actionItems = uniqueTodoValues(
+    [...labelledActions, ...clauseActions],
+    TODO_ACTION_ITEM_LIMIT,
+    TODO_ACTION_ITEM_MAX_LENGTH
+  );
+  const deadlines = uniqueTodoValues(
+    notes.match(TODO_DEADLINE_PATTERN) || [],
+    TODO_DEADLINE_LIMIT
+  );
+  const notesTruncated = notes.length > TODO_NOTES_EXCERPT_LIMIT;
+  const sourceEllipsis = TODO_ELLIPSIS_PATTERN.test(notes);
+  return {
+    actionItems: actionItems.values,
+    deadlines: deadlines.values,
+    excerpt: notesTruncated ? notes.slice(0, TODO_NOTES_EXCERPT_LIMIT) : notes,
+    incomplete: notesTruncated
+      || sourceEllipsis
+      || actionItems.omitted > 0
+      || deadlines.omitted > 0,
+    notesTruncated,
+    sourceEllipsis,
+    omittedActionItems: actionItems.omitted,
+    omittedDeadlines: deadlines.omitted
+  };
+}
+
+function todoStructuredEvidence(
   kind: "project" | "person",
   item: TodoRecentProject | TodoRecentPerson
 ) {
-  const parts = kind === "project"
-    ? [
-        singleLine((item as TodoRecentProject).domain),
-        ((item as TodoRecentProject).subdomains || []).map(singleLine).filter(Boolean).join("、"),
-        singleLine((item as TodoRecentProject).notes)
-      ]
-    : [
-        singleLine((item as TodoRecentPerson).organization),
-        ((item as TodoRecentPerson).types || []).map(singleLine).filter(Boolean).join("、")
-      ];
-  const summary = parts.filter(Boolean).join("；");
-  return summary.length > 160 ? `${summary.slice(0, 159)}…` : summary;
+  if (kind === "person") {
+    const person = item as TodoRecentPerson;
+    return [
+      "evidence_state=complete",
+      singleLine(person.organization) ? `所属组织=${singleLine(person.organization)}` : "",
+      (person.types || []).map(singleLine).filter(Boolean).length
+        ? `人物类型=${(person.types || []).map(singleLine).filter(Boolean).join("、")}`
+        : "",
+      (person.cities || []).map(singleLine).filter(Boolean).length
+        ? `城市=${(person.cities || []).map(singleLine).filter(Boolean).join("、")}`
+        : ""
+    ].filter(Boolean).join("；");
+  }
+
+  const project = item as TodoRecentProject;
+  const notes = todoNotesEvidence(project.notes);
+  const valuation = Number(project.latestValuationUsd100m);
+  return [
+    `evidence_state=${notes.incomplete ? "incomplete" : "complete"}`,
+    notes.incomplete ? "targeted_read_required=true" : "",
+    singleLine(project.domain) ? `领域=${singleLine(project.domain)}` : "",
+    (project.subdomains || []).map(singleLine).filter(Boolean).length
+      ? `子领域=${(project.subdomains || []).map(singleLine).filter(Boolean).join("、")}`
+      : "",
+    (project.investors || []).map(singleLine).filter(Boolean).length
+      ? `关联投资人=${(project.investors || []).map(singleLine).filter(Boolean).join("、")}`
+      : "",
+    (project.cities || []).map(singleLine).filter(Boolean).length
+      ? `城市=${(project.cities || []).map(singleLine).filter(Boolean).join("、")}`
+      : "",
+    project.latestValuationUsd100m !== null
+      && project.latestValuationUsd100m !== undefined
+      && Number.isFinite(valuation)
+      ? `最新估值亿美元=${valuation}`
+      : "",
+    notes.actionItems.length ? `行动项=${notes.actionItems.join(" / ")}` : "",
+    notes.deadlines.length ? `期限=${notes.deadlines.join("、")}` : "",
+    notes.notesTruncated ? "notes_truncated=true" : "",
+    notes.sourceEllipsis ? "source_ellipsis=true" : "",
+    notes.omittedActionItems ? `omitted_action_items=${notes.omittedActionItems}` : "",
+    notes.omittedDeadlines ? `omitted_deadlines=${notes.omittedDeadlines}` : "",
+    notes.excerpt ? `Notes摘录=${notes.excerpt}` : ""
+  ].filter(Boolean).join("；");
 }
 
 function todoRecentEntryLine(
   kind: "project" | "person",
   item: TodoRecentProject | TodoRecentPerson
 ) {
-  const detail = todoEvidenceSummary(kind, item);
+  const detail = todoStructuredEvidence(kind, item);
+  const lastActivity = kind === "project"
+    ? todoFollowupDate((item as TodoRecentProject).lastFollowup)
+    : todoFollowupDate((item as TodoRecentPerson).lastContact);
   return [
     kind,
     singleLine(item.recordId),
@@ -133,7 +253,8 @@ function todoRecentEntryLine(
     new Date(Number(item.createdAt)).toISOString(),
     singleLine(item.rating) || "未评级",
     singleLine(item.status) || "进展未填写",
-    detail || (kind === "project" ? "领域未填写" : "组织未填写")
+    lastActivity,
+    detail
   ].join("｜");
 }
 
@@ -222,17 +343,16 @@ export function todoRecentEntriesContext(
 
   return [
     "DOMI_TODO_CLIENT_SNAPSHOT_V1",
-    `最近 4 周新入库候选索引（刚由客户端刷新，共 ${recentProjects.length} 个项目、${recentPeople.length} 个人；格式：类型｜recordId｜名称｜系统入库时间｜评级｜进展｜价值证据摘要）：`,
+    `最近 4 周新入库候选索引（刚由客户端刷新，共 ${recentProjects.length} 个项目、${recentPeople.length} 个人；格式：类型｜recordId｜名称｜系统入库时间｜评级｜进展｜最后跟进或联系｜结构化证据）：`,
     ...candidates.map(({ kind, item }) => `- ${todoRecentEntryLine(kind, item)}`),
     recentProjects.length + recentPeople.length > recentLimit
       ? `- 另有 ${recentProjects.length + recentPeople.length - recentLimit} 个较早候选未随上下文传入；需要时按 recordId 定向读取。`
       : "",
     "该索引是本轮已刷新资料的 new-entry 权威候选集；不要再次全量读取项目表或人脉表。其他分类已有同一对象，不得作为压制 new-entry 的理由；但同一对象最终都要求联系或约见时，应合并理由并只保留一个开放事项。",
     "若存在符合规则且未受 done/ignored 冷却约束的候选，本轮 new-entry 不得为 0；若全部排除，必须在执行结果中给出逐类排除数量。",
-    `A/S 长期跟进候选索引（共 ${priorityProjects.length} 个项目、${priorityPeople.length} 个人；格式：类型｜recordId｜名称｜评级｜进展｜最后跟进或联系｜价值证据摘要）：`,
+    `A/S 长期跟进候选索引（共 ${priorityProjects.length} 个项目、${priorityPeople.length} 个人；格式：类型｜recordId｜名称｜评级｜进展｜最后跟进或联系｜结构化证据）：`,
     ...followupCandidates.map(({ kind, item }) => {
-      const detail = todoEvidenceSummary(kind, item)
-        || (kind === "project" ? "领域未填写" : "组织未填写");
+      const detail = todoStructuredEvidence(kind, item);
       const lastActivity = kind === "project"
         ? todoFollowupDate((item as TodoRecentProject).lastFollowup)
         : todoFollowupDate((item as TodoRecentPerson).lastContact);
@@ -241,7 +361,8 @@ export function todoRecentEntriesContext(
     priorityProjects.length + priorityPeople.length > followupLimit
       ? `- 另有 ${priorityProjects.length + priorityPeople.length - followupLimit} 个候选未随上下文传入；需要时按 recordId 定向读取。`
       : "",
-    "以上候选已由客户端从本轮项目／人脉快照按 Todo 规则筛出。生成 new-entry、relationship-follow-up 和 project-follow-up 时不得再次全量读取两张表；只允许为字段歧义或账本消歧按 recordId 点读。关键节点日期和已核验新动态仍按 Skill 做最小范围读取。"
+    "结构化证据优先完整传递实体、状态、评级、跟进日期、行动项和期限。evidence_state=incomplete、targeted_read_required=true、notes_truncated=true、source_ellipsis=true、omitted_action_items>0 或 omitted_deadlines>0 任一出现时，表示自由文本存在截断、省略或未传入行动项／期限；必须先按 recordId 定向读取权威项目／人物记录及完整 Notes，再决定下一步、排除候选或形成结论。不得把 Notes摘录或已提取行动项单独视为充分证据。",
+    "以上候选已由客户端从本轮项目／人脉快照按 Todo 规则筛出。生成 new-entry、relationship-follow-up 和 project-follow-up 时不得再次全量读取两张表；只允许为 incomplete 证据、字段歧义或账本消歧按 recordId 点读。关键节点日期和已核验新动态仍按 Skill 做最小范围读取。"
   ].filter(Boolean).join("\n");
 }
 
@@ -463,6 +584,42 @@ const PARALLEL_RESEARCH_WORKFLOW_IDS = new Set([
   "ic-memo"
 ]);
 
+const SLIDE_DELIVERABLE_PATTERN = /(?:\bpptx?\b|\bpowerpoint\b|\bslides?\b|\bslide\s+deck\b|\bdeck\b|幻灯片|演示文稿)/i;
+const SLIDE_AUTHORING_PATTERN = /(?:制作|生成|输出|创建|做(?:一份|一个|成)?|画|写|更新|改版|修改|重做|修复|改进|美化|完善|优化|排版|设计|整理|处理|转成|转换|汇报|create|make|generate|build|design|redesign|update|revise|edit|convert)/i;
+const SLIDE_DIAGNOSTIC_PATTERN = /(?:为什么|打不开|无法打开|连接失败|下载失败|发送失败|报错|卡住|崩溃)/i;
+const EXPLICIT_EDITABLE_POWERPOINT_PATTERN = /(?:\bpptx\b|\.pptx\b|可编辑(?:的)?\s*(?:ppt|powerpoint|幻灯片|演示文稿)|(?:ppt|powerpoint)\s*(?:源文件|原文件)|(?:源文件|原文件)\s*(?:ppt|powerpoint))/i;
+const PRESERVE_EXISTING_TEMPLATE_PATTERN = /(?:保持|保留|沿用|继续使用|不要改|不改)(?:原|现有|当前)?(?:模板|版式|母版|主题)/i;
+
+const QUALITY_FIRST_CONTEXT_EFFICIENCY_RULE = [
+  "上下文优化不得降低模型等级、推理强度、证据覆盖、原文可追溯性、投资判断深度、交付完整性或最终 QA；不得因 token 预算提前停止、截断材料或以有损摘要替代原文。",
+  "同一任务内同一 Skill／reference 只读取一次，重复的确定性查询与校验应批量执行。只有已获用户写入授权，或命中的多阶段／可恢复 Skill 明确要求受控临时工件时，才保存完整原始材料和工具结果；只读任务不得为了节省 token 新增资料库、交付文件或外部副本。受控临时工件不得进入正式资料库或默认交付，并按宿主生命周期清理。跨阶段只传工件路径、内容哈希、实体 ID、Evidence Ledger／来源索引、未决问题和所需回读范围，下一阶段按需回读原文。路由、授权或信息范围不确定时，保守加载完整规则与原始材料，但不得扩张持久化或外部写入权限。"
+].join("\n");
+
+export function domiSlidesDeliveryPolicyForText(userInput: string) {
+  const request = String(userInput || "").trim();
+  if (!SLIDE_DELIVERABLE_PATTERN.test(request)) return "";
+  if (PRESERVE_EXISTING_TEMPLATE_PATTERN.test(request)) return "";
+  if (SLIDE_DIAGNOSTIC_PATTERN.test(request) && !SLIDE_AUTHORING_PATTERN.test(request)) return "";
+  return EXPLICIT_EDITABLE_POWERPOINT_PATTERN.test(request)
+    ? "explicit_pptx"
+    : "html_pdf";
+}
+
+export function domiInvestmentSlidesPromptRule(userInput: string) {
+  const deliveryPolicy = domiSlidesDeliveryPolicyForText(userInput);
+  if (!deliveryPolicy) return "";
+  const formatRule = deliveryPolicy === "explicit_pptx"
+    ? "用户已明确要求可编辑 PowerPoint／PPTX，因此允许交付 .pptx；但仍须以 domi 的 Morgan Stanley 研究报告规范为上位约束，通用 presentations Skill 只能承担必要的格式实现，不得替换其内容、版式、字体或 QA contract。"
+    : "用户只说 PPT／slides／deck／幻灯片／演示文稿，不等于要求 PPTX。必须以 HTML 为唯一事实源并交付该 HTML 与由其导出的 PDF；不得创建或交付 .pptx。";
+  return [
+    "DOMI_INVESTMENT_SLIDES_POLICY_V1",
+    "本轮涉及 domi 投研 Slides。必须读取并采用 $domi:investment-analysis 及其 references/investment-banking-slides.md 作为 Slides 的排版、字体、交付和质量门规范；不得用通用模板或同名非 domi Skill 替代。所有 scripts、assets 和 references 必须相对当前实际选中的 $domi:investment-analysis Skill 根目录解析，禁止调用 ~/.codex/skills/investment-analysis 下的旧全局副本。若当前另有显式选择的 domi 研究 Skill，保留其研究职责，同时叠加本规范完成 Slides。若该 Skill 或 reference 不可用，必须停止并明确报告，不得静默降级。",
+    formatRule,
+    "严格采用外资投行／Morgan Stanley 研究报告风格：结论式标题、高信息密度、严谨证据与来源、规定的中英文字体和版式；不得使用大面积无意义留白、装饰性卡片堆叠、通用渐变封面或纯文本拼页。",
+    "交付前必须完成 research.md、slide contract、coverage matrix、style lock、内容审计、版面 QA、全页渲染与 contact sheet 视觉检查；发现溢出、遮挡、字体替换、低密度或风格漂移时必须修正。最终回复必须列出所有正式交付文件的可提取本地文件链接。"
+  ].join("\n");
+}
+
 export function workflowPrompt(
   workflow: Workflow | undefined,
   userInput: string,
@@ -471,6 +628,7 @@ export function workflowPrompt(
   requestOrigin: "user" | "programmatic" = "user"
 ) {
   const trimmed = userInput.trim();
+  const investmentSlidesRule = domiInvestmentSlidesPromptRule(trimmed);
   const requestLabel = requestOrigin === "user"
     ? "用户输入："
     : "客户端工作流指令（不代表用户授权外部写入）：";
@@ -490,6 +648,8 @@ export function workflowPrompt(
       "你正在 domi 投资工作台中运行，底层是本地 Codex。",
       "当前启用的分析师是 domi-AI分析师。必须使用已安装的 domi 插件完成本轮任务。",
       "先判断是否属于 PLAUD、录音、纪要后续入库等明确的多阶段串联任务；只有这些任务才先完整读取 $domi:domi-router。普通研究、分析、评级、项目管理或交易任务直接选择最匹配的单项 domi Skill，并只读取该 Skill 要求的 references，避免重复加载 Router。不要使用同名的非 domi Skill 替代。",
+      investmentSlidesRule,
+      QUALITY_FIRST_CONTEXT_EFFICIENCY_RULE,
       "确实没有匹配 Skill 时，再以投资分析师身份直接回答；不得为了形式完整而加载与本轮无关的 Skill 或 references。",
       "请用中文直接完成任务。优先使用已有 Watching List、People、Wiki、本地资料库和下面的 domi 绑定上下文，避免重复研究；不得编造项目、人脉、融资、财务或会议事实；外部写入必须遵循对应 Skill 的确认、去重和字段校验规则。",
       "若请求对应资料库中的具体项目，先按项目名查重并绑定稳定项目目录；项目材料和产物统一进入该项目的纪要／研究／原始材料／导出目录，不得写入当前任务工作区的 outputs 后再搬运。查询优先使用 SQLite 与当前实体目录，不递归扫描整个工作区。",
@@ -530,7 +690,7 @@ export function workflowPrompt(
       "你正在 domi 投资工作台后台运行待办事项同步，底层是本地 Codex。",
       "采用 domi 插件中的 $domi:todo，并执行该 Skill 的客户端快速同步路径（紧凑执行）。完整读取 Todo Skill；本轮已有 DOMI_TODO_CLIENT_SNAPSHOT_V1 与已校验的后端事实，不再读取 suggestion-rules、todo-ledger-schema、storage-backends、domi Router 或其他通用技能。Todo Skill 的紧凑路径已经包含本轮所需的完整门槛与账本约束。",
       "客户端已先刷新项目与人脉。若上下文包含 DOMI_TODO_CLIENT_SNAPSHOT_V1，直接使用其中的新入库和 A/S 长期跟进候选；不得为这些分类再次全量读取项目表或人脉表。仅对关键节点日期、已核验关联动态、字段歧义或账本消歧做最小范围读取。",
-      "客户端候选最后一列已经提供价值证据摘要；摘要足以解释下一步动作时，禁止再点读项目或人物记录。",
+      "客户端候选最后一列提供结构化证据及完整性标记。只有 evidence_state=complete 且现有字段足以解释下一步动作时，才禁止再点读项目或人物记录；只要出现 evidence_state=incomplete、targeted_read_required=true、notes_truncated=true、source_ellipsis=true、omitted_action_items>0 或 omitted_deadlines>0，必须按 recordId 定向回读权威记录和完整 Notes 后再判断，绝不得把截断摘录视为充分证据。不得因此改为全量读取项目表或人脉表。",
       "当前待办账本只读取一次，完成去重与排序后单次写入，再单次回读验证。保持完整规则、证据门槛和 12 项配额，不得用减少判断维度换取速度。",
       "本轮以待办文档成功写入并回读为完成条件；不要撰写长篇过程报告，写后只输出各分类计数和排除计数摘要。",
       "不得输出私人链接、邮箱、Base 标识或本机路径；不得修改 domi 应用源码。",
@@ -543,6 +703,7 @@ export function workflowPrompt(
   return [
     "你正在 domi 投资工作台中运行，底层是本地 Codex。",
     `必须采用 domi 插件中的 Skill：${workflow.skill}。进入执行阶段前完整读取该 Skill 及其要求的 references，不要用通用模板或同名非 domi Skill 替代。`,
+    investmentSlidesRule,
     "",
     `工作流：${workflow.title}`,
     `目标：${workflow.description}`,
@@ -550,6 +711,7 @@ export function workflowPrompt(
     domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
     "",
     "执行要求：",
+    QUALITY_FIRST_CONTEXT_EFFICIENCY_RULE,
     "1. 遵循该 domi Skill 的去重、核验、信息不足和外部写入确认规则。",
     "2. 先使用已有 Watching List、People、Wiki 或本地资料库上下文，避免重复研究和重复建档。",
     "3. 不得编造项目、人脉、融资、财务或会议事实。",

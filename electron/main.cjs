@@ -40,6 +40,12 @@ const {
 } = require("./codex-turn-status.cjs");
 const { isSelectedCodexConnectionReady } = require("./codex-protocol.cjs");
 const {
+  createRunUsageTracker,
+  observeRawResponseUsage,
+  observeThreadTokenUsage,
+  runUsageSnapshot
+} = require("./codex-token-usage.cjs");
+const {
   codexRunExecutionMode,
   normalizeCodexRoutingParams,
   partitionCodexRuns,
@@ -2013,17 +2019,16 @@ function describeItem(item) {
   }
 }
 
-function usageFromNotification(params) {
-  const usage = params.tokenUsage?.last;
-  if (!usage) {
-    return null;
-  }
-  return {
-    input_tokens: usage.inputTokens || 0,
-    cached_input_tokens: usage.cachedInputTokens || 0,
-    output_tokens: usage.outputTokens || 0,
-    reasoning_output_tokens: usage.reasoningOutputTokens || 0
-  };
+function publishRunUsage(run, complete = false) {
+  const usage = runUsageSnapshot(run.tokenUsageTracker, complete);
+  if (usage.usage_samples === 0) return null;
+  publishCodexEvent(run.sender, run.runId, {
+    type: "usage",
+    threadId: run.threadId,
+    turnId: run.turnId,
+    usage
+  });
+  return usage;
 }
 
 function armRunIdleTimeout(run) {
@@ -2127,6 +2132,9 @@ function finishRun(run, type, details = {}) {
 
   const stopped = type === "stopped";
   const ok = type === "completed" || stopped;
+  const usage = run.tokenUsageTracker?.samples > 0
+    ? runUsageSnapshot(run.tokenUsageTracker, type === "completed")
+    : null;
   const result = {
     ok,
     stopped,
@@ -2137,7 +2145,8 @@ function finishRun(run, type, details = {}) {
     error: ok ? "" : details.error || "Codex 执行失败。",
     workspacePath: run.workspacePath || demoWorkspace,
     outputPath: "",
-    eventCount: run.eventCount
+    eventCount: run.eventCount,
+    usage
   };
   const finishedAt = Date.now();
   appendRuntimeLog("codex-run-performance", {
@@ -2150,7 +2159,15 @@ function finishRun(run, type, details = {}) {
       : undefined,
     totalMs: Math.max(0, finishedAt - run.acceptedAt),
     eventCount: run.eventCount,
-    researchCacheHit: Boolean(run.researchCache?.cacheHit)
+    researchCacheHit: Boolean(run.researchCache?.cacheHit),
+    usageScope: usage?.usage_scope || "run_observed",
+    usageComplete: usage?.usage_complete === true,
+    usageSamples: usage?.usage_samples || 0,
+    inputTokens: usage?.input_tokens || 0,
+    cachedInputTokens: usage?.cached_input_tokens || 0,
+    cacheWriteInputTokens: usage?.cache_write_input_tokens || 0,
+    outputTokens: usage?.output_tokens || 0,
+    reasoningOutputTokens: usage?.reasoning_output_tokens || 0
   });
 
   publishCodexEvent(run.sender, run.runId, {
@@ -2160,7 +2177,8 @@ function finishRun(run, type, details = {}) {
     output: run.privateOutput ? "" : run.output,
     error: result.error,
     outputPath: "",
-    eventCount: run.eventCount
+    eventCount: run.eventCount,
+    usage
   });
   run.resolve(result);
   queueRunPostProcessing(run, type, finishedAt);
@@ -2230,15 +2248,15 @@ function handleCodexNotification(method, params) {
 
   if (method === "thread/tokenUsage/updated") {
     markConnectionRecovered();
-    const usage = usageFromNotification(params);
-    if (usage) {
-      publishCodexEvent(run.sender, run.runId, {
-        type: "usage",
-        threadId: run.threadId,
-        turnId: run.turnId,
-        usage
-      });
-    }
+    const observed = observeThreadTokenUsage(run.tokenUsageTracker, params.tokenUsage);
+    if (observed) publishRunUsage(run, false);
+    return;
+  }
+
+  if (method === "rawResponse/completed") {
+    markConnectionRecovered();
+    const observed = observeRawResponseUsage(run.tokenUsageTracker, params.usage);
+    if (observed) publishRunUsage(run, false);
     return;
   }
 
@@ -3158,6 +3176,7 @@ async function runCodex(sender, payload) {
         executionMode: codexRunExecutionMode(payload),
         output: "",
         eventCount: 0,
+        tokenUsageTracker: createRunUsageTracker(),
         workspacePath,
         privateOutput: payload?.privateOutput === true,
         externalType: payload?.externalType || "",
