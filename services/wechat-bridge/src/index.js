@@ -5,14 +5,26 @@ import process from "node:process";
 
 import { createCodexClient } from "./codex-client.js";
 import { extractInbound, getUpdates, sendText } from "./common.js";
-import { codexInputFor, downloadInboundMedia, sendLocalAttachment } from "./media.js";
+import {
+  codexInputFor,
+  domiSlidesCorrectionInputFor,
+  domiSlidesDeliveryPolicyFor,
+  downloadInboundMedia,
+  sendLocalAttachment,
+  validateDomiSlidesDeliverables,
+} from "./media.js";
+import { verifyDomiInvestmentSlidesContract } from "./slides-contract.js";
+import {
+  applyDomiWechatPolicyToTask,
+} from "./domi-request-policy.js";
 import {
   extractLocalAttachments,
   messageIdentity,
   replaceLocalAttachmentLinks,
   redactInternalFileCitations,
-  requestsExistingResult,
+  shouldFlushPendingDeliveriesForMessage,
   splitText,
+  targetsExistingResult,
   wantsFileDelivery,
 } from "./protocol.js";
 import {
@@ -153,6 +165,46 @@ const taskManager = new TaskManager({
   },
   deliverTaskResult: async (task, response, job) => {
     const attachments = extractLocalAttachments(response);
+    const slidesValidation = validateDomiSlidesDeliverables(job.slidesDeliveryPolicy, attachments);
+    if (!slidesValidation.ok) {
+      if (Number(job.slidesCorrectionAttempts || 0) < 1) {
+        const correctionInput = domiSlidesCorrectionInputFor(
+          job.slidesDeliveryPolicy,
+          slidesValidation.error,
+        );
+        taskManager.enqueue(task, {
+          text: correctionInput,
+          attachments: [],
+          codexInput: correctionInput,
+          contextToken: job.contextToken || task.lastContextToken,
+          runId: job.runId || task.lastRunId,
+          wantsFiles: true,
+          slidesDeliveryPolicy: job.slidesDeliveryPolicy,
+          slidesCorrectionAttempts: 1,
+        });
+        await sendText({
+          credentials,
+          toUserId: task.senderId,
+          contextToken: job.contextToken || task.lastContextToken,
+          runId: job.runId || task.lastRunId,
+          text: `【${task.id}】Slides 产物未通过 domi 格式门，正在自动修正：${slidesValidation.error}`,
+        });
+        return;
+      }
+      if (!task.delivery?.formatFailureNotified) {
+        await sendText({
+          credentials,
+          toUserId: task.senderId,
+          contextToken: job.contextToken || task.lastContextToken,
+          runId: job.runId || task.lastRunId,
+          text: `【${task.id}】Slides 自动修正后仍未通过格式门，已停止发送错误文件：${slidesValidation.error}`,
+        });
+        task.delivery ||= {};
+        task.delivery.formatFailureNotified = true;
+        taskManager.persist();
+      }
+      throw new Error(`Slides 格式门未通过：${slidesValidation.error}`);
+    }
     const shouldSendFiles = job.wantsFiles && attachments.length > 0;
     let visibleResponse = response;
     if (attachments.length) {
@@ -283,17 +335,43 @@ async function prepareTask(message, task, inbound) {
       if (attachment) attachments.push(attachment);
     }
     const inputText = inbound.text || (attachments.length ? "请处理我发送的附件。" : "");
+    const slidesDeliveryPolicy = domiSlidesDeliveryPolicyFor({
+      text: inputText,
+      attachments,
+    });
+    const appliedDomiPolicy = applyDomiWechatPolicyToTask(task, {
+      text: inputText,
+      attachments,
+      slidesDeliveryPolicy,
+    });
+    if (slidesDeliveryPolicy) {
+      const slidesContract = verifyDomiInvestmentSlidesContract();
+      if (!slidesContract.ok) {
+        const error = new Error(slidesContract.error);
+        error.code = "DOMI_SLIDES_CONTRACT_UNAVAILABLE";
+        throw error;
+      }
+    }
     taskManager.enqueue(task, {
       text: inputText,
       attachments,
-      codexInput: codexInputFor({ text: inputText, attachments }),
+      codexInput: codexInputFor({
+        text: inputText,
+        attachments,
+        routeOverride: appliedDomiPolicy.effectiveRoute,
+      }),
       contextToken: message.context_token,
       runId: message.run_id,
       wantsFiles: wantsFileDelivery(inputText),
+      slidesDeliveryPolicy,
+      slidesCorrectionAttempts: 0,
     });
   } catch (error) {
     taskManager.failPreparation(task, error);
-    await replyMessage(message, `【${task.id}】附件接收失败：${error?.message ?? error}`);
+    const label = error?.code === "DOMI_SLIDES_CONTRACT_UNAVAILABLE"
+      ? "Slides 任务未启动"
+      : "附件接收失败";
+    await replyMessage(message, `【${task.id}】${label}：${error?.message ?? error}`);
   }
 }
 
@@ -311,15 +389,17 @@ async function handleMessage(message) {
     contextToken: message.context_token,
     runId: message.run_id,
   });
-  const preferredDeliveryTask = taskManager.referenceFromText(`${inbound.quotedText || ""}\n${inbound.text || ""}`);
-  const flushedDeliveries = await taskManager.flushPendingDeliveries(senderId, preferredDeliveryTask);
   if (inbound.text && await handleBuiltIn(message, inbound.text)) return;
 
-  const { task, isNew, ambiguousTasks } = taskManager.resolveTask({
+  const { task, isNew, routingReason, ambiguousTasks, missingTaskId } = taskManager.resolveTask({
     senderId,
     text: inbound.text,
     quotedText: inbound.quotedText,
   });
+  if (missingTaskId) {
+    await replyMessage(message, `没有找到任务【${missingTaskId}】。请发送 /tasks 查看最近任务，或直接描述一个新任务。`);
+    return;
+  }
   if (ambiguousTasks?.length) {
     await replyMessage(
       message,
@@ -327,7 +407,18 @@ async function handleMessage(message) {
     );
     return;
   }
-  if (inbound.text && requestsExistingResult(inbound.text) && task.finalResponse) {
+  const shouldFlushPending = !isNew && shouldFlushPendingDeliveriesForMessage(inbound.text);
+  const existingResultRequest = targetsExistingResult({
+    text: inbound.text,
+    routingReason,
+    hasFinalResponse: Boolean(task.finalResponse),
+  });
+  const existingResultWasPending = existingResultRequest && task.delivery?.status === "pending";
+  const flushedDeliveries = shouldFlushPending
+    ? await taskManager.flushPendingDeliveries(senderId, task.id, 1, { preferredOnly: true })
+    : [];
+  if (existingResultRequest) {
+    if (existingResultWasPending) return;
     if (!flushedDeliveries.includes(task.id)) await taskManager.redeliver(task, { wantsFiles: true });
     return;
   }

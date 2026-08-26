@@ -13,7 +13,7 @@ import {
   resolvedProxyEnvironment,
 } from "../src/proxy-environment.js";
 
-test("Weixin bridge prefers Domi's managed Codex runtime and companion tools", (t) => {
+test("Weixin bridge resolves Domi's managed Codex runtime and companion tools", (t) => {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "domi-managed-codex-"));
   t.after(() => fs.rmSync(homeDir, { recursive: true, force: true }));
   const releaseRoot = path.join(homeDir, ".codex", "packages", "standalone", "releases", "0.145.0-test");
@@ -34,6 +34,19 @@ test("Weixin bridge prefers Domi's managed Codex runtime and companion tools", (
     fs.realpathSync(path.join(releaseRoot, "codex-resources", "zsh", "bin")),
   );
   assert.equal(environment.PATH.split(path.delimiter).at(-1), "/usr/bin");
+});
+
+test("Weixin bridge prefers the managed current runtime over a different local Codex", (t) => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "domi-managed-current-codex-"));
+  t.after(() => fs.rmSync(homeDir, { recursive: true, force: true }));
+  const managed = path.join(homeDir, ".codex", "packages", "standalone", "current", "bin", "codex");
+  const local = path.join(homeDir, ".local", "bin", "codex");
+  fs.mkdirSync(path.dirname(managed), { recursive: true });
+  fs.mkdirSync(path.dirname(local), { recursive: true });
+  fs.writeFileSync(managed, "#!/bin/sh\n", { mode: 0o755 });
+  fs.writeFileSync(local, "#!/bin/sh\n", { mode: 0o755 });
+
+  assert.equal(resolveManagedCodexPath({ homeDir, environment: {} }), managed);
 });
 
 test("Weixin bridge converts the active macOS proxy into Codex CLI environment variables", () => {

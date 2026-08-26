@@ -151,6 +151,7 @@ import {
   validSidebarSearchKey
 } from "./sidebar-search-navigation";
 import {
+  domiSlidesDeliveryPolicyForText,
   quickStartWorkflows,
   radarDiscoveryWindow,
   radarPriorityPeopleContext,
@@ -2535,6 +2536,26 @@ function App() {
 
   const timeline = activeThread.timeline || [];
   const lastUsage = activeThread.lastUsage || null;
+  const lastInputTokens = Math.max(0, Number(lastUsage?.input_tokens || 0));
+  const lastCachedInputTokens = Math.min(
+    lastInputTokens,
+    Math.max(0, Number(lastUsage?.cached_input_tokens || 0))
+  );
+  const lastUncachedInputTokens = lastUsage
+    ? lastInputTokens - lastCachedInputTokens
+    : 0;
+  const lastCacheHitRate = lastInputTokens
+    ? Math.round((lastCachedInputTokens / lastInputTokens) * 100)
+    : 0;
+  const lastCacheWriteInputTokens = Math.max(
+    0,
+    Number(lastUsage?.cache_write_input_tokens || 0)
+  );
+  const lastOutputTokens = Math.max(0, Number(lastUsage?.output_tokens || 0));
+  const lastReasoningOutputTokens = Math.max(
+    0,
+    Number(lastUsage?.reasoning_output_tokens || 0)
+  );
   const markdownDirty = Boolean(markdownDocument && markdownDraft !== markdownDocument.content);
   const markdownPanelActive = Boolean(markdownDocument || markdownLoading || markdownRequestLabel);
   const pdfPanelActive = Boolean(pdfDocument || pdfLoading || pdfRequestLabel);
@@ -2594,14 +2615,22 @@ function App() {
     workflowId?: string,
     options: {
       runKind?: DomiModelPolicyRunKind;
+      useDomiPlugin?: boolean;
+      requestText?: string;
       model?: string;
       reasoningEffort?: string;
       serviceTier?: string;
     } = {}
   ) {
+    const semanticRequestText = String(options.requestText || "").trim();
     return resolveDomiModelPolicy({
       workflowId,
       runKind: options.runKind,
+      useDomiPlugin: options.useDomiPlugin,
+      requestText: semanticRequestText,
+      domiSlidesDeliveryPolicy: options.useDomiPlugin
+        ? domiSlidesDeliveryPolicyForText(semanticRequestText)
+        : "",
       models: codexStatus?.models,
       userModel: options.model ?? model,
       userReasoningEffort: options.reasoningEffort ?? reasoningEffort,
@@ -7313,6 +7342,7 @@ function App() {
       patchThread(context.threadId, {
         updatedAt: nowLabel(),
         lastActiveAt: runCompletedAt,
+        ...(payload.usage ? { lastUsage: payload.usage } : {}),
         hasUnreadCompletion:
           payload.type === "completed" && !isThreadActivelyVisible(context.threadId)
       });
@@ -7737,6 +7767,8 @@ function App() {
       return;
     }
     const runModelPolicy = resolveRunModelPolicy(workflow?.id, {
+      useDomiPlugin,
+      requestText: messageText,
       model: options.model,
       reasoningEffort: options.reasoningEffort,
       serviceTier: options.serviceTier
@@ -8233,7 +8265,10 @@ function App() {
 
     const runModelPolicy = (() => {
       try {
-        return resolveRunModelPolicy(workflow?.id);
+        return resolveRunModelPolicy(workflow?.id, {
+          useDomiPlugin: domiPluginEnabled,
+          requestText: messageText
+        });
       } catch (error) {
         setThreadAttachmentError(
           queueThread.id,
@@ -13367,10 +13402,18 @@ function App() {
               </button>
               <div className="panel-content">
                 {lastUsage && (
-                  <div className="usage-row">
-                    <span>Input {lastUsage.input_tokens}</span>
-                    <span>Cached {lastUsage.cached_input_tokens}</span>
-                    <span>Output {lastUsage.output_tokens}</span>
+                  <div
+                    className="usage-row"
+                    title="本轮可观测用量；新增输入 = Input - Cached。Cached 已包含在 Input 内；失败、取消或旧记录可能不完整。"
+                  >
+                    <span>
+                      本轮可观测用量{lastUsage.usage_complete === false ? "（可能不完整）" : ""}
+                    </span>
+                    <span>新增输入 {lastUncachedInputTokens.toLocaleString("zh-CN")}</span>
+                    <span>缓存读取 {lastCachedInputTokens.toLocaleString("zh-CN")}（{lastCacheHitRate}%）</span>
+                    <span>缓存写入 {lastCacheWriteInputTokens.toLocaleString("zh-CN")}</span>
+                    <span>输出 {lastOutputTokens.toLocaleString("zh-CN")}</span>
+                    <span>推理 {lastReasoningOutputTokens.toLocaleString("zh-CN")}</span>
                   </div>
                 )}
                 <div className="timeline-list">

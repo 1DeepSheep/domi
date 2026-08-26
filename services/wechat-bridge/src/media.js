@@ -11,18 +11,22 @@ import {
 } from "./common.js";
 import { INBOUND_DIR, ensurePrivateDir } from "./state.js";
 import { prepareAttachmentForWeixin } from "./markdown-pdf.js";
+import { domiWechatRoutingPolicyFor } from "./domi-request-policy.js";
 
 const MAX_MEDIA_BYTES = 100 * 1024 * 1024;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 const MIME_BY_EXTENSION = new Map([
   [".md", "text/markdown"],
   [".markdown", "text/markdown"],
+  [".html", "text/html"],
+  [".htm", "text/html"],
   [".pdf", "application/pdf"],
   [".doc", "application/msword"],
   [".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
   [".txt", "text/plain"],
   [".csv", "text/csv"],
   [".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+  [".ppt", "application/vnd.ms-powerpoint"],
   [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
   [".zip", "application/zip"],
   [".png", "image/png"],
@@ -229,9 +233,138 @@ export async function sendLocalAttachment({ credentials, toUserId, contextToken,
   return sendMessageItem({ credentials, toUserId, contextToken, runId, item });
 }
 
-export function codexInputFor({ text, attachments }) {
+const SLIDE_DELIVERABLE_PATTERN = /(?:\bpptx?\b|\bpowerpoint\b|\bslides?\b|\bslide\s+deck\b|\bdeck\b|幻灯片|演示文稿)/i;
+const SLIDE_AUTHORING_PATTERN = /(?:制作|生成|输出|创建|做(?:一份|一个|成)?|画|写|更新|改版|修改|重做|修复|改进|美化|完善|优化|排版|设计|整理|处理|转成|转换|汇报|create|make|generate|build|design|redesign|update|revise|edit|convert)/i;
+const SLIDE_DIAGNOSTIC_PATTERN = /(?:为什么|打不开|无法打开|连接失败|下载失败|发送失败|报错|卡住|崩溃)/i;
+const EXPLICIT_EDITABLE_POWERPOINT_PATTERN = /(?:\bpptx\b|\.pptx\b|可编辑(?:的)?\s*(?:ppt|powerpoint|幻灯片|演示文稿)|(?:ppt|powerpoint)\s*(?:源文件|原文件)|(?:源文件|原文件)\s*(?:ppt|powerpoint))/i;
+const PRESERVE_EXISTING_TEMPLATE_PATTERN = /(?:保持|保留|沿用|继续使用|不要改|不改)(?:原|现有|当前)?(?:模板|版式|母版|主题)/i;
+
+function isPowerPointAttachment(attachment) {
+  return [".ppt", ".pptx"].includes(
+    path.extname(String(attachment?.filePath || "")).toLowerCase(),
+  );
+}
+
+export function domiSlidesDeliveryPolicyFor({ text, attachments = [] }) {
+  const request = String(text || "").trim();
+  const hasSlideFormat = SLIDE_DELIVERABLE_PATTERN.test(request);
+  const hasPowerPointAttachment = attachments.some(isPowerPointAttachment);
+  const hasAuthoringIntent = SLIDE_AUTHORING_PATTERN.test(request);
+  const diagnosticOnly = SLIDE_DIAGNOSTIC_PATTERN.test(request) && !hasAuthoringIntent;
+  const preserveExistingTemplate = hasPowerPointAttachment
+    && PRESERVE_EXISTING_TEMPLATE_PATTERN.test(request);
+  if (
+    (!hasSlideFormat && !(hasPowerPointAttachment && hasAuthoringIntent))
+    || diagnosticOnly
+    || preserveExistingTemplate
+  ) return "";
+  return EXPLICIT_EDITABLE_POWERPOINT_PATTERN.test(request)
+    || (hasPowerPointAttachment && hasAuthoringIntent)
+    ? "explicit_pptx"
+    : "html_pdf";
+}
+
+export function domiInvestmentSlidesPolicyFor({ text, attachments = [] }) {
+  const deliveryPolicy = domiSlidesDeliveryPolicyFor({ text, attachments });
+  if (!deliveryPolicy) return "";
+  const formatRule = deliveryPolicy === "explicit_pptx"
+    ? "用户已明确要求或提供可编辑 PowerPoint：允许交付 .pptx；但 PPTX 仍须严格复刻下述 Morgan Stanley 投研版式、字体、信息密度和质量门，不得退回通用 PowerPoint 模板。"
+    : "用户只说了 PPT／slides／deck／幻灯片／演示文稿，这不等于要求 PPTX。默认交付必须是 Morgan Stanley 风格 HTML 源文件及由该 HTML 导出的 PDF；不得创建或交付 .pptx。";
+
+  return [
+    "DOMI_INVESTMENT_SLIDES_POLICY_V1",
+    "本轮涉及 domi 投研 Slides。必须使用已安装的 $domi:investment-analysis 作为 Slides 规范来源，完整读取该 Skill 及 references/investment-banking-slides.md；不得让通用 presentations Skill、通用主题或普通 PPTX 模板替代 domi 的 Slides 工作流。所有 scripts、assets 和 references 必须相对当前实际选中的 $domi:investment-analysis Skill 根目录解析，禁止调用 ~/.codex/skills/investment-analysis 下的旧全局副本。若本轮另有明确选择的 domi 研究 Skill，保留其研究职责，同时叠加本规范完成 Slides。若所需 domi Skill 或 reference 不可用，必须停止并明确报告，不得静默降级为通用 Slides。",
+    formatRule,
+    "必须采用外资投行／Morgan Stanley 研究报告风格：结论式标题、高信息密度、严谨证据与来源、规定的中英文字体和版式；不得出现大面积无意义留白、装饰性卡片堆叠、通用渐变封面或纯文本拼页。",
+    "交付前必须完成 research.md、slide contract、coverage matrix、style lock、内容审计、版面 QA、全页渲染与 contact sheet 视觉检查；发现溢出、遮挡、字体替换、低密度或风格漂移时必须修正后再发送文件。最终回复必须提供所有正式交付文件的可提取本地文件链接。",
+  ].join("\n");
+}
+
+export function validateDomiSlidesDeliverables(deliveryPolicy, attachments = []) {
+  if (!deliveryPolicy) return { ok: true, error: "" };
+  const extensions = new Set(
+    attachments.map((attachment) => path.extname(attachment.filePath).toLowerCase()),
+  );
+  if (deliveryPolicy === "html_pdf") {
+    if (extensions.has(".pptx")) {
+      return { ok: false, error: "普通 PPT 请求不得交付 PPTX。" };
+    }
+    const htmlAttachment = attachments.find((attachment) => (
+      [".html", ".htm"].includes(path.extname(attachment.filePath).toLowerCase())
+    ));
+    if (!htmlAttachment) {
+      return { ok: false, error: "缺少作为唯一事实源的 HTML Slides。" };
+    }
+    if (!extensions.has(".pdf")) {
+      return { ok: false, error: "缺少由 HTML 导出的 PDF Slides。" };
+    }
+    if (!fs.existsSync(htmlAttachment.filePath)) {
+      return { ok: false, error: "HTML Slides 文件不存在，无法执行 Morgan Stanley 样式检查。" };
+    }
+    const html = fs.readFileSync(htmlAttachment.filePath, "utf8");
+    if (!/<section\b[^>]*class=["'][^"']*\bslide\b/i.test(html)) {
+      return { ok: false, error: "HTML 没有使用 domi Slides 页面结构。" };
+    }
+    const styleHref = html.match(
+      /<link\b[^>]*href=["']([^"']*style-packs\/morgan-stanley\/style\.css(?:[?#][^"']*)?)["']/i,
+    )?.[1] || "";
+    if (!styleHref) {
+      return { ok: false, error: "HTML 没有加载 domi 的 Morgan Stanley style pack。" };
+    }
+    const stylePath = path.resolve(
+      path.dirname(htmlAttachment.filePath),
+      styleHref.replace(/[?#].*$/, ""),
+    );
+    if (!fs.existsSync(stylePath)) {
+      return { ok: false, error: "HTML 引用的 Morgan Stanley style pack 不存在。" };
+    }
+    const styleCss = fs.readFileSync(stylePath, "utf8");
+    if (!/--style-pack\s*:\s*["']morgan-stanley["']/i.test(styleCss)) {
+      return { ok: false, error: "HTML 引用的样式文件未通过 Morgan Stanley style lock。" };
+    }
+    return { ok: true, error: "" };
+  }
+  if (deliveryPolicy === "explicit_pptx" && !extensions.has(".pptx")) {
+    return { ok: false, error: "用户明确要求可编辑 PowerPoint，但结果没有 PPTX 文件。" };
+  }
+  return { ok: true, error: "" };
+}
+
+export function domiSlidesCorrectionInputFor(deliveryPolicy, validationError) {
+  const requiredFormat = deliveryPolicy === "explicit_pptx"
+    ? "交付一份经过视觉 QA 的可编辑 .pptx。"
+    : "交付 Morgan Stanley 风格 HTML 源文件及由其导出的 PDF；不得创建或交付 .pptx。";
+  return [
+    "DOMI_SLIDES_FORMAT_CORRECTION_V1",
+    `上轮 Slides 产物未通过 domi 的发送前硬门：${validationError}`,
+    "不要重新开展研究，也不要改换为通用 presentations 模板。继续使用本任务已有研究、文件和上下文，重新完整读取 $domi:investment-analysis 及 references/investment-banking-slides.md，修正实际交付文件。",
+    requiredFormat,
+    "必须执行该 Skill 要求的内容审计、版面 QA、全页渲染和 contact sheet 视觉检查；最终回复只列出修正后的正式交付文件，并使用可提取的本地 Markdown 文件链接。",
+  ].join("\n");
+}
+
+export function codexInputFor({ text, attachments = [], routeOverride = "" }) {
   const input = [];
-  let prompt = String(text || "").trim();
+  const originalRequest = String(text || "").trim();
+  let prompt = originalRequest;
+  const slidesDeliveryPolicy = domiSlidesDeliveryPolicyFor({
+    text: originalRequest,
+    attachments,
+  });
+  const routingPolicy = domiWechatRoutingPolicyFor({
+    text: originalRequest,
+    attachments,
+    slidesDeliveryPolicy,
+    routeOverride,
+  });
+  const slidesPolicy = domiInvestmentSlidesPolicyFor({
+    text: originalRequest,
+    attachments,
+  });
+  const injectedPolicies = [routingPolicy, slidesPolicy].filter(Boolean);
+  if (injectedPolicies.length) {
+    prompt = `${injectedPolicies.join("\n\n")}\n\n用户原始请求：\n${originalRequest || "请处理我发送的附件。"}`;
+  }
   const nonImages = attachments.filter((attachment) => attachment.kind !== "image");
   if (nonImages.length) {
     const paths = nonImages.map((attachment) => `- ${attachment.filePath}（${attachment.mimeType}）`).join("\n");

@@ -6,18 +6,25 @@ import test from "node:test";
 
 import { TaskManager } from "../src/task-manager.js";
 
-function fakeThread(threadId, responses) {
+function fakeThread(threadId, responses, usages = []) {
   return {
     async runStreamed() {
       async function* events() {
         yield { type: "thread.started", thread_id: threadId };
         yield { type: "item.started", item: { type: "web_search", query: "example" } };
         yield { type: "item.completed", item: { type: "agent_message", text: responses.shift() || "完成" } };
-        yield { type: "turn.completed", usage: null };
+        yield { type: "turn.completed", usage: usages.shift() ?? null };
       }
       return { events: events() };
     },
   };
+}
+
+function readJsonLines(filePath) {
+  return fs.readFileSync(filePath, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 async function waitFor(predicate, timeoutMs = 2000) {
@@ -64,6 +71,120 @@ test("separate Weixin tasks keep separate Codex thread ids", async (t) => {
   assert.equal(manager.resolveTask({ senderId: "owner", text: "回到1号任务补充参会人", quotedText: "" }).task.id, first.id);
 });
 
+test("turn usage is normalized, accumulated per task, and persisted without message content", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-usage-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const metricsPath = path.join(directory, "metrics.jsonl");
+  const responses = ["第一次完成", "第二次完成"];
+  const usages = [
+    {
+      input_tokens: 120,
+      cached_input_tokens: 80,
+      cache_write_input_tokens: 10,
+      output_tokens: 30,
+      reasoning_output_tokens: 20,
+    },
+    {
+      input_tokens: 70,
+      input_tokens_details: { cached_tokens: 500, cache_write_tokens: 6 },
+      output_tokens: 25,
+      output_tokens_details: { reasoning_tokens: 15 },
+    },
+  ];
+  const thread = fakeThread("thread-usage", responses, usages);
+  const manager = new TaskManager({
+    codex: { startThread: () => thread, resumeThread: () => thread },
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath,
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "max" }),
+    sendTaskText: async () => {},
+    deliverTaskResult: async () => {},
+  });
+  const task = manager.createTask("private-sender", "包含敏感内容的研究任务");
+  manager.enqueue(task, { text: "第一条敏感消息", codexInput: "第一条敏感提示" });
+  await waitFor(() => task.turns === 1 && task.status === "completed");
+  manager.enqueue(task, { text: "第二条敏感消息", codexInput: "第二条敏感提示" });
+  await waitFor(() => task.turns === 2 && task.status === "completed");
+
+  assert.deepEqual(task.tokenUsage, {
+    inputTokens: 190,
+    cachedInputTokens: 150,
+    uncachedInputTokens: 40,
+    cacheWriteInputTokens: 16,
+    outputTokens: 55,
+    reasoningTokens: 35,
+  });
+  assert.equal(task.tokenUsageSamples, 2);
+
+  const metrics = readJsonLines(metricsPath);
+  assert.equal(metrics.length, 2);
+  assert.deepEqual(metrics[0].tokenUsage, {
+    inputTokens: 120,
+    cachedInputTokens: 80,
+    uncachedInputTokens: 40,
+    cacheWriteInputTokens: 10,
+    outputTokens: 30,
+    reasoningTokens: 20,
+  });
+  assert.deepEqual(metrics[1].tokenUsage, {
+    inputTokens: 70,
+    cachedInputTokens: 70,
+    uncachedInputTokens: 0,
+    cacheWriteInputTokens: 6,
+    outputTokens: 25,
+    reasoningTokens: 15,
+  });
+  assert.deepEqual(metrics[1].taskTokenUsage, task.tokenUsage);
+  assert.equal(metrics[1].usageAvailable, true);
+  assert.equal(metrics[1].usageSamples, 1);
+  assert.equal(metrics[1].usageScope, "completed_turns");
+  assert.equal(metrics[1].usageComplete, true);
+  assert.equal(metrics[1].taskUsageSamples, 2);
+  assert.equal(metrics[1].taskUsageComplete, true);
+  for (const metric of metrics) {
+    assert.equal(Object.hasOwn(metric, "senderId"), false);
+    assert.equal(Object.hasOwn(metric, "text"), false);
+    assert.equal(Object.hasOwn(metric, "codexInput"), false);
+    const serialized = JSON.stringify(metric);
+    assert.equal(serialized.includes("private-sender"), false);
+    assert.equal(serialized.includes("敏感"), false);
+  }
+});
+
+test("null turn usage records an unavailable zero sample without breaking the task", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-null-usage-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const metricsPath = path.join(directory, "metrics.jsonl");
+  const manager = new TaskManager({
+    codex: { startThread: () => fakeThread("thread-null-usage", ["完成"]) },
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath,
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "max" }),
+    sendTaskText: async () => {},
+    deliverTaskResult: async () => {},
+  });
+  const task = manager.createTask("owner", "usage为空仍可完成");
+  manager.enqueue(task, { text: "开始", codexInput: "开始" });
+  await waitFor(() => task.status === "completed");
+
+  const [metric] = readJsonLines(metricsPath);
+  assert.equal(metric.usageAvailable, false);
+  assert.equal(metric.usageSamples, 0);
+  assert.deepEqual(metric.tokenUsage, {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    uncachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+  });
+  assert.equal(metric.usageScope, "completed_turns");
+  assert.equal(metric.usageComplete, false);
+  assert.equal(metric.taskUsageComplete, false);
+});
+
 test("ambiguous replies never guess between multiple waiting tasks", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-routing-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -90,6 +211,80 @@ test("ambiguous replies never guess between multiple waiting tasks", (t) => {
   assert.equal(newTask.isNew, true);
   assert.notEqual(newTask.task.id, first.id);
   assert.notEqual(newTask.task.id, second.id);
+});
+
+test("cross-entity file requests and mixed research actions create independent tasks", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-new-intent-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const manager = new TaskManager({
+    codex: {},
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
+    sendTaskText: async () => {},
+    deliverTaskResult: async () => {},
+  });
+  const oldTask = manager.createTask("owner", "研究一下ojo项目并入库");
+  oldTask.status = "waiting_user";
+  oldTask.finalResponse = "OJO旧结果";
+  oldTask.delivery = { status: "delivered" };
+  manager.persist();
+
+  const rating = manager.resolveTask({
+    senderId: "owner",
+    text: "请对 ojo 进行评级，并把研究报告pdf发我看看",
+    quotedText: "",
+  });
+  assert.equal(rating.isNew, true);
+  assert.equal(rating.routingReason, "new_task");
+  assert.notEqual(rating.task.id, oldTask.id);
+
+  const otherCompany = manager.resolveTask({
+    senderId: "owner",
+    text: "赵动科技的纪要发我看看",
+    quotedText: "",
+  });
+  assert.equal(otherCompany.isNew, true);
+  assert.equal(otherCompany.routingReason, "new_task");
+  assert.notEqual(otherCompany.task.id, oldTask.id);
+  assert.notEqual(otherCompany.task.id, rating.task.id);
+
+  const quotedNewRequest = manager.resolveTask({
+    senderId: "owner",
+    text: "请把赵动科技的会议纪要发我",
+    quotedText: `【${oldTask.id}】OJO 旧结果`,
+  });
+  assert.equal(quotedNewRequest.isNew, true);
+  assert.equal(quotedNewRequest.routingReason, "new_task");
+  assert.notEqual(quotedNewRequest.task.id, oldTask.id);
+
+  const quotedResultRequest = manager.resolveTask({
+    senderId: "owner",
+    text: "把之前的报告发我",
+    quotedText: `【${oldTask.id}】OJO 旧结果`,
+  });
+  assert.equal(quotedResultRequest.isNew, false);
+  assert.equal(quotedResultRequest.routingReason, "quoted_reference");
+  assert.equal(quotedResultRequest.task.id, oldTask.id);
+
+  const quotedOwnRequest = manager.resolveTask({
+    senderId: "owner",
+    text: "风险呢？",
+    quotedText: "研究一下ojo项目并入库",
+  });
+  assert.equal(quotedOwnRequest.isNew, false);
+  assert.equal(quotedOwnRequest.routingReason, "quoted_message");
+  assert.equal(quotedOwnRequest.task.id, oldTask.id);
+
+  const missingReference = manager.resolveTask({
+    senderId: "owner",
+    text: "W19 把报告发我",
+    quotedText: "",
+  });
+  assert.equal(missingReference.task, null);
+  assert.equal(missingReference.routingReason, "missing_reference");
+  assert.equal(missingReference.missingTaskId, "W19");
 });
 
 test("follow-ups for the same task run serially and reuse its thread", async (t) => {
@@ -196,6 +391,7 @@ test("transient transport timeouts retry the same task without spending progress
   let attempts = 0;
   const sent = [];
   const delivered = [];
+  const metricsPath = path.join(directory, "metrics.jsonl");
   const manager = new TaskManager({
     codex: {
       startThread() {
@@ -209,7 +405,16 @@ test("transient transport timeouts retry the same task without spending progress
                 return;
               }
               yield { type: "item.completed", item: { type: "agent_message", text: "恢复成功" } };
-              yield { type: "turn.completed", usage: null };
+              yield {
+                type: "turn.completed",
+                usage: {
+                  input_tokens: 40,
+                  cached_input_tokens: 30,
+                  cache_write_input_tokens: 4,
+                  output_tokens: 8,
+                  reasoning_output_tokens: 3,
+                },
+              };
             }
             return { events: events() };
           },
@@ -221,7 +426,7 @@ test("transient transport timeouts retry the same task without spending progress
       },
     },
     statePath: path.join(directory, "tasks.json"),
-    metricsPath: path.join(directory, "metrics.jsonl"),
+    metricsPath,
     threadOptionsFor: () => ({}),
     preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
     sendTaskText: async (_task, text) => sent.push(text),
@@ -236,6 +441,58 @@ test("transient transport timeouts retry the same task without spending progress
   assert.equal(task.lastError, "");
   assert.deepEqual(delivered, ["恢复成功"]);
   assert.deepEqual(sent, [], "Short retries must preserve the reply quota for the final result.");
+  const [metric] = readJsonLines(metricsPath);
+  assert.equal(metric.usageComplete, true);
+  assert.equal(metric.usageSamples, 1);
+  assert.equal(metric.tokenUsage.cacheWriteInputTokens, 4);
+});
+
+test("canceled jobs retain observed completed-turn usage but mark it incomplete", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-canceled-usage-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const metricsPath = path.join(directory, "metrics.jsonl");
+  const manager = new TaskManager({
+    codex: {
+      startThread() {
+        return {
+          async runStreamed() {
+            async function* events() {
+              yield { type: "thread.started", thread_id: "thread-canceled-usage" };
+              await new Promise((resolve) => setTimeout(resolve, 25));
+              yield {
+                type: "turn.completed",
+                usage: {
+                  input_tokens: 25,
+                  cached_input_tokens: 10,
+                  output_tokens: 5,
+                  reasoning_output_tokens: 2,
+                },
+              };
+            }
+            return { events: events() };
+          },
+        };
+      },
+    },
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath,
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "max" }),
+    sendTaskText: async () => {},
+    deliverTaskResult: async () => {},
+  });
+  const task = manager.createTask("owner", "取消中的用量任务");
+  manager.enqueue(task, { text: "开始", codexInput: "开始" });
+  await waitFor(() => task.status === "running");
+  manager.cancel("owner", task.id);
+  await waitFor(() => fs.existsSync(metricsPath) && readJsonLines(metricsPath).length === 1);
+
+  const [metric] = readJsonLines(metricsPath);
+  assert.equal(metric.status, "canceled");
+  assert.equal(metric.usageSamples, 1);
+  assert.equal(metric.tokenUsage.inputTokens, 25);
+  assert.equal(metric.usageComplete, false);
+  assert.equal(metric.taskUsageComplete, false);
 });
 
 test("delivery rejection preserves the completed result and retries with fresh context", async (t) => {
@@ -267,6 +524,70 @@ test("delivery rejection preserves the completed result and retries with fresh c
   assert.deepEqual(await manager.flushPendingDeliveries("owner", task.id), [task.id]);
   assert.equal(task.delivery.status, "delivered");
   assert.deepEqual(contexts, ["old-context", "fresh-context"]);
+});
+
+test("slides delivery policy and correction count survive the task outbox", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-slides-policy-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const deliveries = [];
+  const manager = new TaskManager({
+    codex: { startThread: () => fakeThread("thread-slides", ["Slides完成"]) },
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
+    sendTaskText: async () => {},
+    deliverTaskResult: async (_task, _response, job) => deliveries.push(job),
+  });
+  const task = manager.createTask("owner", "做成PPT");
+  manager.enqueue(task, {
+    text: "做成PPT",
+    codexInput: "做成PPT",
+    wantsFiles: true,
+    slidesDeliveryPolicy: "html_pdf",
+    slidesCorrectionAttempts: 1,
+  });
+  await waitFor(() => task.delivery?.status === "delivered");
+
+  assert.equal(deliveries[0].slidesDeliveryPolicy, "html_pdf");
+  assert.equal(deliveries[0].slidesCorrectionAttempts, 1);
+  assert.equal(task.delivery.slidesDeliveryPolicy, "html_pdf");
+  assert.equal(task.delivery.slidesCorrectionAttempts, 1);
+});
+
+test("a targeted pending-delivery flush never sends a different task result", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-targeted-outbox-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const delivered = [];
+  const manager = new TaskManager({
+    codex: {},
+    statePath: path.join(directory, "tasks.json"),
+    metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}),
+    preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
+    sendTaskText: async () => {},
+    deliverTaskResult: async (task) => delivered.push(task.id),
+  });
+  const first = manager.createTask("owner", "旧任务");
+  first.status = "completed";
+  first.finalResponse = "旧任务结果";
+  first.delivery = { status: "pending" };
+  const active = manager.createTask("owner", "当前任务");
+  active.status = "completed";
+  active.finalResponse = "当前任务结果";
+  active.delivery = { status: "delivered" };
+  manager.persist();
+
+  assert.deepEqual(
+    await manager.flushPendingDeliveries("owner", active.id, 1, { preferredOnly: true }),
+    [],
+  );
+  assert.deepEqual(delivered, []);
+  assert.deepEqual(
+    await manager.flushPendingDeliveries("owner", first.id, 1, { preferredOnly: true }),
+    [first.id],
+  );
+  assert.deepEqual(delivered, [first.id]);
 });
 
 test("long tasks send at most the configured milestone notices", async (t) => {
@@ -372,6 +693,7 @@ test("exhausted transport retries keep context and hide raw reconnect errors", a
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   let attempts = 0;
   const sent = [];
+  const metricsPath = path.join(directory, "metrics.jsonl");
   const thread = {
     async runStreamed() {
       attempts += 1;
@@ -385,7 +707,7 @@ test("exhausted transport retries keep context and hide raw reconnect errors", a
   const manager = new TaskManager({
     codex: { startThread: () => thread, resumeThread: () => thread },
     statePath: path.join(directory, "tasks.json"),
-    metricsPath: path.join(directory, "metrics.jsonl"),
+    metricsPath,
     threadOptionsFor: () => ({}),
     preferenceFor: () => ({ model: "test", reasoningEffort: "low" }),
     sendTaskText: async (_task, text) => sent.push(text),
@@ -401,6 +723,11 @@ test("exhausted transport retries keep context and hide raw reconnect errors", a
   assert.equal(task.lastError.includes("已自动重试2次"), true);
   assert.equal(task.lastError.includes(`回复“${task.id} 重试”继续`), true);
   assert.equal(sent.at(-1).includes("Reconnecting"), false);
+  const [metric] = readJsonLines(metricsPath);
+  assert.equal(metric.status, "failed");
+  assert.equal(metric.usageAvailable, false);
+  assert.equal(metric.usageComplete, false);
+  assert.equal(metric.taskUsageComplete, false);
 });
 
 test("transport failures after work starts never repeat possible side effects", async (t) => {
