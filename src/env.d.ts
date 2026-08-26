@@ -1601,8 +1601,13 @@ export type CodexEventPayload = {
 export type CodexUsage = {
   input_tokens: number;
   cached_input_tokens: number;
+  cache_write_input_tokens?: number;
   output_tokens: number;
   reasoning_output_tokens: number;
+  usage_scope?: "run_observed" | string;
+  usage_complete?: boolean;
+  usage_source?: "raw_response" | "thread_updates" | "none" | string;
+  usage_samples?: number;
 };
 
 export type CodexThreadItem = {

@@ -2118,5 +2118,25 @@ assert.match(
   /message\?\.content === LEGACY_NEW_THREAD_GREETING[\s\S]*?\.map\(\(message\) => recoverInterrupted/,
   "Loading an existing task must remove the legacy greeting without touching real answers."
 );
+assert.match(
+  app,
+  /lastCachedInputTokens = Math\.min[\s\S]*?lastUncachedInputTokens[\s\S]*?lastInputTokens - lastCachedInputTokens/,
+  "Token usage must clamp the cached subset before deriving newly processed input."
+);
+assert.match(
+  app,
+  /本轮可观测用量[\s\S]*?新增输入[\s\S]*?缓存读取[\s\S]*?缓存写入[\s\S]*?输出[\s\S]*?推理/,
+  "The usage panel must identify observed run usage and expose cache reads, cache writes, output, and reasoning."
+);
+assert.match(
+  main,
+  /method === "rawResponse\/completed"[\s\S]*?observeRawResponseUsage[\s\S]*?publishRunUsage/,
+  "Desktop token usage must accumulate exact raw-response completion usage instead of showing only the last model call."
+);
+assert.match(
+  main,
+  /runUsageSnapshot\(run\.tokenUsageTracker, type === "completed"\)[\s\S]*?usageComplete/,
+  "Terminal usage must report completeness explicitly and only completed runs may claim it."
+);
 
 console.log("renderer resilience checks passed");

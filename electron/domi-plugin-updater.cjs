@@ -135,6 +135,26 @@ function validateExtractedTree(root) {
   }
 }
 
+function validateRequiredPluginContracts(pluginRoot) {
+  const requiredFiles = [
+    ["skills", "domi-router", "SKILL.md"],
+    ["skills", "investment-analysis", "SKILL.md"],
+    ["skills", "investment-analysis", "references", "investment-banking-slides.md"],
+    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"],
+    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style.css"],
+    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "templates.html"],
+    ["skills", "investment-analysis", "scripts", "init_deck.js"],
+    ["skills", "investment-analysis", "scripts", "qa_deck.js"],
+    ["skills", "investment-analysis", "scripts", "export_pdf.js"]
+  ];
+  for (const segments of requiredFiles) {
+    const requiredPath = path.join(pluginRoot, ...segments);
+    if (!fs.existsSync(requiredPath)) {
+      throw new Error(`Extracted plugin is missing required contract: ${segments.join("/")}`);
+    }
+  }
+}
+
 function releaseAsset(release, name) {
   return (Array.isArray(release?.assets) ? release.assets : [])
     .find((asset) => asset?.name === name && asset?.browser_download_url);
@@ -227,6 +247,7 @@ class DomiPluginUpdater {
     const finalPluginRoot = path.join(finalRoot, "plugin");
     const existingManifest = readJson(path.join(finalPluginRoot, ".codex-plugin", "plugin.json"));
     if (existingManifest?.name === "domi" && existingManifest.version === manifest.version) {
+      validateRequiredPluginContracts(finalPluginRoot);
       return { root: finalPluginRoot, pluginManifest: existingManifest };
     }
 
@@ -253,9 +274,7 @@ class DomiPluginUpdater {
       if (pluginManifest?.name !== "domi" || pluginManifest.version !== manifest.version) {
         throw new Error("Extracted plugin manifest does not match the signed release.");
       }
-      if (!fs.existsSync(path.join(pluginRoot, "skills", "domi-router", "SKILL.md"))) {
-        throw new Error("Extracted plugin is missing domi-router.");
-      }
+      validateRequiredPluginContracts(pluginRoot);
       writeJsonAtomic(path.join(stagingRoot, "release-lock.json"), manifest);
       fs.rmSync(finalRoot, { recursive: true, force: true });
       fs.renameSync(stagingRoot, finalRoot);
@@ -367,6 +386,7 @@ module.exports = {
   safeError,
   sha256,
   validateArchiveEntries,
+  validateRequiredPluginContracts,
   validateManifest,
   verifySignedManifest
 };

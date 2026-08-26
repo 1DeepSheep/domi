@@ -10,9 +10,12 @@ import {
   compactTaskTitle,
   describeProgressItem,
   findTaskReference,
+  isResultOnlyRequest,
   likelyWaitingReply,
+  looksLikeNewTask,
   responseWaitsForUser,
   shouldContinueActiveTask,
+  taskReferenceToken,
   taskNumber,
 } from "./protocol.js";
 
@@ -32,6 +35,15 @@ const STATUS_LABELS = {
   interrupted: "已中断",
 };
 
+const EMPTY_TOKEN_USAGE = Object.freeze({
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  uncachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
+  outputTokens: 0,
+  reasoningTokens: 0,
+});
+
 function defaultState() {
   return { nextSequence: 1, tasks: {}, activeBySender: {}, contextBySender: {}, jobs: [] };
 }
@@ -43,6 +55,89 @@ function cleanText(value, maximum = 400) {
 function isTransientTransportError(error) {
   const message = cleanText(error?.message ?? error, 500);
   return /(?:reconnecting|request timed out|timed out while waiting|econnreset|econnrefused|etimedout|eai_again|enetunreach|socket hang up|network (?:error|unavailable)|connection (?:closed|lost|reset))/i.test(message);
+}
+
+function tokenCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+}
+
+function nestedValue(source, path) {
+  let current = source;
+  for (const key of path) {
+    if (!current || typeof current !== "object") return undefined;
+    current = current[key];
+  }
+  return current;
+}
+
+function firstTokenCount(source, paths) {
+  for (const path of paths) {
+    const value = nestedValue(source, path);
+    if (value !== undefined && value !== null) return tokenCount(value);
+  }
+  return 0;
+}
+
+function normalizeTokenUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const inputTokens = firstTokenCount(usage, [
+    ["input_tokens"],
+    ["inputTokens"],
+    ["prompt_tokens"],
+    ["promptTokens"],
+  ]);
+  const rawCachedInputTokens = firstTokenCount(usage, [
+    ["cached_input_tokens"],
+    ["cachedInputTokens"],
+    ["input_tokens_details", "cached_tokens"],
+    ["inputTokensDetails", "cachedTokens"],
+    ["prompt_tokens_details", "cached_tokens"],
+    ["promptTokensDetails", "cachedTokens"],
+  ]);
+  const cachedInputTokens = Math.min(inputTokens, rawCachedInputTokens);
+  const cacheWriteInputTokens = firstTokenCount(usage, [
+    ["cache_write_input_tokens"],
+    ["cacheWriteInputTokens"],
+    ["input_tokens_details", "cache_write_tokens"],
+    ["inputTokensDetails", "cacheWriteTokens"],
+    ["prompt_tokens_details", "cache_write_tokens"],
+    ["promptTokensDetails", "cacheWriteTokens"],
+  ]);
+  const outputTokens = firstTokenCount(usage, [
+    ["output_tokens"],
+    ["outputTokens"],
+    ["completion_tokens"],
+    ["completionTokens"],
+  ]);
+  const reasoningTokens = firstTokenCount(usage, [
+    ["reasoning_output_tokens"],
+    ["reasoningOutputTokens"],
+    ["output_tokens_details", "reasoning_tokens"],
+    ["outputTokensDetails", "reasoningTokens"],
+    ["completion_tokens_details", "reasoning_tokens"],
+    ["completionTokensDetails", "reasoningTokens"],
+  ]);
+  return {
+    inputTokens,
+    cachedInputTokens,
+    uncachedInputTokens: inputTokens - cachedInputTokens,
+    cacheWriteInputTokens,
+    outputTokens,
+    reasoningTokens,
+  };
+}
+
+function addTokenUsage(left = EMPTY_TOKEN_USAGE, right = EMPTY_TOKEN_USAGE) {
+  return {
+    inputTokens: tokenCount(left.inputTokens) + tokenCount(right.inputTokens),
+    cachedInputTokens: tokenCount(left.cachedInputTokens) + tokenCount(right.cachedInputTokens),
+    uncachedInputTokens: tokenCount(left.uncachedInputTokens) + tokenCount(right.uncachedInputTokens),
+    cacheWriteInputTokens: tokenCount(left.cacheWriteInputTokens)
+      + tokenCount(right.cacheWriteInputTokens),
+    outputTokens: tokenCount(left.outputTokens) + tokenCount(right.outputTokens),
+    reasoningTokens: tokenCount(left.reasoningTokens) + tokenCount(right.reasoningTokens),
+  };
 }
 
 export class TaskManager {
@@ -164,6 +259,14 @@ export class TaskManager {
       contextToken: latest.contextToken || fallback.contextToken || task.lastContextToken || "",
       runId: latest.runId || fallback.runId || task.lastRunId || "",
       wantsFiles: task.delivery?.wantsFiles === true,
+      slidesDeliveryPolicy: task.delivery?.slidesDeliveryPolicy
+        || fallback.slidesDeliveryPolicy
+        || "",
+      slidesCorrectionAttempts: Number(
+        task.delivery?.slidesCorrectionAttempts
+        ?? fallback.slidesCorrectionAttempts
+        ?? 0,
+      ),
     };
   }
 
@@ -190,9 +293,12 @@ export class TaskManager {
     }
   }
 
-  async flushPendingDeliveries(senderId, preferredTaskId = "", limit = 1) {
+  async flushPendingDeliveries(senderId, preferredTaskId = "", limit = 1, { preferredOnly = false } = {}) {
     const pending = Object.values(this.state.tasks)
-      .filter((task) => task.senderId === senderId && task.finalResponse && task.delivery?.status === "pending")
+      .filter((task) => task.senderId === senderId
+        && task.finalResponse
+        && task.delivery?.status === "pending"
+        && (!preferredOnly || task.id === preferredTaskId))
       .sort((left, right) => {
         if (left.id === preferredTaskId) return -1;
         if (right.id === preferredTaskId) return 1;
@@ -208,9 +314,13 @@ export class TaskManager {
 
   async redeliver(task, { wantsFiles = true } = {}) {
     if (!task?.finalResponse) return false;
+    const slidesDeliveryPolicy = task.delivery?.slidesDeliveryPolicy || "";
+    const slidesCorrectionAttempts = Number(task.delivery?.slidesCorrectionAttempts || 0);
     task.delivery = {
       status: "pending",
       wantsFiles: wantsFiles || task.delivery?.wantsFiles === true,
+      slidesDeliveryPolicy,
+      slidesCorrectionAttempts,
       textSent: false,
       textChunks: {},
       files: {},
@@ -227,9 +337,37 @@ export class TaskManager {
   }
 
   resolveTask({ senderId, text, quotedText }) {
-    const combined = `${quotedText || ""}\n${text || ""}`;
-    const referencedId = findTaskReference(combined, this.state.tasks);
-    if (referencedId) return { task: this.task(referencedId), isNew: false };
+    const directReference = taskReferenceToken(text);
+    if (directReference) {
+      const referencedTask = this.task(directReference);
+      if (!referencedTask || referencedTask.senderId !== senderId) {
+        return {
+          task: null,
+          isNew: false,
+          routingReason: "missing_reference",
+          missingTaskId: directReference,
+        };
+      }
+      return { task: referencedTask, isNew: false, routingReason: "explicit_reference" };
+    }
+    const bodyStartsNewTask = looksLikeNewTask(text);
+    const quotedReference = taskReferenceToken(quotedText);
+    if (quotedReference && !bodyStartsNewTask) {
+      const referencedTask = this.task(quotedReference);
+      if (!referencedTask || referencedTask.senderId !== senderId) {
+        return {
+          task: null,
+          isNew: false,
+          routingReason: "missing_quoted_reference",
+          missingTaskId: quotedReference,
+        };
+      }
+      return { task: referencedTask, isNew: false, routingReason: "quoted_reference" };
+    }
+    const quotedTask = !bodyStartsNewTask ? this.taskFromQuotedText(senderId, quotedText) : null;
+    if (quotedTask) {
+      return { task: quotedTask, isNew: false, routingReason: "quoted_message" };
+    }
     const waitingTasks = Object.values(this.state.tasks).filter(
       (task) => task.senderId === senderId && task.status === "waiting_user",
     );
@@ -238,14 +376,38 @@ export class TaskManager {
       return {
         task: null,
         isNew: false,
+        routingReason: "ambiguous_waiting_reply",
         ambiguousTasks: waitingTasks.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))),
       };
     }
-    if (waitingTasks.length === 1 && waitingReply) return { task: waitingTasks[0], isNew: false };
+    if (waitingTasks.length === 1 && waitingReply) {
+      return { task: waitingTasks[0], isNew: false, routingReason: "waiting_reply" };
+    }
     const activeId = this.state.activeBySender[senderId];
     const activeTask = activeId ? this.task(activeId) : null;
-    if (shouldContinueActiveTask(text, activeTask)) return { task: activeTask, isNew: false };
-    return { task: this.createTask(senderId, text), isNew: true };
+    if (shouldContinueActiveTask(text, activeTask)) {
+      return {
+        task: activeTask,
+        isNew: false,
+        routingReason: isResultOnlyRequest(text) ? "active_existing_result" : "active_follow_up",
+      };
+    }
+    return { task: this.createTask(senderId, text), isNew: true, routingReason: "new_task" };
+  }
+
+  taskFromQuotedText(senderId, quotedText) {
+    const source = cleanText(quotedText, 1_000);
+    if (!source) return null;
+    const fragments = [source, ...source.split(/\s+\|\s+/)].filter(Boolean);
+    const matches = Object.values(this.state.tasks).filter((task) => {
+      if (task.senderId !== senderId || !task.title) return false;
+      return fragments.some((fragment) => {
+        const compacted = compactTaskTitle(fragment, "");
+        if (compacted === task.title) return true;
+        return task.title.endsWith("…") && fragment.startsWith(task.title.slice(0, -1));
+      });
+    });
+    return matches.length === 1 ? matches[0] : null;
   }
 
   createTask(senderId, text) {
@@ -330,6 +492,8 @@ export class TaskManager {
       contextToken: input.contextToken || "",
       runId: input.runId || "",
       wantsFiles: input.wantsFiles === true,
+      slidesDeliveryPolicy: String(input.slidesDeliveryPolicy || ""),
+      slidesCorrectionAttempts: Number(input.slidesCorrectionAttempts || 0),
       createdAt: new Date().toISOString(),
     };
     this.state.jobs.push(job);
@@ -389,6 +553,22 @@ export class TaskManager {
     let transportRetries = 0;
     let progressNoticeIndex = 0;
     const tools = new Set();
+    let jobTokenUsage = { ...EMPTY_TOKEN_USAGE };
+    let usageSamples = 0;
+    let completedTurnObserved = false;
+    let jobUsageComplete = false;
+    let usageCommitted = false;
+    const priorTaskUsageComplete = typeof task.tokenUsageComplete === "boolean"
+      ? task.tokenUsageComplete
+      : task.turns <= 1 && !task.threadId;
+    const commitTokenUsage = () => {
+      if (usageCommitted) return;
+      task.tokenUsage = addTokenUsage(task.tokenUsage, jobTokenUsage);
+      task.tokenUsageSamples = tokenCount(task.tokenUsageSamples) + usageSamples;
+      task.tokenUsageScope = "completed_turns";
+      task.tokenUsageComplete = priorTaskUsageComplete && jobUsageComplete;
+      usageCommitted = true;
+    };
     const heartbeat = setInterval(() => {
       const nextDelay = this.progressNotificationDelaysMs[progressNoticeIndex];
       if (nextDelay === undefined || Date.now() - startedAt < nextDelay) return;
@@ -432,6 +612,14 @@ export class TaskManager {
             if (event.type === "turn.failed") throw new Error(event.error?.message || "Codex任务失败");
             if (event.type === "turn.completed") {
               attemptCompleted = true;
+              completedTurnObserved = true;
+              const usage = normalizeTokenUsage(
+                event.usage ?? event.response?.usage ?? event.result?.usage,
+              );
+              if (usage) {
+                jobTokenUsage = addTokenUsage(jobTokenUsage, usage);
+                usageSamples += 1;
+              }
               continue;
             }
             if (event.type === "error") {
@@ -463,6 +651,8 @@ export class TaskManager {
         }
       }
       if (controller.signal.aborted) throw new Error("任务已取消");
+      jobUsageComplete = completedTurnObserved && usageSamples > 0;
+      commitTokenUsage();
       if (!finalResponse) finalResponse = "Codex已完成处理，但没有返回文字结果。";
       task.status = responseWaitsForUser(finalResponse) ? "waiting_user" : "completed";
       task.progress = task.status === "waiting_user" ? "等待用户补充" : "已完成";
@@ -472,6 +662,8 @@ export class TaskManager {
       task.delivery = {
         status: "pending",
         wantsFiles: job.wantsFiles === true,
+        slidesDeliveryPolicy: job.slidesDeliveryPolicy || "",
+        slidesCorrectionAttempts: Number(job.slidesCorrectionAttempts || 0),
         textSent: false,
         textChunks: {},
         files: {},
@@ -484,8 +676,18 @@ export class TaskManager {
       const delivered = await this.attemptDelivery(task, job);
       this.pruneTasks(task.senderId);
       this.persist();
-      this.recordMetric(task, job, startedAt, delivered ? "completed" : "completed_pending_delivery", tools);
+      this.recordMetric(
+        task,
+        job,
+        startedAt,
+        delivered ? "completed" : "completed_pending_delivery",
+        tools,
+        jobTokenUsage,
+        usageSamples,
+        jobUsageComplete,
+      );
     } catch (error) {
+      commitTokenUsage();
       const canceled = controller.signal.aborted || task.status === "canceled";
       const transientFailure = !canceled && isTransientTransportError(error);
       task.status = canceled ? "canceled" : "failed";
@@ -505,14 +707,32 @@ export class TaskManager {
             : `【${task.id}】执行失败：${task.lastError || "未知错误"}`,
         job,
       );
-      this.recordMetric(task, job, startedAt, canceled ? "canceled" : "failed", tools);
+      this.recordMetric(
+        task,
+        job,
+        startedAt,
+        canceled ? "canceled" : "failed",
+        tools,
+        jobTokenUsage,
+        usageSamples,
+        jobUsageComplete,
+      );
     } finally {
       clearInterval(heartbeat);
       this.activeControllers.delete(task.id);
     }
   }
 
-  recordMetric(task, job, startedAt, status, tools) {
+  recordMetric(
+    task,
+    job,
+    startedAt,
+    status,
+    tools,
+    tokenUsage = EMPTY_TOKEN_USAGE,
+    usageSamples = 0,
+    usageComplete = false,
+  ) {
     appendJsonLinePrivate(this.metricsPath, {
       taskId: task.id,
       taskUid: task.uid,
@@ -524,6 +744,15 @@ export class TaskManager {
       attachmentCount: job.attachments?.length || 0,
       toolKinds: [...tools].sort(),
       turn: task.turns,
+      usageAvailable: usageSamples > 0,
+      usageSamples,
+      tokenUsage: addTokenUsage(EMPTY_TOKEN_USAGE, tokenUsage),
+      usageScope: "completed_turns",
+      usageComplete: Boolean(usageComplete),
+      taskTokenUsage: addTokenUsage(EMPTY_TOKEN_USAGE, task.tokenUsage),
+      taskUsageSamples: tokenCount(task.tokenUsageSamples),
+      taskUsageScope: task.tokenUsageScope || "completed_turns",
+      taskUsageComplete: task.tokenUsageComplete === true,
     });
   }
 
