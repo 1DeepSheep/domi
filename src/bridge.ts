@@ -146,6 +146,11 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "请在 Electron 窗口中测试 Codex 连接。"
   }),
+  cancelCodexConnectionTest: async (request) => ({
+    ok: true,
+    requestId: request.requestId,
+    cancelled: false
+  }),
   startChatGPTLogin: async () => ({ ok: false, error: "请在 Electron 窗口中登录。" }),
   runDiagnostics: async () => ({
     ok: false,
