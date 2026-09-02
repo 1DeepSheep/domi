@@ -37,3 +37,9 @@ jobs:
 
       - name: Run build, privacy and unit checks
         run: npm run check
+
+      - name: Prepare browser for Markdown table regression tests
+        run: npx playwright install chromium
+
+      - name: Verify chat and editor table rendering
+        run: npm run test:markdown-tables

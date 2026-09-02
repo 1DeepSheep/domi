@@ -4243,6 +4243,8 @@ body.panel-resizing .main-grid {
 }
 
 .message-markdown {
+  min-width: 0;
+  max-width: 100%;
   white-space: normal;
 }
 
@@ -5038,43 +5040,100 @@ body.panel-resizing .main-grid {
   border-top: 1px solid var(--line);
 }
 
+.message-markdown .markdown-table-scroll,
 .rich-markdown-content .tableWrapper {
+  max-width: 100%;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   margin: 16px 0 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--canvas);
 }
 
+.message-markdown .markdown-table-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.message-markdown > .markdown-table-scroll:first-child {
+  margin-top: 0;
+}
+
+.message-markdown table,
 .rich-markdown-content table {
   width: 100%;
-  min-width: 420px;
   border-collapse: collapse;
-  table-layout: fixed;
-  font-size: var(--text-control);
+  table-layout: auto;
+  font-size: var(--text-body);
 }
 
+.message-markdown th,
+.message-markdown td,
 .rich-markdown-content th,
 .rich-markdown-content td {
   position: relative;
-  min-width: 70px;
-  border: 1px solid var(--line-strong);
-  padding: 8px 10px;
+  min-width: 10em;
+  max-width: 36em;
+  border: 0;
+  border-right: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  padding: 9px 12px;
   text-align: left;
   vertical-align: top;
+  line-height: 1.65;
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
+/* Keep useful minimum cell widths even when Tiptap supplies an inline table
+ * min-width. Auto layout can still give long analysis more room, without
+ * assigning a fixed 15/27/58 split to every three-product comparison. */
+:is(.message-markdown, .rich-markdown-content) tr > :first-child {
+  min-width: 8em;
+}
+
+:is(.message-markdown, .rich-markdown-content) tr > :last-child {
+  border-right: 0;
+}
+
+:is(.message-markdown, .rich-markdown-content) tbody > tr:last-child > td {
+  border-bottom: 0;
+}
+
+.message-markdown th > p,
+.message-markdown td > p,
 .rich-markdown-content th > p,
 .rich-markdown-content td > p {
   margin: 0;
 }
 
+.message-markdown th > p + p,
+.message-markdown td > p + p,
 .rich-markdown-content th > p + p,
 .rich-markdown-content td > p + p {
   margin-top: 0.45em;
 }
 
+.message-markdown th,
 .rich-markdown-content th {
   color: #4a4a46;
   background: #f6f6f3;
   font-weight: 600;
+}
+
+:is(.message-markdown, .rich-markdown-content) tbody tr:nth-child(even) td {
+  background: #fafaf8;
+}
+
+:is(.message-markdown, .rich-markdown-content) :is(th, td) :is(a, code) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+:is(.message-markdown, .rich-markdown-content) :is(th, td) :is(ul, ol) {
+  margin: 0;
 }
 
 .rich-markdown-content .selectedCell::after {
@@ -7102,6 +7161,44 @@ body.panel-resizing .main-grid {
 .diagnostic-summary button:hover,
 .export-diagnostics:hover {
   background: var(--hover);
+}
+
+.setup-inline-actions .connection-test-cancel {
+  border-color: #dfa58f;
+  color: #a95439;
+  background: #fff9f6;
+}
+
+.connection-test-progress {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  border-top: 1px solid rgba(92, 117, 100, 0.1);
+  color: #706f6a;
+  background: #fafaf8;
+  padding: 8px 18px;
+  font-family: var(--font-cn);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.connection-test-prerequisite {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  border-top: 1px solid rgba(191, 111, 82, 0.14);
+  color: #9a523d;
+  background: #fffaf7;
+  padding: 8px 18px;
+  font-family: var(--font-cn);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.connection-test-prerequisite svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
 }
 
 .api-fields {

@@ -16,6 +16,10 @@ const {
   createElectronNetFetcher,
   fetchOfficialInstaller
 } = require("./codex-bootstrap.cjs");
+const {
+  CodexConnectionTestController,
+  normalizeConnectionTestRequestId
+} = require("./codex-connection-test.cjs");
 const { CodexRuntimeManager } = require("./codex-runtime.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
@@ -137,6 +141,7 @@ const CODEX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const CODEX_CHECK_CACHE_TTL_MS = 60 * 1000;
 const CODEX_VERSION_CHECK_TIMEOUT_MS = 10_000;
 const CODEX_HEALTH_REQUEST_TIMEOUT_MS = 20_000;
+const codexConnectionTests = new CodexConnectionTestController();
 const LARK_STATUS_CACHE_TTL_MS = 5 * 60 * 1000;
 const DOCUMENT_LIBRARY_CACHE_TTL_MS = 60 * 1000;
 let documentLibraryCache = {
@@ -2366,10 +2371,25 @@ function resetCodexClient() {
   serviceCoordinator.invalidate("codex:check");
 }
 
-async function runCodexCheck() {
+function throwIfCodexCheckAborted(signal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error("Codex 连接测试已取消。");
+  error.code = "DOMI_CODEX_CONNECTION_TEST_CANCELLED";
+  throw error;
+}
+
+function codexCheckTimeout(deadlineAt, maximumMs) {
+  if (!Number.isFinite(deadlineAt)) return maximumMs;
+  return Math.max(1, Math.min(maximumMs, deadlineAt - Date.now()));
+}
+
+async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } = {}) {
   const startedAt = Date.now();
+  throwIfCodexCheckAborted(signal);
   ensureDemoWorkspace();
   await ensureCodexRuntimeReady();
+  throwIfCodexCheckAborted(signal);
   const runtimeReadyAt = Date.now();
   const loaded = getAppSettings().load();
   let detectedPath = "";
@@ -2395,32 +2415,47 @@ async function runCodexCheck() {
         ok: false,
         error: error instanceof Error ? error.message : String(error)
       }));
-    const [versionResult, pluginSetup] = await Promise.all([
+    const [versionSettlement, pluginSettlement] = await Promise.allSettled([
       execFileAsync(binary, ["--version"], {
         env: environment,
-        timeout: CODEX_VERSION_CHECK_TIMEOUT_MS
+        timeout: codexCheckTimeout(deadlineAt, CODEX_VERSION_CHECK_TIMEOUT_MS),
+        signal
       }),
       pluginSetupPromise
     ]);
+    // Promise.allSettled is intentional: after cancellation we keep the
+    // connection-test single-flight slot until every already-started check has
+    // drained, so no detached plugin operation can race the next attempt.
+    throwIfCodexCheckAborted(signal);
+    if (versionSettlement.status === "rejected") throw versionSettlement.reason;
+    if (pluginSettlement.status === "rejected") throw pluginSettlement.reason;
+    const versionResult = versionSettlement.value;
+    const pluginSetup = pluginSettlement.value;
     detectedVersion = String(versionResult.stdout || "").trim();
     if (pluginSetup.updated) resetCodexClient();
     const pluginReadyAt = Date.now();
+    throwIfCodexCheckAborted(signal);
     const client = getCodexClient();
-    const [accountResult, modelResult, configResult] = await Promise.all([
+    const healthTimeoutMs = codexCheckTimeout(deadlineAt, CODEX_HEALTH_REQUEST_TIMEOUT_MS);
+    const healthSettlements = await Promise.allSettled([
       runtime.authMode === "chatgpt"
         ? client.request("account/read", { refreshToken: false }, {
-            timeoutMs: CODEX_HEALTH_REQUEST_TIMEOUT_MS
+            timeoutMs: healthTimeoutMs
           })
         : Promise.resolve({ account: null, requiresOpenaiAuth: false }),
       client.request("model/list", {
         cursor: null,
         limit: 50,
         includeHidden: false
-      }, { timeoutMs: CODEX_HEALTH_REQUEST_TIMEOUT_MS }),
+      }, { timeoutMs: healthTimeoutMs }),
       client.request("config/read", { includeLayers: false }, {
-        timeoutMs: CODEX_HEALTH_REQUEST_TIMEOUT_MS
+        timeoutMs: healthTimeoutMs
       })
     ]);
+    throwIfCodexCheckAborted(signal);
+    const rejectedHealthCheck = healthSettlements.find((result) => result.status === "rejected");
+    if (rejectedHealthCheck) throw rejectedHealthCheck.reason;
+    const [accountResult, modelResult, configResult] = healthSettlements.map((result) => result.value);
     const account = accountResult?.account || null;
     const config = configResult?.config || {};
     const requiresOpenaiAuth = runtime.authMode === "chatgpt"
@@ -2479,6 +2514,7 @@ async function runCodexCheck() {
     });
     return result;
   } catch (error) {
+    throwIfCodexCheckAborted(signal);
     appendRuntimeLog("codex-check-performance", {
       outcome: "failed",
       runtimeMs: runtimeReadyAt - startedAt,
@@ -2605,6 +2641,8 @@ async function saveRuntimeSettings(request) {
     "relayCredentialConfigured"
   ].some((key) => Object.prototype.hasOwnProperty.call(settingsRequest, key)
     && settingsRequest[key] !== current[key]);
+  const codexPathChanged = Object.prototype.hasOwnProperty.call(settingsRequest, "codexPath")
+    && settingsRequest.codexPath !== current.codexPath;
   const dataConnectionChanged = [
     "storageBackend",
     "projectBaseToken",
@@ -2650,9 +2688,27 @@ async function saveRuntimeSettings(request) {
         ? "已保留飞书连接；domi 不再迁移或切换主资料库，本地 SQLite + Markdown 继续作为唯一数据源。"
         : "";
     if (!codexConnectionChanged) return { ok: true, ...result, warning };
+    if (codexPathChanged) {
+      // The readiness promise is intentionally cached during normal startup,
+      // but a user-selected runtime path is a new input and must be resolved
+      // again before the connection result can be trusted.
+      codexRuntimeReadinessPromise = null;
+    }
     resetCodexClient();
     const codex = await runCodexCheck();
-    return { ok: true, ...result, codex, warning };
+    if (codex.path) {
+      const appliedSettings = getAppSettings().load().settings;
+      if (appliedSettings.codexPath !== codex.path) {
+        // resolveCodexBinary returns a realpath. Persist the exact executable
+        // that was checked so a package-manager symlink cannot leave setup in
+        // a permanent draft-path/runtime-path mismatch.
+        getAppSettings().save({ codexPath: codex.path });
+      }
+    }
+    // Runtime preparation canonicalizes symlinked/package-manager Codex paths.
+    // Return the post-check settings rather than the pre-check save snapshot so
+    // onboarding can immediately test the exact binary it just applied.
+    return { ok: true, ...getAppSettings().load(), codex, warning };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -2699,56 +2755,97 @@ async function rollbackCodexRuntime() {
 }
 
 async function configureCodexRelay(request = {}) {
-  const maintenance = prepareCodexConnectionMaintenance(
-    "请先停止正在执行的用户任务，再修改 Codex 中转站。"
-  );
-  if (!maintenance.ok) return maintenance;
-  const result = await getCodexBootstrap().configureRelay(request);
-  if (!result.ok) return result;
-  getAppSettings().save({
-    authMode: "relay",
-    apiBaseUrl: result.baseUrl,
-    apiModel: result.model,
-    relayCredentialConfigured: true,
-    codexPath: result.codexPath
-  });
-  resetCodexClient();
-  const codex = await runCodexCheck();
-  if (!codex.ok) {
+  return codexConnectionTests.run(request, async ({ signal, deadlineAt, remainingMs, setStage }) => {
+    throwIfCodexCheckAborted(signal);
+    const maintenance = prepareCodexConnectionMaintenance(
+      "请先停止正在执行的用户任务，再修改 Codex 中转站。"
+    );
+    if (!maintenance.ok) return maintenance;
+
+    setStage("relay-config");
+    const result = await getCodexBootstrap().configureRelay(request, {
+      signal,
+      timeoutMs: remainingMs()
+    });
+    if (!result.ok) return result;
+
+    // Keep app settings and the already-written Codex provider configuration
+    // consistent even if cancellation lands immediately after the atomic file
+    // write. Validation below is still abortable and does not mark it verified.
+    getAppSettings().save({
+      authMode: "relay",
+      apiBaseUrl: result.baseUrl,
+      apiModel: result.model,
+      relayCredentialConfigured: true,
+      codexPath: result.codexPath
+    });
+    throwIfCodexCheckAborted(signal);
+
+    setStage("relay-runtime-auth");
+    resetCodexClient();
+    const codex = await runCodexCheck({ signal, deadlineAt });
+    throwIfCodexCheckAborted(signal);
+    if (!codex.ok) {
+      return {
+        ok: false,
+        configured: true,
+        codex,
+        error: codex.error || "中转站已配置，但 Codex App Server 尚未就绪。"
+      };
+    }
+
+    setStage("relay-model-tool");
+    const verification = await getCodexBootstrap().testConnection(result.codexPath, {
+      signal,
+      timeoutMs: remainingMs()
+    });
+    throwIfCodexCheckAborted(signal);
     return {
-      ok: false,
+      ok: verification.ok,
       configured: true,
       codex,
-      error: codex.error || "中转站已配置，但 Codex App Server 尚未就绪。"
+      verification,
+      pausedBackgroundRuns: maintenance.pausedBackgroundRuns,
+      error: verification.ok ? "" : verification.error || "中转站测试失败。"
     };
-  }
-  const verification = await getCodexBootstrap().testConnection(result.codexPath);
-  return {
-    ok: verification.ok,
-    configured: true,
-    codex,
-    verification,
-    pausedBackgroundRuns: maintenance.pausedBackgroundRuns,
-    error: verification.ok ? "" : verification.error || "中转站测试失败。"
-  };
+  });
 }
 
-async function testCodexConnection() {
-  const maintenance = prepareCodexConnectionMaintenance(
-    "请先停止正在执行的用户任务，再运行 Codex 连接测试。"
-  );
-  if (!maintenance.ok) return maintenance;
-  resetCodexClient();
-  const codex = await runCodexCheck();
-  if (!codex.ok) return { ok: false, codex, error: codex.error || "Codex App Server 不可用。" };
-  const verification = await getCodexBootstrap().testConnection(codex.path);
-  return {
-    ok: verification.ok,
-    codex,
-    verification,
-    pausedBackgroundRuns: maintenance.pausedBackgroundRuns,
-    error: verification.ok ? "" : verification.error || "Codex 连接测试失败。"
-  };
+async function testCodexConnection(request = {}) {
+  return codexConnectionTests.run(request, async ({ signal, deadlineAt, remainingMs, setStage }) => {
+    throwIfCodexCheckAborted(signal);
+    const maintenance = prepareCodexConnectionMaintenance(
+      "请先停止正在执行的用户任务，再运行 Codex 连接测试。"
+    );
+    if (!maintenance.ok) return maintenance;
+
+    setStage("runtime-auth");
+    throwIfCodexCheckAborted(signal);
+    resetCodexClient();
+    const codex = await runCodexCheck({ signal, deadlineAt });
+    throwIfCodexCheckAborted(signal);
+    if (!codex.ok) {
+      return { ok: false, codex, error: codex.error || "Codex App Server 不可用。" };
+    }
+
+    setStage("model-tool");
+    const verification = await getCodexBootstrap().testConnection(codex.path, {
+      signal,
+      timeoutMs: remainingMs()
+    });
+    throwIfCodexCheckAborted(signal);
+    return {
+      ok: verification.ok,
+      codex,
+      verification,
+      pausedBackgroundRuns: maintenance.pausedBackgroundRuns,
+      error: verification.ok ? "" : verification.error || "Codex 连接测试失败。"
+    };
+  });
+}
+
+function cancelCodexConnectionTest(request = {}) {
+  return codexConnectionTests.cancel(request?.requestId);
 }
 
 async function startChatGptLogin() {
@@ -3614,8 +3711,27 @@ ipcMain.handle("settings:install-codex", () => installCodexCli());
 ipcMain.handle("settings:codex-runtime-status", () => codexRuntimeStatus());
 ipcMain.handle("settings:update-codex-runtime", () => updateCodexRuntime());
 ipcMain.handle("settings:rollback-codex-runtime", () => rollbackCodexRuntime());
-ipcMain.handle("settings:configure-relay", (_event, request) => configureCodexRelay(request));
-ipcMain.handle("settings:test-codex", () => testCodexConnection());
+ipcMain.handle("settings:configure-relay", async (event, request = {}) => {
+  const requestId = normalizeConnectionTestRequestId(request?.requestId);
+  const cancelOnRendererExit = () => codexConnectionTests.cancel(requestId);
+  event.sender.once("destroyed", cancelOnRendererExit);
+  try {
+    return await configureCodexRelay({ ...request, requestId });
+  } finally {
+    event.sender.removeListener("destroyed", cancelOnRendererExit);
+  }
+});
+ipcMain.handle("settings:test-codex", async (event, request = {}) => {
+  const requestId = normalizeConnectionTestRequestId(request?.requestId);
+  const cancelOnRendererExit = () => codexConnectionTests.cancel(requestId);
+  event.sender.once("destroyed", cancelOnRendererExit);
+  try {
+    return await testCodexConnection({ ...request, requestId });
+  } finally {
+    event.sender.removeListener("destroyed", cancelOnRendererExit);
+  }
+});
+ipcMain.handle("settings:cancel-codex-test", (_event, request) => cancelCodexConnectionTest(request));
 ipcMain.handle("settings:chatgpt-login", () => startChatGptLogin());
 ipcMain.handle("settings:diagnose", () => runSystemDiagnostics());
 ipcMain.handle("settings:export-diagnostics", (event, report) =>

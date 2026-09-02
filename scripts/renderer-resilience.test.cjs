@@ -10,6 +10,7 @@ function read(relativePath) {
 
 const app = read("src/App.tsx");
 const setupCenter = read("src/SetupCenter.tsx");
+const connectionTest = read("src/codex-connection-test.ts");
 const editor = read("src/RichMarkdownEditor.tsx");
 const messageContent = read("src/MessageContent.tsx");
 const editorBoundary = read("src/MarkdownEditorErrorBoundary.tsx");
@@ -69,6 +70,21 @@ assert.match(
   editor,
   /underline:\s*\{[\s\S]*?HTMLAttributes:\s*\{[\s\S]*?style:\s*"text-decoration: underline;"/,
   "Selected rich Markdown text must copy underline as portable HTML instead of a domi-only visual style."
+);
+assert.match(
+  messageContent,
+  /table:\s*\(\{ children, node: _node, \.\.\.props \}\) => \([\s\S]*?className="markdown-table-scroll"[\s\S]*?role="region"[\s\S]*?tabIndex=\{0\}[\s\S]*?<table \{\.\.\.props\}>/,
+  "Chat tables must render inside a keyboard-accessible local scroll container."
+);
+assert.match(
+  editor,
+  /table:\s*\{\s*resizable:\s*false,\s*renderWrapper:\s*true\s*\}/,
+  "Non-resizable Tiptap tables still need a real scroll wrapper."
+);
+assert.match(
+  styles,
+  /\.message-markdown table,\s*\.rich-markdown-content table\s*\{[^}]*table-layout:\s*auto/,
+  "Chat and editor tables must share content-aware column layout."
 );
 assert.match(
   messageContent,
@@ -868,13 +884,93 @@ assert.match(
 );
 assert.match(
   setupCenter,
-  /disabled=\{saving \|\| connectionTestBusy \|\| installBusy \|\| !codexInstalled\}/,
-  "Onboarding must not advance while the required Codex installation is incomplete."
+  /disabled=\{saving \|\| installBusy \|\| \(!codexInstalled && !codexPathRequiresApply\)\}/,
+  "Onboarding must not advance while Codex installation is incomplete, while keeping its primary control available to cancel a running test."
 );
 assert.match(
   setupCenter,
-  /connectionTestBusy[\s\S]*?"正在测试并进入…"/,
-  "The first-run primary action must explain that it is testing before advancing."
+  /if \(codexPathRequiresApply\) \{[\s\S]*?await save\(false\)[\s\S]*?Codex 路径已应用并刷新运行状态[\s\S]*?codexPathRequiresApply[\s\S]*?应用 Codex 路径/,
+  "First-run setup must provide a save-and-refresh transaction before testing a changed custom Codex path."
+);
+assert.match(
+  main,
+  /const codexPathChanged =[\s\S]*?codexRuntimeReadinessPromise = null;[\s\S]*?const codex = await runCodexCheck\(\);[\s\S]*?appliedSettings\.codexPath !== codex\.path[\s\S]*?save\(\{ codexPath: codex\.path \}\)[\s\S]*?getAppSettings\(\)\.load\(\)/,
+  "Applying a first-run custom path must re-resolve the runtime and return its canonical tested realpath."
+);
+assert.match(
+  setupCenter,
+  /connectionOperationBusy[\s\S]*?"取消连接测试"/,
+  "The first-run primary action must let the user cancel a connection test instead of trapping them behind a spinner."
+);
+assert.match(
+  setupCenter,
+  /connectionTestAttemptRef[\s\S]*?runBoundedCodexConnectionTest[\s\S]*?result\.requestId !== requestId[\s\S]*?connectionTestAttemptRef\.current !== attempt[\s\S]*?finally[\s\S]*?connectionTestAttemptRef\.current === attempt/,
+  "Only the current request may update or release the connection-test UI after an async result."
+);
+assert.match(
+  connectionTest,
+  /if \(settled \|\| signal\.aborted\) return;[\s\S]*?await invoke\(\{ requestId \}\)/,
+  "Cancelling before the invoke microtask must not start a detached connection-test IPC request."
+);
+assert.match(
+  setupCenter,
+  /configFingerprint: connectionConfigFingerprintRef\.current[\s\S]*?connectionConfigFingerprintRef\.current !== attempt\.configFingerprint[\s\S]*?旧测试结果已忽略/,
+  "A successful connection test must match the current identity and path snapshot before it marks the UI verified."
+);
+assert.match(
+  setupCenter,
+  /role="radio"[\s\S]*?disabled=\{connectionOperationBusy\}[\s\S]*?role="radio"[\s\S]*?disabled=\{connectionOperationBusy\}/,
+  "Connection-mode controls must stay immutable while their configuration is under test."
+);
+assert.match(
+  setupCenter,
+  /onClick=\{startLogin\} disabled=\{connectionOperationBusy \|\| loginBusy \|\| !codexInstalled\}[\s\S]*?自定义 Codex 路径[\s\S]*?disabled=\{connectionOperationBusy\}/,
+  "Account switching and custom Codex paths must not change during a connection test."
+);
+assert.match(
+  setupCenter,
+  /codexConnectionDraftBlockReason\(\{[\s\S]*?savedCodexPath: settings\.codexPath[\s\S]*?relayApiKey[\s\S]*?disabled=\{Boolean\(connectionTestBlockReason\)/,
+  "A generic test must be unavailable for an unsaved Codex path or replacement relay key."
+);
+assert.match(
+  setupCenter,
+  /expectedRuntime: codexConnectionRuntimeSnapshot[\s\S]*?codexConnectionRuntimeMatchesSnapshot\(attempt\.expectedRuntime, result\.codex\)/,
+  "A successful test must match the exact runtime identity snapshot captured at launch."
+);
+assert.match(
+  setupCenter,
+  /async function requestClose\(\)[\s\S]*?if \(hasUnsavedChanges\)[\s\S]*?if \(!approved\) return;[\s\S]*?cancelConnectionTest\(\{ silent: true \}\);[\s\S]*?onClose\(\)/,
+  "Declining the discard-changes confirmation must leave an active connection test running."
+);
+assert.match(
+  `${setupCenter}\n${app}`,
+  /onRefresh\(result\.codex\)[\s\S]*?refreshCodex\(verifiedStatus\?: CodexCheckResult\)[\s\S]*?verifiedStatus \|\| await workbench\.checkCodex\(\)/,
+  "A successful full connection test must publish its verified status without running the same health check twice."
+);
+assert.match(
+  setupCenter,
+  /className="connection-test-cancel"[\s\S]*?cancelConnectionTest\(\)[\s\S]*?最多等待 90 秒，可随时取消/,
+  "Connection setup must expose an independent cancel action and a visible total wait bound."
+);
+assert.match(
+  `${preload}\n${main}`,
+  /settings:cancel-codex-test[\s\S]*?requestId[\s\S]*?CodexConnectionTestController/,
+  "The renderer cancel action must reach a request-scoped main-process controller."
+);
+assert.match(
+  main,
+  /event\.sender\.once\("destroyed", cancelOnRendererExit\)[\s\S]*?testCodexConnection\(\{ \.\.\.request, requestId \}\)[\s\S]*?removeListener\("destroyed", cancelOnRendererExit\)/,
+  "Closing the setup renderer must cancel its in-flight connection test without leaving a detached operation."
+);
+assert.match(
+  main,
+  /settings:configure-relay[\s\S]*?event\.sender\.once\("destroyed", cancelOnRendererExit\)[\s\S]*?configureCodexRelay\(\{ \.\.\.request, requestId \}\)/,
+  "Relay configuration must use the same renderer-close cancellation boundary as a generic test."
+);
+assert.match(
+  main,
+  /async function configureCodexRelay[\s\S]*?codexConnectionTests\.run[\s\S]*?configureRelay\(request, \{[\s\S]*?signal[\s\S]*?timeoutMs: remainingMs\(\)[\s\S]*?testConnection\(result\.codexPath, \{[\s\S]*?signal/,
+  "Relay credential saving, runtime checks, and the model/tool probe must share one bounded cancellable operation."
 );
 assert.match(
   setupCenter,
@@ -1090,7 +1186,7 @@ assert.match(
 );
 assert.match(
   main,
-  /CODEX_VERSION_CHECK_TIMEOUT_MS[\s\S]*?CODEX_HEALTH_REQUEST_TIMEOUT_MS[\s\S]*?execFileAsync\(binary, \["--version"\][\s\S]*?timeout: CODEX_VERSION_CHECK_TIMEOUT_MS[\s\S]*?client\.request\("model\/list"[\s\S]*?timeoutMs: CODEX_HEALTH_REQUEST_TIMEOUT_MS[\s\S]*?codex-check-performance/,
+  /CODEX_VERSION_CHECK_TIMEOUT_MS[\s\S]*?CODEX_HEALTH_REQUEST_TIMEOUT_MS[\s\S]*?execFileAsync\(binary, \["--version"\][\s\S]*?timeout: codexCheckTimeout\(deadlineAt, CODEX_VERSION_CHECK_TIMEOUT_MS\)[\s\S]*?healthTimeoutMs = codexCheckTimeout\(deadlineAt, CODEX_HEALTH_REQUEST_TIMEOUT_MS\)[\s\S]*?client\.request\("model\/list"[\s\S]*?timeoutMs: healthTimeoutMs[\s\S]*?codex-check-performance/,
   "Codex version and App Server readiness probes must stay bounded and emit stage timings."
 );
 assert.match(
