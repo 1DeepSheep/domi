@@ -24,6 +24,15 @@ import { useEffect, useRef, useState } from "react";
 import { workbench } from "./bridge";
 import { useAppConfirm } from "./AppConfirmDialog";
 import {
+  CODEX_CONNECTION_TEST_UI_TIMEOUT_MS,
+  codexConnectionConfigFingerprint,
+  codexConnectionDraftBlockReason,
+  codexConnectionRuntimeMatchesSnapshot,
+  codexConnectionRuntimeSnapshot,
+  runBoundedCodexConnectionTest
+} from "./codex-connection-test";
+import type { CodexConnectionRuntimeSnapshot } from "./codex-connection-test";
+import {
   AppSettings,
   AppSettingsSaveRequest,
   AppSettingsSaveResult,
@@ -46,7 +55,7 @@ type SetupCenterProps = {
   onDirtyChange?: (dirty: boolean) => void;
   onSave: (request: AppSettingsSaveRequest) => Promise<AppSettingsSaveResult>;
   onLogin: () => Promise<ChatGPTLoginResult>;
-  onRefresh: () => Promise<void>;
+  onRefresh: (verifiedStatus?: CodexCheckResult) => Promise<void>;
 };
 
 function domiWorkspacePath(selectedDirectory: string) {
@@ -170,6 +179,14 @@ export default function SetupCenter({
   const [relayBusy, setRelayBusy] = useState(false);
   const [connectionTestBusy, setConnectionTestBusy] = useState(false);
   const [connectionVerified, setConnectionVerified] = useState(false);
+  const connectionTestSequenceRef = useRef(0);
+  const connectionTestAttemptRef = useRef<{
+    requestId: string;
+    controller: AbortController;
+    configFingerprint: string;
+    kind: "connection-test" | "relay-configure";
+    expectedRuntime: CodexConnectionRuntimeSnapshot;
+  } | null>(null);
   const [relayApiKey, setRelayApiKey] = useState("");
   const [diagnosing, setDiagnosing] = useState(false);
   const [report, setReport] = useState<DiagnosticReport | null>(null);
@@ -200,13 +217,36 @@ export default function SetupCenter({
   onDirtyChangeRef.current = onDirtyChange;
   const hasUnsavedChanges = JSON.stringify(draft) !== JSON.stringify(settings)
     || Boolean(relayApiKey.trim());
+  const connectionConfigFingerprint = codexConnectionConfigFingerprint({
+    authMode: draft.authMode,
+    apiBaseUrl: draft.apiBaseUrl,
+    apiModel: draft.apiModel,
+    relayCredentialConfigured: draft.relayCredentialConfigured,
+    codexPath: draft.codexPath,
+    relayApiKey,
+    runtimeAuthMode: codexStatus?.authMode,
+    runtimeApiBaseUrl: codexStatus?.apiBaseUrl,
+    runtimeModel: codexStatus?.configuredModel,
+    runtimePath: codexStatus?.path,
+    runtimeAccount: codexStatus?.account?.email
+  });
+  const connectionConfigFingerprintRef = useRef(connectionConfigFingerprint);
+  connectionConfigFingerprintRef.current = connectionConfigFingerprint;
 
   useEffect(() => setDraft(settings), [settings]);
-  useEffect(() => setTab(initialTab), [initialTab]);
+  useEffect(() => {
+    if (initialTab !== "connection") cancelConnectionTest({ silent: true });
+    setTab(initialTab);
+  }, [initialTab]);
   useEffect(() => {
     onDirtyChangeRef.current?.(hasUnsavedChanges);
   }, [hasUnsavedChanges]);
   useEffect(() => () => onDirtyChangeRef.current?.(false), []);
+  useEffect(() => () => {
+    const attempt = connectionTestAttemptRef.current;
+    connectionTestAttemptRef.current = null;
+    attempt?.controller.abort();
+  }, []);
 
 
   async function refreshFeishuStatus(force = false) {
@@ -461,10 +501,42 @@ export default function SetupCenter({
       });
       if (!approved) return;
     }
+    cancelConnectionTest({ silent: true });
     onClose();
   }
 
+  function cancelConnectionTest({ silent = false } = {}) {
+    const attempt = connectionTestAttemptRef.current;
+    if (!attempt) return false;
+    connectionTestAttemptRef.current = null;
+    attempt.controller.abort();
+    setConnectionTestBusy(false);
+    setRelayBusy(false);
+    setConnectionVerified(false);
+    if (!silent) {
+      setNotice("");
+      setError(attempt.kind === "relay-configure"
+        ? "中转站配置验证已取消。若安全保存已经完成，配置会保留但不会标记为已实测；请重新测试确认。"
+        : "连接测试已取消。连接设置没有改动，可以调整后重新测试。");
+    }
+    return true;
+  }
+
+  function selectTab(nextTab: "connection" | "data" | "plaud" | "updates" | "diagnostics") {
+    if (nextTab !== "connection") cancelConnectionTest({ silent: true });
+    setTab(nextTab);
+  }
+
   async function saveConnection(continueToData: boolean) {
+    if (codexPathRequiresApply) {
+      const applied = await save(false);
+      if (applied) {
+        setConnectionVerified(false);
+        setError("");
+        setNotice("Codex 路径已应用并刷新运行状态。现在请测试完整连接；测试通过后即可继续。");
+      }
+      return;
+    }
     if (!codexStatus?.path) {
       setError("请先安装 Codex CLI。");
       return;
@@ -720,6 +792,7 @@ export default function SetupCenter({
   }
 
   async function startLogin() {
+    if (connectionTestAttemptRef.current) return;
     setLoginBusy(true);
     setError("");
     setNotice("");
@@ -747,6 +820,7 @@ export default function SetupCenter({
   }
 
   async function installCodex(automatic = false) {
+    if (connectionTestAttemptRef.current) return;
     setInstallBusy(true);
     setInstallError("");
     setError("");
@@ -773,19 +847,81 @@ export default function SetupCenter({
   }
 
   async function configureRelay() {
+    if (connectionTestAttemptRef.current) return;
+    const pathBlockReason = codexConnectionDraftBlockReason({
+      draftCodexPath: draft.codexPath,
+      savedCodexPath: settings.codexPath,
+      runtimePath: codexStatus?.path,
+      relayApiKey: ""
+    });
+    if (pathBlockReason) {
+      setConnectionVerified(false);
+      setNotice("");
+      setError(pathBlockReason);
+      return;
+    }
+    const requestId = `relay-${Date.now()}-${connectionTestSequenceRef.current += 1}`;
+    const attempt = {
+      requestId,
+      controller: new AbortController(),
+      configFingerprint: connectionConfigFingerprintRef.current,
+      kind: "relay-configure" as const,
+      expectedRuntime: codexConnectionRuntimeSnapshot({
+        authMode: "relay",
+        path: codexStatus?.path,
+        apiBaseUrl: draft.apiBaseUrl,
+        configuredModel: draft.apiModel
+      })
+    };
+    connectionTestAttemptRef.current = attempt;
     setRelayBusy(true);
     setError("");
     setNotice("");
     setConnectionVerified(false);
     try {
-      const result = await workbench.configureCodexRelay({
-        baseUrl: draft.apiBaseUrl,
-        model: draft.apiModel,
-        apiKey: relayApiKey || undefined,
-        keepExistingKey: !relayApiKey && draft.relayCredentialConfigured
+      const outcome = await runBoundedCodexConnectionTest({
+        requestId,
+        signal: attempt.controller.signal,
+        invoke: ({ requestId: currentRequestId }) => workbench.configureCodexRelay({
+          requestId: currentRequestId,
+          baseUrl: draft.apiBaseUrl,
+          model: draft.apiModel,
+          apiKey: relayApiKey || undefined,
+          keepExistingKey: !relayApiKey && draft.relayCredentialConfigured,
+          codexPath: draft.codexPath
+        }),
+        cancel: (request) => workbench.cancelCodexConnectionTest(request),
+        timeoutMs: CODEX_CONNECTION_TEST_UI_TIMEOUT_MS
       });
+      if (connectionTestAttemptRef.current !== attempt) return;
+      if (outcome.status === "cancelled") {
+        setError("中转站配置验证已取消。若安全保存已经完成，配置会保留但不会标记为已实测；请重新测试确认。");
+        return;
+      }
+      if (outcome.status === "timed-out") {
+        setError("中转站安全保存与完整连接测试超过 90 秒，界面已停止等待并请求终止后台操作。请检查网络、代理和中转站地址后重试；如仍失败，请到“系统诊断”导出脱敏报告。");
+        return;
+      }
+      if (outcome.status === "failed") {
+        setError(outcome.error || "中转站配置或测试失败。");
+        return;
+      }
+      const result = outcome.result;
+      if (result.requestId !== requestId) {
+        setError("中转站测试返回了过期结果，已安全忽略；请重新测试当前配置。");
+        return;
+      }
       if (!result.ok) {
         setError(result.error || "中转站配置或测试失败。");
+        return;
+      }
+      if (connectionTestAttemptRef.current !== attempt) return;
+      if (connectionConfigFingerprintRef.current !== attempt.configFingerprint) {
+        setError("中转站配置在测试期间发生了变化，旧测试结果已忽略。请确认当前地址、模型和 Codex 路径后重新测试。");
+        return;
+      }
+      if (!codexConnectionRuntimeMatchesSnapshot(attempt.expectedRuntime, result.codex)) {
+        setError("实际测试的 Codex 运行配置与当前中转站设置不一致，结果已安全忽略。请刷新运行状态后重新测试。");
         return;
       }
       const nextDraft = {
@@ -797,43 +933,120 @@ export default function SetupCenter({
       };
       setDraft(nextDraft);
       setRelayApiKey("");
-      await onSave({
+      const saved = await onSave({
         authMode: "relay",
         apiBaseUrl: nextDraft.apiBaseUrl,
         apiModel: nextDraft.apiModel,
         relayCredentialConfigured: true,
         codexPath: result.codex?.path || nextDraft.codexPath
       });
-      await onRefresh();
+      if (!saved.ok) {
+        setConnectionVerified(false);
+        setError(saved.error || "中转站已通过测试，但本地设置未能同步，请重新打开设置确认。");
+        return;
+      }
       setConnectionVerified(true);
       setNotice(result.verification?.detail || "中转站模型响应与工具调用均已通过。");
+      void onRefresh(result.codex).catch(() => undefined);
     } catch (relayError) {
+      if (connectionTestAttemptRef.current !== attempt) return;
       setError(relayError instanceof Error ? relayError.message : String(relayError));
     } finally {
-      setRelayBusy(false);
+      if (connectionTestAttemptRef.current === attempt) {
+        connectionTestAttemptRef.current = null;
+        setRelayBusy(false);
+      }
     }
   }
 
   async function testConnection(): Promise<boolean> {
+    if (connectionTestAttemptRef.current) return false;
+    const blockReason = codexConnectionDraftBlockReason({
+      draftCodexPath: draft.codexPath,
+      savedCodexPath: settings.codexPath,
+      runtimePath: codexStatus?.path,
+      relayApiKey
+    });
+    if (blockReason) {
+      setConnectionVerified(false);
+      setNotice("");
+      setError(blockReason);
+      return false;
+    }
+    const requestId = `setup-${Date.now()}-${connectionTestSequenceRef.current += 1}`;
+    const attempt = {
+      requestId,
+      controller: new AbortController(),
+      configFingerprint: connectionConfigFingerprintRef.current,
+      kind: "connection-test" as const,
+      expectedRuntime: codexConnectionRuntimeSnapshot({
+        authMode: draft.authMode,
+        path: codexStatus?.path,
+        apiBaseUrl: draft.authMode === "relay" ? draft.apiBaseUrl : "",
+        configuredModel: draft.authMode === "relay"
+          ? draft.apiModel
+          : codexStatus?.configuredModel
+      })
+    };
+    connectionTestAttemptRef.current = attempt;
     setConnectionTestBusy(true);
     setError("");
     setNotice("");
     setConnectionVerified(false);
     try {
-      const result = await workbench.testCodexConnection();
+      const outcome = await runBoundedCodexConnectionTest({
+        requestId,
+        signal: attempt.controller.signal,
+        invoke: (request) => workbench.testCodexConnection(request),
+        cancel: (request) => workbench.cancelCodexConnectionTest(request),
+        timeoutMs: CODEX_CONNECTION_TEST_UI_TIMEOUT_MS
+      });
+      if (connectionTestAttemptRef.current !== attempt) return false;
+      if (outcome.status === "cancelled") {
+        setError("连接测试已取消。连接设置没有改动，可以调整后重新测试。");
+        return false;
+      }
+      if (outcome.status === "timed-out") {
+        setError("完整连接测试超过最大等待时间，界面已停止等待并请求终止后台测试。请检查网络或代理、确认 ChatGPT 登录仍有效后重试；如仍失败，请到“系统诊断”导出脱敏报告。");
+        return false;
+      }
+      if (outcome.status === "failed") {
+        setError(outcome.error || "Codex 完整连接测试失败。");
+        return false;
+      }
+      const result = outcome.result;
+      if (result.requestId !== requestId) {
+        setError("连接测试返回了过期结果，已安全忽略；请重新测试当前配置。");
+        return false;
+      }
       if (!result.ok) {
         setError(result.error || "Codex 完整连接测试失败。");
         return false;
       }
-      await onRefresh();
+      if (connectionTestAttemptRef.current !== attempt) return false;
+      if (!codexConnectionRuntimeMatchesSnapshot(attempt.expectedRuntime, result.codex)) {
+        setConnectionVerified(false);
+        setError("实际测试的 Codex 身份或运行配置与当前设置不一致，结果已安全忽略。请刷新运行状态后重新测试。");
+        return false;
+      }
+      if (connectionConfigFingerprintRef.current !== attempt.configFingerprint) {
+        setConnectionVerified(false);
+        setError("连接配置在测试期间发生了变化，旧测试结果已忽略。请确认当前账号、地址和 Codex 路径后重新测试。");
+        return false;
+      }
       setConnectionVerified(true);
       setNotice(result.verification?.detail || "模型响应与 Shell 工具调用均已通过。");
+      void onRefresh(result.codex).catch(() => undefined);
       return true;
     } catch (testError) {
+      if (connectionTestAttemptRef.current !== attempt) return false;
       setError(testError instanceof Error ? testError.message : String(testError));
       return false;
     } finally {
-      setConnectionTestBusy(false);
+      if (connectionTestAttemptRef.current === attempt) {
+        connectionTestAttemptRef.current = null;
+        setConnectionTestBusy(false);
+      }
     }
   }
 
@@ -995,6 +1208,14 @@ export default function SetupCenter({
       }[updateStatus.state]
     : "正在读取版本信息";
   const codexInstalled = Boolean(codexStatus?.path);
+  const connectionOperationBusy = connectionTestBusy || relayBusy;
+  const codexPathRequiresApply = draft.codexPath.trim() !== settings.codexPath.trim();
+  const connectionTestBlockReason = codexConnectionDraftBlockReason({
+    draftCodexPath: draft.codexPath,
+    savedCodexPath: settings.codexPath,
+    runtimePath: codexStatus?.path,
+    relayApiKey
+  });
   const relayDraftMatchesRuntime = draft.authMode !== "relay" || Boolean(
     draft.relayCredentialConfigured
     && draft.apiBaseUrl.trim() === codexStatus?.apiBaseUrl
@@ -1043,19 +1264,19 @@ export default function SetupCenter({
             <div><strong>domi</strong><span>{required ? "首次启动配置" : "设置"}</span></div>
           </div>
           <nav>
-            <button className={tab === "connection" ? "active" : ""} onClick={() => setTab("connection")}>
+            <button className={tab === "connection" ? "active" : ""} onClick={() => selectTab("connection")}>
               <Settings2 size={16} />Codex 连接
             </button>
-            <button className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}>
+            <button className={tab === "data" ? "active" : ""} onClick={() => selectTab("data")}>
               <Database size={16} />资料连接
             </button>
-            <button className={tab === "plaud" ? "active" : ""} onClick={() => setTab("plaud")}>
+            <button className={tab === "plaud" ? "active" : ""} onClick={() => selectTab("plaud")}>
               <Mic size={16} />录音转写
             </button>
-            <button className={tab === "updates" ? "active" : ""} onClick={() => setTab("updates")}>
+            <button className={tab === "updates" ? "active" : ""} onClick={() => selectTab("updates")}>
               <Download size={16} />软件更新
             </button>
-            <button className={tab === "diagnostics" ? "active" : ""} onClick={() => setTab("diagnostics")}>
+            <button className={tab === "diagnostics" ? "active" : ""} onClick={() => selectTab("diagnostics")}>
               <ShieldCheck size={16} />系统诊断
             </button>
           </nav>
@@ -1118,7 +1339,7 @@ export default function SetupCenter({
                 {codexInstalled ? (
                   <b className="codex-install-badge">已完成</b>
                 ) : installError || !required ? (
-                  <button type="button" onClick={() => void installCodex(false)} disabled={installBusy}>
+                  <button type="button" onClick={() => void installCodex(false)} disabled={installBusy || connectionOperationBusy}>
                     {installBusy ? <LoaderCircle className="spinning" size={15} /> : <RefreshCw size={15} />}
                     {installBusy ? "正在重试…" : "重新安装"}
                   </button>
@@ -1133,6 +1354,7 @@ export default function SetupCenter({
                   role="radio"
                   aria-checked={draft.authMode === "chatgpt"}
                   className={draft.authMode === "chatgpt" ? "selected" : ""}
+                  disabled={connectionOperationBusy}
                   onClick={() => {
                     setDraft((current) => ({
                       ...current,
@@ -1158,6 +1380,7 @@ export default function SetupCenter({
                   role="radio"
                   aria-checked={draft.authMode === "relay"}
                   className={draft.authMode === "relay" ? "selected" : ""}
+                  disabled={connectionOperationBusy}
                   onClick={() => {
                     setDraft((current) => ({ ...current, authMode: "relay" }));
                     setConnectionVerified(false);
@@ -1186,6 +1409,7 @@ export default function SetupCenter({
                       }}
                       placeholder="https://relay.example.com/v1"
                       spellCheck={false}
+                      disabled={connectionOperationBusy}
                     />
                     <small>必须支持 OpenAI Responses API；普通 Chat Completions 接口不能提供完整 Codex 能力。</small>
                   </label>
@@ -1200,6 +1424,7 @@ export default function SetupCenter({
                         }}
                         placeholder="中转站支持的模型 ID"
                         spellCheck={false}
+                        disabled={connectionOperationBusy}
                       />
                     </label>
                     <label>
@@ -1214,12 +1439,21 @@ export default function SetupCenter({
                         placeholder={draft.relayCredentialConfigured ? "已保存在 macOS 钥匙串，留空则沿用" : "仅保存到 macOS 钥匙串"}
                         autoComplete="new-password"
                         spellCheck={false}
+                        disabled={connectionOperationBusy}
                       />
                     </label>
                   </div>
-                  <button className="relay-configure-button" type="button" onClick={configureRelay} disabled={relayBusy || !codexInstalled}>
-                    {relayBusy ? <LoaderCircle className="spinning" size={15} /> : <ShieldCheck size={15} />}
-                    {relayBusy ? "正在配置并测试…" : "安全保存并测试"}
+                  <button
+                    className={`relay-configure-button ${relayBusy ? "connection-test-cancel" : ""}`}
+                    type="button"
+                    onClick={() => {
+                      if (relayBusy) cancelConnectionTest();
+                      else void configureRelay();
+                    }}
+                    disabled={connectionTestBusy || !codexInstalled}
+                  >
+                    {relayBusy ? <X size={15} /> : <ShieldCheck size={15} />}
+                    {relayBusy ? "取消配置测试" : "安全保存并测试"}
                   </button>
                 </div>
               )}
@@ -1246,17 +1480,40 @@ export default function SetupCenter({
                 </div>
                 <div className="setup-inline-actions">
                   {draft.authMode === "chatgpt" && (
-                    <button type="button" onClick={startLogin} disabled={loginBusy || !codexInstalled}>
+                    <button type="button" onClick={startLogin} disabled={connectionOperationBusy || loginBusy || !codexInstalled}>
                       {loginBusy ? <LoaderCircle className="spinning" size={16} /> : <LogIn size={16} />}
                       {selectedConnectionReady ? "切换 ChatGPT 账号" : "登录 ChatGPT"}
                       <ExternalLink size={13} />
                     </button>
                   )}
-                  <button type="button" onClick={testConnection} disabled={connectionTestBusy || !codexInstalled || (draft.authMode === "relay" && !draft.relayCredentialConfigured)}>
-                    {connectionTestBusy ? <LoaderCircle className="spinning" size={15} /> : <RefreshCw size={15} />}
-                    {connectionTestBusy ? "正在调用模型与工具…" : "测试完整连接"}
-                  </button>
+                  {connectionOperationBusy ? (
+                    <button className="connection-test-cancel" type="button" onClick={() => cancelConnectionTest()}>
+                      <X size={15} />{relayBusy ? "取消配置测试" : "取消测试"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={testConnection}
+                      disabled={Boolean(connectionTestBlockReason) || !codexInstalled || (draft.authMode === "relay" && !draft.relayCredentialConfigured)}
+                    >
+                      <RefreshCw size={15} />测试完整连接
+                    </button>
+                  )}
                 </div>
+                {connectionOperationBusy && (
+                  <div className="connection-test-progress" role="status">
+                    <LoaderCircle className="spinning" size={14} />
+                    <span>{relayBusy
+                      ? "正在安全保存中转站并验证模型与 Shell 工具；最多等待 90 秒，可随时取消。"
+                      : "正在验证模型响应与 Shell 工具；最多等待 90 秒，可随时取消。"}</span>
+                  </div>
+                )}
+                {!connectionOperationBusy && connectionTestBlockReason && (
+                  <div className="connection-test-prerequisite" role="note">
+                    <CircleAlert size={13} />
+                    <span>{connectionTestBlockReason}</span>
+                  </div>
+                )}
               </div>
 
               <details className="advanced-settings">
@@ -1282,9 +1539,13 @@ export default function SetupCenter({
                   <span>自定义 Codex 路径</span>
                   <input
                     value={draft.codexPath}
-                    onChange={(event) => setDraft((current) => ({ ...current, codexPath: event.target.value }))}
+                    onChange={(event) => {
+                      setDraft((current) => ({ ...current, codexPath: event.target.value }));
+                      setConnectionVerified(false);
+                    }}
                     placeholder="自动检测，通常无需填写"
                     spellCheck={false}
+                    disabled={connectionOperationBusy}
                   />
                 </label>
               </details>
@@ -1802,12 +2063,16 @@ export default function SetupCenter({
               <button
                 className="setup-primary"
                 type="button"
-                onClick={() => saveConnection(required)}
-                disabled={saving || connectionTestBusy || installBusy || !codexInstalled}
+                onClick={() => connectionOperationBusy
+                  ? cancelConnectionTest()
+                  : saveConnection(required)}
+                disabled={saving || installBusy || (!codexInstalled && !codexPathRequiresApply)}
               >
-                {(saving || connectionTestBusy) && <LoaderCircle className="spinning" size={16} />}
-                {connectionTestBusy
-                  ? "正在测试并进入…"
+                {saving && <LoaderCircle className="spinning" size={16} />}
+                {connectionOperationBusy
+                  ? relayBusy ? "取消中转站配置测试" : "取消连接测试"
+                  : codexPathRequiresApply
+                    ? "应用 Codex 路径"
                   : required
                     ? "下一步：资料连接"
                     : "保存设置"}

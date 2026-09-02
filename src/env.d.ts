@@ -12,7 +12,10 @@ declare global {
       updateCodexRuntime: () => Promise<CodexRuntimeActionResult>;
       rollbackCodexRuntime: () => Promise<CodexRuntimeActionResult>;
       configureCodexRelay: (request: CodexRelayConfigureRequest) => Promise<CodexSetupResult>;
-      testCodexConnection: () => Promise<CodexSetupResult>;
+      testCodexConnection: (request?: CodexConnectionTestRequest) => Promise<CodexSetupResult>;
+      cancelCodexConnectionTest: (
+        request: CodexConnectionTestRequest
+      ) => Promise<CodexConnectionTestCancelResult>;
       startChatGPTLogin: () => Promise<ChatGPTLoginResult>;
       runDiagnostics: () => Promise<DiagnosticReport>;
       exportDiagnostics: (report: DiagnosticReport) => Promise<DiagnosticExportResult>;
@@ -1322,10 +1325,23 @@ export type CodexRuntimeActionResult = Partial<CodexInstallResult> & CodexRuntim
 };
 
 export type CodexRelayConfigureRequest = {
+  requestId: string;
   baseUrl: string;
   model: string;
   apiKey?: string;
   keepExistingKey?: boolean;
+  codexPath?: string;
+};
+
+export type CodexConnectionTestRequest = {
+  requestId: string;
+};
+
+export type CodexConnectionTestCancelResult = {
+  ok: boolean;
+  requestId: string;
+  cancelled: boolean;
+  error?: string;
 };
 
 export type CodexConnectionVerification = {
@@ -1338,10 +1354,15 @@ export type CodexConnectionVerification = {
 
 export type CodexSetupResult = {
   ok: boolean;
+  requestId?: string;
   configured?: boolean;
   codex?: CodexCheckResult;
   verification?: CodexConnectionVerification;
   pausedBackgroundRuns?: number;
+  cancelled?: boolean;
+  timedOut?: boolean;
+  stage?: string;
+  diagnosticCode?: string;
   error?: string;
 };
 
