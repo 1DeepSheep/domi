@@ -668,7 +668,7 @@ export default function RichMarkdownEditor({
         }
       }),
       TableKit.configure({
-        table: { resizable: false }
+        table: { resizable: false, renderWrapper: true }
       }),
       TaskList,
       TaskItem.configure({ nested: true }),

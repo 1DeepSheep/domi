@@ -243,9 +243,12 @@ async function fetchOfficialInstaller(fetcher = fetch) {
   throw new Error("Codex 官方安装程序重定向次数过多，已停止安装。");
 }
 
-function writeCredentialToKeychain(credential) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("/usr/bin/security", [
+async function writeCredentialToKeychain(credential, {
+  signal,
+  timeoutMs = 15_000
+} = {}) {
+  try {
+    await runCodexWithPrompt("/usr/bin/security", [
       "add-generic-password",
       "-U",
       "-s",
@@ -253,69 +256,88 @@ function writeCredentialToKeychain(credential) {
       "-a",
       DOMI_KEYCHAIN_ACCOUNT,
       "-w"
-    ], {
-      stdio: ["pipe", "pipe", "pipe"]
+    ], `${credential}\n${credential}\n`, {
+      timeout: Math.max(1, Number(timeoutMs) || 15_000),
+      maxBuffer: 1024 * 1024,
+      signal
     });
-    let stdout = "";
-    let stderr = "";
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error("写入 macOS 钥匙串超时。"));
-    }, 15_000);
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timeout);
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(stderr.trim() || stdout.trim() || `macOS 钥匙串返回 ${code}。`));
-    });
-    child.stdin.end(`${credential}\n${credential}\n`);
-  });
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason || error;
+    if (/连接测试超时/.test(String(error?.message || error))) {
+      throw new Error("写入 macOS 钥匙串超时。");
+    }
+    throw error;
+  }
 }
 
 function runCodexWithPrompt(binary, args, prompt, {
   env,
   timeout = 2 * 60_000,
-  maxBuffer = 8 * 1024 * 1024
+  maxBuffer = 8 * 1024 * 1024,
+  signal,
+  terminateGraceMs = 1_500
 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, {
-      env,
-      stdio: ["pipe", "pipe", "pipe"]
-    });
+    if (signal?.aborted) {
+      reject(signal.reason || new Error("Codex 连接测试已取消。"));
+      return;
+    }
+    let child;
+    try {
+      child = spawn(binary, args, {
+        env,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let abortHandler = null;
+    let timeoutTimer = null;
+    let forceKillTimer = null;
+    let forceSettleTimer = null;
+    let terminationError = null;
+    const graceMs = Math.max(1, Number(terminateGraceMs) || 1_500);
     const finish = (callback) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+      if (forceKillTimer !== null) clearTimeout(forceKillTimer);
+      if (forceSettleTimer !== null) clearTimeout(forceSettleTimer);
+      if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
       callback();
     };
+    const terminate = (error) => {
+      if (settled || terminationError) return;
+      terminationError = error;
+      if (child.exitCode !== null) {
+        finish(() => reject(error));
+        return;
+      }
+      child.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        if (child.exitCode === null) child.kill("SIGKILL");
+      }, graceMs);
+      forceKillTimer.unref?.();
+      // Usually `close` settles immediately after SIGTERM/SIGKILL. Keep one
+      // final bound so a broken child-process implementation cannot leave the
+      // connection-test single-flight slot draining forever.
+      forceSettleTimer = setTimeout(() => {
+        finish(() => reject(error));
+      }, graceMs * 2);
+    };
     const append = (current, chunk) => {
+      if (terminationError) return current;
       const next = current + chunk.toString();
       if (Buffer.byteLength(next) > maxBuffer) {
-        child.kill("SIGTERM");
-        finish(() => reject(new Error("Codex 连接测试输出过大，已停止。")));
+        terminate(new Error("Codex 连接测试输出过大，已停止。"));
         return current;
       }
       return next;
     };
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      finish(() => reject(new Error("Codex 连接测试超时。")));
-    }, timeout);
     child.stdout.on("data", (chunk) => {
       stdout = append(stdout, chunk);
     });
@@ -323,10 +345,14 @@ function runCodexWithPrompt(binary, args, prompt, {
       stderr = append(stderr, chunk);
     });
     child.once("error", (error) => {
-      finish(() => reject(error));
+      finish(() => reject(terminationError || error));
     });
     child.once("close", (code) => {
       finish(() => {
+        if (terminationError) {
+          reject(terminationError);
+          return;
+        }
         if (code === 0) {
           resolve({ stdout, stderr });
           return;
@@ -337,8 +363,34 @@ function runCodexWithPrompt(binary, args, prompt, {
     child.stdin.on("error", (error) => {
       if (error.code !== "EPIPE") finish(() => reject(error));
     });
+    if (signal) {
+      abortHandler = () => terminate(
+        signal.reason || new Error("Codex 连接测试已取消。")
+      );
+      signal.addEventListener("abort", abortHandler, { once: true });
+      if (signal.aborted) {
+        abortHandler();
+        return;
+      }
+    }
+    timeoutTimer = setTimeout(() => {
+      terminate(new Error("Codex 连接测试超时。"));
+    }, timeout);
     child.stdin.end(prompt);
   });
+}
+
+function throwIfBootstrapAborted(signal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error("Codex 连接测试已取消。");
+  error.code = "DOMI_CODEX_CONNECTION_TEST_CANCELLED";
+  throw error;
+}
+
+function bootstrapRemainingTimeout(deadlineAt, maximumMs) {
+  if (!Number.isFinite(deadlineAt)) return maximumMs;
+  return Math.max(1, Math.min(maximumMs, deadlineAt - Date.now()));
 }
 
 class CodexBootstrapService {
@@ -374,21 +426,31 @@ class CodexBootstrapService {
     return path.join(this.homeDir, ".codex", "domi-provider-state.json");
   }
 
-  async status(preferredPath = "") {
+  async status(preferredPath = "", {
+    signal,
+    timeoutMs = 15_000
+  } = {}) {
     try {
+      throwIfBootstrapAborted(signal);
       const binary = this.resolveBinary(preferredPath);
       const { stdout } = await this.exec(binary, ["--version"], {
         env: codexEnvironment(),
-        timeout: 15_000
+        timeout: Math.max(1, Number(timeoutMs) || 15_000),
+        signal
       });
+      throwIfBootstrapAborted(signal);
       return {
         ok: true,
         installed: true,
         path: binary,
         version: String(stdout || "").trim(),
-        credentialStored: await this.hasRelayCredential()
+        credentialStored: await this.hasRelayCredential({
+          signal,
+          timeoutMs: Math.min(10_000, Math.max(1, Number(timeoutMs) || 15_000))
+        })
       };
     } catch (error) {
+      throwIfBootstrapAborted(signal);
       return {
         ok: false,
         installed: false,
@@ -619,7 +681,10 @@ class CodexBootstrapService {
     }
   }
 
-  async saveRelayCredential(apiKey) {
+  async saveRelayCredential(apiKey, {
+    signal,
+    timeoutMs = 15_000
+  } = {}) {
     const credential = String(apiKey || "").trim();
     if (
       !credential
@@ -629,11 +694,20 @@ class CodexBootstrapService {
     ) {
       throw new Error("请输入有效的中转站 API Key。");
     }
-    await this.writeCredential(credential);
+    throwIfBootstrapAborted(signal);
+    await this.writeCredential(credential, {
+      signal,
+      timeoutMs: Math.max(1, Number(timeoutMs) || 15_000)
+    });
+    throwIfBootstrapAborted(signal);
   }
 
-  async hasRelayCredential() {
+  async hasRelayCredential({
+    signal,
+    timeoutMs = 10_000
+  } = {}) {
     try {
+      throwIfBootstrapAborted(signal);
       await this.exec("/usr/bin/security", [
         "find-generic-password",
         "-s",
@@ -641,27 +715,42 @@ class CodexBootstrapService {
         "-a",
         DOMI_KEYCHAIN_ACCOUNT
       ], {
-        timeout: 10_000,
-        maxBuffer: 1024 * 1024
+        timeout: Math.max(1, Number(timeoutMs) || 10_000),
+        maxBuffer: 1024 * 1024,
+        signal
       });
+      throwIfBootstrapAborted(signal);
       return true;
-    } catch {
+    } catch (error) {
+      throwIfBootstrapAborted(signal);
       return false;
     }
   }
 
-  async configureRelay({ baseUrl, model, apiKey, keepExistingKey = false }) {
+  async configureRelay({ baseUrl, model, apiKey, keepExistingKey = false, codexPath = "" }, {
+    signal,
+    timeoutMs = 90_000
+  } = {}) {
+    const deadlineAt = Date.now() + Math.max(1, Number(timeoutMs) || 90_000);
     try {
-      const installed = await this.status();
+      throwIfBootstrapAborted(signal);
+      const installed = await this.status(codexPath, {
+        signal,
+        timeoutMs: bootstrapRemainingTimeout(deadlineAt, 15_000)
+      });
       if (!installed.ok) {
         return { ok: false, error: "请先安装 Codex CLI，再配置中转站。" };
       }
       const normalizedBaseUrl = normalizeRelayBaseUrl(baseUrl);
       const normalizedModel = normalizeRelayModel(model);
-      const hasExistingKey = await this.hasRelayCredential();
+      const hasExistingKey = Boolean(installed.credentialStored);
       if (!keepExistingKey || !hasExistingKey) {
-        await this.saveRelayCredential(apiKey);
+        await this.saveRelayCredential(apiKey, {
+          signal,
+          timeoutMs: bootstrapRemainingTimeout(deadlineAt, 15_000)
+        });
       }
+      throwIfBootstrapAborted(signal);
       const config = this.writeRelayConfig({
         baseUrl: normalizedBaseUrl,
         model: normalizedModel
@@ -674,11 +763,15 @@ class CodexBootstrapService {
         version: installed.version
       };
     } catch (error) {
+      throwIfBootstrapAborted(signal);
       return { ok: false, error: userFacingError(error) };
     }
   }
 
-  async testConnection(preferredPath = "") {
+  async testConnection(preferredPath = "", {
+    signal,
+    timeoutMs = 2 * 60_000
+  } = {}) {
     const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-test-"));
     try {
       const binary = this.resolveBinary(preferredPath);
@@ -704,8 +797,9 @@ class CodexBootstrapService {
         "-"
       ], prompt, {
         env: codexEnvironment(),
-        timeout: 2 * 60_000,
-        maxBuffer: 8 * 1024 * 1024
+        timeout: Math.max(1_000, Number(timeoutMs) || 2 * 60_000),
+        maxBuffer: 8 * 1024 * 1024,
+        signal
       });
       const output = String(stdout || "");
       const events = output
@@ -770,5 +864,6 @@ module.exports = {
   mergeRelayConfig,
   normalizeRelayBaseUrl,
   normalizeRelayModel,
+  runCodexWithPrompt,
   userFacingError
 };

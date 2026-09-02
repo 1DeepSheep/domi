@@ -5945,8 +5945,8 @@ function App() {
     return workbench.startChatGPTLogin();
   }
 
-  async function refreshCodex() {
-    const status = await workbench.checkCodex();
+  async function refreshCodex(verifiedStatus?: CodexCheckResult) {
+    const status = verifiedStatus || await workbench.checkCodex();
     setCodexStatus(status);
   }
 

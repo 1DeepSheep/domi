@@ -14,7 +14,8 @@ const {
   fetchOfficialInstaller,
   isOfficialCodexInstallerUrl,
   mergeRelayConfig,
-  normalizeRelayBaseUrl
+  normalizeRelayBaseUrl,
+  runCodexWithPrompt
 } = require("../electron/codex-bootstrap.cjs");
 
 function createRoot() {
@@ -187,7 +188,10 @@ test("configuring a relay stores the credential outside config.toml", async () =
     ].join("\n"));
     const service = new CodexBootstrapService({
       homeDir: root,
-      resolveBinary: () => "/tmp/fake-codex",
+      resolveBinary: (preferredPath) => {
+        assert.equal(preferredPath, "/tmp/fake-codex");
+        return preferredPath;
+      },
       writeCredential: async (value) => writtenCredentials.push(value),
       exec: async (binary, args) => {
         if (binary === "/tmp/fake-codex" && args[0] === "--version") {
@@ -203,7 +207,8 @@ test("configuring a relay stores the credential outside config.toml", async () =
     const result = await service.configureRelay({
       baseUrl: "https://relay.example.com/v1",
       model: "relay-model",
-      apiKey: credential
+      apiKey: credential,
+      codexPath: "/tmp/fake-codex"
     });
     assert.equal(result.ok, true);
     assert.deepEqual(writtenCredentials, [credential]);
@@ -223,6 +228,46 @@ test("configuring a relay stores the credential outside config.toml", async () =
     assert.equal(restoredConfig.model, "original-model");
     assert.equal(restoredConfig.model_provider, "original-provider");
     assert.equal(restoredConfig.model_providers?.[DOMI_PROVIDER_ID], undefined);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("relay configuration forwards cancellation through credential storage and does not write config", async () => {
+  const root = createRoot();
+  const controller = new AbortController();
+  let credentialOptions = null;
+  try {
+    const service = new CodexBootstrapService({
+      homeDir: root,
+      resolveBinary: () => "/tmp/fake-codex",
+      writeCredential: async (_value, options) => {
+        credentialOptions = options;
+        controller.abort(Object.assign(new Error("relay setup cancelled"), {
+          code: "DOMI_CODEX_CONNECTION_TEST_CANCELLED"
+        }));
+        throw options.signal.reason;
+      },
+      exec: async (binary, args) => {
+        if (binary === "/tmp/fake-codex" && args[0] === "--version") {
+          return { stdout: "codex-cli test\n", stderr: "" };
+        }
+        if (binary === "/usr/bin/security") throw new Error("not configured");
+        throw new Error(`unexpected command: ${binary} ${args.join(" ")}`);
+      }
+    });
+
+    await assert.rejects(() => service.configureRelay({
+      baseUrl: "https://relay.example.com/v1",
+      model: "relay-model",
+      apiKey: "example-credential"
+    }, {
+      signal: controller.signal,
+      timeoutMs: 90_000
+    }), /relay setup cancelled/);
+    assert.equal(credentialOptions.signal, controller.signal);
+    assert.ok(credentialOptions.timeoutMs > 0 && credentialOptions.timeoutMs <= 15_000);
+    assert.equal(fs.existsSync(service.configPath()), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -334,11 +379,14 @@ test("connection test is ephemeral, read-only, non-interactive, and verifies a t
   const root = createRoot();
   try {
     let capturedArgs = [];
+    let capturedOptions = null;
+    const controller = new AbortController();
     const service = new CodexBootstrapService({
       homeDir: root,
       resolveBinary: () => "/tmp/fake-codex",
-      runCodex: async (_binary, args, prompt) => {
+      runCodex: async (_binary, args, prompt, options) => {
         capturedArgs = args;
+        capturedOptions = options;
         assert.ok(prompt.includes("DOMI_TOOL_OK"));
         return {
           stdout: [
@@ -349,16 +397,93 @@ test("connection test is ephemeral, read-only, non-interactive, and verifies a t
         };
       }
     });
-    const result = await service.testConnection();
+    const result = await service.testConnection("", {
+      signal: controller.signal,
+      timeoutMs: 4_321
+    });
     assert.equal(result.ok, true);
     assert.deepEqual(capturedArgs.slice(0, 3), ["--ask-for-approval", "never", "exec"]);
     assert.ok(capturedArgs.includes("--ephemeral"));
     assert.ok(capturedArgs.includes("--ignore-rules"));
     assert.equal(capturedArgs[capturedArgs.indexOf("--sandbox") + 1], "read-only");
     assert.equal(capturedArgs.at(-1), "-");
+    assert.equal(capturedOptions.timeout, 4_321);
+    assert.equal(capturedOptions.signal, controller.signal);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("connection test forwards cancellation to the running Codex probe", async () => {
+  const root = createRoot();
+  try {
+    const controller = new AbortController();
+    let probeAborted = false;
+    const service = new CodexBootstrapService({
+      homeDir: root,
+      resolveBinary: () => "/tmp/fake-codex",
+      runCodex: async (_binary, _args, _prompt, options) => new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => {
+          probeAborted = true;
+          reject(options.signal.reason);
+        }, { once: true });
+      })
+    });
+
+    const resultPromise = service.testConnection("", {
+      signal: controller.signal,
+      timeoutMs: 5_000
+    });
+    controller.abort(new Error("用户已取消连接测试。"));
+    const result = await resultPromise;
+    assert.equal(probeAborted, true);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /用户已取消连接测试/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an already-cancelled probe rejects before spawning a child", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("probe cancelled before spawn"));
+  await assert.rejects(
+    runCodexWithPrompt("/definitely/missing/codex", [], "", {
+      env: process.env,
+      signal: controller.signal,
+      timeout: 100
+    }),
+    /probe cancelled before spawn/
+  );
+});
+
+test("probe timeout escalates to SIGKILL when the child ignores SIGTERM", async () => {
+  const stubbornChild = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+  await assert.rejects(
+    runCodexWithPrompt(process.execPath, ["-e", stubbornChild], "", {
+      env: process.env,
+      timeout: 30,
+      terminateGraceMs: 20
+    }),
+    /连接测试超时/
+  );
+});
+
+test("probe output limit also escalates to SIGKILL", async () => {
+  const noisyChild = [
+    "process.on('SIGTERM', () => {});",
+    "process.stdout.write('x'.repeat(4096));",
+    "setInterval(() => {}, 1000);"
+  ].join("");
+  await assert.rejects(
+    runCodexWithPrompt(process.execPath, ["-e", noisyChild], "", {
+      env: process.env,
+      timeout: 5_000,
+      maxBuffer: 32,
+      terminateGraceMs: 20
+    }),
+    /输出过大/
+  );
 });
 
 test("connection test does not accept markers echoed outside completed tool and model events", async () => {

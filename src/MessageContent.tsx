@@ -52,6 +52,16 @@ const MessageContent = memo(function MessageContent({
           return defaultUrlTransform(url);
         }}
         components={{
+          table: ({ children, node: _node, ...props }) => (
+            <div
+              className="markdown-table-scroll"
+              role="region"
+              aria-label="表格，可左右滚动"
+              tabIndex={0}
+            >
+              <table {...props}>{children}</table>
+            </div>
+          ),
           a: ({ href, children, title }) => {
             const citationPath = codexFileCitationPath(href);
             const target = citationPath || href || "";
