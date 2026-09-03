@@ -35,7 +35,7 @@ function fixture(t, { enabled = true, complete = true } = {}) {
       fs.writeFileSync(
         target,
         segments.at(-1) === "investment-banking-slides.md"
-          ? "Morgan Stanley\nHTML + PDF\n"
+          ? "Morgan Stanley\nHTML + PDF\nnode qa_deck.js deck.html --strict\n"
           : "fixture\n",
       );
     }
@@ -62,5 +62,36 @@ test("Slides contract fails closed when the Morgan Stanley assets are missing", 
   const { homeDir } = fixture(t, { complete: false });
   const result = verifyDomiInvestmentSlidesContract({ homeDir, environment: {} });
   assert.equal(result.ok, false);
-  assert.match(result.error, /缺少 investment-analysis/);
+  assert.match(result.error, /缺少独立 slides Skill/);
+});
+
+test("Slides contract requires the full standalone templates, recipes and audit toolchain", (t) => {
+  const { homeDir, pluginRoot } = fixture(t);
+  const requiredRelativePaths = REQUIRED_SLIDES_FILES.map((segments) => segments.join("/"));
+  for (const expected of [
+    "skills/slides/references/morgan-stanley-ibd-template-notes.md",
+    "skills/slides/assets/slides/base-deck.html",
+    "skills/slides/assets/slides/ms-research.css",
+    "skills/slides/assets/slides/page-templates.html",
+    "skills/slides/assets/slides/style-packs/morgan-stanley/layout-index.json",
+    "skills/slides/assets/slides/style-packs/morgan-stanley/layout-recipes.md",
+    "skills/slides/assets/slides/style-packs/morgan-stanley/chart-recipes.md",
+    "skills/slides/scripts/audit_research_deck.js",
+  ]) {
+    assert.ok(requiredRelativePaths.includes(expected), `missing contract entry: ${expected}`);
+  }
+
+  fs.rmSync(path.join(
+    pluginRoot,
+    "skills",
+    "slides",
+    "assets",
+    "slides",
+    "style-packs",
+    "morgan-stanley",
+    "chart-recipes.md",
+  ));
+  const result = verifyDomiInvestmentSlidesContract({ homeDir, environment: {} });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /缺少独立 slides Skill/);
 });

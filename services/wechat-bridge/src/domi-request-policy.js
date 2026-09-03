@@ -10,8 +10,8 @@ export const DOMI_WECHAT_ECONOMY_PREFERENCE = Object.freeze({
   reasoningEffort: "medium",
 });
 
-const DIAGNOSTIC_CONTEXT_PATTERN = /(?:\bdomi\b|\bplaud\b|录音|音频|转写|同步|入库|归档|文件|文档|截图|应用|客户端|插件|功能|工作流|workflow|模型|投资分析|项目研究|深度研究|评级|评分|纪要|投委会|\bic\s*memo\b|\bpptx?\b|powerpoint|slides?|幻灯片|演示文稿)/i;
-const DIAGNOSTIC_FAILURE_PATTERN = /(?:报错|错误(?:码|提示)?|故障|异常|失败|打不开|无法(?:打开|连接|下载|上传|导入|同步|发送|运行|启动|读取|识别|转写)|连接不上|卡住|崩溃|闪退|没反应|不工作|不能用|同步不了|排查|诊断|debug|troubleshoot)/i;
+const DIAGNOSTIC_CONTEXT_PATTERN = /(?:\bdomi\b|\bplaud\b|录音|音频|转写|同步|入库|归档|文件|文档|截图|应用|客户端|插件|功能|工作流|workflow|模型|投资分析|项目研究|深度研究|评级|评分|纪要|投委会|\bic\s*memo\b|\bpptx?\b|powerpoint|keynote|slides?|幻灯片|演示文稿|路演材料|汇报材料)/i;
+const DIAGNOSTIC_FAILURE_PATTERN = /(?:报错|错误(?:码|提示)?|故障|异常|失败|打不开|无法(?:打开|连接|下载|上传|导入|同步|发送|运行|启动|读取|识别|转写)|连接不上|卡住|崩溃|闪退|没反应|不工作|不能用|同步不了|丑|不好看|版式(?:很)?差|排版(?:很)?差|排查|诊断|debug|troubleshoot)/i;
 const EXPLICIT_RETRY_REQUEST_PATTERN = /(?:^|[，,。；;！!\n]\s*|(?:请帮我|请你|请|麻烦你?|帮我|烦请|现在|马上)\s*)(?:重新来一遍|再来一次|再做一次|再试一次|恢复执行|继续执行|重新|重做|重试|再次|继续|恢复|再(?=(?:同步|处理|生成|整理|研究|调研|分析|评估|评级|评分|打分|入库|建档|归档|撰写|制作|输出|完成|做)))/gi;
 const RETRY_QUESTION_PATTERN = /(?:吗|么|呢|怎么样|如何|是否|会不会|能否|可否)[？?]?\s*$/i;
 const RETRY_TROUBLESHOOTING_ACTION_PATTERN = /(?:(?:排查|诊断|调试|修复).{0,12}(?:客户端|应用|插件|功能|工作流|模型|脚本|代码|文件|故障|错误|报错)|(?:分析|研究|排查|诊断|定位|查看).{0,10}(?:故障|错误|报错|异常|失败)(?:原因|日志|信息|代码|详情|问题)?|(?:处理|整理|分析|研究).{0,8}(?:错误|报错|异常|故障)(?:日志|信息|代码|原因)|(?:重启|启动|安装|登录|连接).{0,8}(?:客户端|应用|插件|工作流|模型|服务))/i;
@@ -27,7 +27,7 @@ const INVESTMENT_CONTEXT_PATTERN = /(?:投资|上市公司|股票|证券|基本�
 const INVESTMENT_ANALYSIS_ACTION_PATTERN = /(?:分析|研究|评估|估值|前瞻|复盘|解读|预测|建模|拆解|判断|投资意见|投资建议)/i;
 const INVESTMENT_RATING_PATTERN = /(?:(?:项目|公司|企业|标的|创始人|团队).{0,20}(?:评分|评级|打分|投资意见|投资建议)|(?:评分|评级|打分).{0,20}(?:项目|公司|企业|标的|创始人|团队))/i;
 const IC_PATTERN = /(?:\bic\s*memo\b|投委会(?:报告|材料)?|上会材料|决策报告)/i;
-const SLIDES_PATTERN = /(?:\bpptx?\b|powerpoint|slides?|幻灯片|演示文稿)/i;
+const SLIDES_PATTERN = /(?:\bpptx?\b|powerpoint|keynote|slides?|幻灯片|演示文稿|路演材料|汇报(?:材料|演示)?)/i;
 const RADAR_PATTERN = /(?:行业雷达|新闻雷达|行业动态|赛道动态|融资动态|每周动态|本周动态|最新动态|追踪.{0,12}(?:行业|赛道|新闻|融资)|扫描.{0,12}(?:行业|赛道|新闻|融资))/i;
 const TODO_PATTERN = /(?:\btodo\b|待办事项|待办|任务建议|跟进事项|还有什么(?:需要|要)跟进|提醒我)/i;
 const SOURCING_PATTERN = /(?:\bmapping\b|\bmap(?:ping)?\s+(?:founders?|talent|people|companies)|人才地图|人脉地图|创始人地图|(?:找|寻找|搜寻|筛选|推荐).{0,20}(?:创始人|创业者|行业专家|候选人|人才|项目))/i;
@@ -95,7 +95,7 @@ function hasPremiumDomiBusinessContext(request, slidesDeliveryPolicy = "") {
 }
 
 function retryRouteFor(request, slidesDeliveryPolicy = "") {
-  if (slidesDeliveryPolicy || SLIDES_PATTERN.test(request)) return "$domi:investment-analysis";
+  if (slidesDeliveryPolicy || SLIDES_PATTERN.test(request)) return "$domi:slides";
   if (IC_PATTERN.test(request)) return "$domi:ic-memo";
   if (PROJECT_CONTEXT_PATTERN.test(request) && PROJECT_INTAKE_PATTERN.test(request)) {
     return "$domi:domi-router";
@@ -145,7 +145,7 @@ function classifyDomiWechatRequestRaw({
   if (slidesDeliveryPolicy) {
     return {
       policyClass: "premium",
-      route: "$domi:investment-analysis",
+      route: "$domi:slides",
       diagnostic: false,
       isDomiTask: true,
     };

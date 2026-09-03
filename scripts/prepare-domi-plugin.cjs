@@ -77,13 +77,23 @@ function validateSource(sourceRoot) {
   }
   const slidesContractFiles = [
     ["skills", "investment-analysis", "SKILL.md"],
-    ["skills", "investment-analysis", "references", "investment-banking-slides.md"],
-    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"],
-    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style.css"],
-    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "templates.html"],
-    ["skills", "investment-analysis", "scripts", "init_deck.js"],
-    ["skills", "investment-analysis", "scripts", "qa_deck.js"],
-    ["skills", "investment-analysis", "scripts", "export_pdf.js"]
+    ["skills", "slides", "SKILL.md"],
+    ["skills", "slides", "agents", "openai.yaml"],
+    ["skills", "slides", "references", "investment-banking-slides.md"],
+    ["skills", "slides", "references", "morgan-stanley-ibd-template-notes.md"],
+    ["skills", "slides", "assets", "slides", "base-deck.html"],
+    ["skills", "slides", "assets", "slides", "ms-research.css"],
+    ["skills", "slides", "assets", "slides", "page-templates.html"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "style.css"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "templates.html"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "layout-index.json"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "layout-recipes.md"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "chart-recipes.md"],
+    ["skills", "slides", "scripts", "audit_research_deck.js"],
+    ["skills", "slides", "scripts", "init_deck.js"],
+    ["skills", "slides", "scripts", "qa_deck.js"],
+    ["skills", "slides", "scripts", "export_pdf.js"]
   ];
   for (const segments of slidesContractFiles) {
     const requiredPath = path.join(sourceRoot, ...segments);

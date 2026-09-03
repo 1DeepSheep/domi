@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { workbench } from "./bridge";
 import { prepareMarkdownForEditor, restoreMarkdownFromEditor } from "./markdownDialect";
+import { PortableMarkdownClipboard } from "./markdown-clipboard";
 import "./RichMarkdownEditor.css";
 
 type RichMarkdownEditorProps = {
@@ -672,6 +673,7 @@ export default function RichMarkdownEditor({
       }),
       TaskList,
       TaskItem.configure({ nested: true }),
+      PortableMarkdownClipboard,
       imageExtension,
       Markdown.configure({
         markedOptions: { gfm: true, breaks: false }

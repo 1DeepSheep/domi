@@ -555,6 +555,174 @@ test("slides delivery policy and correction count survive the task outbox", asyn
   assert.equal(task.delivery.slidesCorrectionAttempts, 1);
 });
 
+test("Slides questions stay waiting through transient send failure without correction or completion", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-slides-input-request-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const metricsPath = path.join(directory, "metrics.jsonl");
+  let deliveries = 0;
+  const manager = new TaskManager({
+    codex: { startThread: () => fakeThread("slides-input", ["尚未收到项目材料，请先上传报告或底稿，收到后我再制作。 "]) },
+    statePath: path.join(directory, "tasks.json"), metricsPath,
+    threadOptionsFor: () => ({}), preferenceFor: () => ({}), sendTaskText: async () => {},
+    deliverTaskResult: async (task) => {
+      deliveries += 1;
+      assert.equal(task.status, "waiting_user");
+      assert.equal(task.completedAt, "");
+      assert.notEqual(task.delivery.slidesQaPassed, true);
+      if (deliveries === 1) throw new Error("sendmessage temporarily unavailable");
+    },
+  });
+  const task = manager.createTask("owner", "做Slides");
+  manager.enqueue(task, { text: "做Slides", codexInput: "做Slides", wantsFiles: true, slidesDeliveryPolicy: "html_pdf" });
+  await waitFor(() => manager.runningCount === 0 && fs.existsSync(metricsPath));
+  assert.equal(task.status, "waiting_user");
+  assert.equal(task.delivery.status, "pending");
+  assert.equal(task.delivery.awaitingSlidesInput, true);
+  assert.equal(task.delivery.slidesCorrectionAttempts, 0);
+  assert.equal(readJsonLines(metricsPath)[0].status, "waiting_user_pending_delivery");
+  assert.doesNotMatch(task.progress, /已完成|质量门|验收异常/);
+  assert.deepEqual(await manager.flushPendingDeliveries("owner", task.id), [task.id]);
+  assert.equal(task.delivery.status, "delivered");
+  assert.equal(task.status, "waiting_user");
+  assert.equal(task.completedAt, "");
+  assert.equal(task.delivery.slidesDeliveryPolicy, "html_pdf");
+  assert.equal(manager.resolveTask({ senderId: "owner", text: "面向投委会，10页", quotedText: "" }).task.id, task.id);
+  assert.equal(manager.resolveTask({ senderId: "owner", text: "研究一下另一家公司并入库", quotedText: "" }).isNew, true);
+});
+
+test("Slides page edits retain their task and policy before preparation", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-slides-followup-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const manager = new TaskManager({
+    codex: {}, statePath: path.join(directory, "tasks.json"), metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}), preferenceFor: () => ({}), sendTaskText: async () => {}, deliverTaskResult: async () => {},
+  });
+  const waiting = manager.createTask("owner", "另一个待补充任务");
+  waiting.status = "waiting_user";
+  const slides = manager.createTask("owner", "制作Slides");
+  slides.status = "completed";
+  slides.delivery = { status: "delivered", slidesDeliveryPolicy: "html_pdf" };
+  for (const text of ["这两页可以去掉", "这页也可以删掉", "把第2页改一下", "请修改", "请更新", "按上面的要求改一下"]) {
+    const resolved = manager.resolveTask({ senderId: "owner", text, quotedText: "" });
+    assert.equal(resolved.task.id, slides.id, text);
+    assert.equal(resolved.routingReason, "active_slides_revision", text);
+    assert.equal(resolved.task.delivery.slidesDeliveryPolicy, "html_pdf");
+  }
+  assert.equal(manager.resolveTask({ senderId: "owner", text: "生成新的 PPT，加入图表", quotedText: "" }).isNew, true);
+});
+
+test("Slides correction and terminal QA failure never masquerade as delivered or transport-pending", async (t) => {
+  for (const correctionPasses of [false, true]) {
+    await t.test(correctionPasses ? "corrected artifact is delivered" : "second failure is bounded", async (child) => {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-slides-outcome-"));
+      child.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+      const metricsPath = path.join(directory, "metrics.jsonl");
+      let releaseCorrection;
+      const correctionReady = new Promise((resolve) => { releaseCorrection = resolve; });
+      let runs = 0;
+      let deliveries = 0;
+      let manager;
+      const thread = {
+        async runStreamed() {
+          runs += 1;
+          const run = runs;
+          async function* events() {
+            yield { type: "thread.started", thread_id: "slides-thread" };
+            if (run === 2) await correctionReady;
+            yield { type: "item.completed", item: { type: "agent_message", text: `candidate-${run}` } };
+            yield { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } };
+          }
+          return { events: events() };
+        },
+      };
+      manager = new TaskManager({
+        codex: { startThread: () => thread, resumeThread: () => thread },
+        statePath: path.join(directory, "tasks.json"), metricsPath,
+        threadOptionsFor: () => ({}), preferenceFor: () => ({}), sendTaskText: async () => {},
+        deliverTaskResult: async (task, _response, job) => {
+          deliveries += 1;
+          if (!job.slidesCorrectionAttempts) {
+            manager.enqueue(task, { text: "修正Slides", codexInput: "修正Slides", wantsFiles: true, slidesDeliveryPolicy: job.slidesDeliveryPolicy, slidesCorrectionAttempts: 1 });
+            return { status: "correcting", error: "缺少正式PDF" };
+          }
+          return correctionPasses ? undefined : { status: "quality_failed", error: "最终PDF未通过质量门" };
+        },
+      });
+      const task = manager.createTask("owner", "做Slides");
+      manager.enqueue(task, { text: "做Slides", codexInput: "做Slides", wantsFiles: true, slidesDeliveryPolicy: "html_pdf" });
+      await waitFor(() => runs === 2 && fs.existsSync(metricsPath));
+      assert.equal(task.delivery.status, "correcting");
+      assert.equal(task.completedAt, "");
+      assert.equal(readJsonLines(metricsPath)[0].status, "slides_correction_queued");
+      assert.deepEqual(await manager.flushPendingDeliveries("owner", task.id), []);
+      assert.equal(deliveries, 1);
+      releaseCorrection();
+      await waitFor(() => readJsonLines(metricsPath).length === 2 && manager.runningCount === 0);
+      assert.equal(runs, 2);
+      assert.equal(deliveries, 2);
+      assert.equal(task.delivery.status, correctionPasses ? "delivered" : "quality_failed");
+      assert.equal(task.status, correctionPasses ? "completed" : "failed");
+      assert.equal(readJsonLines(metricsPath)[1].status, correctionPasses ? "completed" : "slides_quality_failed");
+      assert.doesNotMatch(task.progress, /等待下一条|自动发送/);
+      assert.deepEqual(await manager.flushPendingDeliveries("owner", task.id), []);
+      assert.equal(deliveries, 2);
+      if (!correctionPasses) {
+        assert.equal(task.completedAt, "");
+        assert.match(task.lastError, /质量门/);
+      }
+    });
+  }
+});
+
+test("Slides stay uncompleted while QA failure notification is deferred and exceptions retain their stage", async (t) => {
+  for (const stage of ["qa_notification", "qa_exception", "validated_transport"]) {
+    await t.test(stage, async (child) => {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-slides-qa-stage-"));
+      child.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+      const statePath = path.join(directory, "tasks.json");
+      const metricsPath = path.join(directory, "metrics.jsonl");
+      let release;
+      const deferredNotification = new Promise((resolve) => { release = resolve; });
+      let validating = false;
+      const manager = new TaskManager({
+        codex: { startThread: () => fakeThread("slides-stage", ["Slides候选产物"]) },
+        statePath, metricsPath, threadOptionsFor: () => ({}), preferenceFor: () => ({}), sendTaskText: async () => {},
+        deliverTaskResult: async (task) => {
+          validating = true;
+          await deferredNotification;
+          if (stage === "qa_notification") return { status: "quality_failed", error: "PDF 质量未通过" };
+          if (stage === "validated_transport") task.delivery.slidesQaPassed = true;
+          throw new Error(stage === "qa_exception" ? "读取验收文件失败" : "sendmessage network unavailable");
+        },
+      });
+      const task = manager.createTask("owner", "修改 Slides");
+      manager.enqueue(task, { text: "修改Slides", codexInput: "修改Slides", wantsFiles: true, slidesDeliveryPolicy: "html_pdf", slidesCorrectionAttempts: 1 });
+      await waitFor(() => validating);
+      assert.equal(task.status, "running");
+      assert.equal(task.completedAt, "");
+      assert.match(task.progress, /验收中/);
+      const persisted = JSON.parse(fs.readFileSync(statePath, "utf8")).tasks[task.id];
+      assert.equal(persisted.status, "running");
+      assert.equal(persisted.completedAt, "");
+      release();
+      await waitFor(() => manager.runningCount === 0 && fs.existsSync(metricsPath));
+      if (stage === "validated_transport") {
+        assert.equal(task.status, "completed");
+        assert.equal(task.delivery.status, "pending");
+        assert.ok(task.completedAt);
+        assert.equal(readJsonLines(metricsPath)[0].status, "completed_pending_delivery");
+      } else {
+        assert.equal(task.status, "failed");
+        assert.equal(task.delivery.status, "quality_failed");
+        assert.equal(task.completedAt, "");
+        assert.doesNotMatch(task.progress, /自动发送|已完成/);
+        assert.equal(readJsonLines(metricsPath)[0].status, "slides_quality_failed");
+        assert.deepEqual(await manager.flushPendingDeliveries("owner", task.id), []);
+      }
+    });
+  }
+});
+
 test("a targeted pending-delivery flush never sends a different task result", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-targeted-outbox-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

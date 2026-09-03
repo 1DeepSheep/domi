@@ -122,6 +122,7 @@ import {
   DomiPlaudSnapshot,
   DomiPlaudSyncResult,
   DomiProject,
+  DomiSlidesDeliveryPolicy,
   DomiSnapshot,
   DomiTask,
   DomiTaskBoardSnapshot,
@@ -136,6 +137,7 @@ import {
   PodcastJob,
   PodcastProcessResult,
   RadarSourceSnapshot,
+  SkillHubUserSkill,
   UpdateStatus
 } from "./env";
 import {
@@ -143,6 +145,7 @@ import {
   resolveDomiModelPolicy
 } from "./model-policy";
 import { sidebarUpdateEntry } from "./update-entry";
+import { newSkillHubCandidatesForReview } from "./skill-hub-review";
 import {
   documentLibraryExpansionPath,
   documentLibraryHasDocumentPath,
@@ -183,6 +186,7 @@ const RichMarkdownEditor = lazy(() => import("./RichMarkdownEditor"));
 const SetupCenter = lazy(() => import("./SetupCenter"));
 const MessageContent = lazy(() => import("./MessageContent"));
 const RadarSourceManager = lazy(() => import("./RadarSourceManager"));
+const SkillHubManager = lazy(() => import("./SkillHubManager"));
 
 type Role = "user" | "assistant" | "system";
 type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents";
@@ -859,6 +863,10 @@ type Message = {
   entityFinalizationMode?: EntityFinalizationMode;
   entityExecutionIsolated?: boolean;
   executionCodexThreadId?: string;
+  /** Fail-closed Slides contract retained across renderer/main restarts. */
+  slidesDeliveryPolicy?: DomiSlidesDeliveryPolicy;
+  /** This turn requested missing Slides input; no deliverable was completed. */
+  awaitingSlidesInput?: boolean;
 };
 
 type Thread = {
@@ -1810,12 +1818,31 @@ const workflowIconMap: Record<string, typeof FileText> = {
 
 const NEW_TASK_QUOTE = "We (the whole industry, not just OpenAI) are building a brain for the world.";
 
+function userSkillWorkflow(skill: SkillHubUserSkill): Workflow {
+  return {
+    id: skill.id,
+    title: skill.title,
+    shortTitle: skill.title,
+    skill: `$${skill.name}`,
+    skillPath: skill.path,
+    description: skill.description,
+    output: `按 $${skill.name} 约定生成的结果`,
+    defaultPrompt: `请使用 $${skill.name} 完成我的任务。`,
+    source: "user"
+  };
+}
+
 function App() {
   const { confirm: requestConfirmation, confirmDialog: appConfirmDialog } = useAppConfirm();
   const [threads, setThreads] = useState<Thread[]>(initialThreads);
   const [activeThreadId, setActiveThreadId] = useState(initialThreads[0].id);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("conversation");
   const [skillsExpanded, setSkillsExpanded] = useState(true);
+  const [skillHubOpen, setSkillHubOpen] = useState(false);
+  const [skillHubReviewCandidateIds, setSkillHubReviewCandidateIds] = useState<string[]>([]);
+  const [skillHubSkills, setSkillHubSkills] = useState<SkillHubUserSkill[]>([]);
+  const [skillHubReady, setSkillHubReady] = useState(false);
+  const [skillHubLoadError, setSkillHubLoadError] = useState("");
   const [documentLibrarySidebarExpanded, setDocumentLibrarySidebarExpanded] = useState(false);
   const [composerDraftsByThread, setComposerDraftsByThread] = useState<
     Record<string, ComposerDraft>
@@ -2001,6 +2028,9 @@ function App() {
   const chatScrollRestoreFrameRef = useRef<number | null>(null);
   const chatScrollRestoreTimersRef = useRef<number[]>([]);
   const threadSelectionIntentRef = useRef(0);
+  const skillCreatorBaselinesRef = useRef(
+    new Map<string, Promise<Set<string>>>()
+  );
   const threadListRef = useRef<HTMLDivElement>(null);
   const activeThreadIdRef = useRef(activeThreadId);
   const workspaceViewRef = useRef<WorkspaceView>(workspaceView);
@@ -2490,6 +2520,17 @@ function App() {
     });
   }
 
+  function replaceComposerDraft(threadId: string, draft: Partial<ComposerDraft>) {
+    setComposerDraftsByThread((current) => ({
+      ...current,
+      [threadId]: {
+        ...EMPTY_COMPOSER_DRAFT,
+        ...draft,
+        attachments: draft.attachments || []
+      }
+    }));
+  }
+
   function clearSubmittedComposerDraft(
     threadId: string,
     submittedInput: string,
@@ -2576,9 +2617,16 @@ function App() {
   );
   const selectedDocumentLibraryPath = markdownDocument?.path || pdfDocument?.path || "";
 
+  const userSkillWorkflows = useMemo<Workflow[]>(() => skillHubSkills
+    .filter((skill) => skill.available !== false)
+    .map(userSkillWorkflow), [skillHubSkills]);
+  const allWorkflows = useMemo(
+    () => [...workflows, ...userSkillWorkflows],
+    [userSkillWorkflows]
+  );
   const selectedWorkflow = useMemo(
-    () => workflows.find((workflow) => workflow.id === selectedWorkflowId),
-    [selectedWorkflowId]
+    () => allWorkflows.find((workflow) => workflow.id === selectedWorkflowId),
+    [allWorkflows, selectedWorkflowId]
   );
   const plaudEnabled = appSettings?.plaudConnectionMode === "enabled";
   const todoDocumentLabel = appSettings?.storageBackend === "local"
@@ -2617,6 +2665,7 @@ function App() {
       runKind?: DomiModelPolicyRunKind;
       useDomiPlugin?: boolean;
       requestText?: string;
+      domiSlidesDeliveryPolicy?: DomiSlidesDeliveryPolicy | "";
       model?: string;
       reasoningEffort?: string;
       serviceTier?: string;
@@ -2629,7 +2678,7 @@ function App() {
       useDomiPlugin: options.useDomiPlugin,
       requestText: semanticRequestText,
       domiSlidesDeliveryPolicy: options.useDomiPlugin
-        ? domiSlidesDeliveryPolicyForText(semanticRequestText)
+        ? options.domiSlidesDeliveryPolicy ?? domiSlidesDeliveryPolicyForText(semanticRequestText)
         : "",
       models: codexStatus?.models,
       userModel: options.model ?? model,
@@ -2887,8 +2936,7 @@ function App() {
     ? managedTaskCount
     : taskBoardSuggestions.length + snoozedTaskSuggestions.length)
     + queuedTaskItems.length
-    + failedTaskThreads.length
-    + runningTaskThreads.length;
+    + failedTaskThreads.length;
 
   const weeklyNewsDomains = useMemo(() => normalizeRadarDomains(
     appSettings?.radarFollowedDomains,
@@ -3207,6 +3255,27 @@ function App() {
     if (workspaceView !== "tasks" || !hasNativeWorkbench || domiTaskLoading) return;
     if (!domiTaskBoard) void refreshDomiTaskBoard();
   }, [workspaceView, domiTaskBoard, domiTaskLoading]);
+
+  useEffect(() => {
+    let cancelled = false;
+    workbench.listSkillHub().then((result) => {
+      if (cancelled) return;
+      if (!result.ok) {
+        setSkillHubLoadError(result.error || "Skill Hub 未能读取本机用户 Skill。");
+        return;
+      }
+      setSkillHubSkills(result.skills);
+      setSkillHubLoadError("");
+      setSkillHubReady(true);
+    }).catch((error) => {
+      if (!cancelled) {
+        setSkillHubLoadError(error instanceof Error ? error.message : String(error));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!appSettings || plaudEnabled) return;
@@ -3536,7 +3605,10 @@ function App() {
         patchThread(thread.id, { codexThreadId: recoveryThreadId });
         let reboundRunId = "";
         try {
-          let result = await workbench.recoverCodexThread(recoveryThreadId);
+          const recoveryRequest = {
+            slidesDeliveryPolicy: latestAssistant.slidesDeliveryPolicy
+          };
+          let result = await workbench.recoverCodexThread(recoveryThreadId, recoveryRequest);
           if (!result.ok) {
             blockRecoveredThread(thread, latestAssistant, result.error || "无法读取上一轮运行状态。");
             continue;
@@ -3568,10 +3640,10 @@ function App() {
 
             // The run may have finished between the snapshot and bind handshake.
             // Re-read once, then accept only a terminal disposition.
-            result = await workbench.recoverCodexThread(recoveryThreadId);
+            result = await workbench.recoverCodexThread(recoveryThreadId, recoveryRequest);
             clearRecoveredRun(thread.id, reboundRunId);
             reboundRunId = "";
-            if (!result.ok || !["completed", "stopped", "failed"].includes(result.status)) {
+            if (!result.ok || !["completed", "waiting-input", "stopped", "failed"].includes(result.status)) {
               blockRecoveredThread(
                 thread,
                 latestAssistant,
@@ -3579,6 +3651,23 @@ function App() {
               );
               continue;
             }
+          }
+
+          if (result.status === "waiting-input") {
+            patchMessage(latestAssistant.id, {
+              content: result.output || latestAssistant.content,
+              status: "done",
+              awaitingSlidesInput: true
+            });
+            pauseRecoveredThreadQueue(thread.id);
+            addTimeline(thread.id, {
+              runId: result.runId || `recovery-${thread.id}`,
+              title: "等待补充 Slides 材料",
+              detail: "在当前对话回复即可继续；尚未交付演示文稿",
+              kind: "event",
+              status: "waiting-input"
+            });
+            continue;
           }
 
           if (result.status === "completed") {
@@ -3707,7 +3796,20 @@ function App() {
         continue;
       }
       if (pausedQueuedSubmissionIds.has(queued.id)) continue;
-      const workflow = workflows.find((item) => item.id === queued.workflowId);
+      const queuedUserSkill = queued.workflowId?.startsWith("user-skill:");
+      // A restored user-Skill task must wait for the persisted Skill Hub
+      // registry. Treating an unresolved id as a generic task would silently
+      // drop the user's selected Skill and produce the wrong deliverable.
+      if (queuedUserSkill && !skillHubReady) continue;
+      const workflow = allWorkflows.find((item) => item.id === queued.workflowId);
+      if (queuedUserSkill && !workflow) {
+        setThreadAttachmentError(
+          threadId,
+          `用户 Skill“${queued.workflowId}”当前不可用；该排队任务已暂停，请在 Skill Hub 重新导入后重试。`
+        );
+        setPausedQueuedSubmissionIds((current) => new Set(current).add(queued.id));
+        continue;
+      }
       let accepted = false;
       let acceptedSubmission = queued;
       void submitToCodex(workflow, queued.input, {
@@ -3788,10 +3890,12 @@ function App() {
     }
   }, [
     activeRunsByThread,
+    allWorkflows,
     appSettings,
     codexRecoveryReady,
     pausedQueuedSubmissionIds,
     queuedSubmissionsByThread,
+    skillHubReady,
     storageReady,
     threads
   ]);
@@ -5952,6 +6056,8 @@ function App() {
 
   async function chooseWorkflow(workflow: Workflow) {
     if (!await navigateWorkspace("conversation")) return;
+    // Explicitly selecting an official Skill opts into its plugin and QA.
+    if (workflow.skill.startsWith("$domi:")) setDomiPluginEnabled(true);
     setSelectedWorkflowId(workflow.id);
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }
@@ -7015,7 +7121,7 @@ function App() {
       workspacePath: workspace.workspacePath
     };
     if (!thread.manualTitle) {
-      const workflow = workflows.find((item) => item.id === context.workflowId);
+      const workflow = allWorkflows.find((item) => item.id === context.workflowId);
       patch.title = `${workflow?.title || (result.entityType === "project" ? "项目任务" : "人物任务")}：${result.name}`;
     }
     const boundThread = { ...thread, ...patch };
@@ -7127,7 +7233,7 @@ function App() {
         };
         runContextRef.current.set(payload.runId, context);
 
-        if (payload.type !== "completed" && payload.type !== "stopped" && payload.type !== "failed") {
+        if (payload.type !== "completed" && payload.type !== "waiting-input" && payload.type !== "stopped" && payload.type !== "failed") {
           setActiveRunsByThread((current) => ({
             ...current,
             [recoveredThread.id]: payload.runId
@@ -7312,7 +7418,7 @@ function App() {
       }
     }
 
-    if (payload.type === "completed" || payload.type === "stopped" || payload.type === "failed") {
+    if (payload.type === "completed" || payload.type === "waiting-input" || payload.type === "stopped" || payload.type === "failed") {
       if (completedRunIdsRef.current.has(payload.runId)) return;
       completedRunIdsRef.current.add(payload.runId);
       setAssistantInteractions((current) => current.map((interaction) =>
@@ -7335,6 +7441,7 @@ function App() {
               ? "任务已停止。"
             : payload.error || "Codex 执行失败。"),
         status: payload.type === "failed" ? "error" : "done",
+        awaitingSlidesInput: payload.type === "waiting-input",
         runCompletedAt,
         runEventCount: payload.eventCount
       });
@@ -7352,6 +7459,8 @@ function App() {
         title:
           payload.type === "completed"
             ? "执行完成"
+            : payload.type === "waiting-input"
+              ? "等待补充 Slides 材料"
             : payload.type === "stopped"
               ? "执行已停止"
               : "执行失败",
@@ -7361,6 +7470,17 @@ function App() {
         kind: payload.type === "failed" ? "error" : "assistant",
         status: payload.type
       });
+      const skillCreatorTask = context.workflowId === "skill-creator"
+        || Boolean(threadsRef.current.find((thread) => thread.id === context.threadId)
+          ?.messages.some((message) => message.workflowId === "skill-creator"));
+      if (payload.type === "completed" && skillCreatorTask) {
+        void refreshSkillsAfterCreatorRun(context.threadId).catch((error) => {
+          workbench.reportRendererIssue({
+            kind: "document-operation",
+            message: `Skill Hub 刷新失败：${error instanceof Error ? error.message : String(error)}`
+          });
+        });
+      }
       const releaseRun = () => {
         settlingThreadIdsRef.current.delete(context.threadId);
         runContextRef.current.delete(payload.runId);
@@ -7371,6 +7491,13 @@ function App() {
           return next;
         });
       };
+      if (payload.type === "waiting-input") {
+        // Pause later queued work, but do not re-enqueue the original request:
+        // its next turn must be the user's answer to the clarification.
+        pauseThreadQueueAfterTerminal({ ...context, queuedSubmission: undefined });
+        releaseRun();
+        return;
+      }
       if (payload.type !== "completed") {
         // Rebuild and pause the queue before releasing the per-thread run lock.
         // Otherwise the next item can start in the small gap before the failed
@@ -7730,6 +7857,37 @@ function App() {
       ?? options.queuedSubmission?.repositoryIdentity
       ?? queueRepositoryIdentity(appSettingsRef.current);
     try {
+      const requestedUserSkillId = workflow?.source === "user"
+        ? workflow.id
+        : options.queuedSubmission?.workflowId?.startsWith("user-skill:")
+          ? options.queuedSubmission.workflowId
+          : "";
+      if (requestedUserSkillId && !skillHubReady) {
+        throw new Error(
+          skillHubLoadError
+            ? `Skill Hub 读取失败，不能安全启动用户 Skill：${skillHubLoadError}`
+            : "Skill Hub 正在读取本机用户 Skill，请稍后重试；当前输入已保留。"
+        );
+      }
+      if (requestedUserSkillId && !workflow) {
+        throw new Error(`用户 Skill“${requestedUserSkillId}”当前不可用，请在 Skill Hub 重新导入后重试。`);
+      }
+      if (requestedUserSkillId) {
+        // The user may have edited or renamed SKILL.md outside domi since the
+        // sidebar loaded. Resolve the stable id against live metadata before
+        // constructing the prompt; never keep invoking a stale alias.
+        const refreshed = await workbench.listSkillHub();
+        if (!refreshed.ok) throw new Error(refreshed.error || "无法检查用户 Skill，请稍后重试。");
+        setSkillHubSkills(refreshed.skills);
+        const currentSkill = refreshed.skills.find((skill) => skill.id === requestedUserSkillId);
+        if (!currentSkill || currentSkill.available === false) {
+          throw new Error(currentSkill?.error || "所选用户 Skill 已不可用，请在 Skill Hub 重新扫描并修复。");
+        }
+        if (refreshed.activation === "after-current-tasks") {
+          throw new Error("Skill 目录正在等待当前任务结束后刷新；当前输入已保留，请稍后重试。");
+        }
+        workflow = userSkillWorkflow(currentSkill);
+      }
       if (!codexRecoveryReady) {
         throw new Error("Codex 任务恢复检查尚未完成，请稍后重试；当前输入已保留。");
       }
@@ -7766,9 +7924,27 @@ function App() {
     if (!messageText) {
       return;
     }
+    const previousAssistant = [...sourceThread.messages].reverse()
+      .find((message) => message.role === "assistant");
+    const previousSlidesDeliveryPolicy = previousAssistant?.slidesDeliveryPolicy || "";
+    const awaitingSlidesInput = previousAssistant?.awaitingSlidesInput === true
+      && (!workflow || workflow.id === "slides");
+    const slidesDeliveryPolicy = useDomiPlugin && workflow?.source !== "system"
+      ? domiSlidesDeliveryPolicyForText(
+          messageText,
+          selectedAttachments.map((attachment) => attachment.name || attachment.path),
+          previousSlidesDeliveryPolicy,
+          workflow?.id === "slides",
+          awaitingSlidesInput
+        ) as DomiSlidesDeliveryPolicy | ""
+      : "";
     const runModelPolicy = resolveRunModelPolicy(workflow?.id, {
       useDomiPlugin,
-      requestText: messageText,
+      domiSlidesDeliveryPolicy: slidesDeliveryPolicy,
+      requestText: [
+        messageText,
+        ...selectedAttachments.map((attachment) => attachment.name || attachment.path)
+      ].filter(Boolean).join("\n"),
       model: options.model,
       reasoningEffort: options.reasoningEffort,
       serviceTier: options.serviceTier
@@ -7946,7 +8122,6 @@ function App() {
       targetThread.id
     );
     const displayText = options.displayText?.trim() || messageText;
-
     const runId = createId("run");
     const runStartedAt = Date.now();
     const userMessage: Message = {
@@ -7970,7 +8145,8 @@ function App() {
       runId,
       runStartedAt,
       entityFinalizationMode: execution.entityFinalizationMode,
-      entityExecutionIsolated: privateCodexExecution
+      entityExecutionIsolated: privateCodexExecution,
+      ...(slidesDeliveryPolicy ? { slidesDeliveryPolicy } : {})
     };
 
     appendMessageToThread(targetThread.id, userMessage);
@@ -8025,7 +8201,10 @@ function App() {
         executionNotice
       ].filter(Boolean).join("\n\n"),
       useDomiPlugin,
-      requestOrigin
+      requestOrigin,
+      selectedAttachments.map((attachment) => attachment.name || attachment.path),
+      previousSlidesDeliveryPolicy,
+      awaitingSlidesInput
     );
     const prompt = selectedAttachments.length
       ? `${basePrompt}\n\n本次任务附带以下本地材料，请直接读取并使用：\n${selectedAttachments
@@ -8050,6 +8229,7 @@ function App() {
         model: runModelPolicy.model,
         reasoningEffort: runModelPolicy.reasoningEffort,
         serviceTier: runModelPolicy.serviceTier,
+        ...(slidesDeliveryPolicy ? { slidesDeliveryPolicy } : {}),
         background: options.background,
         workspacePath: execution.workspacePath,
         externalType: execution.externalType,
@@ -8110,18 +8290,34 @@ function App() {
       patchMessage(assistantId, {
         content: result.output,
         status: "done",
+        awaitingSlidesInput: result.awaitingSlidesInput === true,
         runCompletedAt
       });
       patchThread(targetThread.id, {
         updatedAt: nowLabel(),
         lastActiveAt: runCompletedAt,
-        hasUnreadCompletion: !isThreadActivelyVisible(targetThread.id)
+        hasUnreadCompletion: !result.awaitingSlidesInput && !isThreadActivelyVisible(targetThread.id)
       });
       const context = runContextRef.current.get(runId);
       if (context) {
+        const skillCreatorTask = context.workflowId === "skill-creator"
+          || Boolean(threadsRef.current.find((thread) => thread.id === context.threadId)
+            ?.messages.some((message) => message.workflowId === "skill-creator"));
+        if (skillCreatorTask) {
+          void refreshSkillsAfterCreatorRun(context.threadId).catch((error) => {
+            workbench.reportRendererIssue({
+              kind: "document-operation",
+              message: `Skill Hub 刷新失败：${error instanceof Error ? error.message : String(error)}`
+            });
+          });
+        }
         settlingThreadIdsRef.current.add(targetThread.id);
         try {
-          await finalizeEntityBinding(context, result.output);
+          if (result.awaitingSlidesInput) {
+            pauseThreadQueueAfterTerminal({ ...context, queuedSubmission: undefined });
+          } else {
+            await finalizeEntityBinding(context, result.output);
+          }
         } catch (error) {
           workbench.reportRendererIssue({
             kind: "document-operation",
@@ -8164,12 +8360,36 @@ function App() {
     const submittedInput = input;
     const submittedAttachments = [...attachments];
     const submittedActiveDocumentPath = selectedDocumentLibraryPath || undefined;
-    const plaudContinuation = !selectedWorkflow
+    const selectedUserSkillId = selectedWorkflowId?.startsWith("user-skill:")
+      ? selectedWorkflowId
+      : "";
+    if (selectedUserSkillId && !skillHubReady) {
+      setThreadAttachmentError(
+        sourceThreadId,
+        skillHubLoadError
+          ? `Skill Hub 读取失败，不能安全启动用户 Skill：${skillHubLoadError}`
+          : "Skill Hub 正在读取本机用户 Skill，请稍后重试；当前输入已保留。"
+      );
+      return;
+    }
+    if (selectedUserSkillId && !selectedWorkflow) {
+      setThreadAttachmentError(
+        sourceThreadId,
+        `用户 Skill“${selectedUserSkillId}”当前不可用，请在 Skill Hub 重新导入后重试。`
+      );
+      return;
+    }
+    const skillCreatorContinuation = !selectedWorkflow
+      && sourceThread.messages.some((message) => message.workflowId === "skill-creator")
+      ? workflows.find((workflow) => workflow.id === "skill-creator")
+      : undefined;
+    const effectiveSelectedWorkflow = selectedWorkflow || skillCreatorContinuation;
+    const plaudContinuation = !effectiveSelectedWorkflow
       ? pendingPlaudContinuation(sourceThread, plaudSnapshot?.items || [])
       : null;
     const submittedWorkflow = plaudContinuation
       ? workflows.find((workflow) => workflow.id === "domi-router")
-      : selectedWorkflow;
+      : effectiveSelectedWorkflow;
     const submittedRequest = plaudContinuation
       ? plaudContinuationPrompt(
           plaudNotesWorkflowRequest(plaudContinuation.item),
@@ -8183,6 +8403,11 @@ function App() {
           resumeCodexThreadId: plaudContinuation.executionCodexThreadId,
           privateCodexContinuation: Boolean(plaudContinuation.executionCodexThreadId)
         }
+      : skillCreatorContinuation
+        ? {
+            displayText: submittedInput,
+            workflowContinuation: true
+          }
       : {};
     if (attachmentImportCount > 0) {
       setThreadAttachmentError(sourceThreadId, "附件仍在导入，请等待完成后再发送。");
@@ -8267,7 +8492,10 @@ function App() {
       try {
         return resolveRunModelPolicy(workflow?.id, {
           useDomiPlugin: domiPluginEnabled,
-          requestText: messageText
+          requestText: [
+            messageText,
+            ...queuedAttachments.map((attachment) => attachment.name || attachment.path)
+          ].filter(Boolean).join("\n")
         });
       } catch (error) {
         setThreadAttachmentError(
@@ -8510,7 +8738,7 @@ function App() {
     setComposerSuggestionIndex((current) => (current + 1) % COMPOSER_SUGGESTIONS.length);
   }
 
-  async function createThread() {
+  async function createThread(seed?: Partial<ComposerDraft>) {
     if (!await navigateWorkspace("conversation")) return;
     const currentDraftIsUnused = isUnusedDraftThread(activeThread)
       && !input.trim()
@@ -8518,9 +8746,10 @@ function App() {
       && !selectedWorkflowId;
     if (currentDraftIsUnused) {
       applyNewThreadAgentDefaults();
+      if (seed) replaceComposerDraft(activeThread.id, seed);
       setThreadMenuId(null);
       window.requestAnimationFrame(() => composerRef.current?.focus());
-      return;
+      return activeThread.id;
     }
 
     const reusableDraft = threads.find(
@@ -8528,11 +8757,12 @@ function App() {
     );
     if (reusableDraft) {
       activateThreadNow(reusableDraft.id);
-      clearComposerDraft(reusableDraft.id);
+      if (seed) replaceComposerDraft(reusableDraft.id, seed);
+      else clearComposerDraft(reusableDraft.id);
       applyNewThreadAgentDefaults();
       setThreadMenuId(null);
       window.requestAnimationFrame(() => composerRef.current?.focus());
-      return;
+      return reusableDraft.id;
     }
 
     if (creatingThreadRef.current) return;
@@ -8566,13 +8796,89 @@ function App() {
         ...current.filter((thread) => thread.id !== nextThread.id)
       ]);
       activateThreadNow(nextThread.id);
-      clearComposerDraft(nextThread.id);
+      if (seed) replaceComposerDraft(nextThread.id, seed);
+      else clearComposerDraft(nextThread.id);
       applyNewThreadAgentDefaults();
       setThreadMenuId(null);
       window.requestAnimationFrame(() => composerRef.current?.focus());
+      return nextThread.id;
     } finally {
       creatingThreadRef.current = false;
     }
+  }
+
+  async function openNewSkillConversation() {
+    setSkillHubOpen(false);
+    setSkillHubReviewCandidateIds([]);
+    const threadId = await createThread({ selectedWorkflowId: "skill-creator" });
+    if (!threadId) return;
+    // Establish the pre-creation snapshot before Codex can write a new Skill;
+    // otherwise a very fast creator run could appear in both sides of the
+    // comparison and never be registered in Skill Hub.
+    try {
+      const baselineResult = await workbench.scanSkillHub();
+      if (baselineResult.ok) {
+        const baseline = new Set(baselineResult.candidates.map((candidate) => candidate.id));
+        skillCreatorBaselinesRef.current.set(threadId, Promise.resolve(baseline));
+      }
+    } catch {
+      // Fail closed: without a trustworthy baseline, never auto-register every
+      // unimported local Skill after this conversation completes.
+    }
+    const thread = threadsRef.current.find((candidate) => candidate.id === threadId);
+    const workflow = workflows.find((candidate) => candidate.id === "skill-creator");
+    if (!thread || !workflow) return;
+    try {
+      await submitToCodex(workflow, "请先通过对话引导我创建一个新的 Skill。", {
+        thread,
+        attachments: [],
+        requestOrigin: "user",
+        userInstructionText: "请先通过对话引导我创建一个新的 Skill。",
+        useDomiPlugin: domiPluginEnabled,
+        model,
+        reasoningEffort,
+        serviceTier
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setThreadAttachmentError(threadId, `Skill 创建引导未能启动：${message}`);
+      workbench.reportRendererIssue({
+        kind: "codex-run",
+        message: `Skill 创建引导未能启动：${message}`
+      });
+    }
+  }
+
+  async function refreshSkillsAfterCreatorRun(threadId: string) {
+    const baselinePromise = skillCreatorBaselinesRef.current.get(threadId);
+    if (!baselinePromise) {
+      const current = await workbench.scanSkillHub();
+      if (current.ok) {
+        setSkillHubSkills(current.imported);
+        setSkillHubLoadError("");
+        setSkillHubReady(true);
+      }
+      return;
+    }
+    const baseline = await baselinePromise;
+    const scanned = await workbench.scanSkillHub();
+    if (!scanned.ok) return;
+    setSkillHubLoadError("");
+    setSkillHubReady(true);
+    setSkillHubSkills(scanned.imported);
+    const reviewCandidateIds = newSkillHubCandidatesForReview(scanned.candidates, baseline);
+    if (!reviewCandidateIds.length) {
+      // skill-creator often asks one or more questions before writing files.
+      // Retain the baseline so a later turn in this same task can detect them.
+      return;
+    }
+    // A new directory is not proof that this conversation created it. Keep
+    // every candidate unchecked and let the user choose what to import.
+    skillCreatorBaselinesRef.current.set(threadId, Promise.resolve(
+      new Set(scanned.candidates.map((candidate) => candidate.id))
+    ));
+    setSkillHubReviewCandidateIds(reviewCandidateIds);
+    setSkillHubOpen(true);
   }
 
   async function stopRun() {
@@ -12011,7 +12317,7 @@ function App() {
         {variant === "dock" && activeQueuedSubmissions.length > 0 && (
           <div className="queued-submissions" aria-label="待执行消息" aria-live="polite">
             {activeQueuedSubmissions.map((queued, index) => {
-              const workflow = workflows.find((item) => item.id === queued.workflowId);
+              const workflow = allWorkflows.find((item) => item.id === queued.workflowId);
               const repositoryMismatch = Boolean(
                 appSettings
                 && (!queued.repositoryIdentity
@@ -12359,7 +12665,7 @@ function App() {
           </div>
         </div>
 
-        <button className="new-thread" type="button" onClick={createThread}>
+        <button className="new-thread" type="button" onClick={() => void createThread()}>
           <span><Plus size={17} /></span>
           <strong>新建任务</strong>
         </button>
@@ -12593,24 +12899,37 @@ function App() {
         </nav>
 
         <div className={`sidebar-workflow-section ${skillsExpanded ? "open" : ""}`}>
-          <button
-            className="sidebar-section-toggle"
-            type="button"
-            onClick={() => setSkillsExpanded((current) => !current)}
-            aria-expanded={skillsExpanded}
-          >
-            <Atom className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
-            <strong>技能</strong>
-            <span className="sidebar-nav-meta">
-              <span className="sidebar-nav-disclosure" aria-hidden="true">
-                <ChevronRight size={14} strokeWidth={2} />
+          <div className="sidebar-skill-hub-header">
+            <button
+              className="sidebar-section-toggle"
+              type="button"
+              onClick={() => setSkillsExpanded((current) => !current)}
+              aria-expanded={skillsExpanded}
+            >
+              <Atom className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
+              <strong>Skill Hub</strong>
+              <span className="sidebar-nav-meta">
+                <span className="sidebar-nav-disclosure" aria-hidden="true">
+                  <ChevronRight size={14} strokeWidth={2} />
+                </span>
               </span>
-            </span>
-          </button>
+            </button>
+            <button
+              className="sidebar-skill-hub-manage"
+              type="button"
+              onClick={() => setSkillHubOpen(true)}
+              title="管理 Skill Hub"
+              aria-label="管理 Skill Hub"
+            >
+              <Settings size={13} />
+            </button>
+          </div>
           {skillsExpanded && (
             <div className="sidebar-workflows">
-              {workflows.filter((workflow) => !workflow.hidden).map((workflow) => {
-                const Icon = workflowIconMap[workflow.id] || FileText;
+              {[...workflows.filter((workflow) => !workflow.hidden), ...userSkillWorkflows].map((workflow) => {
+                const Icon = workflow.source === "user"
+                  ? Sparkles
+                  : workflowIconMap[workflow.id] || FileText;
                 return (
                   <button
                     key={workflow.id}
@@ -12959,7 +13278,7 @@ function App() {
                 >
                   <div className="transcript">
                     {visibleMessages.map((message) => {
-                      const workflow = workflows.find((item) => item.id === message.workflowId);
+                      const workflow = allWorkflows.find((item) => item.id === message.workflowId);
                       const isLatestAssistant = message.role === "assistant"
                         && message.id === [...visibleMessages]
                           .reverse()
@@ -13466,6 +13785,23 @@ function App() {
           onSave={saveAppSettings}
           onLogin={startChatGPTLogin}
           onRefresh={refreshCodex}
+        />
+      </Suspense>
+    )}
+    {skillHubOpen && (
+      <Suspense fallback={<div className="lazy-overlay"><RefreshCw className="spinning" size={20} />正在加载 Skill Hub</div>}>
+        <SkillHubManager
+          onClose={() => {
+            setSkillHubOpen(false);
+            setSkillHubReviewCandidateIds([]);
+          }}
+          onCreateSkill={() => void openNewSkillConversation()}
+          reviewCandidateIds={skillHubReviewCandidateIds}
+          onImported={(skills) => {
+            setSkillHubSkills(skills);
+            setSkillHubLoadError("");
+            setSkillHubReady(true);
+          }}
         />
       </Suspense>
     )}

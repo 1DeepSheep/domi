@@ -139,17 +139,29 @@ function validateRequiredPluginContracts(pluginRoot) {
   const requiredFiles = [
     ["skills", "domi-router", "SKILL.md"],
     ["skills", "investment-analysis", "SKILL.md"],
-    ["skills", "investment-analysis", "references", "investment-banking-slides.md"],
-    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"],
-    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style.css"],
-    ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "templates.html"],
-    ["skills", "investment-analysis", "scripts", "init_deck.js"],
-    ["skills", "investment-analysis", "scripts", "qa_deck.js"],
-    ["skills", "investment-analysis", "scripts", "export_pdf.js"]
+    ["skills", "slides", "SKILL.md"],
+    ["skills", "slides", "agents", "openai.yaml"],
+    ["skills", "slides", "references", "investment-banking-slides.md"],
+    ["skills", "slides", "references", "morgan-stanley-ibd-template-notes.md"],
+    ["skills", "slides", "assets", "slides", "base-deck.html"],
+    ["skills", "slides", "assets", "slides", "ms-research.css"],
+    ["skills", "slides", "assets", "slides", "page-templates.html"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "style.css"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "templates.html"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "layout-index.json"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "layout-recipes.md"],
+    ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "chart-recipes.md"],
+    ["skills", "slides", "scripts", "audit_research_deck.js"],
+    ["skills", "slides", "scripts", "init_deck.js"],
+    ["skills", "slides", "scripts", "qa_deck.js"],
+    ["skills", "slides", "scripts", "export_pdf.js"]
   ];
   for (const segments of requiredFiles) {
     const requiredPath = path.join(pluginRoot, ...segments);
-    if (!fs.existsSync(requiredPath)) {
+    if (!fs.existsSync(requiredPath)
+      || !fs.lstatSync(requiredPath).isFile()
+      || fs.statSync(requiredPath).size === 0) {
       throw new Error(`Extracted plugin is missing required contract: ${segments.join("/")}`);
     }
   }
@@ -188,12 +200,22 @@ class DomiPluginUpdater {
     const manifest = state?.candidateManifest
       || (state?.status === "available" ? state.manifest : null);
     if (!manifest?.sha256) return null;
-    const root = path.join(this.updatesRoot, manifest.sha256, "plugin");
-    const pluginManifest = readJson(path.join(root, ".codex-plugin", "plugin.json"));
-    if (pluginManifest?.name !== "domi" || pluginManifest.version !== manifest.version) {
+    try {
+      // A cache can survive a client rollback or come from a newer local
+      // client sharing this marketplace. Recheck compatibility and the current
+      // resource contract instead of bypassing the signed-release gate.
+      if (!validateManifest(manifest, this.clientVersion).compatible) return null;
+      const root = path.join(this.updatesRoot, manifest.sha256, "plugin");
+      const pluginManifest = readJson(path.join(root, ".codex-plugin", "plugin.json"));
+      if (pluginManifest?.name !== "domi" || pluginManifest.version !== manifest.version) return null;
+      validateExtractedTree(root);
+      validateRequiredPluginContracts(root);
+      return this.candidate(root, pluginManifest, manifest);
+    } catch {
+      // Offline or damaged caches must not prevent the bundled release from
+      // starting; the next successful download repairs this cache atomically.
       return null;
     }
-    return this.candidate(root, pluginManifest, manifest);
   }
 
   candidate(root, pluginManifest, releaseManifest) {
@@ -247,8 +269,14 @@ class DomiPluginUpdater {
     const finalPluginRoot = path.join(finalRoot, "plugin");
     const existingManifest = readJson(path.join(finalPluginRoot, ".codex-plugin", "plugin.json"));
     if (existingManifest?.name === "domi" && existingManifest.version === manifest.version) {
-      validateRequiredPluginContracts(finalPluginRoot);
-      return { root: finalPluginRoot, pluginManifest: existingManifest };
+      try {
+        validateExtractedTree(finalPluginRoot);
+        validateRequiredPluginContracts(finalPluginRoot);
+        return { root: finalPluginRoot, pluginManifest: existingManifest };
+      } catch {
+        // The archive already passed its signed SHA-256 check. Re-extract it
+        // to staging instead of repeatedly rejecting the same broken cache.
+      }
     }
 
     const stagingRoot = fs.mkdtempSync(path.join(this.updatesRoot, ".staging-"));

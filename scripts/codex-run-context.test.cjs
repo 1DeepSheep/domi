@@ -1,15 +1,101 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const {
+  bindCodexRunToTurn,
+  codexClientIdleForSkillReload,
   codexRunExecutionMode,
   codexTurnContext,
   normalizeCodexRoutingParams,
   partitionCodexRuns,
+  prepareCodexRunForNextTurn,
   requestCodexTurn,
   resolveCodexActiveRun,
   runtimeAdditionalContext,
   threadPersistenceOptions
 } = require("../electron/codex-run-context.cjs");
+
+test("Skill reload waits for both preflight and active tasks", () => {
+  const active = new Map();
+  const starting = new Set(["task-a"]);
+  assert.equal(codexClientIdleForSkillReload(active, starting), false);
+  active.set("task-a", { runId: "task-a" });
+  starting.delete("task-a");
+  assert.equal(codexClientIdleForSkillReload(active, starting), false);
+  starting.add("task-b");
+  active.delete("task-a");
+  assert.equal(codexClientIdleForSkillReload(active, starting), false);
+  starting.delete("task-b");
+  assert.equal(codexClientIdleForSkillReload(active, starting), true);
+});
+
+test("Skill reload coordination guards the real task preflight and its cleanup", () => {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  assert.match(main, /startingCodexRunIds\.add\(runId\);\s*try\s*\{\s*await ensureCodexRuntimeReady/);
+  assert.match(main, /finally\s*\{\s*startingCodexRunIds\.delete\(runId\);\s*schedulePendingSkillHubCodexReload\(\)/);
+  assert.match(main, /if \(activeRuns\.has\(runId\) \|\| startingCodexRunIds\.has\(runId\)\)/);
+  assert.match(main, /function activateImportedSkillsWhenSafe\(\)[\s\S]*?codexClientIdleForSkillReload\(activeRuns, startingCodexRunIds\)/);
+  assert.match(main, /startsWith\("user-skill:"\) && skillHubCodexReloadPending/);
+  assert.match(main, /用户 Skill 更新正在等待当前任务结束后生效/);
+  assert.match(main, /\["skill-creator", "[^"\n]*Codex 用户 Skill 目录/);
+});
+
+test("safe app updates wait for a task in preflight without counting it twice once active", () => {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const implementation = main.match(/function criticalUpdateActivity\(\) \{[\s\S]*?\n\}\n/)[0];
+  const context = {
+    activeRuns: new Map(),
+    startingCodexRunIds: new Set(["preparing-task"]),
+    pendingRunPostProcessing: new Set(),
+    domiPluginActivationGate: null,
+    domiIntegration: { criticalOperationSnapshot: () => ({ total: 0 }) },
+    serviceCoordinator: { snapshot: () => [] }
+  };
+  vm.createContext(context);
+  vm.runInContext(implementation, context);
+  assert.equal(context.criticalUpdateActivity().total, 1);
+  assert.equal(context.criticalUpdateActivity().counts.codexPreflight, 1);
+  context.activeRuns.set("preparing-task", {});
+  assert.equal(context.criticalUpdateActivity().total, 1);
+  assert.equal(context.criticalUpdateActivity().counts.codexPreflight, 0);
+  context.startingCodexRunIds.clear();
+  assert.equal(context.criticalUpdateActivity().total, 1);
+  context.activeRuns.clear();
+  assert.equal(context.criticalUpdateActivity().total, 0);
+  context.domiPluginActivationGate = { pending: Promise.resolve() };
+  assert.equal(context.criticalUpdateActivity().total, 1);
+  context.domiPluginActivationGate = { pending: null, readers: 1 };
+  assert.equal(context.criticalUpdateActivity().total, 1);
+});
+
+test("a correction accepts early next-turn events without replaying the retired turn", () => {
+  const run = { runId: "run-slides", threadId: "thread-slides", turnId: "turn-original" };
+  prepareCodexRunForNextTurn(run);
+  assert.equal(run.turnId, "");
+  const stale = resolveCodexActiveRun([run], {
+    threadId: run.threadId, turnId: "turn-original"
+  });
+  assert.equal(stale.run, null);
+  assert.equal(stale.rejectionReason, "retired-turn-id");
+  const early = resolveCodexActiveRun([run], {
+    threadId: run.threadId, turnId: "turn-correction"
+  });
+  assert.equal(early.run, run);
+  assert.equal(early.matchedBy, "threadId");
+  assert.equal(bindCodexRunToTurn(run, "turn-correction"), true);
+  // A delayed turn/start response from the original call must not overwrite
+  // the next turn, even when its completion arrived before that response.
+  assert.equal(bindCodexRunToTurn(run, "turn-original"), false);
+  assert.equal(run.turnId, "turn-correction");
+  assert.equal(resolveCodexActiveRun([run], {
+    threadId: run.threadId, turnId: "turn-correction"
+  }).run, run);
+  assert.equal(resolveCodexActiveRun([run], {
+    threadId: run.threadId, turnId: "turn-original"
+  }).run, null);
+});
 
 test("background runs create ephemeral Codex threads", () => {
   assert.deepEqual(threadPersistenceOptions({ ephemeral: true }), { ephemeral: true });
