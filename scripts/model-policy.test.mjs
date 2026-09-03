@@ -28,6 +28,25 @@ const models = [
   }
 ];
 
+test("disabled domi never injects a Slides overlay without its host gate", () => {
+  assert.doesNotMatch(workflowPrompt(undefined, "生成行业 Slides", "", false), /DOMI_SLIDES_POLICY/);
+  const personal = { id: "user-slides", source: "user", skill: "$personal", skillPath: "/tmp/personal", defaultPrompt: "制作 Slides" };
+  assert.doesNotMatch(workflowPrompt(personal, "生成行业 Slides", "", false), /DOMI_SLIDES_POLICY/);
+});
+
+test("answering a necessary Slides clarification preserves format and quality policy", () => {
+  assert.equal(domiSlidesDeliveryPolicyForText("面向投委会，10页", [], "explicit_pptx_preserve_template", false, true), "explicit_pptx_preserve_template");
+  for (const response of ["这是研究报告，面向投委会", "研究报告请见附件", "原始分析材料已经上传", "research report attached"]) {
+    assert.equal(domiSlidesDeliveryPolicyForText(response, [], "html_pdf", false, true), "html_pdf", response);
+  }
+  assert.equal(domiSlidesDeliveryPolicyForText("面向投委会，10页", [], "html_pdf", false, false), "");
+  assert.match(workflowPrompt(undefined, "面向投委会，10页", "", true, "user", [], "html_pdf", true), /DOMI_SLIDES_POLICY/);
+  assert.equal(domiSlidesDeliveryPolicyForText("先不做 slides", [], "html_pdf", false, true), "");
+  for (const request of ["研究一下另一家公司", "给这个项目评级", "把旧纪要发给我", "安排明天的会议", "搜索最近的行业动态", "同步录音"]) {
+    assert.equal(domiSlidesDeliveryPolicyForText(request, [], "html_pdf", false, true), "", request);
+  }
+});
+
 function resolve(workflowId, overrides = {}) {
   return resolveDomiModelPolicy({
     workflowId,
@@ -69,6 +88,7 @@ test("externally deliverable workflows use Sol max and preserve the user speed t
     "desk-research",
     "investment-review",
     "investment-analysis",
+    "slides",
     "ic-memo"
   ];
   for (const workflowId of workflows) {
@@ -230,7 +250,7 @@ test("retry wording does not upgrade troubleshooting or mechanical reruns", () =
   }
 });
 
-test("explicit compact workflows outrank premium-looking natural language", () => {
+test("explicit compact workflows outrank premium-looking natural language except Slides overlays", () => {
   for (const workflowId of ["investment-radar", "task"]) {
     assert.deepEqual(resolve(workflowId, {
       useDomiPlugin: true,
@@ -242,6 +262,17 @@ test("explicit compact workflows outrank premium-looking natural language", () =
       serviceTier: "standard"
     });
   }
+  assert.deepEqual(resolve("task", {
+    useDomiPlugin: true,
+    requestText: "把结果做成 slides",
+    domiSlidesDeliveryPolicy: "html_pdf",
+    userServiceTier: "flex"
+  }), {
+    policyClass: "premium",
+    model: DOMI_PREMIUM_MODEL_ID,
+    reasoningEffort: "max",
+    serviceTier: "flex"
+  });
 });
 
 test("project-library phrasing and substantive revisions remain premium", () => {
@@ -318,12 +349,14 @@ test("every renderer entry point uses the centralized policy before starting or 
 
   const submit = segment("async function submitToCodexInternal", "function handleSubmit");
   assert.match(submit, /resolveRunModelPolicy\(workflow\?\.id/);
-  assert.match(submit, /useDomiPlugin,\s*\n\s*requestText: messageText/);
+  assert.match(submit, /useDomiPlugin,\s*\n\s*domiSlidesDeliveryPolicy: slidesDeliveryPolicy,\s*\n\s*requestText: \[/);
+  assert.match(submit, /selectedAttachments\.map\(\(attachment\) => attachment\.name \|\| attachment\.path\)/);
   assert.match(submit, /model: runModelPolicy\.model/);
 
   const queue = segment("function enqueueSubmission", "function removeQueuedSubmission");
   assert.match(queue, /resolveRunModelPolicy\(workflow\?\.id\s*,/);
-  assert.match(queue, /useDomiPlugin: domiPluginEnabled,\s*\n\s*requestText: messageText/);
+  assert.match(queue, /useDomiPlugin: domiPluginEnabled,\s*\n\s*requestText: \[/);
+  assert.match(queue, /queuedAttachments\.map\(\(attachment\) => attachment\.name \|\| attachment\.path\)/);
   assert.match(queue, /model: runModelPolicy\.model/);
 
   const resolver = segment("function resolveRunModelPolicy", "const deferredThreadQuery");
@@ -359,13 +392,13 @@ test("context efficiency is lossless and never lowers premium reasoning quality"
   });
 });
 
-test("free-form domi investment slides are hard-routed to the Morgan Stanley HTML and PDF workflow", () => {
+test("free-form domi slides are hard-routed to the standalone Morgan Stanley HTML and PDF workflow", () => {
   const request = "把 H 股 AI 制药三家公司技术与管线做成 PPT";
   const prompt = workflowPrompt(undefined, request, "", true);
 
   assert.equal(domiSlidesDeliveryPolicyForText(request), "html_pdf");
-  assert.match(prompt, /DOMI_INVESTMENT_SLIDES_POLICY_V1/);
-  assert.match(prompt, /\$domi:investment-analysis/);
+  assert.match(prompt, /DOMI_SLIDES_POLICY_V2/);
+  assert.match(prompt, /\$domi:slides/);
   assert.match(prompt, /investment-banking-slides\.md/);
   assert.match(prompt, /Morgan Stanley/);
   assert.match(prompt, /HTML.*PDF/);
@@ -377,8 +410,36 @@ test("selected research workflows retain their skill while applying the domi sli
   const prompt = workflowPrompt(workflow, "请生成一份行业 slides", "", true);
 
   assert.match(prompt, /必须采用 domi 插件中的 Skill：\$domi:desk-research/);
-  assert.match(prompt, /\$domi:investment-analysis/);
-  assert.match(prompt, /若当前另有显式选择的 domi 研究 Skill，保留其研究职责/);
+  assert.match(prompt, /\$domi:slides/);
+  assert.match(prompt, /若本轮另有明确选择的 domi 研究／IC／用户 Skill，保留其内容职责/);
+});
+
+test("a selected personal Skill keeps its content role while Slides adds premium QA", () => {
+  const personalWorkflow = {
+    id: "user:my-sector-skill",
+    title: "我的赛道 Skill",
+    shortTitle: "我的 Skill",
+    skill: "$my-sector-skill",
+    description: "个人研究方法",
+    output: "行业结论",
+    defaultPrompt: "请研究",
+    source: "user"
+  };
+  const request = "请把结论做成 slides";
+  const prompt = workflowPrompt(personalWorkflow, request, "", true);
+  assert.match(prompt, /个人 Skill：\$my-sector-skill/);
+  assert.match(prompt, /\$domi:slides/);
+  assert.deepEqual(resolve(personalWorkflow.id, {
+    useDomiPlugin: true,
+    requestText: request,
+    domiSlidesDeliveryPolicy: domiSlidesDeliveryPolicyForText(request),
+    userServiceTier: "flex"
+  }), {
+    policyClass: "premium",
+    model: DOMI_PREMIUM_MODEL_ID,
+    reasoningEffort: "max",
+    serviceTier: "flex"
+  });
 });
 
 test("explicit editable PowerPoint requests permit PPTX but keep the domi style and QA contract", () => {
@@ -386,7 +447,7 @@ test("explicit editable PowerPoint requests permit PPTX but keep the domi style 
   const prompt = workflowPrompt(undefined, request, "", true);
 
   assert.equal(domiSlidesDeliveryPolicyForText(request), "explicit_pptx");
-  assert.match(prompt, /允许交付 \.pptx/);
+  assert.match(prompt, /额外交付 \.pptx/);
   assert.match(prompt, /Morgan Stanley/);
   assert.match(prompt, /contact sheet/);
   assert.doesNotMatch(prompt, /不得创建或交付 \.pptx/);
@@ -394,11 +455,78 @@ test("explicit editable PowerPoint requests permit PPTX but keep the domi style 
 
 test("PowerPoint troubleshooting does not trigger a deck-generation workflow", () => {
   assert.equal(domiSlidesDeliveryPolicyForText("为什么这个 PPT 打不开？"), "");
-  assert.equal(domiSlidesDeliveryPolicyForText("请修改这个 PPT 并保持原模板"), "");
+  assert.equal(domiSlidesDeliveryPolicyForText("为什么之前生成的 PPT 这么丑？"), "");
+  assert.equal(
+    domiSlidesDeliveryPolicyForText("请修改这个 PPT 并保持原模板", ["existing-deck.pptx"]),
+    "explicit_pptx_preserve_template"
+  );
+  assert.equal(
+    domiSlidesDeliveryPolicyForText("改第二页", ["existing-deck.pptx"]),
+    "explicit_pptx"
+  );
+  for (const request of ["用 Keynote 做一份公司介绍", "制作路演材料", "做个汇报"]) {
+    assert.equal(domiSlidesDeliveryPolicyForText(request), "html_pdf", request);
+  }
+  const preservePrompt = workflowPrompt(
+    undefined,
+    "请修改第二页并保持原模板",
+    "",
+    true,
+    "user",
+    ["existing-deck.pptx"]
+  );
+  assert.match(preservePrompt, /不得覆盖原主题/);
+  assert.match(preservePrompt, /仍必须使用 \$domi:slides/);
   assert.equal(
     domiSlidesDeliveryPolicyForText("为什么这个 PPT 这么丑，请修复改进"),
     "html_pdf",
   );
   const prompt = workflowPrompt(undefined, "为什么这个 PPT 打不开？", "", true);
-  assert.doesNotMatch(prompt, /DOMI_INVESTMENT_SLIDES_POLICY_V1/);
+  assert.doesNotMatch(prompt, /DOMI_SLIDES_POLICY_V2/);
+});
+
+test("Slides routing distinguishes current edits from explanations, file operations and negation", () => {
+  for (const request of [
+    "PPT 是什么？", "怎么制作 PPT？", "请告诉我怎么制作 PPT", "为什么修改 PPT 后文字溢出了？",
+    "帮我打开之前做的 slides", "把上次生成的 slides 发给我",
+    "请检查 slides 的排版", "不要生成 slides，只分析报告",
+    "修复 PPT 生成失败的问题", "创建一个做 slides 的 Skill",
+  ]) {
+    assert.equal(domiSlidesDeliveryPolicyForText(request), "", request);
+    assert.equal(domiSlidesDeliveryPolicyForText(request, [], "html_pdf"), "", request);
+  }
+  assert.equal(domiSlidesDeliveryPolicyForText("请做 slides，不要 PPTX"), "html_pdf");
+  assert.equal(domiSlidesDeliveryPolicyForText("请做 slides，不要用 PPTX"), "html_pdf");
+  assert.equal(domiSlidesDeliveryPolicyForText("不要 PPTX，只要 PDF", [], "explicit_pptx"), "html_pdf");
+  assert.equal(domiSlidesDeliveryPolicyForText("请修改 slides，保留原模板"), "html_pdf_preserve_template");
+  assert.equal(domiSlidesDeliveryPolicyForText("请修改第二页，保留原有模板", ["deck.pptx"]), "explicit_pptx_preserve_template");
+  for (const request of ["这页删掉", "这两页可以去掉", "这页也可以删掉", "把第2页改一下", "标题改短一些", "字体放大", "请修改", "请更新", "按上面的要求改一下"]) {
+    assert.equal(domiSlidesDeliveryPolicyForText(request, [], "html_pdf"), "html_pdf", request);
+    assert.equal(domiSlidesDeliveryPolicyForText(request, [], "explicit_pptx_preserve_template"), "explicit_pptx_preserve_template", request);
+    assert.equal(domiSlidesDeliveryPolicyForText(request), "", request);
+  }
+  assert.equal(domiSlidesDeliveryPolicyForText("修改 slides，不要保留原模板", [], "html_pdf_preserve_template"), "html_pdf");
+  for (const request of ["研究另一家公司", "同步待办事项", "明天有哪些会议", "请修改我的Skill", "请修改代码"]) {
+    assert.equal(domiSlidesDeliveryPolicyForText(request, [], "html_pdf"), "", request);
+  }
+  assert.equal(domiSlidesDeliveryPolicyForText("生成新的 PPT，加入图表", [], "explicit_pptx_preserve_template"), "html_pdf");
+});
+
+test("selected Slides workflow uses its topic while diagnostics and skill creation remain read-only", () => {
+  assert.equal(domiSlidesDeliveryPolicyForText("AI 行业年度复盘", [], "", true), "html_pdf");
+  assert.equal(domiSlidesDeliveryPolicyForText("为什么 PPT 打不开？", [], "", true), "");
+  assert.equal(domiSlidesDeliveryPolicyForText("这个PPT太丑", [], "", true), "");
+  assert.equal(domiSlidesDeliveryPolicyForText("不要生成 slides，只分析报告", [], "", true), "");
+  const slides = workflows.find((item) => item.id === "slides");
+  assert.match(workflowPrompt(slides, "AI 行业年度复盘", "", true), /DOMI_SLIDES_POLICY_V2/);
+  const creator = { id: "skill-creator", title: "新建 Skill", source: "system", skill: "$skill-creator" };
+  assert.doesNotMatch(workflowPrompt(creator, "创建一个做 slides 的 Skill", "", true), /DOMI_SLIDES_POLICY_V2/);
+});
+
+test("contextual revisions and compact workflows retain the Slides overlay", () => {
+  assert.match(workflowPrompt(undefined, "这页删掉", "", true, "user", [], "html_pdf"), /DOMI_SLIDES_POLICY_V2/);
+  for (const id of ["investment-radar", "task"]) {
+    const workflow = workflows.find((item) => item.id === id);
+    assert.match(workflowPrompt(workflow, "把结果做成 slides", "", true), /DOMI_SLIDES_POLICY_V2/);
+  }
 });

@@ -2,9 +2,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const {
   DomiPluginManager,
+  DomiPluginActivationGate,
   checkRemoteWithinBudget,
   compareVersions,
   selectPreferredCandidate
@@ -121,7 +123,206 @@ async function verifyBoundedRemoteStartup() {
   assert.equal(immediate.checked, true);
 }
 
-verifyBoundedRemoteStartup()
+async function verifyActivationGate() {
+  let busy = true;
+  let current = { manifest: { version: "0.3.20" } };
+  let ensureCalls = 0;
+  let resetCalls = 0;
+  let finishEnsure;
+  let finishReset;
+  const gate = new DomiPluginActivationGate({
+    isBusy: () => busy,
+    installedInfo: () => current,
+    ensure: () => {
+      ensureCalls += 1;
+      return new Promise((resolve) => { finishEnsure = resolve; });
+    },
+    onActivated: () => {
+      resetCalls += 1;
+      return new Promise((resolve) => { finishReset = resolve; });
+    }
+  });
+  const deferred = await gate.ensureWhenIdle({ enabled: true });
+  assert.equal(deferred.ok, true);
+  assert.equal(deferred.deferred, true);
+  assert.equal(deferred.version, "0.3.20");
+  assert.equal(ensureCalls, 0);
+  assert.equal(resetCalls, 0);
+  current = null;
+  const firstInstallWhileBusy = await gate.ensureWhenIdle({ enabled: true });
+  assert.equal(firstInstallWhileBusy.ok, false);
+  assert.match(firstInstallWhileBusy.error, /尚未安装/);
+  assert.equal(ensureCalls, 0);
+  assert.equal((await gate.ensureWhenIdle({ enabled: false })).ok, true);
+  assert.equal(gate.pending, null);
+
+  busy = false;
+  const activation = gate.ensureWhenIdle({ enabled: true });
+  assert.ok(gate.pending, "activation slot is claimed before the first async yield");
+  busy = true; // A new task arrives while plugin installation is starting.
+  assert.equal(gate.ensureWhenIdle({ enabled: true }), activation);
+  let taskEnteredClient = false;
+  const waitingTask = gate.waitForActivation().then(() => { taskEnteredClient = true; });
+  await Promise.resolve();
+  assert.equal(ensureCalls, 1);
+  assert.equal(taskEnteredClient, false);
+  finishEnsure({ ok: true, updated: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resetCalls, 1);
+  assert.equal(taskEnteredClient, false, "new task must wait through client reset too");
+  finishReset();
+  await Promise.all([activation, waitingTask]);
+  assert.equal(taskEnteredClient, true);
+  assert.equal(gate.pending, null);
+
+  let attempts = 0;
+  const failingGate = new DomiPluginActivationGate({
+    isBusy: () => false,
+    installedInfo: () => current,
+    ensure: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("installation failed; rollback complete");
+      return { ok: true, updated: false };
+    },
+    onActivated: () => assert.fail("failed install must not reset the client")
+  });
+  const failedActivation = failingGate.ensureWhenIdle({ enabled: true });
+  await Promise.all([
+    assert.rejects(failedActivation, /rollback complete/),
+    assert.rejects(failingGate.waitForActivation(), /rollback complete/)
+  ]);
+  assert.equal(failingGate.pending, null, "failure releases the slot for retry");
+  assert.equal((await failingGate.ensureWhenIdle({ enabled: true })).ok, true);
+  const missingBundleGate = new DomiPluginActivationGate({
+    isBusy: () => false,
+    installedInfo: () => null,
+    ensure: async () => ({ ok: false, error: "安装包未包含 domi 插件。" }),
+    onActivated: () => assert.fail("an incomplete installation must not reset the client")
+  });
+  const missingBundle = missingBundleGate.ensureWhenIdle({ enabled: true });
+  await assert.rejects(missingBundleGate.waitForActivation(), /未包含/);
+  assert.equal((await missingBundle).ok, false);
+  assert.equal(missingBundleGate.pending, null);
+
+  // Execute the production health-check function, not a reimplementation:
+  // a busy first installation must not produce a false healthy result.
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const implementation = main.match(/async function runCodexCheck\([\s\S]*?\n\}\n/)[0];
+  const context = {
+    process: { env: {} }, app: { isPackaged: true },
+    ensureDemoWorkspace() {}, ensureCodexRuntimeReady: async () => {},
+    throwIfCodexCheckAborted() {}, codexCheckTimeout: (_deadline, maximum) => maximum,
+    getAppSettings: () => ({ load: () => ({ settings: { codexPath: "codex" } }) }),
+    getCodexRuntime: () => ({ authMode: "chatgpt", codexPath: "codex", env: {} }),
+    resolveCodexBinary: () => "codex", codexEnvironment: () => ({}),
+    getDomiPluginActivationGate: () => gate,
+    execFileAsync: async () => ({ stdout: "codex test" }),
+    CODEX_VERSION_CHECK_TIMEOUT_MS: 100, CODEX_HEALTH_REQUEST_TIMEOUT_MS: 100,
+    demoWorkspace: "/isolated-test-workspace", appendRuntimeLog() {},
+    isSelectedCodexConnectionReady: () => true,
+    resetCodexClient: () => assert.fail("runCodexCheck cannot reset after releasing the activation slot"),
+    getCodexClient: () => ({ request: async (method) => method === "account/read"
+      ? { account: { type: "chatgpt" }, requiresOpenaiAuth: false }
+      : method === "model/list" ? { data: [] } : { config: {} } })
+  };
+  vm.createContext(context);
+  vm.runInContext(implementation, context);
+  const notReady = await context.runCodexCheck({});
+  assert.equal(notReady.ok, false);
+  assert.equal(notReady.pluginSetup.ok, false);
+  assert.match(notReady.error, /尚未安装/);
+  current = { manifest: { version: "0.3.20" } };
+  const readyWithExisting = await context.runCodexCheck({});
+  assert.equal(readyWithExisting.ok, true);
+  assert.equal(readyWithExisting.pluginSetup.deferred, true);
+  assert.equal(ensureCalls, 1, "busy connection checks do not install/remove plugins");
+  assert.equal(resetCalls, 1);
+  const realRun = main.slice(main.indexOf("async function runCodex(sender, payload)"), main.indexOf("async function stopCodex("));
+  assert.match(realRun, /await getDomiPluginActivationGate\(\)\.waitForActivation\(\);\s*const client = getCodexClient\(\)/);
+  assert.match(main, /isBusy: \(\) => updateRestartPreparing\s*\|\| !codexClientIdleForSkillReload\(activeRuns, startingCodexRunIds\)/);
+}
+
+async function verifyRecoveryReaderLease() {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const implementation = main.match(/async function recoverCodexThread\([\s\S]*?\n\}\n/)[0];
+  const events = [];
+  let finishActivation;
+  let finishRead;
+  let rejectRead;
+  const gate = new DomiPluginActivationGate({
+    isBusy: () => false,
+    installedInfo: () => ({ manifest: { version: "installed" } }),
+    ensure: () => {
+      events.push("install");
+      return new Promise((resolve) => { finishActivation = resolve; });
+    },
+    onActivated: () => { events.push("reset"); }
+  });
+  const context = {
+    activeRuns: new Map(),
+    resolveCodexActiveRun: () => ({ run: null, ambiguousCandidates: [] }),
+    getDomiPluginActivationGate: () => gate,
+    getCodexClient: () => ({ request: (method, params) => {
+      assert.equal(method, "thread/read", "recovery must never write, send, or start a task");
+      assert.equal(params.threadId, "recovered-thread");
+      assert.equal(params.includeTurns, true);
+      events.push("read");
+      return new Promise((resolve, reject) => { finishRead = resolve; rejectRead = reject; });
+    } }),
+    classifyCodexTurnStatus: require("../electron/codex-turn-status.cjs").classifyCodexTurnStatus,
+    normalizedSlidesDeliveryPolicy: () => null
+  };
+  const completedResponse = { thread: { turns: [{
+    id: "last-turn", status: "completed", items: [{
+      type: "agentMessage", phase: "final_answer", text: "Original completed result"
+    }]
+  }] } };
+  vm.createContext(context);
+  vm.runInContext(implementation, context);
+
+  const readingFirst = context.recoverCodexThread("recovered-thread");
+  assert.equal(gate.readers, 1);
+  const deferred = await gate.ensureWhenIdle({ enabled: true });
+  assert.equal(deferred.deferred, true);
+  assert.deepEqual(events, ["read"], "activation cannot remove plugins or reset during recovery");
+  finishRead(completedResponse);
+  const firstResult = await readingFirst;
+  assert.equal(firstResult.ok, true);
+  assert.equal(firstResult.status, "completed");
+  assert.equal(firstResult.output, "Original completed result");
+  assert.equal(gate.readers, 0);
+
+  const activationFirst = gate.ensureWhenIdle({ enabled: true });
+  const readingAfter = context.recoverCodexThread("recovered-thread");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["read", "install"]);
+  assert.equal(gate.readers, 1);
+  finishActivation({ ok: true, updated: true });
+  await activationFirst;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["read", "install", "reset", "read"]);
+  finishRead(completedResponse);
+  const secondResult = await readingAfter;
+  assert.equal(secondResult.ok, true);
+  assert.equal(secondResult.status, "completed");
+  assert.equal(secondResult.output, firstResult.output);
+  assert.equal(gate.readers, 0);
+
+  const failedRead = context.recoverCodexThread("recovered-thread");
+  await new Promise((resolve) => setImmediate(resolve));
+  rejectRead(new Error("temporary read failure"));
+  const failure = await failedRead;
+  assert.equal(failure.ok, false);
+  assert.equal(failure.status, "unknown", "a diagnostic error must not report the task failed");
+  assert.equal(gate.readers, 0, "read exceptions release the lease");
+  const retryActivation = gate.ensureWhenIdle({ enabled: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  finishActivation({ ok: true, updated: false });
+  assert.equal((await retryActivation).ok, true);
+  assert.equal(gate.pending, null);
+}
+
+Promise.all([verifyBoundedRemoteStartup(), verifyActivationGate(), verifyRecoveryReaderLease()])
   .then(() => console.log("domi plugin manager tests passed."))
   .catch((error) => {
     console.error(error);

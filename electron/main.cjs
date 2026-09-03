@@ -31,13 +31,20 @@ const {
   feishuMarkdownSourceCandidates,
   safeFeishuExportContext
 } = require("./feishu-document-intent.cjs");
-const { DomiPluginManager } = require("./domi-plugin-manager.cjs");
+const { DomiPluginActivationGate, DomiPluginManager } = require("./domi-plugin-manager.cjs");
 const {
   AppSettingsService,
   parseCalendarRecipients
 } = require("./app-settings.cjs");
 const { UpdateService } = require("./update-service.cjs");
 const { ServiceCoordinator } = require("./service-coordinator.cjs");
+const { SkillHubService } = require("./skill-hub.cjs");
+const {
+  normalizedSlidesDeliveryPolicy,
+  slidesDeliveryCorrectionPrompt,
+  validateSlidesDeliveryOutput
+} = require("./slides-delivery.cjs");
+const { isSlidesInputRequest } = require("../services/wechat-bridge/src/slides-response-policy.cjs");
 const {
   classifyCodexTurnStatus,
   codexReconnectNotice
@@ -50,9 +57,12 @@ const {
   runUsageSnapshot
 } = require("./codex-token-usage.cjs");
 const {
+  bindCodexRunToTurn,
+  codexClientIdleForSkillReload,
   codexRunExecutionMode,
   normalizeCodexRoutingParams,
   partitionCodexRuns,
+  prepareCodexRunForNextTurn,
   requestCodexTurn,
   resolveCodexActiveRun,
   threadPersistenceOptions
@@ -114,6 +124,7 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 const activeRuns = new Map();
+const startingCodexRunIds = new Set();
 const liveCodexThreads = new Map();
 const resolvedCodexUserInputs = new Map();
 const pendingRunPostProcessing = new Set();
@@ -151,6 +162,7 @@ let documentLibraryCache = {
 };
 let documentSearchService = null;
 const externalDomiWorkflows = new Map([
+  ["skill-creator", "按你的确认在 Codex 用户 Skill 目录创建并验证个人 Skill；不会修改 domi 官方 Skill"],
   ["domi-analyst", "使用 domi-AI分析师，并可能读取当前 domi 资料库"],
   ["domi-router", "访问 PLAUD、domi 恢复队列和当前资料库，并可能按工作流更新记录"],
   ["plaud-connection-assist", "检查 domi 内置音频运行时和 PLAUD 专用浏览器 Profile，并协助完成用户自己的 PLAUD 登录"],
@@ -193,10 +205,13 @@ let codexRuntimeReadinessPromise = null;
 let stateStore = null;
 let domiIntegration = null;
 let domiPluginManager = null;
+let domiPluginActivationGate = null;
 let appSettings = null;
 let codexBootstrap = null;
 let codexRuntimeManager = null;
 let updateService = null;
+let skillHubService = null;
+let skillHubCodexReloadPending = false;
 const serviceCoordinator = new ServiceCoordinator();
 
 if (!hasSingleInstanceLock) {
@@ -290,6 +305,47 @@ function getDomiPluginManager() {
     });
   }
   return domiPluginManager;
+}
+
+function domiOfficialSkillNames() {
+  try {
+    const manager = getDomiPluginManager();
+    const plugin = manager.installedInfo() || manager.bundledInfo();
+    const skillRoot = plugin?.root ? path.join(plugin.root, "skills") : "";
+    if (!skillRoot || !fs.existsSync(skillRoot)) return [];
+    return fs.readdirSync(skillRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(skillRoot, entry.name, "SKILL.md")))
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+function getDomiPluginActivationGate() {
+  if (!domiPluginActivationGate) {
+    domiPluginActivationGate = new DomiPluginActivationGate({
+      isBusy: () => updateRestartPreparing
+        || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds),
+      installedInfo: () => getDomiPluginManager().installedInfo(),
+      ensure: (request) => getDomiPluginManager().ensure(request),
+      onActivated: () => resetCodexClient()
+    });
+  }
+  return domiPluginActivationGate;
+}
+
+function getSkillHubService() {
+  if (!skillHubService) {
+    skillHubService = new SkillHubService({
+      userDataPath: brandPaths.userDataPath,
+      officialSkillNames: domiOfficialSkillNames()
+    });
+  } else {
+    // The managed domi plugin can update independently while the app is open.
+    // Refresh this display-only conflict set for every Skill Hub operation.
+    skillHubService.setOfficialSkillNames(domiOfficialSkillNames());
+  }
+  return skillHubService;
 }
 
 function getCodexRuntime() {
@@ -1418,6 +1474,9 @@ function criticalUpdateActivity() {
     .filter((entry) => entry.inFlight).length;
   const counts = {
     codex: activeRuns.size,
+    codexPreflight: [...startingCodexRunIds].filter((runId) => !activeRuns.has(runId)).length,
+    pluginActivation: domiPluginActivationGate?.pending ? 1 : 0,
+    pluginReaders: Number(domiPluginActivationGate?.readers || 0),
     postProcessing: pendingRunPostProcessing.size,
     coordinated: coordinatedOperations,
     domi: Number(domiOperations.total || 0)
@@ -2136,13 +2195,15 @@ function finishRun(run, type, details = {}) {
   activeRuns.delete(run.runId);
 
   const stopped = type === "stopped";
-  const ok = type === "completed" || stopped;
+  const awaitingSlidesInput = type === "waiting-input";
+  const ok = type === "completed" || stopped || awaitingSlidesInput;
   const usage = run.tokenUsageTracker?.samples > 0
     ? runUsageSnapshot(run.tokenUsageTracker, type === "completed")
     : null;
   const result = {
     ok,
     stopped,
+    awaitingSlidesInput,
     runId: run.runId,
     threadId: run.threadId,
     turnId: run.turnId,
@@ -2187,6 +2248,118 @@ function finishRun(run, type, details = {}) {
   });
   run.resolve(result);
   queueRunPostProcessing(run, type, finishedAt);
+  schedulePendingSkillHubCodexReload();
+}
+
+async function completeRunThroughSlidesDeliveryGate(run) {
+  if (run.finished) return;
+  const policy = normalizedSlidesDeliveryPolicy(run.slidesDeliveryPolicy);
+  if (!policy) {
+    finishRun(run, "completed");
+    return;
+  }
+  // A clarification ends this turn, not the deliverable. Do not spend the one
+  // repair attempt, archive a question as research, or mark artifact QA passed.
+  if (isSlidesInputRequest(run.output)) {
+    finishRun(run, "waiting-input");
+    return;
+  }
+
+  let validation;
+  try {
+    validation = validateSlidesDeliveryOutput({
+      output: run.output,
+      deliveryPolicy: policy
+    });
+  } catch (error) {
+    validation = {
+      ok: false,
+      error: `Slides 交付检查异常：${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+  if (validation.ok) {
+    finishRun(run, "completed");
+    return;
+  }
+
+  if ((run.slidesDeliveryCorrectionAttempts || 0) >= 1) {
+    const error = `Slides 交付在一次自动修正后仍未通过质量门：${validation.error} 当前任务需要人工检查，未标记为完成。`;
+    appendRuntimeLog("slides-delivery-gate-failed", {
+      runId: run.runId,
+      policy,
+      attempts: run.slidesDeliveryCorrectionAttempts || 0,
+      error: boundedRuntimeText(validation.error, 2_000)
+    });
+    // The model's last answer may claim success. Do not expose that answer as
+    // a completed result after the deterministic host gate rejected it.
+    run.output = "";
+    finishRun(run, "failed", { error });
+    return;
+  }
+
+  run.slidesDeliveryCorrectionAttempts = (run.slidesDeliveryCorrectionAttempts || 0) + 1;
+  run.output = "";
+  run.deliveryCorrectionStarting = true;
+  clearTimeout(run.idleTimer);
+  run.idleTimer = null;
+  // The rejected answer may already have arrived as an item/completed event.
+  // Explicitly clear it before correction deltas so the renderer cannot append
+  // the corrected answer to a stale success claim.
+  publishCodexEvent(run.sender, run.runId, {
+    type: "assistant-delta",
+    threadId: run.threadId,
+    turnId: run.turnId,
+    output: ""
+  });
+  publishCodexEvent(run.sender, run.runId, {
+    type: "stderr",
+    threadId: run.threadId,
+    turnId: run.turnId,
+    text: `Slides 交付质量门未通过，正在进行唯一一次自动修正：${validation.error}`
+  });
+  appendRuntimeLog("slides-delivery-gate-correction", {
+    runId: run.runId,
+    policy,
+    error: boundedRuntimeText(validation.error, 2_000)
+  });
+  armRunIdleTimeout(run);
+
+  try {
+    prepareCodexRunForNextTurn(run);
+    run.deliveryGatePending = false;
+    const response = await requestCodexTurn(
+      getCodexClient(),
+      {
+        threadId: run.threadId,
+        ...(run.turnParameters || {}),
+        cwd: run.workspacePath || demoWorkspace,
+        approvalPolicy: "never"
+      },
+      slidesDeliveryCorrectionPrompt(policy, validation.error),
+      "",
+      {
+        onCompatibility: ({ message }) => publishCodexEvent(run.sender, run.runId, {
+          type: "compatibility",
+          threadId: run.threadId,
+          summary: message
+        })
+      }
+    );
+    if (run.finished) return;
+    if (!bindCodexRunToTurn(run, response.turn.id)) return;
+    run.turnAcceptedAt = Date.now();
+    run.deliveryCorrectionStarting = false;
+    run.deliveryGatePending = false;
+    armRunIdleTimeout(run);
+  } catch (error) {
+    if (run.finished) return;
+    run.deliveryCorrectionStarting = false;
+    run.deliveryGatePending = false;
+    run.output = "";
+    finishRun(run, "failed", {
+      error: `Slides 交付未通过质量门，且自动修正无法启动：${error instanceof Error ? error.message : String(error)} 当前任务需要人工检查，未标记为完成。`
+    });
+  }
 }
 
 function prepareCodexConnectionMaintenance(blockedError) {
@@ -2212,6 +2385,7 @@ function handleCodexNotification(method, params) {
   if (!run) {
     return;
   }
+  if (!run.turnId && params.turnId) bindCodexRunToTurn(run, params.turnId);
 
   run.eventCount += 1;
   armRunIdleTimeout(run);
@@ -2230,6 +2404,10 @@ function handleCodexNotification(method, params) {
   if (method === "turn/started") {
     markConnectionRecovered();
     run.turnId = params.turnId || run.turnId;
+    if (run.deliveryCorrectionStarting) {
+      run.deliveryCorrectionStarting = false;
+      run.deliveryGatePending = false;
+    }
     publishCodexEvent(run.sender, run.runId, {
       type: "started",
       threadId: run.threadId,
@@ -2320,7 +2498,11 @@ function handleCodexNotification(method, params) {
       finishRun(run, "stopped");
     } else if (status === "completed") {
       markConnectionRecovered();
-      finishRun(run, "completed");
+      if (run.deliveryGatePending) return;
+      run.deliveryGatePending = true;
+      clearTimeout(run.idleTimer);
+      run.idleTimer = null;
+      void completeRunThroughSlidesDeliveryGate(run);
     } else if (status === "stopped") {
       markConnectionRecovered();
       finishRun(run, "stopped");
@@ -2371,6 +2553,25 @@ function resetCodexClient() {
   serviceCoordinator.invalidate("codex:check");
 }
 
+function schedulePendingSkillHubCodexReload() {
+  if (!skillHubCodexReloadPending || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) return;
+  setImmediate(() => {
+    if (!skillHubCodexReloadPending || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) return;
+    skillHubCodexReloadPending = false;
+    resetCodexClient();
+  });
+}
+
+function activateImportedSkillsWhenSafe() {
+  if (!codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) {
+    skillHubCodexReloadPending = true;
+    return "after-current-tasks";
+  }
+  skillHubCodexReloadPending = false;
+  resetCodexClient();
+  return "next-task";
+}
+
 function throwIfCodexCheckAborted(signal) {
   if (!signal?.aborted) return;
   if (signal.reason instanceof Error) throw signal.reason;
@@ -2407,7 +2608,7 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
     const binary = resolveCodexBinary(runtime.codexPath);
     detectedPath = binary;
     const environment = codexEnvironment(runtime.env);
-    const pluginSetupPromise = getDomiPluginManager().ensure({
+    const pluginSetupPromise = getDomiPluginActivationGate().ensureWhenIdle({
         binary,
         env: environment,
         enabled: app.isPackaged || process.env.DOMI_INSTALL_BUNDLED_PLUGIN === "1"
@@ -2432,7 +2633,6 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
     const versionResult = versionSettlement.value;
     const pluginSetup = pluginSettlement.value;
     detectedVersion = String(versionResult.stdout || "").trim();
-    if (pluginSetup.updated) resetCodexClient();
     const pluginReadyAt = Date.now();
     throwIfCodexCheckAborted(signal);
     const client = getCodexClient();
@@ -2468,7 +2668,7 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
     });
 
     const result = {
-      ok: authenticated,
+      ok: authenticated && pluginSetup.ok !== false,
       path: binary,
       version: detectedVersion,
       transport: "app-server",
@@ -2499,7 +2699,9 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
           description: tier.description || ""
         }))
       })),
-      error: authenticated
+      error: pluginSetup.ok === false
+        ? pluginSetup.error || "domi 插件尚未就绪，请重新检查连接。"
+        : authenticated
         ? ""
         : runtime.authMode === "relay"
           ? "中转站凭据未就绪，请重新保存配置并测试；无需登录 ChatGPT。"
@@ -3193,7 +3395,7 @@ async function runCodex(sender, payload) {
     };
   }
 
-  if (activeRuns.has(runId)) {
+  if (activeRuns.has(runId) || startingCodexRunIds.has(runId)) {
     return {
       ok: false,
       runId,
@@ -3203,6 +3405,21 @@ async function runCodex(sender, payload) {
     };
   }
 
+  if (String(payload?.workflowId || "").startsWith("user-skill:") && skillHubCodexReloadPending) {
+    if (!codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) {
+      return {
+        ok: false,
+        runId,
+        output: "",
+        error: "用户 Skill 更新正在等待当前任务结束后生效；不会中断已有任务，请稍后重试。",
+        workspacePath
+      };
+    }
+    skillHubCodexReloadPending = false;
+    resetCodexClient();
+  }
+
+  startingCodexRunIds.add(runId);
   try {
     await ensureCodexRuntimeReady();
     const larkRequired = needsLarkAccess(payload);
@@ -3224,6 +3441,9 @@ async function runCodex(sender, payload) {
       // hidden read session first so the task never sees a false profile lock.
       await getDomiIntegration().stopPlaudBackgroundSession("codex-plaud-workflow");
     }
+    // Imports/updates that claimed an idle activation slot before this task
+    // arrived must finish (including reset) before it touches the app-server.
+    await getDomiPluginActivationGate().waitForActivation();
     const client = getCodexClient();
     const researchCacheScope = projectResearchCacheScope(payload, workspacePath);
     const researchCachePromise = prepareProjectResearchCache({
@@ -3264,6 +3484,15 @@ async function runCodex(sender, payload) {
       .join("\n\n");
     const threadReadyAt = Date.now();
 
+    const model = payload.model && payload.model !== "default" ? payload.model : undefined;
+    const effort = payload.reasoningEffort && payload.reasoningEffort !== "default"
+      ? payload.reasoningEffort
+      : undefined;
+    const serviceTier = payload.serviceTier === "standard"
+      ? null
+      : payload.serviceTier && payload.serviceTier !== "default"
+        ? payload.serviceTier
+        : undefined;
     const completion = new Promise((resolve) => {
       const run = {
         runId,
@@ -3279,6 +3508,11 @@ async function runCodex(sender, payload) {
         externalType: payload?.externalType || "",
         externalRecordId: payload?.externalRecordId || "",
         workflowId: payload?.workflowId || "",
+        slidesDeliveryPolicy: normalizedSlidesDeliveryPolicy(payload?.slidesDeliveryPolicy),
+        slidesDeliveryCorrectionAttempts: 0,
+        deliveryCorrectionStarting: false,
+        deliveryGatePending: false,
+        turnParameters: { model, effort, serviceTier },
         allowUserInput: payload?.allowUserInput !== false,
         workspaceIdentity: directoryIdentity(workspacePath),
         finished: false,
@@ -3300,15 +3534,6 @@ async function runCodex(sender, payload) {
       summary: payload.threadId ? "已恢复 Codex 对话" : "已创建 Codex 对话"
     });
 
-    const model = payload.model && payload.model !== "default" ? payload.model : undefined;
-    const effort = payload.reasoningEffort && payload.reasoningEffort !== "default"
-      ? payload.reasoningEffort
-      : undefined;
-    const serviceTier = payload.serviceTier === "standard"
-      ? null
-      : payload.serviceTier && payload.serviceTier !== "default"
-        ? payload.serviceTier
-        : undefined;
     try {
       const response = await requestCodexTurn(client, {
         threadId,
@@ -3332,8 +3557,7 @@ async function runCodex(sender, payload) {
         }
       });
       const run = activeRuns.get(runId);
-      if (run) {
-        run.turnId = response.turn.id;
+      if (run && bindCodexRunToTurn(run, response.turn.id)) {
         run.turnAcceptedAt = Date.now();
       }
     } catch (error) {
@@ -3354,6 +3578,9 @@ async function runCodex(sender, payload) {
       error: error instanceof Error ? error.message : String(error),
       workspacePath
     };
+  } finally {
+    startingCodexRunIds.delete(runId);
+    schedulePendingSkillHubCodexReload();
   }
 }
 
@@ -3404,7 +3631,7 @@ async function stopCodex(runId) {
   return { ok: false, error: "无法停止当前任务。" };
 }
 
-async function recoverCodexThread(threadId) {
+async function recoverCodexThread(threadId, request = {}) {
   const normalizedThreadId = String(threadId || "").trim();
   if (!normalizedThreadId) {
     return { ok: false, threadId: "", status: "unknown", error: "Codex 对话 ID 不能为空。" };
@@ -3433,10 +3660,12 @@ async function recoverCodexThread(threadId) {
   }
   const activeRun = activeResolution.run;
   try {
-    const response = await getCodexClient().request("thread/read", {
-      threadId: normalizedThreadId,
-      includeTurns: true
-    });
+    const response = await getDomiPluginActivationGate().withStableClient(() =>
+      getCodexClient().request("thread/read", {
+        threadId: normalizedThreadId,
+        includeTurns: true
+      })
+    );
     const turns = Array.isArray(response?.thread?.turns) ? response.thread.turns : [];
     const lastTurn = turns.at(-1);
     const items = Array.isArray(lastTurn?.items) ? lastTurn.items : [];
@@ -3447,7 +3676,41 @@ async function recoverCodexThread(threadId) {
       .reverse()
       .find((item) => item?.type === "agentMessage");
     const turnStatus = String(lastTurn?.status || "");
-    const status = classifyCodexTurnStatus(turnStatus, Boolean(activeRun));
+    let status = classifyCodexTurnStatus(turnStatus, Boolean(activeRun));
+    let output = latestMessage?.text || activeRun?.output || "";
+    let recoveryError = status === "failed"
+      ? lastTurn?.error?.message || `Codex turn 状态：${turnStatus || "unknown"}`
+      : "";
+    const slidesDeliveryPolicy = normalizedSlidesDeliveryPolicy(
+      request?.slidesDeliveryPolicy || activeRun?.slidesDeliveryPolicy
+    );
+    if (status === "completed" && slidesDeliveryPolicy && isSlidesInputRequest(output)) {
+      status = "waiting-input";
+    }
+    if (status === "completed" && slidesDeliveryPolicy) {
+      let validation;
+      try {
+        validation = validateSlidesDeliveryOutput({
+          output,
+          deliveryPolicy: slidesDeliveryPolicy
+        });
+      } catch (error) {
+        validation = {
+          ok: false,
+          error: `Slides 交付检查异常：${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+      if (!validation.ok) {
+        status = "failed";
+        output = "";
+        recoveryError = `恢复任务时 Slides 交付未通过质量门：${validation.error} 当前任务需要人工检查，未标记为完成。`;
+        appendRuntimeLog("slides-delivery-recovery-gate-failed", {
+          threadId: boundedRuntimeText(normalizedThreadId, 240),
+          policy: slidesDeliveryPolicy,
+          error: boundedRuntimeText(validation.error, 2_000)
+        });
+      }
+    }
 
     return {
       ok: true,
@@ -3455,10 +3718,8 @@ async function recoverCodexThread(threadId) {
       threadId: normalizedThreadId,
       turnId: lastTurn?.id || activeRun?.turnId || "",
       status,
-      output: latestMessage?.text || activeRun?.output || "",
-      error: status === "failed"
-        ? lastTurn?.error?.message || `Codex turn 状态：${turnStatus || "unknown"}`
-        : "",
+      output,
+      error: recoveryError,
       pendingUserInputRequests: activeRun
         ? [...activeRun.pendingUserInputs.values()]
         : []
@@ -3697,11 +3958,30 @@ ipcMain.handle("app:notify", (_event, request = {}) => {
 ipcMain.handle("codex:check", runCodexCheckCached);
 ipcMain.handle("codex:run", (event, payload) => runCodex(event.sender, payload));
 ipcMain.handle("codex:stop", (_event, runId) => stopCodex(runId));
-ipcMain.handle("codex:recover-thread", (_event, threadId) => recoverCodexThread(threadId));
+ipcMain.handle("codex:recover-thread", (_event, threadId, request) => recoverCodexThread(threadId, request));
 ipcMain.handle("codex:bind-run", (event, runId) => bindCodexRun(runId, event.sender));
 ipcMain.handle("codex:answer-user-input", (event, request) =>
   answerCodexUserInput(event.sender, request)
 );
+ipcMain.handle("skill-hub:list", () => {
+  const result = getSkillHubService().listImported();
+  const activation = result.changed ? activateImportedSkillsWhenSafe()
+    : skillHubCodexReloadPending ? "after-current-tasks" : "unchanged";
+  return { ...result, activation };
+});
+ipcMain.handle("skill-hub:scan", () => {
+  const result = getSkillHubService().scan();
+  const activation = result.changed ? activateImportedSkillsWhenSafe()
+    : skillHubCodexReloadPending ? "after-current-tasks" : "unchanged";
+  return { ...result, activation };
+});
+ipcMain.handle("skill-hub:import", (_event, request) => {
+  const result = getSkillHubService().import(request);
+  const activation = result.changed || result.imported?.length
+    ? activateImportedSkillsWhenSafe()
+    : skillHubCodexReloadPending ? "after-current-tasks" : "unchanged";
+  return { ...result, activation };
+});
 ipcMain.handle("settings:load", () => ({ ok: true, ...getAppSettings().load() }));
 ipcMain.handle("settings:save", (_event, request) => saveRuntimeSettings(request));
 ipcMain.handle("settings:select-directory", (event, currentPath) =>

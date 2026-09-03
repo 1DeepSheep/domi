@@ -55,12 +55,33 @@ function normalizeCodexRoutingParams(params = {}) {
   };
 }
 
+function prepareCodexRunForNextTurn(run) {
+  if (!(run.retiredTurnIds instanceof Set)) run.retiredTurnIds = new Set();
+  if (run.turnId) run.retiredTurnIds.add(run.turnId);
+  // The app-server may send the next turn's notifications before resolving
+  // turn/start. Leave its binding open, but never accept a late prior turn.
+  run.turnId = "";
+}
+
+function bindCodexRunToTurn(run, turnId) {
+  const id = String(turnId || "").trim();
+  if (!id || run.retiredTurnIds?.has(id) || (run.turnId && run.turnId !== id)) return false;
+  run.turnId = id;
+  return true;
+}
+
+function codexClientIdleForSkillReload(activeRuns, startingRunIds) {
+  return activeRuns.size === 0 && startingRunIds.size === 0;
+}
+
 function resolveCodexActiveRun(runs = [], params = {}) {
   const candidates = [...runs].filter(Boolean);
   const route = normalizeCodexRoutingParams(params);
 
   if (route.turnId) {
-    const exactTurnCandidates = candidates.filter((run) => run.turnId === route.turnId);
+    const exactTurnCandidates = candidates.filter((run) => (
+      run.turnId === route.turnId && !run.retiredTurnIds?.has(route.turnId)
+    ));
     if (exactTurnCandidates.length === 1) {
       return {
         run: exactTurnCandidates[0],
@@ -94,6 +115,15 @@ function resolveCodexActiveRun(runs = [], params = {}) {
   const threadCandidates = candidates.filter((run) => run.threadId === route.threadId);
   if (threadCandidates.length === 1) {
     const candidate = threadCandidates[0];
+    if (route.turnId && candidate.retiredTurnIds?.has(route.turnId)) {
+      return {
+        run: null,
+        matchedBy: null,
+        ambiguousCandidates: [],
+        conflictingCandidates: [candidate],
+        rejectionReason: "retired-turn-id"
+      };
+    }
     if (route.turnId && candidate.turnId && candidate.turnId !== route.turnId) {
       return {
         run: null,
@@ -214,11 +244,14 @@ async function requestCodexTurn(client, params, prompt, runtimeContext, options 
 }
 
 module.exports = {
+  bindCodexRunToTurn,
+  codexClientIdleForSkillReload,
   codexRunExecutionMode,
   compatibilityInput,
   codexTurnContext,
   normalizeCodexRoutingParams,
   partitionCodexRuns,
+  prepareCodexRunForNextTurn,
   requestCodexTurn,
   resolveCodexActiveRun,
   runtimeAdditionalContext,
