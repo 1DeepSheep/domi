@@ -48,18 +48,30 @@ function createReleaseFixture(root) {
     "# domi router\n"
   );
   const investmentSkillRoot = path.join(pluginRoot, "skills", "investment-analysis");
-  const investmentFiles = [
-    ["SKILL.md", "# investment analysis\n"],
+  fs.mkdirSync(investmentSkillRoot, { recursive: true });
+  fs.writeFileSync(path.join(investmentSkillRoot, "SKILL.md"), "# investment analysis\n");
+  const slidesSkillRoot = path.join(pluginRoot, "skills", "slides");
+  const slidesFiles = [
+    ["SKILL.md", "# slides\n"],
+    [path.join("agents", "openai.yaml"), "interface:\n  default_prompt: Use $domi:slides\n"],
     [path.join("references", "investment-banking-slides.md"), "# slides\n"],
+    [path.join("references", "morgan-stanley-ibd-template-notes.md"), "# Morgan Stanley notes\n"],
+    [path.join("assets", "slides", "base-deck.html"), "<main></main>\n"],
+    [path.join("assets", "slides", "ms-research.css"), "/* base style */\n"],
+    [path.join("assets", "slides", "page-templates.html"), "<template></template>\n"],
     [path.join("assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"), "style: morgan-stanley\n"],
     [path.join("assets", "slides", "style-packs", "morgan-stanley", "style.css"), "/* style */\n"],
     [path.join("assets", "slides", "style-packs", "morgan-stanley", "templates.html"), "<section></section>\n"],
+    [path.join("assets", "slides", "style-packs", "morgan-stanley", "layout-index.json"), "{}\n"],
+    [path.join("assets", "slides", "style-packs", "morgan-stanley", "layout-recipes.md"), "# layouts\n"],
+    [path.join("assets", "slides", "style-packs", "morgan-stanley", "chart-recipes.md"), "# charts\n"],
+    [path.join("scripts", "audit_research_deck.js"), "// audit\n"],
     [path.join("scripts", "init_deck.js"), "// init\n"],
     [path.join("scripts", "qa_deck.js"), "// qa\n"],
     [path.join("scripts", "export_pdf.js"), "// export\n"],
   ];
-  for (const [relativePath, content] of investmentFiles) {
-    const target = path.join(investmentSkillRoot, relativePath);
+  for (const [relativePath, content] of slidesFiles) {
+    const target = path.join(slidesSkillRoot, relativePath);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, content);
   }
@@ -104,7 +116,9 @@ function createReleaseFixture(root) {
     manifestBytes,
     manifestUrl,
     publicKeyDerBase64,
+    pluginRoot,
     release,
+    slidesSkillRoot,
     signatureBytes,
     signatureUrl
   };
@@ -140,6 +154,21 @@ async function run() {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plugin-updater-unit-"));
   try {
     const fixture = createReleaseFixture(temporaryRoot);
+    validateRequiredPluginContracts(fixture.pluginRoot);
+    const missingLayoutRecipe = path.join(
+      fixture.slidesSkillRoot,
+      "assets",
+      "slides",
+      "style-packs",
+      "morgan-stanley",
+      "layout-recipes.md"
+    );
+    fs.rmSync(missingLayoutRecipe);
+    assert.throws(
+      () => validateRequiredPluginContracts(fixture.pluginRoot),
+      /layout-recipes\.md/
+    );
+    fs.writeFileSync(missingLayoutRecipe, "# layouts\n");
     const calls = [];
     const marketplaceRoot = path.join(temporaryRoot, "marketplace");
     const updater = new DomiPluginUpdater({
@@ -167,6 +196,34 @@ async function run() {
     assert.equal(cached.checked, false);
     assert.equal(cached.candidate.manifest.version, fixture.manifest.version);
     assert.equal(calls.length, 4);
+
+    const rolledBackClient = new DomiPluginUpdater({
+      marketplaceRoot,
+      clientVersion: "0.2.9",
+      fetchImpl: fetchFixture(fixture, []),
+      releaseApiUrl: "https://example.test/latest",
+      publicKeyDerBase64: fixture.publicKeyDerBase64,
+      now: () => 1000
+    });
+    assert.equal(rolledBackClient.cachedCandidate(), null);
+    assert.equal((await rolledBackClient.check()).candidate, null);
+    const incompatible = await rolledBackClient.check({ force: true });
+    assert.equal(incompatible.reason, "requires-client-0.3.0");
+    assert.equal(incompatible.candidate, null);
+    // Repopulate the verified state after simulating the older client.
+    assert.equal((await updater.check({ force: true })).ok, true);
+
+    const cachedRecipe = path.join(first.candidate.root, "skills", "slides", "scripts", "qa_deck.js");
+    fs.writeFileSync(cachedRecipe, "");
+    assert.equal(updater.cachedCandidate(), null, "empty QA resources must not bypass the contract via cache");
+    const repaired = await updater.check({ force: true });
+    assert.equal(repaired.ok, true);
+    assert.ok(fs.statSync(cachedRecipe).size > 0, "a signed archive repairs an invalid cache");
+    fs.rmSync(cachedRecipe);
+    fs.mkdirSync(cachedRecipe);
+    assert.equal(updater.cachedCandidate(), null, "directories cannot stand in for required files");
+    assert.equal((await updater.check({ force: true })).ok, true);
+    assert.equal(fs.statSync(cachedRecipe).isFile(), true);
 
     const missingAssetsUpdater = new DomiPluginUpdater({
       marketplaceRoot,

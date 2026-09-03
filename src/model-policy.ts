@@ -43,6 +43,7 @@ const PREMIUM_WORKFLOW_IDS = new Set([
   "desk-research",
   "investment-review",
   "investment-analysis",
+  "slides",
   "ic-memo"
 ]);
 
@@ -223,7 +224,8 @@ export function isDomiPremiumNaturalLanguageTask(
 
   // Keep the renderer's established Slides policy authoritative after the
   // shared diagnostic/mechanical guards. It recognizes genuine deck authoring
-  // requests and already excludes preserve-existing-template edits.
+  // requests, including edits that preserve an existing template while still
+  // enforcing the Slides quality gate.
   if (domiSlidesDeliveryPolicy) return true;
 
   if (
@@ -265,6 +267,18 @@ export function domiModelPolicyClass(
 ): DomiModelPolicyClass {
   if (runKind === "podcast-archive") return "premium";
   const normalizedWorkflowId = String(workflowId || "").trim();
+  // Slides are a quality overlay: an explicitly selected personal/content
+  // Skill keeps its own instructions, while the independent domi Slides Skill
+  // still receives the premium model and maximum reasoning needed for layout
+  // and visual QA.
+  if (
+    semanticRequest.useDomiPlugin
+    && semanticRequest.domiSlidesDeliveryPolicy
+    && isDomiPremiumNaturalLanguageTask(
+      semanticRequest.requestText || "",
+      semanticRequest.domiSlidesDeliveryPolicy
+    )
+  ) return "premium";
   if (ECONOMY_WORKFLOW_IDS.has(normalizedWorkflowId)) return "economy";
   if (PREMIUM_WORKFLOW_IDS.has(normalizedWorkflowId)) return "premium";
   if (normalizedWorkflowId) return "inherit";

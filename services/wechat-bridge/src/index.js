@@ -14,6 +14,7 @@ import {
   validateDomiSlidesDeliverables,
 } from "./media.js";
 import { verifyDomiInvestmentSlidesContract } from "./slides-contract.js";
+import { isSlidesInputRequest } from "./slides-response-policy.cjs";
 import {
   applyDomiWechatPolicyToTask,
 } from "./domi-request-policy.js";
@@ -164,8 +165,14 @@ const taskManager = new TaskManager({
     });
   },
   deliverTaskResult: async (task, response, job) => {
-    const attachments = extractLocalAttachments(response);
-    const slidesValidation = validateDomiSlidesDeliverables(job.slidesDeliveryPolicy, attachments);
+    // Slides require HTML + PDF + receipt, plus PPTX on an explicit request.
+    const extractedAttachments = extractLocalAttachments(response, job.slidesDeliveryPolicy ? 16 : 3, {
+      includeJson: Boolean(job.slidesDeliveryPolicy),
+    });
+    const awaitingSlidesInput = Boolean(job.slidesDeliveryPolicy) && isSlidesInputRequest(response);
+    const slidesValidation = awaitingSlidesInput
+      ? { ok: true, error: "" }
+      : validateDomiSlidesDeliverables(job.slidesDeliveryPolicy, extractedAttachments);
     if (!slidesValidation.ok) {
       if (Number(job.slidesCorrectionAttempts || 0) < 1) {
         const correctionInput = domiSlidesCorrectionInputFor(
@@ -182,40 +189,43 @@ const taskManager = new TaskManager({
           slidesDeliveryPolicy: job.slidesDeliveryPolicy,
           slidesCorrectionAttempts: 1,
         });
-        await sendText({
-          credentials,
-          toUserId: task.senderId,
-          contextToken: job.contextToken || task.lastContextToken,
-          runId: job.runId || task.lastRunId,
-          text: `【${task.id}】Slides 产物未通过 domi 格式门，正在自动修正：${slidesValidation.error}`,
-        });
-        return;
+        await taskManager.safeSend(task,
+          `【${task.id}】Slides 产物未通过 domi 格式门，正在自动修正：${slidesValidation.error}`, job);
+        return { status: "correcting", error: slidesValidation.error };
       }
       if (!task.delivery?.formatFailureNotified) {
-        await sendText({
-          credentials,
-          toUserId: task.senderId,
-          contextToken: job.contextToken || task.lastContextToken,
-          runId: job.runId || task.lastRunId,
-          text: `【${task.id}】Slides 自动修正后仍未通过格式门，已停止发送错误文件：${slidesValidation.error}`,
-        });
+        await taskManager.safeSend(task,
+          `【${task.id}】Slides 自动修正后仍未通过格式门，已停止发送错误文件：${slidesValidation.error}`, job);
         task.delivery ||= {};
         task.delivery.formatFailureNotified = true;
         taskManager.persist();
       }
-      throw new Error(`Slides 格式门未通过：${slidesValidation.error}`);
+      return { status: "quality_failed", error: `Slides 格式门未通过：${slidesValidation.error}` };
     }
+    if (job.slidesDeliveryPolicy && !awaitingSlidesInput) {
+      // Only errors after this exact candidate passes QA are transport-pending.
+      task.delivery ||= {};
+      task.delivery.slidesQaPassed = true;
+      task.progress = "Slides 已通过质量门，正在发送";
+      taskManager.persist();
+    }
+    // QA receipts/render evidence stay internal after validation, never become user attachments.
+    const attachments = job.slidesDeliveryPolicy
+      ? extractedAttachments.filter((attachment) => /\.(?:html?|pdf|pptx)$/i.test(attachment.filePath))
+      : extractedAttachments;
     const shouldSendFiles = job.wantsFiles && attachments.length > 0;
-    let visibleResponse = response;
+    let visibleResponse = extractedAttachments.reduce((text, attachment) => (
+      attachments.includes(attachment) ? text : text.replace(attachment.fullMatch, "")
+    ), response);
     if (attachments.length) {
       visibleResponse = shouldSendFiles
-        ? replaceLocalAttachmentLinks(response, attachments)
+        ? replaceLocalAttachmentLinks(visibleResponse, attachments)
         : attachments.reduce(
             (text, attachment) => text.replace(
               attachment.fullMatch,
               `本机文件：${path.basename(attachment.filePath)}（需要时可让我发送附件）`,
             ),
-            response,
+            visibleResponse,
           );
     }
     visibleResponse = redactInternalFileCitations(visibleResponse);
@@ -335,9 +345,13 @@ async function prepareTask(message, task, inbound) {
       if (attachment) attachments.push(attachment);
     }
     const inputText = inbound.text || (attachments.length ? "请处理我发送的附件。" : "");
+    const previousDeliveryPolicy = task.delivery?.slidesDeliveryPolicy || "";
+    const awaitingSlidesInput = task.status === "waiting_user" && task.delivery?.awaitingSlidesInput === true;
     const slidesDeliveryPolicy = domiSlidesDeliveryPolicyFor({
       text: inputText,
       attachments,
+      previousDeliveryPolicy,
+      awaitingSlidesInput,
     });
     const appliedDomiPolicy = applyDomiWechatPolicyToTask(task, {
       text: inputText,
@@ -359,10 +373,12 @@ async function prepareTask(message, task, inbound) {
         text: inputText,
         attachments,
         routeOverride: appliedDomiPolicy.effectiveRoute,
+        previousDeliveryPolicy,
+        awaitingSlidesInput,
       }),
       contextToken: message.context_token,
       runId: message.run_id,
-      wantsFiles: wantsFileDelivery(inputText),
+      wantsFiles: Boolean(slidesDeliveryPolicy) || wantsFileDelivery(inputText),
       slidesDeliveryPolicy,
       slidesCorrectionAttempts: 0,
     });

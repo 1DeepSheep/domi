@@ -26,11 +26,17 @@ declare global {
       installUpdate: () => Promise<UpdateInstallResult>;
       runCodex: (payload: CodexRunRequest) => Promise<CodexRunResult>;
       stopCodex: (runId: string) => Promise<{ ok: boolean; error?: string }>;
-      recoverCodexThread: (threadId: string) => Promise<CodexThreadRecoveryResult>;
+      recoverCodexThread: (
+        threadId: string,
+        request?: CodexThreadRecoveryRequest
+      ) => Promise<CodexThreadRecoveryResult>;
       bindCodexRun: (runId: string) => Promise<{ ok: boolean; error?: string }>;
       answerCodexUserInput: (
         request: CodexUserInputAnswerRequest
       ) => Promise<CodexUserInputAnswerResult>;
+      listSkillHub: () => Promise<SkillHubListResult>;
+      scanSkillHub: () => Promise<SkillHubScanResult>;
+      importSkillHub: (request: SkillHubImportRequest) => Promise<SkillHubImportResult>;
       selectFiles: (
         workspacePath?: string,
         entityRequest?: DomiEntityMaterialsRequest
@@ -150,6 +156,74 @@ export type LocalAttachment = {
   name: string;
   path: string;
   size: number;
+};
+
+export type SkillHubUserSkill = {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  path: string;
+  sourcePath: string;
+  fingerprint: string;
+  metadataFingerprint?: string;
+  available?: boolean;
+  error?: string;
+  importedAt: number;
+};
+
+export type SkillHubCandidate = {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  sourcePath: string;
+  sourceLabel: string;
+  status: "available" | "imported" | "unavailable";
+  error?: string;
+  suggestedName: string;
+  officialNameConflict: boolean;
+  nameCollision: boolean;
+  sourceIsDestination: boolean;
+};
+
+export type SkillHubListResult = {
+  ok: boolean;
+  skills: SkillHubUserSkill[];
+  changed?: boolean;
+  activation?: "next-task" | "after-current-tasks" | "unchanged";
+  updatedAt: number;
+  error?: string;
+};
+
+export type SkillHubScanResult = {
+  ok: boolean;
+  changed?: boolean;
+  activation?: "next-task" | "after-current-tasks" | "unchanged";
+  candidates: SkillHubCandidate[];
+  imported: SkillHubUserSkill[];
+  scannedAt: number;
+  error?: string;
+};
+
+export type SkillHubImportRequest = {
+  candidateIds: string[];
+};
+
+export type SkillHubImportFailure = {
+  id: string;
+  title: string;
+  error: string;
+};
+
+export type SkillHubImportResult = {
+  ok: boolean;
+  changed?: boolean;
+  imported: SkillHubUserSkill[];
+  skills?: SkillHubUserSkill[];
+  failures?: SkillHubImportFailure[];
+  activation?: "next-task" | "after-current-tasks" | "unchanged";
+  error?: string;
 };
 
 export type DesktopNotificationRequest = {
@@ -1506,11 +1580,27 @@ export type CodexRunRequest = {
   model?: string;
   reasoningEffort?: string;
   serviceTier?: string;
+  /**
+   * Host-classified Slides deliverable contract. The Electron main process
+   * treats a non-empty value as a fail-closed completion gate.
+   */
+  slidesDeliveryPolicy?: DomiSlidesDeliveryPolicy;
   workspacePath?: string;
   privateOutput?: boolean;
   externalType?: "project" | "person";
   externalRecordId?: string;
   entityUpdatedAt?: number;
+};
+
+export type DomiSlidesDeliveryPolicy =
+  | "html_pdf"
+  | "html_pdf_preserve_template"
+  | "explicit_pptx"
+  | "explicit_pptx_preserve_template";
+
+export type CodexThreadRecoveryRequest = {
+  /** Persisted with the running assistant message so restart recovery cannot bypass QA. */
+  slidesDeliveryPolicy?: DomiSlidesDeliveryPolicy;
 };
 
 export type CodexRunResult = {
@@ -1519,6 +1609,7 @@ export type CodexRunResult = {
   code?: number;
   signal?: string;
   stopped?: boolean;
+  awaitingSlidesInput?: boolean;
   threadId?: string;
   turnId?: string;
   output: string;
@@ -1533,7 +1624,7 @@ export type CodexThreadRecoveryResult = {
   runId?: string;
   threadId: string;
   turnId?: string;
-  status: "running" | "completed" | "stopped" | "failed" | "unknown";
+  status: "running" | "completed" | "waiting-input" | "stopped" | "failed" | "unknown";
   output?: string;
   error?: string;
   pendingUserInputRequests?: CodexUserInputRequest[];
@@ -1592,6 +1683,7 @@ export type CodexEventPayload = {
     | "user-input-request"
     | "user-input-resolved"
     | "completed"
+    | "waiting-input"
     | "stopped"
     | "failed";
   threadId?: string;

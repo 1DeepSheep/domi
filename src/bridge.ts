@@ -219,7 +219,7 @@ const browserFallback: Window["workbench"] = {
     eventCount: 0
   }),
   stopCodex: async () => ({ ok: true }),
-  recoverCodexThread: async (threadId) => ({
+  recoverCodexThread: async (threadId, _request) => ({
     ok: false,
     threadId,
     status: "unknown",
@@ -232,6 +232,19 @@ const browserFallback: Window["workbench"] = {
   answerCodexUserInput: async () => ({
     ok: false,
     error: "浏览器预览模式不能提交 Codex 选择。"
+  }),
+  listSkillHub: async () => ({ ok: true, skills: [], updatedAt: Date.now() }),
+  scanSkillHub: async () => ({
+    ok: true,
+    candidates: [],
+    imported: [],
+    scannedAt: Date.now()
+  }),
+  importSkillHub: async () => ({
+    ok: false,
+    imported: [],
+    activation: "unchanged",
+    error: "请在 Electron 窗口中导入本地 Skill。"
   }),
   selectFiles: async () => ({
     ok: false,

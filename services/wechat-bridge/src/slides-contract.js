@@ -4,14 +4,23 @@ import path from "node:path";
 import process from "node:process";
 
 const REQUIRED_SLIDES_FILES = [
-  ["skills", "investment-analysis", "SKILL.md"],
-  ["skills", "investment-analysis", "references", "investment-banking-slides.md"],
-  ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"],
-  ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "style.css"],
-  ["skills", "investment-analysis", "assets", "slides", "style-packs", "morgan-stanley", "templates.html"],
-  ["skills", "investment-analysis", "scripts", "init_deck.js"],
-  ["skills", "investment-analysis", "scripts", "qa_deck.js"],
-  ["skills", "investment-analysis", "scripts", "export_pdf.js"],
+  ["skills", "slides", "SKILL.md"],
+  ["skills", "slides", "agents", "openai.yaml"],
+  ["skills", "slides", "references", "investment-banking-slides.md"],
+  ["skills", "slides", "references", "morgan-stanley-ibd-template-notes.md"],
+  ["skills", "slides", "assets", "slides", "base-deck.html"],
+  ["skills", "slides", "assets", "slides", "ms-research.css"],
+  ["skills", "slides", "assets", "slides", "page-templates.html"],
+  ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "style-lock.yml"],
+  ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "style.css"],
+  ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "templates.html"],
+  ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "layout-index.json"],
+  ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "layout-recipes.md"],
+  ["skills", "slides", "assets", "slides", "style-packs", "morgan-stanley", "chart-recipes.md"],
+  ["skills", "slides", "scripts", "audit_research_deck.js"],
+  ["skills", "slides", "scripts", "init_deck.js"],
+  ["skills", "slides", "scripts", "qa_deck.js"],
+  ["skills", "slides", "scripts", "export_pdf.js"],
 ];
 
 function completeSlidesRoot(root) {
@@ -73,15 +82,19 @@ export function verifyDomiInvestmentSlidesContract({
     return {
       ok: false,
       root: "",
-      error: "当前 domi 插件缺少 investment-analysis 的 Slides 规范、Morgan Stanley 样式或 QA 脚本，请先更新插件。",
+      error: "当前 domi 插件缺少独立 slides Skill、Morgan Stanley 样式或严格 QA 脚本，请先更新插件。",
     };
   }
 
   const reference = fs.readFileSync(
-    path.join(root, "skills", "investment-analysis", "references", "investment-banking-slides.md"),
+    path.join(root, "skills", "slides", "references", "investment-banking-slides.md"),
     "utf8",
   );
-  if (!/Morgan Stanley/i.test(reference) || !/HTML\s*\+\s*PDF/i.test(reference)) {
+  if (
+    !/Morgan Stanley/i.test(reference)
+    || !/HTML\s*\+\s*PDF/i.test(reference)
+    || !/--strict/.test(reference)
+  ) {
     return {
       ok: false,
       root: "",

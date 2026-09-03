@@ -95,7 +95,7 @@ try {
       include: [
         "react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime",
         "react-markdown", "remark-gfm", "lucide-react", "@tiptap/core", "@tiptap/react",
-        "@tiptap/starter-kit", "@tiptap/markdown", "@tiptap/extension-table",
+        "@tiptap/starter-kit", "@tiptap/markdown", "@tiptap/extension-table", "@tiptap/pm/model", "@tiptap/pm/state",
         "@tiptap/extension-image", "@tiptap/extension-task-item", "@tiptap/extension-task-list"
       ]
     },
@@ -254,9 +254,66 @@ try {
     assert.ok(savedMarkdown.includes(text), "Editing the document must preserve every table cell");
   }
   assert.equal(savedMarkdown.split("\n").filter((line) => line.trim().startsWith("|")).length, streamingFixture.rows + 2, "Saving must preserve the Markdown table structure");
+
+  // Exercise the real editor's ordinary selection-copy path, not just the
+  // separate full-document export button. Legacy emphasized headings must not
+  // become online-document headings when the user copies a selected passage.
+  for (const markdown of [
+    "## ++团队的核心组合不是单一 EDA 工具团队++\n\n## 产品与技术\n\n正文内容。",
+    "## <u>编辑器保存出的重点判断</u>\n\n## 产品与技术\n\n正文内容。"
+  ]) {
+    await render("chat", streamingFixture);
+    await render("editor", streamingFixture, markdown);
+    const copied = await page.locator(".rich-markdown-content").evaluate((element) => {
+      const editor = element.editor;
+      const before = JSON.stringify(editor.getJSON());
+      editor.commands.selectAll();
+      const all = editor.view.serializeForClipboard(editor.state.selection.content());
+      const end = editor.state.doc.firstChild.nodeSize - 1;
+      editor.commands.setTextSelection({ from: 2, to: end - 1 });
+      const partial = editor.view.serializeForClipboard(editor.state.selection.content());
+      return { all: all.dom.innerHTML, partial: partial.dom.innerHTML, before, after: JSON.stringify(editor.getJSON()) };
+    });
+    assert.match(copied.all, /<p[^>]*><strong><u[^>]*>/, "Ordinary selection copy must export underlined emphasis as bold body text");
+    assert.match(copied.all, /<h2>产品与技术<\/h2>/, "Real section headings must survive ordinary selection copy");
+    assert.doesNotMatch(copied.partial, /<h[1-6]\b/, "Partial selection of legacy emphasis must not regain a heading wrapper");
+    assert.match(copied.partial, /<strong><u[^>]*>/, "Partial selection must keep bold and underline formatting");
+    assert.equal(copied.before, copied.after, "Clipboard normalization must never rewrite the source document");
+  }
+
+  await render("chat", streamingFixture);
+  await render("editor", streamingFixture, "## 正常标题与<u>部分下划线</u>\n\n| 工作经历 |\n| --- |\n| IBM<br />Dell EMC<br>趋动科技 |\n\n`<u>代码示例</u><br>`");
+  const portableCopy = await page.locator(".rich-markdown-content").evaluate((element) => {
+    const editor = element.editor;
+    const before = JSON.stringify(editor.getJSON());
+    editor.commands.selectAll();
+    const copied = editor.view.serializeForClipboard(editor.state.selection.content());
+    const table = copied.dom.querySelector("table");
+    const heading = editor.state.doc.firstChild;
+    const underlined = heading.lastChild;
+    const headingEnd = heading.nodeSize - 1;
+    editor.commands.setTextSelection({ from: headingEnd - underlined.nodeSize, to: headingEnd });
+    const partialHeading = editor.view.serializeForClipboard(editor.state.selection.content());
+    return {
+      html: copied.dom.innerHTML, text: copied.text,
+      partialHeading: partialHeading.dom.innerHTML,
+      tableBorder: table?.style.borderCollapse,
+      cellBorder: table?.querySelector("td")?.style.borderWidth,
+      breakCount: table?.querySelectorAll("br").length,
+      before, after: JSON.stringify(editor.getJSON())
+    };
+  });
+  assert.match(portableCopy.html, /<h2[^>]*>正常标题与<u[^>]*>部分下划线<\/u><\/h2>/, "Partially underlined real headings must not be demoted");
+  assert.match(portableCopy.partialHeading, /<h2[^>]*><u[^>]*>部分下划线<\/u><\/h2>/, "Copying only an underlined fragment of a real heading must retain its source semantics");
+  assert.doesNotMatch(portableCopy.html, /tableWrapper/, "Application-only table wrappers must not enter the clipboard");
+  assert.equal(portableCopy.tableBorder, "collapse", "Copied tables need portable inline table styling");
+  assert.equal(portableCopy.cellBorder, "1px", "Copied table cells need portable borders");
+  assert.equal(portableCopy.breakCount, 2, "Copied table br markup must remain real line breaks");
+  assert.match(portableCopy.html, /<code>&lt;u&gt;代码示例&lt;\/u&gt;&lt;br&gt;<\/code>/, "Code examples must remain literal instead of becoming formatting");
+  assert.equal(portableCopy.before, portableCopy.after, "Copying table and heading selections must leave source content unchanged");
   assert.deepEqual(browserErrors, [], "Table rendering must not produce browser runtime errors");
   assert.deepEqual(failures, [], `Rendered table regressions:\n${failures.join("\n")}`);
-  console.log(`Markdown table DOM regression passed: ${tested} real component/viewport fixtures, streamed header transitions and editor Markdown round-trip.`);
+  console.log(`Markdown table DOM regression passed: ${tested} real component/viewport fixtures, streamed header transitions, editor Markdown round-trip and ordinary selection clipboard fidelity.`);
   if (artifactDirectory) console.log(`Synthetic visual QA screenshots: ${artifactDirectory}`);
 } finally {
   await browser?.close();

@@ -1,3 +1,5 @@
+import { resolveSlidesDeliveryPolicy } from "../services/wechat-bridge/src/slides-request-policy.js";
+
 export type Workflow = {
   id: string;
   title: string;
@@ -10,6 +12,8 @@ export type Workflow = {
   hidden?: boolean;
   webSearch?: boolean;
   requiresPlaud?: boolean;
+  source?: "domi" | "user" | "system";
+  skillPath?: string;
 };
 
 export const RADAR_MAX_LOOKBACK_MS = 72 * 60 * 60 * 1000;
@@ -368,6 +372,18 @@ export function todoRecentEntriesContext(
 
 export const workflows: Workflow[] = [
   {
+    id: "skill-creator",
+    title: "新建 Skill",
+    shortTitle: "新建 Skill",
+    skill: "$skill-creator",
+    description: "通过 Codex 原生对话明确使用场景，并创建、检查可复用的个人 Skill。",
+    output: "经过确认和验证的个人 Skill",
+    defaultPrompt:
+      "请使用 Codex 原生 skill-creator，通过对话引导我明确 Skill 的使用场景、触发条件、输入输出、所需工具和示例；信息充分并经我确认后，再创建和验证 Skill。",
+    hidden: true,
+    source: "system"
+  },
+  {
     id: "domi-router",
     title: "处理录音",
     shortTitle: "domi",
@@ -519,6 +535,17 @@ export const workflows: Workflow[] = [
     webSearch: true
   },
   {
+    id: "slides",
+    title: "制作 Slides",
+    shortTitle: "Slides",
+    skill: "$domi:slides",
+    description: "把研究、IC 或用户 Skill 的内容编排成外资投行风格的高质量演示材料。",
+    output: "默认交付 HTML 与 PDF；用户明确要求可编辑 PowerPoint 时额外交付经过严格 QA 的 PPTX",
+    defaultPrompt:
+      "请先明确演示对象、场景和已有内容，再使用 domi Slides Skill 完成故事线、排版、字体、信息密度、逐页渲染和严格质量验收；不得降低上游研究或判断质量。",
+    webSearch: false
+  },
+  {
     id: "ic-memo",
     title: "IC Memo",
     shortTitle: "Memo",
@@ -584,54 +611,107 @@ const PARALLEL_RESEARCH_WORKFLOW_IDS = new Set([
   "ic-memo"
 ]);
 
-const SLIDE_DELIVERABLE_PATTERN = /(?:\bpptx?\b|\bpowerpoint\b|\bslides?\b|\bslide\s+deck\b|\bdeck\b|幻灯片|演示文稿)/i;
-const SLIDE_AUTHORING_PATTERN = /(?:制作|生成|输出|创建|做(?:一份|一个|成)?|画|写|更新|改版|修改|重做|修复|改进|美化|完善|优化|排版|设计|整理|处理|转成|转换|汇报|create|make|generate|build|design|redesign|update|revise|edit|convert)/i;
-const SLIDE_DIAGNOSTIC_PATTERN = /(?:为什么|打不开|无法打开|连接失败|下载失败|发送失败|报错|卡住|崩溃)/i;
-const EXPLICIT_EDITABLE_POWERPOINT_PATTERN = /(?:\bpptx\b|\.pptx\b|可编辑(?:的)?\s*(?:ppt|powerpoint|幻灯片|演示文稿)|(?:ppt|powerpoint)\s*(?:源文件|原文件)|(?:源文件|原文件)\s*(?:ppt|powerpoint))/i;
-const PRESERVE_EXISTING_TEMPLATE_PATTERN = /(?:保持|保留|沿用|继续使用|不要改|不改)(?:原|现有|当前)?(?:模板|版式|母版|主题)/i;
-
 const QUALITY_FIRST_CONTEXT_EFFICIENCY_RULE = [
   "上下文优化不得降低模型等级、推理强度、证据覆盖、原文可追溯性、投资判断深度、交付完整性或最终 QA；不得因 token 预算提前停止、截断材料或以有损摘要替代原文。",
   "同一任务内同一 Skill／reference 只读取一次，重复的确定性查询与校验应批量执行。只有已获用户写入授权，或命中的多阶段／可恢复 Skill 明确要求受控临时工件时，才保存完整原始材料和工具结果；只读任务不得为了节省 token 新增资料库、交付文件或外部副本。受控临时工件不得进入正式资料库或默认交付，并按宿主生命周期清理。跨阶段只传工件路径、内容哈希、实体 ID、Evidence Ledger／来源索引、未决问题和所需回读范围，下一阶段按需回读原文。路由、授权或信息范围不确定时，保守加载完整规则与原始材料，但不得扩张持久化或外部写入权限。"
 ].join("\n");
 
-export function domiSlidesDeliveryPolicyForText(userInput: string) {
-  const request = String(userInput || "").trim();
-  if (!SLIDE_DELIVERABLE_PATTERN.test(request)) return "";
-  if (PRESERVE_EXISTING_TEMPLATE_PATTERN.test(request)) return "";
-  if (SLIDE_DIAGNOSTIC_PATTERN.test(request) && !SLIDE_AUTHORING_PATTERN.test(request)) return "";
-  return EXPLICIT_EDITABLE_POWERPOINT_PATTERN.test(request)
-    ? "explicit_pptx"
-    : "html_pdf";
+function isPowerPointAttachmentName(fileName: string) {
+  return /\.(?:ppt|pptx)$/i.test(String(fileName || "").trim());
 }
 
-export function domiInvestmentSlidesPromptRule(userInput: string) {
-  const deliveryPolicy = domiSlidesDeliveryPolicyForText(userInput);
+export function domiSlidesDeliveryPolicyForText(
+  userInput: string,
+  attachmentNames: readonly string[] = [],
+  previousDeliveryPolicy = "",
+  selectedSlides = false,
+  awaitingSlidesInput = false
+) {
+  return resolveSlidesDeliveryPolicy({
+    text: userInput,
+    hasPowerPointAttachment: attachmentNames.some(isPowerPointAttachmentName),
+    previousDeliveryPolicy,
+    selectedSlides,
+    awaitingSlidesInput
+  });
+}
+
+export function domiSlidesPromptRule(
+  userInput: string,
+  attachmentNames: readonly string[] = [],
+  previousDeliveryPolicy = "",
+  selectedSlides = false,
+  awaitingSlidesInput = false
+) {
+  const deliveryPolicy = domiSlidesDeliveryPolicyForText(userInput, attachmentNames, previousDeliveryPolicy, selectedSlides, awaitingSlidesInput);
   if (!deliveryPolicy) return "";
-  const formatRule = deliveryPolicy === "explicit_pptx"
-    ? "用户已明确要求可编辑 PowerPoint／PPTX，因此允许交付 .pptx；但仍须以 domi 的 Morgan Stanley 研究报告规范为上位约束，通用 presentations Skill 只能承担必要的格式实现，不得替换其内容、版式、字体或 QA contract。"
+  const preserveExistingTemplate = deliveryPolicy.endsWith("_preserve_template");
+  const formatRule = preserveExistingTemplate
+    ? `用户明确要求保留现有模板／母版／主题：不得覆盖原主题，但仍必须使用 $domi:slides 完成内容结构、字体可用性、信息密度、溢出和逐页视觉 QA，并交付同源 HTML、PDF${deliveryPolicy.startsWith("explicit_pptx") ? " 与经过验证的可编辑 .pptx" : "；不得创建或交付 .pptx"}。`
+    : deliveryPolicy.startsWith("explicit_pptx")
+    ? "用户已明确要求或提供可编辑 PowerPoint／PPTX，因此必须在同源 HTML + PDF 之外额外交付 .pptx；仍须以 domi Slides 的 Morgan Stanley 研究报告规范为上位约束，通用 presentations Skill 只能承担必要的格式实现，不得替换其故事线、版式、字体或 QA contract。"
     : "用户只说 PPT／slides／deck／幻灯片／演示文稿，不等于要求 PPTX。必须以 HTML 为唯一事实源并交付该 HTML 与由其导出的 PDF；不得创建或交付 .pptx。";
   return [
-    "DOMI_INVESTMENT_SLIDES_POLICY_V1",
-    "本轮涉及 domi 投研 Slides。必须读取并采用 $domi:investment-analysis 及其 references/investment-banking-slides.md 作为 Slides 的排版、字体、交付和质量门规范；不得用通用模板或同名非 domi Skill 替代。所有 scripts、assets 和 references 必须相对当前实际选中的 $domi:investment-analysis Skill 根目录解析，禁止调用 ~/.codex/skills/investment-analysis 下的旧全局副本。若当前另有显式选择的 domi 研究 Skill，保留其研究职责，同时叠加本规范完成 Slides。若该 Skill 或 reference 不可用，必须停止并明确报告，不得静默降级。",
+    "DOMI_SLIDES_POLICY_V2",
+    "本轮涉及 domi Slides。必须叠加已安装的独立 $domi:slides，并完整读取该 Skill 及 references/investment-banking-slides.md；不得让通用 presentations Skill、通用主题或普通 PPTX 模板替代它。所有 scripts、assets 和 references 必须相对当前实际选中的 $domi:slides Skill 根目录解析，禁止调用 ~/.codex/skills/slides 或旧 investment-analysis Slides 副本。若本轮另有明确选择的 domi 研究／IC／用户 Skill，保留其内容职责，再由 $domi:slides 完成故事线、排版与验收。若所需 Skill 或 reference 不可用，必须停止并明确报告，不得静默降级。",
     formatRule,
-    "严格采用外资投行／Morgan Stanley 研究报告风格：结论式标题、高信息密度、严谨证据与来源、规定的中英文字体和版式；不得使用大面积无意义留白、装饰性卡片堆叠、通用渐变封面或纯文本拼页。",
-    "交付前必须完成 research.md、slide contract、coverage matrix、style lock、内容审计、版面 QA、全页渲染与 contact sheet 视觉检查；发现溢出、遮挡、字体替换、低密度或风格漂移时必须修正。最终回复必须列出所有正式交付文件的可提取本地文件链接。"
+    "只有缺少无法合理推断的必要材料或目标时，明确说明缺口并请用户先补充，收到后再继续；等待补充不是交付，不创建占位文件、不声称已完成或 QA 已通过。",
+    preserveExistingTemplate
+      ? "沿用已明确要求的原模板；保留结论式标题、严谨证据与来源、可读字体、信息密度和逐页 QA，不以默认 Morgan Stanley 主题覆盖用户模板。"
+      : "严格采用外资投行／Morgan Stanley 研究报告风格：结论式标题、高信息密度、严谨证据与来源、规定的中英文字体和版式；不得使用大面积无意义留白、装饰性卡片堆叠、通用渐变封面或纯文本拼页。",
+    "交付前必须完成 research.md、slide contract、coverage matrix、style lock、严格内容审计、版面 QA、全页渲染与 contact sheet 视觉检查；低密度或布局重复 warning 也必须修正。最终文件必须附带与其 SHA-256 匹配且 status=passed 的 DOMI_SLIDES_QA_RECEIPT_V1；最终回复必须列出所有正式交付文件及 receipt 的可提取本地文件链接。"
   ].join("\n");
 }
+
+/** @deprecated Use domiSlidesPromptRule. */
+export const domiInvestmentSlidesPromptRule = domiSlidesPromptRule;
 
 export function workflowPrompt(
   workflow: Workflow | undefined,
   userInput: string,
   domiContext = "",
   useDomiPlugin = false,
-  requestOrigin: "user" | "programmatic" = "user"
+  requestOrigin: "user" | "programmatic" = "user",
+  attachmentNames: readonly string[] = [],
+  previousDeliveryPolicy = "",
+  awaitingSlidesInput = false
 ) {
   const trimmed = userInput.trim();
-  const investmentSlidesRule = domiInvestmentSlidesPromptRule(trimmed);
+  const slidesRule = !useDomiPlugin || workflow?.source === "system" ? ""
+    : domiSlidesPromptRule(trimmed, attachmentNames, previousDeliveryPolicy, workflow?.id === "slides", awaitingSlidesInput);
   const requestLabel = requestOrigin === "user"
     ? "用户输入："
     : "客户端工作流指令（不代表用户授权外部写入）：";
+  if (workflow?.source === "system") {
+    return [
+      "你正在 domi 的 Skill Hub 中使用 Codex 原生 Skill 创建流程。",
+      `必须采用系统 Skill：${workflow.skill}。先完整读取它的 SKILL.md，再通过自然语言对话协助用户；不得改造成表单向导。`,
+      "先了解用户希望 Skill 稳定完成什么任务，并按需追问触发条件、输入输出、工具、边界与成功示例。信息不足时继续对话；在用户确认前不要创建文件。",
+      "创建后必须按 skill-creator 的要求检查目录、frontmatter、触发描述和必要资源，并明确告诉用户保存位置及如何调用。",
+      "不要修改 domi 官方插件目录；个人 Skill 必须保存在 Codex 用户 Skill 目录，确保 domi 软件升级不会覆盖。",
+      "若基于官方 Skill 定制，先把 SKILL.md 及其所需 references、scripts、assets 完整复制到个人 Skill 目录，再修改副本；校验改名后的自引用和相对资源路径，不得依赖会随官方升级变化的插件缓存绝对路径，也不得改写官方原件。",
+      "复制时检查依赖闭包：指向 ../其他Skill/ 的共享文件也要把实际必需资源复制到个人目录并改写引用；不要只复制当前文件夹而留下跨目录悬空链接。完整读取并验证引用可达、脚本可运行，再让用户试跑成功示例。按逻辑 Skill 名调用其他能力可以保留，但不得把易变的官方缓存文件路径当作个人资源。",
+      "",
+      requestLabel,
+      trimmed || workflow.defaultPrompt
+    ].join("\n");
+  }
+  if (workflow?.source === "user") {
+    return [
+      "你正在 domi 投资工作台中运行，底层是本地 Codex。",
+      `用户已从 Skill Hub 明确选择个人 Skill：${workflow.skill}。必须先完整读取并按该 Skill 执行，不要改用同名 domi 官方 Skill或通用模板。`,
+      workflow.skillPath
+        ? `所选 Skill 的唯一来源文件为 ${workflow.skillPath.replace(/\/$/, "")}/SKILL.md。即使本机另一目录存在同名 Skill，也必须完整读取该文件，并相对这个目录解析所有 references、scripts 和 assets；该文件不可用时停止，不得改用同名副本。`
+        : "所选个人 Skill 缺少已验证的本地路径，必须停止并提示在 Skill Hub 重新扫描。",
+      slidesRule,
+      QUALITY_FIRST_CONTEXT_EFFICIENCY_RULE,
+      "个人 Skill 与 domi 官方插件相互独立；不得修改 domi 官方插件目录。外部写入仍须遵循用户授权与目标系统的安全规则。",
+      domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
+      "",
+      requestLabel,
+      trimmed || workflow.defaultPrompt
+    ].filter(Boolean).join("\n");
+  }
   if (!workflow) {
     if (!useDomiPlugin) {
       return [
@@ -648,7 +728,7 @@ export function workflowPrompt(
       "你正在 domi 投资工作台中运行，底层是本地 Codex。",
       "当前启用的分析师是 domi-AI分析师。必须使用已安装的 domi 插件完成本轮任务。",
       "先判断是否属于 PLAUD、录音、纪要后续入库等明确的多阶段串联任务；只有这些任务才先完整读取 $domi:domi-router。普通研究、分析、评级、项目管理或交易任务直接选择最匹配的单项 domi Skill，并只读取该 Skill 要求的 references，避免重复加载 Router。不要使用同名的非 domi Skill 替代。",
-      investmentSlidesRule,
+      slidesRule,
       QUALITY_FIRST_CONTEXT_EFFICIENCY_RULE,
       "确实没有匹配 Skill 时，再以投资分析师身份直接回答；不得为了形式完整而加载与本轮无关的 Skill 或 references。",
       "请用中文直接完成任务。优先使用已有 Watching List、People、Wiki、本地资料库和下面的 domi 绑定上下文，避免重复研究；不得编造项目、人脉、融资、财务或会议事实；外部写入必须遵循对应 Skill 的确认、去重和字段校验规则。",
@@ -679,6 +759,7 @@ export function workflowPrompt(
       "本轮是首页手动刷新：先建立一份覆盖重叠回看窗口的既有事件去重索引，再并发搜索；A/S 重点人物别名索引只用于匹配与消歧，有直接事件信号时才补查对象。每轮必须完成 DeepTech 深科技等中文专业媒体扫源，并为深度访谈/公开观点类投资论点信号预留候选位。把耗时控制在 6 分钟内，达到 12 条高质量候选或 8 条合格新增后停止扩展搜索。",
       "写入后进行一次批量回读；执行结束必须输出一行机器可读结果：RADAR_RESULT {\"added\":0,\"updated\":0,\"unchanged\":0,\"failed\":0,\"checked_through\":\"ISO-8601\",\"discovery_from\":\"ISO-8601\",\"candidates\":0,\"rejected\":{\"duplicate\":0,\"not_event\":0,\"unverified\":0,\"unavailable\":0,\"out_of_scope\":0},\"coverage\":{\"searched_domains\":[],\"queries_by_domain\":{},\"deeptech_checked\":false,\"configured_sources_attempted\":0,\"configured_sources_failed\":0}}。候选总数必须与处理及拒绝项合计一致；没有新增不是失败。",
       "不得编造新闻、融资或公司事实；不得修改 domi 应用源码。",
+      slidesRule,
       domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
       "",
       requestLabel,
@@ -694,6 +775,8 @@ export function workflowPrompt(
       "当前待办账本只读取一次，完成去重与排序后单次写入，再单次回读验证。保持完整规则、证据门槛和 12 项配额，不得用减少判断维度换取速度。",
       "本轮以待办文档成功写入并回读为完成条件；不要撰写长篇过程报告，写后只输出各分类计数和排除计数摘要。",
       "不得输出私人链接、邮箱、Base 标识或本机路径；不得修改 domi 应用源码。",
+      slidesRule ? "本轮另有用户明确要求的演示文稿；上述紧凑摘要约束只适用于待办同步，不得省略正式 Slides 文件及其可提取交付链接。" : "",
+      slidesRule,
       domiContext ? `\ndomi 客户端候选上下文：\n${domiContext}` : "",
       "",
       requestLabel,
@@ -703,7 +786,7 @@ export function workflowPrompt(
   return [
     "你正在 domi 投资工作台中运行，底层是本地 Codex。",
     `必须采用 domi 插件中的 Skill：${workflow.skill}。进入执行阶段前完整读取该 Skill 及其要求的 references，不要用通用模板或同名非 domi Skill 替代。`,
-    investmentSlidesRule,
+    slidesRule,
     "",
     `工作流：${workflow.title}`,
     `目标：${workflow.description}`,
