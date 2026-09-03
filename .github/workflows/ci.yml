@@ -38,8 +38,11 @@ jobs:
       - name: Run build, privacy and unit checks
         run: npm run check
 
-      - name: Prepare browser for Markdown table regression tests
+      - name: Prepare browser for interface regression tests
         run: npx playwright install chromium
 
       - name: Verify chat and editor table rendering
         run: npm run test:markdown-tables
+
+      - name: Verify Skill Hub creation, import and sidebar layout
+        run: npm run test:skill-hub-ui

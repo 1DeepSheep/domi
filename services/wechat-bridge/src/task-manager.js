@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { isContextualSlidesRevision } from "./slides-request-policy.js";
+import { isSlidesInputRequest } from "./slides-response-policy.cjs";
 
 import {
   appendJsonLinePrivate,
@@ -272,20 +274,76 @@ export class TaskManager {
 
   async attemptDelivery(task, fallback = {}) {
     if (!task?.finalResponse || task.delivery?.status !== "pending") return false;
+    const deliveryContext = this.deliveryContext(task, fallback);
+    const awaitingSlidesInput = Boolean(deliveryContext.slidesDeliveryPolicy)
+      && isSlidesInputRequest(task.finalResponse);
+    const requiresSlidesQa = Boolean(deliveryContext.slidesDeliveryPolicy) && !awaitingSlidesInput;
+    if (awaitingSlidesInput) {
+      task.status = "waiting_user";
+      task.progress = "等待用户补充";
+      task.completedAt = "";
+      task.delivery.awaitingSlidesInput = true;
+      task.delivery.slidesQaPassed = false;
+    }
+    if (requiresSlidesQa) {
+      // Revalidate even on a manual resend: a prior pass cannot bless changed files.
+      task.delivery.slidesQaPassed = false;
+      task.status = "running";
+      task.progress = "Slides 产物质量验收中";
+      task.completedAt = "";
+      task.updatedAt = new Date().toISOString();
+      this.persist();
+    }
     try {
-      await this.deliverTaskResult(task, task.finalResponse, this.deliveryContext(task, fallback));
+      const outcome = await this.deliverTaskResult(task, task.finalResponse, deliveryContext);
+      if (outcome?.status === "correcting" || outcome?.status === "quality_failed") {
+        const correcting = outcome.status === "correcting";
+        task.delivery.status = outcome.status;
+        task.delivery.error = cleanText(outcome.error, 240);
+        task.delivery.deliveredAt = "";
+        task.status = correcting ? "queued" : "failed";
+        task.progress = correcting ? "Slides 未通过质量门，正在自动修正" : "Slides 未通过质量门，未交付";
+        task.lastError = correcting ? "" : task.delivery.error;
+        task.completedAt = "";
+        task.updatedAt = new Date().toISOString();
+        this.persist();
+        return false;
+      }
       task.delivery.status = "delivered";
       task.delivery.deliveredAt = new Date().toISOString();
       task.delivery.error = "";
+      if (requiresSlidesQa) {
+        task.status = "completed";
+        task.completedAt = new Date().toISOString();
+      }
       task.progress = task.status === "waiting_user" ? "等待用户补充" : "已完成";
       task.updatedAt = new Date().toISOString();
       this.pruneTasks(task.senderId);
       this.persist();
       return true;
     } catch (error) {
+      if (requiresSlidesQa && task.delivery.slidesQaPassed !== true) {
+        task.delivery.status = "quality_failed";
+        task.delivery.error = `Slides 验收异常：${cleanText(error?.message ?? error, 220)}`;
+        task.delivery.deliveredAt = "";
+        task.status = "failed";
+        task.progress = "Slides 验收异常，未交付";
+        task.lastError = task.delivery.error;
+        task.completedAt = "";
+        task.updatedAt = new Date().toISOString();
+        this.persist();
+        this.log(`任务 ${task.id} ${task.delivery.error}`);
+        return false;
+      }
       task.delivery.status = "pending";
       task.delivery.error = cleanText(error?.message ?? error, 240);
-      task.progress = "已完成，等待下一条微信消息后自动发送";
+      if (requiresSlidesQa) {
+        task.status = "completed";
+        task.completedAt = new Date().toISOString();
+      }
+      task.progress = awaitingSlidesInput
+        ? "等待用户补充，问题将在下一条微信消息后自动发送"
+        : "已完成，等待下一条微信消息后自动发送";
       task.updatedAt = new Date().toISOString();
       this.persist();
       this.log(`任务 ${task.id} 结果已保存，微信发送暂缓：${task.delivery.error}`);
@@ -368,6 +426,11 @@ export class TaskManager {
     if (quotedTask) {
       return { task: quotedTask, isNew: false, routingReason: "quoted_message" };
     }
+    const activeId = this.state.activeBySender[senderId];
+    const activeTask = activeId ? this.task(activeId) : null;
+    if (activeTask && isContextualSlidesRevision(text, activeTask.delivery?.slidesDeliveryPolicy)) {
+      return { task: activeTask, isNew: false, routingReason: "active_slides_revision" };
+    }
     const waitingTasks = Object.values(this.state.tasks).filter(
       (task) => task.senderId === senderId && task.status === "waiting_user",
     );
@@ -383,8 +446,6 @@ export class TaskManager {
     if (waitingTasks.length === 1 && waitingReply) {
       return { task: waitingTasks[0], isNew: false, routingReason: "waiting_reply" };
     }
-    const activeId = this.state.activeBySender[senderId];
-    const activeTask = activeId ? this.task(activeId) : null;
     if (shouldContinueActiveTask(text, activeTask)) {
       return {
         task: activeTask,
@@ -654,16 +715,18 @@ export class TaskManager {
       jobUsageComplete = completedTurnObserved && usageSamples > 0;
       commitTokenUsage();
       if (!finalResponse) finalResponse = "Codex已完成处理，但没有返回文字结果。";
-      task.status = responseWaitsForUser(finalResponse) ? "waiting_user" : "completed";
-      task.progress = task.status === "waiting_user" ? "等待用户补充" : "已完成";
+      const awaitingSlidesInput = Boolean(job.slidesDeliveryPolicy) && isSlidesInputRequest(finalResponse);
+      task.status = awaitingSlidesInput ? "waiting_user" : job.slidesDeliveryPolicy ? "running" : responseWaitsForUser(finalResponse) ? "waiting_user" : "completed";
+      task.progress = task.status === "waiting_user" ? "等待用户补充" : job.slidesDeliveryPolicy ? "Slides 产物质量验收中" : "已完成";
       task.lastError = "";
       task.finalResponse = finalResponse;
-      task.completedAt = new Date().toISOString();
+      task.completedAt = job.slidesDeliveryPolicy ? "" : new Date().toISOString();
       task.delivery = {
         status: "pending",
         wantsFiles: job.wantsFiles === true,
         slidesDeliveryPolicy: job.slidesDeliveryPolicy || "",
         slidesCorrectionAttempts: Number(job.slidesCorrectionAttempts || 0),
+        awaitingSlidesInput,
         textSent: false,
         textChunks: {},
         files: {},
@@ -680,7 +743,10 @@ export class TaskManager {
         task,
         job,
         startedAt,
-        delivered ? "completed" : "completed_pending_delivery",
+        delivered ? task.status === "waiting_user" ? "waiting_user" : "completed"
+          : task.delivery?.status === "correcting" ? "slides_correction_queued"
+            : task.delivery?.status === "quality_failed" ? "slides_quality_failed"
+              : task.status === "waiting_user" ? "waiting_user_pending_delivery" : "completed_pending_delivery",
         tools,
         jobTokenUsage,
         usageSamples,

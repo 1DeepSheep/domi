@@ -96,6 +96,66 @@ function selectPreferredCandidate(candidates) {
   })[0] || null;
 }
 
+class DomiPluginActivationGate {
+  constructor({ isBusy, installedInfo, ensure, onActivated }) {
+    this.isBusy = isBusy;
+    this.installedInfo = installedInfo;
+    this.ensure = ensure;
+    this.onActivated = onActivated;
+    this.pending = null;
+    this.readers = 0;
+  }
+
+  ensureWhenIdle(request) {
+    if (this.pending) return this.pending;
+    if (request?.enabled === false) {
+      return Promise.resolve({ ok: true, updated: false, skipped: true, reason: "development" });
+    }
+    if (this.readers > 0 || this.isBusy()) {
+      const current = this.installedInfo();
+      return Promise.resolve({
+        ok: Boolean(current),
+        updated: false,
+        deferred: true,
+        reason: "active-tasks",
+        version: current?.manifest?.version || "",
+        error: current ? "" : "当前仍有任务正在准备或执行，尚未安装 domi 插件；请等待任务结束后重新检查连接。"
+      });
+    }
+    // Claim the slot synchronously before ensure() can yield. A task that
+    // arrives afterwards waits below, and cannot use the client being reset.
+    this.pending = Promise.resolve()
+      .then(() => this.ensure(request))
+      .then(async (result) => {
+        if (result.updated) await this.onActivated();
+        return result;
+      })
+      .finally(() => { this.pending = null; });
+    return this.pending;
+  }
+
+  async waitForActivation() {
+    const activation = this.pending;
+    if (!activation) return;
+    const result = await activation;
+    if (result?.ok === false) {
+      throw new Error(result.error || "domi 插件激活未完成，请重新检查连接后重试。");
+    }
+  }
+
+  async withStableClient(operation) {
+    // Claim the read lease before yielding. If activation already owns the
+    // slot, wait for it; otherwise new activations defer until this read ends.
+    this.readers += 1;
+    try {
+      await this.waitForActivation();
+      return await operation();
+    } finally {
+      this.readers -= 1;
+    }
+  }
+}
+
 class DomiPluginManager {
   constructor({
     userDataPath,
@@ -401,6 +461,7 @@ module.exports = {
   DEFAULT_CODEX_PLUGIN_COMMAND_TIMEOUT_MS,
   DEFAULT_REMOTE_STARTUP_BUDGET_MS,
   DomiPluginManager,
+  DomiPluginActivationGate,
   MARKETPLACE_NAME,
   PLUGIN_ID,
   checkRemoteWithinBudget,

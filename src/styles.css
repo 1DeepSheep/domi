@@ -445,6 +445,41 @@ body.panel-resizing .main-grid {
   margin-top: 3px;
 }
 
+.sidebar-skill-hub-header {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.sidebar-skill-hub-header .sidebar-section-toggle {
+  padding-right: 10px;
+}
+
+.sidebar-skill-hub-manage {
+  position: absolute;
+  top: 50%;
+  right: 43px;
+  z-index: 1;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 6px;
+  color: #8a8a84;
+  background: transparent;
+  padding: 0;
+  opacity: 0.78;
+}
+
+.sidebar-skill-hub-manage:hover,
+.sidebar-skill-hub-manage:focus-visible {
+  color: var(--text);
+  background: #deded9;
+  opacity: 1;
+  outline: 0;
+}
+
 .sidebar-nav-disclosure {
   display: grid;
   width: 28px;
@@ -479,7 +514,7 @@ body.panel-resizing .main-grid {
 .sidebar-workflow-section .sidebar-workflows {
   min-height: 0;
   flex: 1 1 auto;
-  max-height: min(292px, 36vh);
+  max-height: min(220px, 28vh);
   overflow-y: auto;
   padding: 2px 0 3px 8px;
   scrollbar-width: thin;
@@ -655,12 +690,14 @@ body.panel-resizing .main-grid {
 }
 
 .thread-list::-webkit-scrollbar,
+.sidebar-workflows::-webkit-scrollbar,
 .chat-scroll::-webkit-scrollbar,
 .right-panel::-webkit-scrollbar {
   width: 5px;
 }
 
 .thread-list::-webkit-scrollbar-thumb,
+.sidebar-workflows::-webkit-scrollbar-thumb,
 .chat-scroll::-webkit-scrollbar-thumb,
 .right-panel::-webkit-scrollbar-thumb {
   border-radius: 5px;
@@ -668,6 +705,7 @@ body.panel-resizing .main-grid {
 }
 
 .thread-list::-webkit-scrollbar-track,
+.sidebar-workflows::-webkit-scrollbar-track,
 .chat-scroll::-webkit-scrollbar-track,
 .right-panel::-webkit-scrollbar-track {
   background: transparent;

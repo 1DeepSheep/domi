@@ -45,6 +45,17 @@ test("follow-ups and recent result requests continue the active task", () => {
   assert.equal(likelyWaitingReply("收入是3亿元"), true);
 });
 
+test("deictic Slides revisions retain the active task without reusing it for a new topic", () => {
+  const active = { id: "W02", status: "completed", updatedAt: new Date().toISOString(), delivery: { slidesDeliveryPolicy: "html_pdf" } };
+  for (const text of ["这两页可以去掉", "这页也可以删掉", "把第2页改一下", "请修改", "请更新", "按上面的要求改一下"]) {
+    assert.equal(shouldContinueActiveTask(text, active), true, text);
+  }
+  for (const text of ["研究另一家公司", "生成新的 PPT，加入图表", "新任务：做个汇报"]) {
+    assert.equal(shouldContinueActiveTask(text, active), false, text);
+  }
+  assert.equal(shouldContinueActiveTask("这两页可以去掉", { ...active, delivery: null }), false);
+});
+
 test("new entities and new actions cannot replay the active task result", () => {
   const active = { id: "W15", status: "completed", updatedAt: new Date().toISOString() };
   const ratingRequest = "请对 ojo 进行评级，并把研究报告pdf发我看看";

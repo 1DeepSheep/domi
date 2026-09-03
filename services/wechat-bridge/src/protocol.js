@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isContextualSlidesRevision } from "./slides-request-policy.js";
 
 const TASK_REFERENCE_PATTERNS = [
   /(?:^|\s|【|\[|#)W0*(\d{1,6})(?:\b|】|\])/i,
@@ -257,6 +258,7 @@ export function findTaskReference(text, tasks = {}) {
 
 export function shouldContinueActiveTask(text, activeTask, now = Date.now()) {
   if (!activeTask) return false;
+  if (isContextualSlidesRevision(text, activeTask.delivery?.slidesDeliveryPolicy)) return true;
   const updatedAt = Date.parse(activeTask.updatedAt || "");
   const recentlyActive = Number.isFinite(updatedAt) && now - updatedAt <= RECENT_FOCUS_GRACE_MS;
   if (looksLikeNewTask(text)) return false;
@@ -408,7 +410,7 @@ function safeCitationLabel(attributes) {
     .slice(0, 180) || "文件引用不可用";
 }
 
-export function extractLocalAttachments(text, maximum = 3) {
+export function extractLocalAttachments(text, maximum = 3, { includeJson = false } = {}) {
   const source = String(text || "");
   const found = [];
   const seen = new Set();
@@ -429,13 +431,15 @@ export function extractLocalAttachments(text, maximum = 3) {
   const markdownLink = /\[([^\]]+)\]\(\s*(<?(?:file:\/\/)?\/[^)\n]+>?)\s*\)/g;
   for (const match of source.matchAll(markdownLink)) add(match[2], match[1], match[0]);
 
-  const codePath = /`((?:file:\/\/)?\/[^`\n]+\.(?:md|markdown|html?|pdf|docx?|xlsx?|pptx?|txt|csv|zip))`/gi;
+  const codePath = includeJson
+    ? /`((?:file:\/\/)?\/[^`\n]+\.(?:md|markdown|html?|pdf|docx?|xlsx?|pptx?|txt|csv|zip|json))`/gi
+    : /`((?:file:\/\/)?\/[^`\n]+\.(?:md|markdown|html?|pdf|docx?|xlsx?|pptx?|txt|csv|zip))`/gi;
   for (const match of source.matchAll(codePath)) add(match[1], path.basename(match[1]), match[0]);
 
   for (const match of source.matchAll(CODEX_FILE_CITATION_PATTERN)) {
     const attributes = parseCitationAttributes(match[1]);
     const filePath = normalizeLinkedPath(attributes.path);
-    if (!filePath || !DELIVERABLE_FILE_EXTENSION_PATTERN.test(filePath)) continue;
+    if (!filePath || !(DELIVERABLE_FILE_EXTENSION_PATTERN.test(filePath) || (includeJson && /\.json$/i.test(filePath)))) continue;
     add(filePath, safeCitationLabel(attributes), match[0]);
   }
   return found;

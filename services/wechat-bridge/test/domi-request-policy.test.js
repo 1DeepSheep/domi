@@ -40,7 +40,7 @@ test("A-E high-value WeChat tasks use an explicit domi route and Sol max", () =>
     ],
     ["把这份普通客户访谈整理成纪要", "", "$domi:asr-notes"],
     ["研究某创业公司并入库", "", "$domi:domi-router"],
-    ["做一份投研 slides", "html_pdf", "$domi:investment-analysis"],
+    ["做一份投研 slides", "html_pdf", "$domi:slides"],
     ["对某上市公司做一份高质量投资分析", "", "$domi:investment-analysis"],
   ];
 
@@ -142,6 +142,9 @@ test("a failure plus an explicit re-execution request runs the current business 
     "投资分析失败，请重新分析失败原因",
     "项目研究报错，请重新研究报错原因",
     "PLAUD 处理失败，请重新处理错误日志",
+    "为什么之前生成的 PPT 这么丑？",
+    "这个演示文稿不好看，是什么原因？",
+    "这份路演材料版式很差，帮我诊断一下",
   ];
   for (const text of diagnostics) {
     const currentPreference = { model: "gpt-5.6-luna", reasoningEffort: "low" };

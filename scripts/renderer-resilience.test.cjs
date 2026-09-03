@@ -1316,6 +1316,19 @@ assert.match(
 const managedTaskBoardSource = app.match(
   /function renderTaskBoard\(\)[\s\S]*?\n  function renderLegacyTaskBoard\(\)/
 )?.[0] || "";
+const taskNavigationCountSource = app.match(
+  /const taskNavigationCount = \([\s\S]*?failedTaskThreads\.length;/
+)?.[0] || "";
+assert.match(
+  taskNavigationCountSource,
+  /queuedTaskItems\.length[\s\S]*?failedTaskThreads\.length/,
+  "Queued and failed work must remain included in the todo navigation count."
+);
+assert.doesNotMatch(
+  taskNavigationCountSource,
+  /runningTaskThreads/,
+  "Running tasks must stay in their separate status indicator instead of inflating the todo total."
+);
 assert.match(
   managedTaskBoardSource,
   /managed-task-sync-status[\s\S]*?domiTaskSyncState\.label[\s\S]*?domiTaskSyncElapsed/,
@@ -1684,7 +1697,7 @@ assert.match(
 );
 assert.match(
   app,
-  /reboundRunId = result\.runId[\s\S]*?runContextRef\.current\.set\(reboundRunId[\s\S]*?await workbench\.bindCodexRun\(reboundRunId\)[\s\S]*?recoverCodexThread\(recoveryThreadId\)/,
+  /reboundRunId = result\.runId[\s\S]*?runContextRef\.current\.set\(reboundRunId[\s\S]*?await workbench\.bindCodexRun\(reboundRunId\)[\s\S]*?recoverCodexThread\(recoveryThreadId(?:, recoveryRequest)?\)/,
   "The renderer must register recovery context before binding live events and reconcile a bind race."
 );
 assert.match(
@@ -2008,7 +2021,7 @@ assert.match(
 );
 assert.match(
   app,
-  /const allLocalThreads = threadsRef\.current[\s\S]*?const recoveryThreadId = recoveryCodexThreadId\([\s\S]*?latestAssistant\.entityExecutionIsolated === true[\s\S]*?if \(!recoveryThreadId\)[\s\S]*?隔离任务缺少独立的 Codex 对话标识[\s\S]*?recoverCodexThread\(recoveryThreadId\)/,
+  /const allLocalThreads = threadsRef\.current[\s\S]*?const recoveryThreadId = recoveryCodexThreadId\([\s\S]*?latestAssistant\.entityExecutionIsolated === true[\s\S]*?if \(!recoveryThreadId\)[\s\S]*?隔离任务缺少独立的 Codex 对话标识[\s\S]*?recoverCodexThread\(recoveryThreadId(?:, recoveryRequest)?\)/,
   "Restart recovery must resume an isolated turn by its private Codex thread id while preserving the task's canonical id."
 );
 assert.match(
@@ -2091,7 +2104,7 @@ assert.match(
 );
 assert.match(
   app,
-  /pauseRecoveredThreadQueue[\s\S]*?blockRecoveredThread[\s\S]*?if \(!result\.ok\)[\s\S]*?result\.status === "running"[\s\S]*?!result\.runId[\s\S]*?bindCodexRun[\s\S]*?\["completed", "stopped", "failed"\][\s\S]*?result\.status === "stopped"[\s\S]*?pauseRecoveredThreadQueue\(thread\.id\)[\s\S]*?result\.status === "failed"[\s\S]*?pauseRecoveredThreadQueue\(thread\.id\)[\s\S]*?blockRecoveredThread/,
+  /pauseRecoveredThreadQueue[\s\S]*?blockRecoveredThread[\s\S]*?if \(!result\.ok\)[\s\S]*?result\.status === "running"[\s\S]*?!result\.runId[\s\S]*?bindCodexRun[\s\S]*?\["completed", "waiting-input", "stopped", "failed"\][\s\S]*?result\.status === "waiting-input"[\s\S]*?awaitingSlidesInput: true[\s\S]*?pauseRecoveredThreadQueue\(thread\.id\)[\s\S]*?result\.status === "stopped"[\s\S]*?pauseRecoveredThreadQueue\(thread\.id\)[\s\S]*?result\.status === "failed"[\s\S]*?pauseRecoveredThreadQueue\(thread\.id\)[\s\S]*?blockRecoveredThread/,
   "Unknown, unbound, stopped and failed recoveries must safely block or pause their thread queues."
 );
 assert.match(
