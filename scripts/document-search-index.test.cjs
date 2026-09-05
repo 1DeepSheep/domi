@@ -52,13 +52,37 @@ test("indexes Markdown body mentions and PDF filenames without promoting them to
     assert.ok(results.some((result) => result.snippet.includes("模型训练方法")));
     assert.equal(
       searchIndexedDocuments(database, { query: "模型", limit: 10 }).length,
-      0,
-      "Two-character searches must stay on names and paths instead of scanning every document body."
+      1,
+      "Two-character body mentions use the short-term index."
     );
   } finally {
     database.close();
     sample.close();
   }
+});
+
+test("short names and hydrated cloud files become searchable without an mtime change", () => {
+  const sample = fixture();
+  const note = path.join(sample.rootPath, "交流.md");
+  fs.writeFileSync(note, "会上讨论壁仞、AI、Mechanize，以及100%和a_b。");
+  const db = openDocumentSearchIndex(sample.databasePath);
+  const stat = fs.statSync(note);
+  try {
+    configureRoot(db, sample.rootPath);
+    upsertIndexedDocument(db, sample.rootPath, note, { ...stat, blocks: 0 }, "cloud");
+    assert.equal(searchIndexedDocuments(db, { query: "Mechanize" }).length, 0);
+    assert.equal(upsertIndexedDocument(db, sample.rootPath, note, { ...stat, blocks: 8 }, "local"), true);
+    for (const query of ["壁仞", "仞", "AI", "Mechanize", "%", "_"]) {
+      assert.equal(searchIndexedDocuments(db, { query }).length, 1, query);
+    }
+    assert.equal(searchIndexedDocuments(db, { query: "%%" }).length, 0);
+    assert.equal(upsertIndexedDocument(db, sample.rootPath, note, { ...stat, blocks: 8 }, "same"), false);
+    // Existing databases have an empty state until their first incremental scan.
+    db.prepare("UPDATE search_documents SET content_state = ''").run();
+    db.exec("DELETE FROM search_documents_short");
+    assert.equal(upsertIndexedDocument(db, sample.rootPath, note, { ...stat, blocks: 8 }, "migration"), true);
+    assert.equal(searchIndexedDocuments(db, { query: "壁仞" }).length, 1);
+  } finally { db.close(); sample.close(); }
 });
 
 test("updates changed files, removes deleted files, and hides raw transcripts by default", () => {

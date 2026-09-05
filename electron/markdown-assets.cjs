@@ -427,7 +427,9 @@ function buildMarkdownClipboardPayload(request) {
   };
 
   const body = splitFrontmatter(markdown);
-  const rendered = markdownClipboardParser(renderer).parse(body);
+  const rendered = markdownClipboardParser(renderer).parse(body)
+    .replace(/<table>/g, '<table style="border-collapse:collapse">')
+    .replace(/<(th|td)(\s[^>]*)?>/g, '<$1$2 style="border:1px solid #ddd;padding:6px 9px;vertical-align:top">');
   const html = [
     "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;",
     "font-size:15px;line-height:1.7;color:#292926;\">",

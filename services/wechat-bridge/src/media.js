@@ -14,6 +14,7 @@ import { prepareAttachmentForWeixin } from "./markdown-pdf.js";
 import { domiWechatRoutingPolicyFor } from "./domi-request-policy.js";
 import { resolveSlidesDeliveryPolicy } from "./slides-request-policy.js";
 import slidesHtmlContract from "./slides-html-contract.cjs";
+import slidesPdfProof from "./slides-pdf-proof.cjs";
 
 const { htmlAttribute, externalLocalResourceIn, slideElementsIn } = slidesHtmlContract;
 
@@ -254,7 +255,7 @@ export function domiInvestmentSlidesPolicyFor({ text, attachments = [], previous
   const formatRule = preserveExistingTemplate
     ? `用户明确要求保留现有模板／母版／主题：不得覆盖原主题，但仍必须使用 $domi:slides 完成内容结构、字体可用性、信息密度、溢出和逐页视觉 QA，并交付同源 HTML、PDF${deliveryPolicy.startsWith("explicit_pptx") ? " 与经过验证的可编辑 .pptx" : "；不得创建或交付 .pptx"}。`
     : deliveryPolicy.startsWith("explicit_pptx")
-    ? "用户已明确要求或提供可编辑 PowerPoint：在同源 HTML + PDF 之外额外交付 .pptx；PPTX 仍须严格复刻下述 Morgan Stanley 投研版式、字体、信息密度和质量门，不得退回通用 PowerPoint 模板。"
+    ? "用户已明确要求输出可编辑 PowerPoint 或编辑原 PPTX：在同源 HTML + PDF 之外额外交付 .pptx；仅提供 PPTX 研究材料不算输出授权。PPTX 仍须严格复刻下述 Morgan Stanley 投研版式、字体、信息密度和质量门，不得退回通用 PowerPoint 模板。"
     : "用户只说了 PPT／slides／deck／幻灯片／演示文稿，这不等于要求 PPTX。默认交付必须是 Morgan Stanley 风格 HTML 源文件及由该 HTML 导出的 PDF；不得创建或交付 .pptx。";
 
   return [
@@ -356,7 +357,9 @@ function validatedSlidesReceipt(attachments, required = {}) {
   }
   if (
     receipt?.contract !== "DOMI_SLIDES_QA_RECEIPT_V1"
-    || receipt?.qaVersion !== 3
+    || receipt?.qaVersion !== 4
+    || !receipt?.fontSummary?.expectedCjkFont
+    || receipt?.fontSummary?.trueCjkBoldChecked !== true
     || !receipt?.fontSummary?.expectedLatinFont
     || !(receipt?.fontSummary?.actualRenderedFontsChecked > 0)
     || !Array.isArray(receipt?.fontSummary?.renderedMismatches)
@@ -367,6 +370,8 @@ function validatedSlidesReceipt(attachments, required = {}) {
   ) {
     return { ok: false, error: "Slides QA receipt 未通过严格质量门。" };
   }
+  const pdfProofError = slidesPdfProof.validatePdfProof(receipt);
+  if (pdfProofError) return { ok: false, error: pdfProofError };
   if (!required.pptx && receipt.pptx) return { ok: false, error: "普通 Slides 请求不得残留 PPTX 正式交付绑定。" };
   const pages = slideElementsIn(fs.readFileSync(required.html, "utf8"));
   if (pages.length !== receipt.pages || pages.some((page) => !page.attributes.some((attribute) => (

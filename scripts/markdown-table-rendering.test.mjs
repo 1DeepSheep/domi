@@ -312,6 +312,27 @@ try {
   assert.match(portableCopy.html, /<code>&lt;u&gt;代码示例&lt;\/u&gt;&lt;br&gt;<\/code>/, "Code examples must remain literal instead of becoming formatting");
   assert.equal(portableCopy.before, portableCopy.after, "Copying table and heading selections must leave source content unchanged");
   assert.deepEqual(browserErrors, [], "Table rendering must not produce browser runtime errors");
+  await render("chat", streamingFixture, "## <u>重点判断</u>\n\n## 正常标题\n\n**<u>加粗下划线</u>**\n\n| 工作经历 |\n| --- |\n| IBM<br />Dell<br>科技 |\n\n`<u>代码</u><br>`\n\n<script>window.injected=true</script>");
+  const chatCopy = await page.locator(".message-markdown").evaluate((element) => {
+    const selection = window.getSelection();
+    const range = document.createRange(); range.selectNodeContents(element);
+    selection.removeAllRanges(); selection.addRange(range);
+    const data = new DataTransfer();
+    element.dispatchEvent(new ClipboardEvent("copy", { clipboardData: data, bubbles: true, cancelable: true }));
+    const html = data.getData("text/html");
+    const underline = element.querySelector("p strong u");
+    range.selectNodeContents(underline); selection.removeAllRanges(); selection.addRange(range);
+    const partialData = new DataTransfer();
+    underline.dispatchEvent(new ClipboardEvent("copy", { clipboardData: partialData, bubbles: true, cancelable: true }));
+    return { html, partial: partialData.getData("text/html"), br: element.querySelectorAll("td br").length, injected: window.injected };
+  });
+  assert.match(chatCopy.html, /<p><strong><u[^>]*>重点判断/);
+  assert.match(chatCopy.html, /<h2>正常标题<\/h2>/);
+  assert.match(chatCopy.html, /<td[^>]*style="[^"]*border: 1px/);
+  assert.match(chatCopy.html, /<code>&lt;u&gt;代码&lt;\/u&gt;&lt;br&gt;<\/code>/);
+  assert.match(chatCopy.partial, /<strong><u[^>]*>重点判断/);
+  assert.equal(chatCopy.br, 2);
+  assert.equal(chatCopy.injected, undefined);
   assert.deepEqual(failures, [], `Rendered table regressions:\n${failures.join("\n")}`);
   console.log(`Markdown table DOM regression passed: ${tested} real component/viewport fixtures, streamed header transitions, editor Markdown round-trip and ordinary selection clipboard fidelity.`);
   if (artifactDirectory) console.log(`Synthetic visual QA screenshots: ${artifactDirectory}`);

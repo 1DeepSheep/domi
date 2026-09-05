@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { isContextualSlidesRevision } from "./slides-request-policy.js";
 import { isSlidesInputRequest } from "./slides-response-policy.cjs";
+import { producedSlides } from "./slides-produced.cjs";
 
 import {
   appendJsonLinePrivate,
@@ -11,6 +12,7 @@ import {
   canonicalTaskId,
   compactTaskTitle,
   describeProgressItem,
+  extractLocalAttachments,
   findTaskReference,
   isResultOnlyRequest,
   likelyWaitingReply,
@@ -715,6 +717,11 @@ export class TaskManager {
       jobUsageComplete = completedTurnObserved && usageSamples > 0;
       commitTokenUsage();
       if (!finalResponse) finalResponse = "Codex已完成处理，但没有返回文字结果。";
+      // Detect before persisting completion/delivery state, so an undeclared
+      // Skill output cannot bypass QA on either initial send or a later resend.
+      if (!job.slidesDeliveryPolicy && producedSlides(
+        extractLocalAttachments(finalResponse, 16).map((item) => item.filePath), job.createdAt
+      )) job.slidesDeliveryPolicy = "html_pdf";
       const awaitingSlidesInput = Boolean(job.slidesDeliveryPolicy) && isSlidesInputRequest(finalResponse);
       task.status = awaitingSlidesInput ? "waiting_user" : job.slidesDeliveryPolicy ? "running" : responseWaitsForUser(finalResponse) ? "waiting_user" : "completed";
       task.progress = task.status === "waiting_user" ? "等待用户补充" : job.slidesDeliveryPolicy ? "Slides 产物质量验收中" : "已完成";

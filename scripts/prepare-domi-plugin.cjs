@@ -93,6 +93,8 @@ function validateSource(sourceRoot) {
     ["skills", "slides", "scripts", "audit_research_deck.js"],
     ["skills", "slides", "scripts", "init_deck.js"],
     ["skills", "slides", "scripts", "qa_deck.js"],
+    ["skills", "slides", "scripts", "pdf-proof.py"],
+    ["skills", "slides", "scripts", "prepare-font.py"],
     ["skills", "slides", "scripts", "export_pdf.js"]
   ];
   for (const segments of slidesContractFiles) {

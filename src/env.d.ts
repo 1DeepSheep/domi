@@ -37,6 +37,11 @@ declare global {
       listSkillHub: () => Promise<SkillHubListResult>;
       scanSkillHub: () => Promise<SkillHubScanResult>;
       importSkillHub: (request: SkillHubImportRequest) => Promise<SkillHubImportResult>;
+      manageSkillHub: (request: { id: string; action: "fork" | "enable" | "details"; enabled?: boolean }) => Promise<{
+        ok: boolean; error?: string; skills?: SkillHubUserSkill[]; imported?: SkillHubUserSkill[];
+        skill?: SkillHubUserSkill; changes?: string[]; baselineAvailable?: boolean; upstreamVersion?: string;
+        failures?: SkillHubImportFailure[]; activation?: string;
+      }>;
       selectFiles: (
         workspacePath?: string,
         entityRequest?: DomiEntityMaterialsRequest
@@ -159,6 +164,7 @@ export type LocalAttachment = {
 };
 
 export type SkillHubUserSkill = {
+  producesSlides?: boolean;
   id: string;
   name: string;
   title: string;
@@ -170,6 +176,16 @@ export type SkillHubUserSkill = {
   available?: boolean;
   error?: string;
   importedAt: number;
+  enabled?: boolean;
+  independentCopy?: boolean;
+  sourceName?: string;
+  sourceVersion?: string;
+};
+
+export type SkillHubOfficialSkill = {
+  id: string; name: string; title: string; description: string; path: string; version: string;
+  integrity?: "matches-bundled" | "modified" | "unverified";
+  error?: string;
 };
 
 export type SkillHubCandidate = {
@@ -197,6 +213,7 @@ export type SkillHubListResult = {
 };
 
 export type SkillHubScanResult = {
+  official?: SkillHubOfficialSkill[];
   ok: boolean;
   changed?: boolean;
   activation?: "next-task" | "after-current-tasks" | "unchanged";
