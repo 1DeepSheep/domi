@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { validatePdfProof } = require("../services/wechat-bridge/src/slides-pdf-proof.cjs");
 const { externalLocalResourceIn, slideElementsIn } = require("../services/wechat-bridge/src/slides-html-contract.cjs");
 
 const SLIDES_DELIVERY_POLICIES = new Set([
@@ -288,7 +289,9 @@ function validateStrictReceipt(receiptPath, files, preserveTemplate) {
   if (!receipt) return { ok: false, error: "Slides QA receipt 不存在、过大或无法解析。" };
   if (
     receipt.contract !== "DOMI_SLIDES_QA_RECEIPT_V1"
-    || receipt.qaVersion !== 3
+    || receipt.qaVersion !== 4
+    || !receipt.fontSummary?.expectedCjkFont
+    || receipt.fontSummary?.trueCjkBoldChecked !== true
     || !receipt.fontSummary?.expectedLatinFont
     || !(receipt.fontSummary?.actualRenderedFontsChecked > 0)
     || !Array.isArray(receipt.fontSummary?.renderedMismatches)
@@ -410,6 +413,8 @@ function validateStrictReceipt(receiptPath, files, preserveTemplate) {
   ) {
     return { ok: false, error: "Slides 缺少与最终 contact sheet 绑定的逐页视觉复核。" };
   }
+  const pdfProofError = validatePdfProof(receipt);
+  if (pdfProofError) return { ok: false, error: pdfProofError };
   return { ok: true, error: "", receipt, receiptPath };
 }
 

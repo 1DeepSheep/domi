@@ -234,6 +234,7 @@ const browserFallback: Window["workbench"] = {
     error: "浏览器预览模式不能提交 Codex 选择。"
   }),
   listSkillHub: async () => ({ ok: true, skills: [], updatedAt: Date.now() }),
+  manageSkillHub: async () => ({ ok: false, error: "请在 domi 桌面客户端管理 Skill。" }),
   scanSkillHub: async () => ({
     ok: true,
     candidates: [],
@@ -289,13 +290,13 @@ const browserFallback: Window["workbench"] = {
   listDocumentLibrary: async (_request) => ({
     ok: false,
     rootPath: "",
-    rootName: "本地文档库",
+    rootName: "本地工作区",
     nodes: [],
     documentCount: 0,
     folderCount: 0,
     truncated: false,
     scannedAt: Date.now(),
-    error: "请在 Electron 窗口中读取本地文档库。"
+    error: "请在 Electron 窗口中读取文档中心。"
   }),
   searchDocumentLibrary: async (_request) => ({
     ok: false,
@@ -303,7 +304,7 @@ const browserFallback: Window["workbench"] = {
     indexing: false,
     indexedCount: 0,
     lastIndexedAt: 0,
-    error: "请在 Electron 窗口中搜索本地文档库。"
+    error: "请在 Electron 窗口中搜索文档中心。"
   }),
   createDocumentLibraryEntry: async () => ({
     ok: false,

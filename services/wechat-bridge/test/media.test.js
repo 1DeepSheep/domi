@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import addPdfProofFixture from "../../../scripts/slides-proof-fixture.cjs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -69,8 +70,8 @@ function writePassedReceipt(root, artifacts) {
   const receiptPath = path.join(root, "deck.qa-receipt.json");
   const receipt = {
     contract: "DOMI_SLIDES_QA_RECEIPT_V1",
-    qaVersion: 3,
-    fontSummary: { expectedLatinFont: "Calibri", actualRenderedFontsChecked: 2, renderedMismatches: [] },
+    qaVersion: 4,
+    fontSummary: { expectedCjkFont: "Kaiti SC", trueCjkBoldChecked: true, expectedLatinFont: "Calibri", actualRenderedFontsChecked: 2, renderedMismatches: [] },
     strict: true,
     status: "passed",
     pages: 1,
@@ -148,6 +149,7 @@ function writePassedReceipt(root, artifacts) {
       contactSheetSha256: pptxContactSheetSha256,
     };
   }
+  addPdfProofFixture(receipt);
   fs.writeFileSync(receiptPath, JSON.stringify(receipt));
   return receiptPath;
 }

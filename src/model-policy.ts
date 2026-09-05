@@ -274,10 +274,6 @@ export function domiModelPolicyClass(
   if (
     semanticRequest.useDomiPlugin
     && semanticRequest.domiSlidesDeliveryPolicy
-    && isDomiPremiumNaturalLanguageTask(
-      semanticRequest.requestText || "",
-      semanticRequest.domiSlidesDeliveryPolicy
-    )
   ) return "premium";
   if (ECONOMY_WORKFLOW_IDS.has(normalizedWorkflowId)) return "economy";
   if (PREMIUM_WORKFLOW_IDS.has(normalizedWorkflowId)) return "premium";

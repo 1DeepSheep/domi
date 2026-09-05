@@ -42,7 +42,24 @@ function initializeDocumentSearchIndex(database) {
       content,
       tokenize='trigram'
     );
+    CREATE VIRTUAL TABLE IF NOT EXISTS search_documents_short USING fts5(path UNINDEXED, grams);
   `);
+  const columns = new Set(database.prepare("PRAGMA table_info(search_documents)").all().map((column) => column.name));
+  if (!columns.has("content_state")) database.exec("ALTER TABLE search_documents ADD COLUMN content_state TEXT NOT NULL DEFAULT ''");
+}
+
+function shortToken(characters) {
+  return `g${characters.map((character) => character.codePointAt(0).toString(16)).join("x")}`;
+}
+
+function shortTokens(text) {
+  const characters = [...text.toLocaleLowerCase("zh-CN")];
+  const tokens = new Set();
+  for (let index = 0; index < characters.length; index += 1) {
+    tokens.add(shortToken([characters[index]]));
+    if (index) tokens.add(shortToken([characters[index - 1], characters[index]]));
+  }
+  return [...tokens].join(" ");
 }
 
 function openDocumentSearchIndex(databasePath) {
@@ -76,7 +93,7 @@ function configureRoot(database, rootPath) {
   if (currentRoot(database) === resolvedRoot) return resolvedRoot;
   database.exec("BEGIN IMMEDIATE");
   try {
-    database.exec("DELETE FROM search_documents_fts; DELETE FROM search_documents;");
+    database.exec("DELETE FROM search_documents_fts; DELETE FROM search_documents_short; DELETE FROM search_documents;");
     database.prepare(`
       INSERT INTO search_meta(key, value) VALUES ('root_path', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -112,22 +129,25 @@ function upsertIndexedDocument(database, rootPath, filePath, stat, generation) {
   const relativePath = path.relative(rootPath, resolvedPath);
   const extension = path.extname(resolvedPath).toLocaleLowerCase("en-US");
   const kind = extension === ".pdf" ? "pdf" : "markdown";
+  const transcript = isTranscript(relativePath);
+  const contentState = kind !== "markdown" || transcript ? "excluded"
+    : stat.size > MAX_MARKDOWN_BYTES ? "too-large" : isCloudPlaceholder(stat) ? "placeholder" : "ready";
   const existing = database.prepare(`
-    SELECT size, mtime_ms FROM search_documents WHERE path = ?
+    SELECT size, mtime_ms, content_state FROM search_documents WHERE path = ?
   `).get(resolvedPath);
-  if (existing && existing.size === stat.size && existing.mtime_ms === stat.mtimeMs) {
+  if (existing && existing.size === stat.size && existing.mtime_ms === stat.mtimeMs && existing.content_state === contentState) {
     database.prepare(`
       UPDATE search_documents SET scan_generation = ? WHERE path = ?
     `).run(generation, resolvedPath);
     return false;
   }
-  const transcript = isTranscript(relativePath);
   const content = kind === "markdown" && !transcript
     ? readMarkdownContent(resolvedPath, stat)
     : "";
   database.exec("BEGIN IMMEDIATE");
   try {
     database.prepare("DELETE FROM search_documents_fts WHERE path = ?").run(resolvedPath);
+    database.prepare("DELETE FROM search_documents_short WHERE path = ?").run(resolvedPath);
     database.prepare(`
       INSERT INTO search_documents(
         path, root_path, name, relative_path, kind, size, mtime_ms,
@@ -161,6 +181,9 @@ function upsertIndexedDocument(database, rootPath, filePath, stat, generation) {
       INSERT INTO search_documents_fts(path, name, relative_path, content)
       VALUES (?, ?, ?, ?)
     `).run(resolvedPath, path.basename(resolvedPath), relativePath, content);
+    database.prepare("INSERT INTO search_documents_short(path, grams) VALUES (?, ?)")
+      .run(resolvedPath, shortTokens(`${path.basename(resolvedPath)}\n${relativePath}\n${content}`));
+    database.prepare("UPDATE search_documents SET content_state = ? WHERE path = ?").run(contentState, resolvedPath);
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");
@@ -177,9 +200,11 @@ function removeStaleDocuments(database, generation) {
   database.exec("BEGIN IMMEDIATE");
   try {
     const deleteFts = database.prepare("DELETE FROM search_documents_fts WHERE path = ?");
+    const deleteShort = database.prepare("DELETE FROM search_documents_short WHERE path = ?");
     const deleteDocument = database.prepare("DELETE FROM search_documents WHERE path = ?");
     for (const row of stale) {
       deleteFts.run(row.path);
+      deleteShort.run(row.path);
       deleteDocument.run(row.path);
     }
     database.exec("COMMIT");
@@ -232,18 +257,16 @@ function searchIndexedDocuments(database, request = {}) {
       LIMIT ?
     `).all(phrase, includeTranscripts ? 1 : 0, limit);
   } else {
-    const pattern = `%${query.toLocaleLowerCase("zh-CN")}%`;
+    // Indexed unigrams/bigrams: short company names must not trigger a body
+    // scan on every keystroke. Hex tokens also treat %, _ and quotes literally.
+    const normalized = query.toLocaleLowerCase("zh-CN");
     rows = database.prepare(`
-      SELECT d.*, 0 AS rank
-      FROM search_documents d
-      WHERE (? = 1 OR d.is_transcript = 0)
-        AND (
-          lower(d.name) LIKE ?
-          OR lower(d.relative_path) LIKE ?
-        )
-      ORDER BY d.mtime_ms DESC
+      SELECT d.*, 0 AS rank FROM search_documents_short s
+      JOIN search_documents d ON d.path = s.path
+      WHERE search_documents_short MATCH ? AND (? = 1 OR d.is_transcript = 0)
+      ORDER BY (instr(lower(d.name), ?) > 0) DESC, d.mtime_ms DESC
       LIMIT ?
-    `).all(includeTranscripts ? 1 : 0, pattern, pattern, limit);
+    `).all(shortToken([...normalized]), includeTranscripts ? 1 : 0, normalized, limit);
   }
   return rows.map((row) => ({
     path: row.path,

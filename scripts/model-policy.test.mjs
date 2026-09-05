@@ -184,8 +184,7 @@ test("diagnostics and ordinary file edits do not become premium by keyword colli
     "帮我修复 investment-analysis.ts 文件里的 TypeScript 报错",
     "把“项目研究.md”文件重命名为“研究归档.md”",
     "把 IC memo 文档里的字体换成宋体",
-    "修改这份投资分析报告里的错别字",
-    "修正这个 PPT 的拼写和页码"
+    "修改这份投资分析报告里的错别字"
   ];
 
   for (const requestText of ordinaryRequests) {
@@ -196,6 +195,11 @@ test("diagnostics and ordinary file edits do not become premium by keyword colli
       serviceTier: "priority"
     }, requestText);
   }
+});
+
+test("slide revisions retain the full slides reasoning policy", () => {
+  assert.equal(resolveNaturalLanguage("修正这个 PPT 的拼写和页码").policyClass, "premium");
+  assert.equal(resolveNaturalLanguage("修正这个 PPT 的拼写和页码").reasoningEffort, "max");
 });
 
 test("explicit business retries override a preceding failure diagnostic", () => {

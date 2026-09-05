@@ -217,7 +217,7 @@ async function main() {
     });
     assert.match(
       tableBreak.html,
-      /<td>IBM<br>Dell EMC<br>趋动科技<\/td>/,
+      /<td[^>]*style="[^"]*border:1px solid #ddd[^\"]*">IBM<br>Dell EMC<br>趋动科技<\/td>/,
       "table break markup must become real rich-text line breaks"
     );
     assert.doesNotMatch(tableBreak.html, /&lt;br/);
