@@ -9,12 +9,13 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { workbench } from "./bridge";
-import type { SkillHubCandidate, SkillHubUserSkill } from "./env";
+import type { SkillHubCandidate, SkillHubUserSkill, SkillHubOfficialSkill } from "./env";
 import "./skill-hub-manager.css";
 
 type SkillHubManagerProps = {
   onClose: () => void;
   onCreateSkill: () => void;
+  onEditSkill: (skill: SkillHubUserSkill) => void;
   onImported: (skills: SkillHubUserSkill[]) => void;
   reviewCandidateIds?: string[];
 };
@@ -22,10 +23,14 @@ type SkillHubManagerProps = {
 export default function SkillHubManager({
   onClose,
   onCreateSkill,
+  onEditSkill,
   onImported,
   reviewCandidateIds = []
 }: SkillHubManagerProps) {
   const [candidates, setCandidates] = useState<SkillHubCandidate[]>([]);
+  const [users, setUsers] = useState<SkillHubUserSkill[]>([]);
+  const [official, setOfficial] = useState<SkillHubOfficialSkill[]>([]);
+  const [details, setDetails] = useState<{ id: string; text: string } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
@@ -42,6 +47,8 @@ export default function SkillHubManager({
       const result = await workbench.scanSkillHub();
       if (!result.ok) throw new Error(result.error || "没有完成本机 Skill 扫描。");
       setCandidates(result.candidates);
+      setUsers(result.imported);
+      setOfficial(result.official || []);
       onImported(result.imported);
       setSelected((current) => new Set(
         [...current].filter((id) => result.candidates.some(
@@ -130,6 +137,33 @@ export default function SkillHubManager({
     }
   }
 
+  async function manage(id: string, action: "fork" | "enable" | "details", enabled?: boolean) {
+    if (importing) return;
+    setImporting(true);
+    setError("");
+    try {
+      const result = await workbench.manageSkillHub({ id, action, enabled });
+      if (!result.ok) throw new Error(result.failures?.map((failure) => failure.error).join("；") || result.error || "操作未完成。");
+      if (result.skills) onImported(result.skills);
+      if (action === "details" && result.skill) {
+        const skill = result.skill;
+        setDetails({ id, text: [
+          `保存位置：${skill.path}`, `来源：${skill.sourcePath}`,
+          skill.independentCopy ? "独立副本：来源移动或软件升级不会覆盖它。" : "旧版原位注册：请保留上述目录；来源移动后需重新导入。",
+          skill.sourceVersion ? `复制时官方版本：${skill.sourceVersion}；当前官方版本：${result.upstreamVersion || "不可用"}` : "来源：本机用户 Skill",
+          result.baselineAvailable ? `相对导入时的文件差异：\n${result.changes?.join("\n") || "没有变化"}` : "旧版没有基线，不能准确计算文件差异。"
+        ].join("\n") });
+      } else {
+        await scan();
+        if (action === "fork" && result.imported?.[0]) onEditSkill(result.imported[0]);
+        else setNotice(enabled ? "已在 Skill Hub 启用。" : "已从 Skill Hub 隐藏并禁止通过该入口启动；保留文件，不中断已开始的任务。Codex 原生发现不受此开关影响。");
+      }
+    } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    finally { setImporting(false); }
+  }
+
+  const matches = (item: { title: string; description: string }) => `${item.title} ${item.description}`.toLowerCase().includes(query.trim().toLowerCase());
+
   return (
     <div
       className="skill-hub-overlay"
@@ -172,8 +206,8 @@ export default function SkillHubManager({
 
           <div className="skill-hub-import-heading">
             <div>
-              <strong>从本机 Codex 导入</strong>
-              <small>{loading ? "正在扫描…" : `${importableCount} 个可导入 · ${candidates.filter((candidate) => candidate.status === "imported").length} 个已加入${candidates.some((candidate) => candidate.status === "unavailable") ? " · 部分 Skill 需修复" : ""}`}</small>
+              <strong>技能管理与本机导入</strong>
+              <small>{loading ? "正在扫描…" : `${official.length} 个官方 · ${users.length} 个已加入 · ${importableCount} 个可从本机 Codex 导入${candidates.some((candidate) => candidate.status === "unavailable") ? " · 部分 Skill 需修复" : ""}`}</small>
             </div>
             <button type="button" onClick={() => void scan()} disabled={loading || importing}>
               <RefreshCw className={loading ? "spinning" : ""} size={14} />
@@ -197,12 +231,31 @@ export default function SkillHubManager({
           </label>
 
           <div className="skill-hub-list" aria-busy={loading}>
-            {!loading && visibleCandidates.length === 0 && (
+            {official.filter(matches).map((skill) => (
+              <div className="skill-hub-managed-item" key={skill.id}>
+                <div className="skill-hub-item-copy"><strong>{skill.title} <em>官方 · {skill.version}</em></strong><small>{skill.error || skill.description}</small>
+                  {skill.integrity === "modified" && <small>与随软件打包的同版本内容不同。若是你的修改，请先复制保存，避免后续官方更新覆盖。</small>}
+                </div>
+                <button type="button" disabled={importing || Boolean(skill.error)} onClick={() => void manage(skill.id, "fork")}>复制并修改</button>
+              </div>
+            ))}
+            {users.filter(matches).map((skill) => (
+              <div className="skill-hub-managed-item" key={skill.id}>
+                <div className="skill-hub-item-copy"><strong>{skill.title} <em>{skill.sourceVersion ? "官方派生" : "用户 Skill"} · {skill.enabled === false ? "已停用" : "已加入"}</em></strong><small>{skill.error || skill.description}</small></div>
+                <div className="skill-hub-item-actions">
+                  <button type="button" disabled={importing} onClick={() => onEditSkill(skill)}>编辑</button>
+                  <button type="button" disabled={importing} onClick={() => void manage(skill.id, "enable", skill.enabled === false)}>{skill.enabled === false ? "启用" : "停用"}</button>
+                  <button type="button" disabled={importing} onClick={() => details?.id === skill.id ? setDetails(null) : void manage(skill.id, "details")}>来源与差异</button>
+                </div>
+                {details?.id === skill.id && <pre className="skill-hub-details">{details.text}</pre>}
+              </div>
+            ))}
+            {!loading && visibleCandidates.length === 0 && !users.some(matches) && !official.some(matches) && (
               <div className="skill-hub-empty">
                 {query ? "没有匹配的 Skill" : "没有发现可导入的 Codex 用户 Skill"}
               </div>
             )}
-            {visibleCandidates.map((candidate) => {
+            {visibleCandidates.filter((candidate) => candidate.status === "available").map((candidate) => {
               const checked = selected.has(candidate.id);
               const imported = candidate.status === "imported";
               const blocked = candidate.status === "unavailable"

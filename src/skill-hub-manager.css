@@ -421,3 +421,10 @@
     margin-left: auto;
   }
 }
+.skill-hub-managed-item { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 12px; border-bottom: 1px solid var(--line, #ddd); }
+.skill-hub-managed-item .skill-hub-item-copy { flex: 1; min-width: 180px; }
+.skill-hub-managed-item button { border: 1px solid var(--line, #ddd); background: transparent; border-radius: 6px; padding: 6px 9px; cursor: pointer; color: inherit; }
+.skill-hub-managed-item button:focus-visible { outline: 2px solid #ca694a; outline-offset: 2px; }
+.skill-hub-managed-item button:disabled { opacity: .5; cursor: default; }
+.skill-hub-item-actions { display: flex; gap: 6px; }
+.skill-hub-details { flex-basis: 100%; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 system-ui; margin: 0; padding: 10px; background: #8881; }

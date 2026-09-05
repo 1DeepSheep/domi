@@ -4,7 +4,7 @@ export const SLIDES_DELIVERY_POLICIES = new Set([
   "html_pdf", "html_pdf_preserve_template", "explicit_pptx", "explicit_pptx_preserve_template",
 ]);
 
-const SLIDE = /(?:\bpptx?\b|\bpowerpoint\b|\bkeynote\b|\bslides?\b|\bdeck\b|幻灯片|演示文稿|路演材料|汇报(?:材料|演示)?)/i;
+const SLIDE = /(?:\bpptx?\b|\bpowerpoint\b|\bkeynote\b|\bslides?\b|\bpresentations?\b|\bdeck\b|幻灯片|演示文稿|路演材料|汇报(?:材料|演示)?)/i;
 const AUTHOR = /(?:制作|生成|输出|导出|创建|完成|做(?:一份|一个|成|个)?|画|写|更新|改版|修改|改(?:一下|第.{0,8}页|一版)|重做|修复|改进|美化|完善|优化|排版|设计|整理|处理|转成|转换|create|make|generate|build|design|redesign|update|revise|edit|convert)/i;
 const CHANGE = /(?:删除|删掉|去掉|移除|合并|增加|加上|加入|补充|替换|换成|缩小|放大|调整|修改|更新|改进|优化|美化|重做|修复|改|删|减|加|edit|revise|remove|delete|merge|replace|resize)/i;
 const PAGE_CONTEXT = /(?:这|那|此|上|前|后|第[\d一二两三四五六七八九十百]+)[几\d一二两三四五六七八九十百]*\s*页|首页|末页|封面|页码|版式|排版|字体|字号|留白|行距|标题|图表|表格|配色|母版|模板|页面|page\s*\d|layout|font|chart|slide\s*\d/i;
@@ -22,6 +22,11 @@ function contextualRevisionIntent(text, previous) {
   if (!previous || NEW_DECK.test(text)) return false;
   return SHORT_REVISION.test(text)
     || (PAGE_CONTEXT.test(text) && CHANGE.test(text))
+    // Content amendments are still edits of the current deliverable. Do not
+    // require a page number, but do require a revision verb and content target.
+    || (/(?:强调|突出|补充|删掉|去掉|改写|重写|替换|增加|加入|补上|改成|修正|纠正|strengthen|emphasize|rewrite|add)/i.test(text)
+      && /(?:内容|结论|观点|表述|描述|介绍|逻辑|数据|数字|证据|风险|优势|竞争|模型|技术|产品|玩法|公司|团队|论点|例子|案例|分析|content|conclusion|argument|evidence|risk)/i.test(text)
+      && !/(?:新任务|另一个任务|换个问题|待办|日程|联系人|人脉库|入库|建档|发送给|发给)/.test(text))
     || (/(?:只要|交付|输出|导出|改成|换成|不要|不用)/.test(text) && /(?:html|pdf|pptx|powerpoint)/i.test(text));
 }
 
@@ -82,8 +87,11 @@ export function resolveSlidesDeliveryPolicy({ text = "", hasPowerPointAttachment
   const inherit = contextualEdit;
   const rejectPreserve = /(?:不要|不再|无需|不必|别|不)\s*保留|恢复默认(?:模板|主题)|改用.{0,12}(?:默认|Morgan Stanley|投行)/i.test(currentText);
   const preserve = !rejectPreserve && (PRESERVE.test(currentText) || (inherit && previous.endsWith("_preserve_template")));
+  const editingAttachedDeck = hasPowerPointAttachment && (CHANGE.test(currentText) || /重新排版|重排/.test(currentText))
+    && PAGE_CONTEXT.test(currentText) && !/(?:根据|基于|参考).{0,50}(?:BP|材料|附件|pptx)/i.test(currentText);
+  const outputIntent = currentText.replace(/(?:根据|基于|参考|阅读|分析).{0,60}?\.pptx\b/gi, "");
   const pptx = !NO_PPTX.test(currentText) && (
-    EDITABLE.test(currentText) || hasPowerPointAttachment || (inherit && previous.startsWith("explicit_pptx"))
+    EDITABLE.test(outputIntent) || editingAttachedDeck || (inherit && previous.startsWith("explicit_pptx"))
   );
   return `${pptx ? "explicit_pptx" : "html_pdf"}${preserve ? "_preserve_template" : ""}`;
 }

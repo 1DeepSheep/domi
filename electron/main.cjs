@@ -41,9 +41,11 @@ const { ServiceCoordinator } = require("./service-coordinator.cjs");
 const { SkillHubService } = require("./skill-hub.cjs");
 const {
   normalizedSlidesDeliveryPolicy,
+  extractLocalFileLinks,
   slidesDeliveryCorrectionPrompt,
   validateSlidesDeliveryOutput
 } = require("./slides-delivery.cjs");
+const { producedSlides } = require("../services/wechat-bridge/src/slides-produced.cjs");
 const { isSlidesInputRequest } = require("../services/wechat-bridge/src/slides-response-policy.cjs");
 const {
   classifyCodexTurnStatus,
@@ -345,6 +347,9 @@ function getSkillHubService() {
     // Refresh this display-only conflict set for every Skill Hub operation.
     skillHubService.setOfficialSkillNames(domiOfficialSkillNames());
   }
+  const manager = getDomiPluginManager();
+  const bundledPlugin = manager.bundledInfo();
+  skillHubService.setOfficialPlugin(manager.installedInfo() || bundledPlugin, bundledPlugin);
   return skillHubService;
 }
 
@@ -2253,6 +2258,9 @@ function finishRun(run, type, details = {}) {
 
 async function completeRunThroughSlidesDeliveryGate(run) {
   if (run.finished) return;
+  if (!run.slidesDeliveryPolicy && run.useDomiPlugin && producedSlides(extractLocalFileLinks(run.output), run.acceptedAt)) {
+    run.slidesDeliveryPolicy = "html_pdf";
+  }
   const policy = normalizedSlidesDeliveryPolicy(run.slidesDeliveryPolicy);
   if (!policy) {
     finishRun(run, "completed");
@@ -3508,6 +3516,7 @@ async function runCodex(sender, payload) {
         externalType: payload?.externalType || "",
         externalRecordId: payload?.externalRecordId || "",
         workflowId: payload?.workflowId || "",
+        useDomiPlugin: payload?.useDomiPlugin === true,
         slidesDeliveryPolicy: normalizedSlidesDeliveryPolicy(payload?.slidesDeliveryPolicy),
         slidesDeliveryCorrectionAttempts: 0,
         deliveryCorrectionStarting: false,
@@ -3981,6 +3990,10 @@ ipcMain.handle("skill-hub:import", (_event, request) => {
     ? activateImportedSkillsWhenSafe()
     : skillHubCodexReloadPending ? "after-current-tasks" : "unchanged";
   return { ...result, activation };
+});
+ipcMain.handle("skill-hub:manage", (_event, request) => {
+  const result = getSkillHubService().manage(request);
+  return { ...result, activation: result.changed ? activateImportedSkillsWhenSafe() : "unchanged" };
 });
 ipcMain.handle("settings:load", () => ({ ok: true, ...getAppSettings().load() }));
 ipcMain.handle("settings:save", (_event, request) => saveRuntimeSettings(request));

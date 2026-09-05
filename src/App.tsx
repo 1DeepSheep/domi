@@ -1825,6 +1825,7 @@ function userSkillWorkflow(skill: SkillHubUserSkill): Workflow {
     shortTitle: skill.title,
     skill: `$${skill.name}`,
     skillPath: skill.path,
+    producesSlides: skill.producesSlides,
     description: skill.description,
     output: `按 $${skill.name} 约定生成的结果`,
     defaultPrompt: `请使用 $${skill.name} 完成我的任务。`,
@@ -1838,6 +1839,7 @@ function App() {
   const [activeThreadId, setActiveThreadId] = useState(initialThreads[0].id);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("conversation");
   const [skillsExpanded, setSkillsExpanded] = useState(true);
+  const selectedSkillButtonRef = useRef<HTMLButtonElement>(null);
   const [skillHubOpen, setSkillHubOpen] = useState(false);
   const [skillHubReviewCandidateIds, setSkillHubReviewCandidateIds] = useState<string[]>([]);
   const [skillHubSkills, setSkillHubSkills] = useState<SkillHubUserSkill[]>([]);
@@ -2618,8 +2620,11 @@ function App() {
   const selectedDocumentLibraryPath = markdownDocument?.path || pdfDocument?.path || "";
 
   const userSkillWorkflows = useMemo<Workflow[]>(() => skillHubSkills
-    .filter((skill) => skill.available !== false)
+    .filter((skill) => skill.available !== false && skill.enabled !== false)
     .map(userSkillWorkflow), [skillHubSkills]);
+  useEffect(() => {
+    if (skillsExpanded) selectedSkillButtonRef.current?.scrollIntoView({ block: "nearest" });
+  }, [skillsExpanded, selectedWorkflowId]);
   const allWorkflows = useMemo(
     () => [...workflows, ...userSkillWorkflows],
     [userSkillWorkflows]
@@ -4901,7 +4906,7 @@ function App() {
       setDatabaseDraft(selected ? databaseDraftForRecord(target.entityType, selected) : null);
       setDatabaseNotice(
         result.filesPreserved
-          ? `已从资料库移除“${target.title}”；本地原始文件仍保留。`
+          ? `已从投资档案移除“${target.title}”；本地原始文件仍保留。`
           : `已删除“${target.title}”。`
       );
       if (target.entityType === "news") {
@@ -7880,7 +7885,7 @@ function App() {
         if (!refreshed.ok) throw new Error(refreshed.error || "无法检查用户 Skill，请稍后重试。");
         setSkillHubSkills(refreshed.skills);
         const currentSkill = refreshed.skills.find((skill) => skill.id === requestedUserSkillId);
-        if (!currentSkill || currentSkill.available === false) {
+        if (!currentSkill || currentSkill.available === false || currentSkill.enabled === false) {
           throw new Error(currentSkill?.error || "所选用户 Skill 已不可用，请在 Skill Hub 重新扫描并修复。");
         }
         if (refreshed.activation === "after-current-tasks") {
@@ -7934,7 +7939,7 @@ function App() {
           messageText,
           selectedAttachments.map((attachment) => attachment.name || attachment.path),
           previousSlidesDeliveryPolicy,
-          workflow?.id === "slides",
+          workflow?.id === "slides" || workflow?.producesSlides === true,
           awaitingSlidesInput
         ) as DomiSlidesDeliveryPolicy | ""
       : "";
@@ -8807,7 +8812,7 @@ function App() {
     }
   }
 
-  async function openNewSkillConversation() {
+  async function openNewSkillConversation(editSkill?: SkillHubUserSkill) {
     setSkillHubOpen(false);
     setSkillHubReviewCandidateIds([]);
     const threadId = await createThread({ selectedWorkflowId: "skill-creator" });
@@ -8829,11 +8834,14 @@ function App() {
     const workflow = workflows.find((candidate) => candidate.id === "skill-creator");
     if (!thread || !workflow) return;
     try {
-      await submitToCodex(workflow, "请先通过对话引导我创建一个新的 Skill。", {
+      const instruction = editSkill
+        ? `请使用 skill-creator，通过对话引导我修改自己的 Skill。唯一目标为 ${JSON.stringify(editSkill.path)}/SKILL.md。先完整读取并询问我希望怎样修改；保留相关资源，只修改这个用户副本，不能修改官方插件或来源目录。`
+        : "请先通过对话引导我创建一个新的 Skill。";
+      await submitToCodex(workflow, instruction, {
         thread,
         attachments: [],
         requestOrigin: "user",
-        userInstructionText: "请先通过对话引导我创建一个新的 Skill。",
+        userInstructionText: instruction,
         useDomiPlugin: domiPluginEnabled,
         model,
         reasoningEffort,
@@ -9077,7 +9085,7 @@ function App() {
       const snapshot = await workbench.listDocumentLibrary({ force: options.force === true });
       if (requestId !== documentLibraryRequestRef.current) return null;
       if (!snapshot.ok) {
-        setDocumentLibraryError(snapshot.error || "无法读取本地文档库。");
+        setDocumentLibraryError(snapshot.error || "无法读取文档中心。");
         setDocumentLibrary(snapshot);
         return null;
       }
@@ -9093,7 +9101,7 @@ function App() {
       return snapshot;
     } catch (error) {
       if (requestId !== documentLibraryRequestRef.current) return null;
-      const message = describeOperationError(error, "无法读取本地文档库。");
+      const message = describeOperationError(error, "无法读取文档中心。");
       setDocumentLibraryError(message);
       return null;
     } finally {
@@ -9992,13 +10000,13 @@ function App() {
   function renderDocumentLibrarySidebar() {
     const rootPath = documentLibrary?.rootPath || "";
     const selectedFolderName = documentLibrarySelectedFolder === rootPath
-      ? "文档库根目录"
-      : documentLibrarySelectedFolder.split(/[\\/]/).filter(Boolean).pop() || "文档库根目录";
+      ? "文档中心根目录"
+      : documentLibrarySelectedFolder.split(/[\\/]/).filter(Boolean).pop() || "文档中心根目录";
     return (
-      <div className="sidebar-document-library" aria-label="本地文档库目录">
+      <div className="sidebar-document-library" aria-label="文档中心目录">
         <div className="sidebar-document-toolbar">
-          <span title={documentLibrary?.rootName || "本地资料库"}>
-            {documentLibrary?.rootName || "本地资料库"}
+          <span title={documentLibrary?.rootName || "本地工作区"}>
+            {documentLibrary?.rootName || "本地工作区"}
           </span>
           <div className="document-library-tree-actions">
             <button
@@ -10023,8 +10031,8 @@ function App() {
               type="button"
               onClick={() => rootPath && void workbench.openResource(rootPath)}
               disabled={!rootPath}
-              title="在访达中打开文档库"
-              aria-label="在访达中打开文档库"
+              title="在访达中打开文档中心"
+              aria-label="在访达中打开文档中心"
             >
               <ExternalLink size={13} />
             </button>
@@ -10060,7 +10068,7 @@ function App() {
               }
             }}
             placeholder="搜索文档和文件夹"
-            aria-label="搜索本地文档库"
+            aria-label="搜索文档中心"
           />
           {documentLibraryQuery && (
             <button
@@ -10149,7 +10157,7 @@ function App() {
           {documentLibrary?.ok && filteredDocumentLibraryNodes.length === 0 && (
             <div className="document-library-state">
               <FileText size={15} />
-              {documentLibraryQuery ? "没有匹配的文档" : "文档库还是空的"}
+              {documentLibraryQuery ? "没有匹配的文档" : "文档中心还是空的"}
             </div>
           )}
         </div>
@@ -10172,7 +10180,7 @@ function App() {
             <div className="document-library-welcome">
               <span><LibraryBig size={28} /></span>
               <h2>选择一篇文档开始阅读</h2>
-              <p>在左侧“文档库”中展开目录，即可查看并编辑本地 Markdown。</p>
+              <p>在左侧“文档中心”中展开目录，即可查看并编辑本地 Markdown。</p>
               <div>
                 <button
                   type="button"
@@ -11361,7 +11369,7 @@ function App() {
     return (
       <div className="database-stage">
         <div className="database-toolbar">
-          <div className="database-tabs" role="tablist" aria-label="资料库类型">
+          <div className="database-tabs" role="tablist" aria-label="投资档案类型">
             {([
               ["project", "项目库", databaseSnapshot?.projects?.length || 0],
               ["person", "人脉库", databaseSnapshot?.people?.length || 0],
@@ -11384,7 +11392,7 @@ function App() {
           </div>
           <div className="database-backend-badge">
             <Database size={15} />
-            {databaseSnapshot?.backend === "local" ? "本地 SQLite · 自动保存到 Markdown" : "资料库"}
+            {databaseSnapshot?.backend === "local" ? "本地 SQLite · 自动保存到 Markdown" : "投资档案"}
           </div>
         </div>
 
@@ -11408,12 +11416,12 @@ function App() {
           </div>
         )}
         {databaseLoading && !databaseSnapshot && (
-          <div className="database-empty"><RefreshCw className="spinning" size={18} />正在读取资料库</div>
+          <div className="database-empty"><RefreshCw className="spinning" size={18} />正在读取投资档案</div>
         )}
         {databaseSnapshot && !databaseSnapshot.editable && (
           <div className="database-empty">
             <AlertCircle size={18} />
-            {databaseSnapshot.error || "当前资料库暂不支持在客户端内直接编辑。"}
+            {databaseSnapshot.error || "当前投资档案暂不支持在客户端内直接编辑。"}
           </div>
         )}
 
@@ -12173,9 +12181,9 @@ function App() {
             >
               <div className="database-delete-icon"><Trash2 size={18} /></div>
               <div>
-                <h3 id="database-delete-title">从资料库移除这条记录？</h3>
+                <h3 id="database-delete-title">从投资档案移除这条记录？</h3>
                 <p id="database-delete-description">
-                  “{databaseDeleteTarget.title}”会从资料库列表和后续索引中移除；本地项目目录、文档和附件会完整保留。
+                  “{databaseDeleteTarget.title}”会从投资档案列表和后续索引中移除；本地项目目录、文档和附件会完整保留。
                 </p>
               </div>
               <div className="database-delete-actions">
@@ -12194,7 +12202,7 @@ function App() {
                 >
                   {databaseDeleting
                     ? <><RefreshCw className="spinning" size={14} />正在移除</>
-                    : <><Trash2 size={14} />移出资料库</>}
+                    : <><Trash2 size={14} />移出投资档案</>}
                 </button>
               </div>
             </div>
@@ -12841,7 +12849,7 @@ function App() {
           )}
         </div>
 
-        <nav className="sidebar-primary-nav" aria-label="工作台导航">
+        <nav className={`sidebar-primary-nav ${documentLibrarySidebarExpanded ? "documents-open" : ""}`} aria-label="工作台导航">
           <button
             className={`sidebar-nav-item ${workspaceView === "tasks" ? "active" : ""}`}
             type="button"
@@ -12876,7 +12884,7 @@ function App() {
             }}
           >
             <Database className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
-            <strong>资料库</strong>
+            <strong>投资档案</strong>
             <span className="sidebar-nav-meta" />
           </button>
           <div className={`sidebar-document-section ${documentLibrarySidebarExpanded ? "open" : ""}`}>
@@ -12887,7 +12895,7 @@ function App() {
               aria-expanded={documentLibrarySidebarExpanded}
             >
               <LibraryBig className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
-              <strong>文档库</strong>
+              <strong>文档中心</strong>
               <span className="sidebar-nav-meta">
                 <span className="sidebar-nav-disclosure" aria-hidden="true">
                   <ChevronRight size={14} strokeWidth={2} />
@@ -12914,35 +12922,39 @@ function App() {
                 </span>
               </span>
             </button>
-            <button
-              className="sidebar-skill-hub-manage"
-              type="button"
-              onClick={() => setSkillHubOpen(true)}
-              title="管理 Skill Hub"
-              aria-label="管理 Skill Hub"
-            >
-              <Settings size={13} />
-            </button>
           </div>
           {skillsExpanded && (
-            <div className="sidebar-workflows">
-              {[...workflows.filter((workflow) => !workflow.hidden), ...userSkillWorkflows].map((workflow) => {
-                const Icon = workflow.source === "user"
-                  ? Sparkles
-                  : workflowIconMap[workflow.id] || FileText;
-                return (
-                  <button
-                    key={workflow.id}
-                    type="button"
-                    className="workflow-mini"
-                    onClick={() => chooseWorkflow(workflow)}
-                    title={workflow.description}
-                  >
-                    <Icon size={15} />
-                    {workflow.title}
-                  </button>
-                );
-              })}
+            <div className="sidebar-skill-hub-content">
+              <div className="sidebar-workflows">
+                {[...workflows.filter((workflow) => !workflow.hidden), ...userSkillWorkflows].map((workflow) => {
+                  const Icon = workflow.source === "user"
+                    ? Sparkles
+                    : workflowIconMap[workflow.id] || FileText;
+                  return (
+                    <button
+                      key={workflow.id}
+                      type="button"
+                      className={`workflow-mini ${selectedWorkflowId === workflow.id ? "selected" : ""}`}
+                      aria-pressed={selectedWorkflowId === workflow.id}
+                      ref={selectedWorkflowId === workflow.id ? selectedSkillButtonRef : undefined}
+                      onClick={() => chooseWorkflow(workflow)}
+                      title={workflow.description}
+                    >
+                      <Icon size={15} />
+                      {workflow.title}
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                className="sidebar-skill-hub-manage"
+                type="button"
+                onClick={() => setSkillHubOpen(true)}
+                title="管理技能"
+                aria-label="管理技能"
+              >
+                管理技能…
+              </button>
             </div>
           )}
         </div>
@@ -13167,9 +13179,9 @@ function App() {
               : workspaceView === "news"
                 ? "行业动态"
                 : workspaceView === "data"
-                  ? "资料库"
+                  ? "投资档案"
                 : workspaceView === "documents"
-                  ? "文档库"
+                  ? "文档中心"
                 : activeThread.title}</strong>
             <span>{workspaceView === "tasks"
               ? `${taskNavigationCount} 个待办事项`
@@ -13179,7 +13191,7 @@ function App() {
                   ? `${databaseSnapshot?.projects?.length || 0} 项目 / ${databaseSnapshot?.people?.length || 0} 人脉 / ${databaseSnapshot?.news?.length || 0} 行业信息`
                 : workspaceView === "documents"
                   ? documentLibrary?.rootName
-                    ? `本地资料库 · ${documentLibrary.rootName}`
+                    ? `本地工作区 · ${documentLibrary.rootName}`
                     : "本地 Markdown 与资料目录"
                 : activeThread.project}</span>
           </div>
@@ -13211,18 +13223,18 @@ function App() {
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
                   : workspaceView === "data"
-                    ? "刷新资料库"
+                    ? "刷新投资档案"
                   : workspaceView === "documents"
-                    ? "刷新本地文档库"
+                    ? "刷新文档中心"
                   : domiError ? `重新同步 domi：${domiError}` : "同步 domi 项目与人脉"}
               aria-label={workspaceView === "tasks"
                 ? "刷新任务来源"
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
                   : workspaceView === "data"
-                    ? "刷新资料库"
+                    ? "刷新投资档案"
                   : workspaceView === "documents"
-                    ? "刷新本地文档库"
+                    ? "刷新文档中心"
                   : "同步 domi 项目与人脉"}
             >
               <RefreshCw
@@ -13796,6 +13808,7 @@ function App() {
             setSkillHubReviewCandidateIds([]);
           }}
           onCreateSkill={() => void openNewSkillConversation()}
+          onEditSkill={(skill) => void openNewSkillConversation(skill)}
           reviewCandidateIds={skillHubReviewCandidateIds}
           onImported={(skills) => {
             setSkillHubSkills(skills);

@@ -115,8 +115,8 @@ function createDeliveryFixture({ preserveTemplate = false, pptx = false } = {}) 
 
   const receipt = {
     contract: "DOMI_SLIDES_QA_RECEIPT_V1",
-    qaVersion: 3,
-    fontSummary: { expectedLatinFont: "Calibri", actualRenderedFontsChecked: 2, renderedMismatches: [] },
+    qaVersion: 4,
+    fontSummary: { expectedCjkFont: "Kaiti SC", trueCjkBoldChecked: true, expectedLatinFont: "Calibri", actualRenderedFontsChecked: 2, renderedMismatches: [] },
     strict: true,
     status: "passed",
     html: { path: htmlPath, sha256: htmlSha256 },
@@ -192,6 +192,7 @@ function createDeliveryFixture({ preserveTemplate = false, pptx = false } = {}) 
       }
     ]
   };
+  require("./slides-proof-fixture.cjs")(receipt);
   writeJson(receiptPath, receipt);
 
   const output = [
@@ -339,6 +340,13 @@ test("legacy declaration-only receipts and missing actual-font checks fail close
   for (const update of [
     (receipt) => { receipt.qaVersion = 2; },
     (receipt) => { delete receipt.fontSummary; },
+    (receipt) => { delete receipt.fontSummary.expectedCjkFont; },
+    (receipt) => { delete receipt.fontSummary.trueCjkBoldChecked; },
+    (receipt) => { delete receipt.pdfProof; },
+    (receipt) => { delete receipt.pdfVisualReview; },
+    (receipt) => { receipt.pdfVisualReview.reviewedPages = [1]; },
+    (receipt) => { receipt.pdfVisualReview.pdfSha256 = "stale"; },
+    (receipt) => { fs.appendFileSync(receipt.pdfProof.path, "tampered"); },
     (receipt) => { receipt.fontSummary.actualRenderedFontsChecked = 0; },
     (receipt) => { receipt.fontSummary.renderedMismatches = [{ actualFonts: ["Kaiti SC"], expected: "Calibri" }]; },
   ]) {
