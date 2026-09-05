@@ -555,6 +555,33 @@ test("slides delivery policy and correction count survive the task outbox", asyn
   assert.equal(task.delivery.slidesCorrectionAttempts, 1);
 });
 
+test("undeclared fresh slides enter QA before completion and persist policy for resend", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-undeclared-slides-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const artifact = path.join(directory, "generated.html");
+  const manager = new TaskManager({
+    codex: { startThread: () => {
+      fs.writeFileSync(artifact, '<section class="slide">Synthetic output</section>');
+      return fakeThread("new-slides", [`[交付](${artifact})`]);
+    } },
+    statePath: path.join(directory, "tasks.json"), metricsPath: path.join(directory, "metrics.jsonl"),
+    threadOptionsFor: () => ({}), preferenceFor: () => ({}), sendTaskText: async () => {},
+    deliverTaskResult: async (task, _response, context) => {
+      assert.equal(context.slidesDeliveryPolicy, "html_pdf");
+      assert.equal(task.status, "running");
+      assert.equal(task.completedAt, "");
+      assert.equal(task.delivery.slidesDeliveryPolicy, "html_pdf");
+      return { status: "quality_failed", error: "Synthetic output has no QA receipt" };
+    },
+  });
+  const task = manager.createTask("owner", "调用个人技能");
+  manager.enqueue(task, { text: "调用个人技能", codexInput: "调用个人技能" });
+  await waitFor(() => task.delivery?.status === "quality_failed");
+  assert.equal(task.status, "failed");
+  const state = JSON.parse(fs.readFileSync(path.join(directory, "tasks.json"), "utf8"));
+  assert.equal(Object.values(state.tasks)[0].delivery.slidesDeliveryPolicy, "html_pdf");
+});
+
 test("Slides questions stay waiting through transient send failure without correction or completion", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-slides-input-request-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

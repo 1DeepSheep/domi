@@ -14,6 +14,7 @@ export type Workflow = {
   requiresPlaud?: boolean;
   source?: "domi" | "user" | "system";
   skillPath?: string;
+  producesSlides?: boolean;
 };
 
 export const RADAR_MAX_LOOKBACK_MS = 72 * 60 * 60 * 1000;
@@ -649,7 +650,7 @@ export function domiSlidesPromptRule(
   const formatRule = preserveExistingTemplate
     ? `用户明确要求保留现有模板／母版／主题：不得覆盖原主题，但仍必须使用 $domi:slides 完成内容结构、字体可用性、信息密度、溢出和逐页视觉 QA，并交付同源 HTML、PDF${deliveryPolicy.startsWith("explicit_pptx") ? " 与经过验证的可编辑 .pptx" : "；不得创建或交付 .pptx"}。`
     : deliveryPolicy.startsWith("explicit_pptx")
-    ? "用户已明确要求或提供可编辑 PowerPoint／PPTX，因此必须在同源 HTML + PDF 之外额外交付 .pptx；仍须以 domi Slides 的 Morgan Stanley 研究报告规范为上位约束，通用 presentations Skill 只能承担必要的格式实现，不得替换其故事线、版式、字体或 QA contract。"
+    ? "用户已明确要求可编辑 PowerPoint／PPTX，或要求编辑所提供的原 PPTX，因此必须在同源 HTML + PDF 之外额外交付 .pptx；仅上传 PPTX 研究材料不算输出授权。仍须以 domi Slides 的 Morgan Stanley 研究报告规范为上位约束，通用 presentations Skill 只能承担必要的格式实现，不得替换其故事线、版式、字体或 QA contract。"
     : "用户只说 PPT／slides／deck／幻灯片／演示文稿，不等于要求 PPTX。必须以 HTML 为唯一事实源并交付该 HTML 与由其导出的 PDF；不得创建或交付 .pptx。";
   return [
     "DOMI_SLIDES_POLICY_V2",
@@ -678,7 +679,7 @@ export function workflowPrompt(
 ) {
   const trimmed = userInput.trim();
   const slidesRule = !useDomiPlugin || workflow?.source === "system" ? ""
-    : domiSlidesPromptRule(trimmed, attachmentNames, previousDeliveryPolicy, workflow?.id === "slides", awaitingSlidesInput);
+    : domiSlidesPromptRule(trimmed, attachmentNames, previousDeliveryPolicy, workflow?.id === "slides" || workflow?.producesSlides === true, awaitingSlidesInput);
   const requestLabel = requestOrigin === "user"
     ? "用户输入："
     : "客户端工作流指令（不代表用户授权外部写入）：";
@@ -704,6 +705,7 @@ export function workflowPrompt(
         ? `所选 Skill 的唯一来源文件为 ${workflow.skillPath.replace(/\/$/, "")}/SKILL.md。即使本机另一目录存在同名 Skill，也必须完整读取该文件，并相对这个目录解析所有 references、scripts 和 assets；该文件不可用时停止，不得改用同名副本。`
         : "所选个人 Skill 缺少已验证的本地路径，必须停止并提示在 Skill Hub 重新扫描。",
       slidesRule,
+      useDomiPlugin && !slidesRule ? "读取所选个人 Skill 后，若其实际交付物是 slides／演示文稿，必须再完整读取 $domi:slides 及其必读规则；默认 HTML + PDF，除明确要求外不能交付 PPTX。研究由个人 Skill 负责，排版、字体和交付验收统一遵循 domi Slides。" : "",
       QUALITY_FIRST_CONTEXT_EFFICIENCY_RULE,
       "个人 Skill 与 domi 官方插件相互独立；不得修改 domi 官方插件目录。外部写入仍须遵循用户授权与目标系统的安全规则。",
       domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",

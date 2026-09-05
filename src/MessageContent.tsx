@@ -2,6 +2,7 @@ import { memo } from "react";
 import { FileText } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { remarkMessageFormatting, copyMessageSelection } from "./message-formatting";
 import { workbench } from "./bridge";
 import { isLocalMarkdownResource, isLocalPdfResource } from "./document-resources";
 import { stripDomiEntityResultMarker } from "./entity-routing";
@@ -40,9 +41,9 @@ const MessageContent = memo(function MessageContent({
   );
 
   return (
-    <div className="message-text message-markdown">
+    <div className="message-text message-markdown" onCopy={copyMessageSelection}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkCodexFileCitations]}
+        remarkPlugins={[remarkGfm, remarkCodexFileCitations, remarkMessageFormatting]}
         urlTransform={(url, key, node) => {
           if (key === "href" && codexFileCitationPath(url)) return url;
           if (

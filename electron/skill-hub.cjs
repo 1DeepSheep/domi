@@ -17,13 +17,17 @@ function canonicalPath(filePath) {
   try {
     return fs.realpathSync(filePath);
   } catch {
-    return path.resolve(filePath);
+    // Resolve existing ancestors too: /tmp aliases /private/tmp on macOS,
+    // including when a referenced destination file does not exist yet.
+    const absolute = path.resolve(filePath);
+    const parent = path.dirname(absolute);
+    return parent === absolute ? absolute : path.join(canonicalPath(parent), path.basename(absolute));
   }
 }
 
 function pathInside(parent, candidate) {
   const relative = path.relative(canonicalPath(parent), canonicalPath(candidate));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 function directChildPath(parent, candidate) {
@@ -69,6 +73,8 @@ function skillMetadata(skillPath) {
     name: metadata.name,
     title: typeof metadata.title === "string" && metadata.title.trim() ? metadata.title.trim() : metadata.name,
     description: metadata.description.trim(),
+    producesSlides: metadata?.metadata?.domi?.output === "slides"
+      || /(?:交付|输出|生成|制作|produce|deliver|output)[^\n。]{0,60}(?:slides|presentation|slide deck|PPT|演示文稿|幻灯片)/i.test(metadata.description),
     metadataFingerprint: crypto.createHash("sha256").update(markdown).digest("hex")
   };
 }
@@ -132,7 +138,7 @@ function candidateId(sourcePath) {
   return crypto.createHash("sha256").update(canonicalPath(sourcePath)).digest("hex").slice(0, 24);
 }
 
-function discoverSkillDirectories(root, maximumDepth = MAX_SCAN_DEPTH) {
+function discoverSkillDirectories(root, maximumDepth = MAX_SCAN_DEPTH, includeInvalid = false) {
   if (!root || !fs.existsSync(root)) return [];
   const canonicalRoot = canonicalPath(root);
   const discovered = [];
@@ -149,6 +155,7 @@ function discoverSkillDirectories(root, maximumDepth = MAX_SCAN_DEPTH) {
       }
     } catch {
       // A malformed or unreadable candidate must not abort the whole scan.
+      if (includeInvalid && fs.existsSync(path.join(canonicalDirectory, "SKILL.md"))) discovered.push(canonicalDirectory);
       return;
     }
     if (depth >= maximumDepth) return;
@@ -199,12 +206,45 @@ function rewriteSkillName(skillPath, name) {
 }
 
 function rewriteSkillSelfReferences(skillPath, previousName, nextName) {
-  const promptPath = path.join(skillPath, "agents", "openai.yaml");
-  if (!fs.existsSync(promptPath) || !fs.statSync(promptPath).isFile()) return;
   const escaped = previousName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const source = fs.readFileSync(promptPath, "utf8");
-  const updated = source.replace(new RegExp(`\\$${escaped}(?![a-z0-9_-])`, "gi"), `$${nextName}`);
-  if (updated !== source) fs.writeFileSync(promptPath, updated, "utf8");
+  for (const file of skillFiles(skillPath)) {
+    const bytes = fs.readFileSync(file.absolutePath);
+    if (bytes.includes(0)) continue;
+    const source = bytes.toString("utf8");
+    const updated = source.replace(new RegExp(`\\$(?:domi:)?${escaped}(?![a-z0-9_-])`, "gi"), `$${nextName}`);
+    if (updated !== source) fs.writeFileSync(file.absolutePath, updated, "utf8");
+  }
+}
+
+function bundleOfficialReferences(sourceRoot, destinationRoot, pluginRoot) {
+  const queue = skillFiles(sourceRoot).map((file) => ({ source: file.absolutePath, target: path.join(destinationRoot, file.relativePath) }));
+  const visited = new Set();
+  let bytes = 0;
+  while (queue.length) {
+    const { source, target } = queue.shift();
+    if (visited.has(source)) continue;
+    visited.add(source);
+    const buffer = fs.readFileSync(source);
+    bytes += buffer.length;
+    if (visited.size > MAX_SKILL_FILES || bytes > MAX_SKILL_BYTES) throw new Error("Skill 依赖过大，请先精简为独立技能包。");
+    if (buffer.includes(0)) continue;
+    const text = buffer.toString("utf8");
+    const updated = text.replace(/(?:\.\.\/)+[^\s`"'<>()[\]{};,]+/g, (reference) => {
+      const dependency = path.resolve(path.dirname(source), reference);
+      if (pathInside(sourceRoot, dependency)) {
+        return path.relative(path.dirname(target), path.join(destinationRoot, path.relative(sourceRoot, dependency))).split(path.sep).join("/");
+      }
+      if (!pathInside(pluginRoot, dependency) || !fs.existsSync(dependency)) return reference;
+      if (fs.lstatSync(dependency).isSymbolicLink()) throw new Error("共享资源包含符号链接，请先整理为独立技能包。");
+      if (!fs.statSync(dependency).isFile()) return reference;
+      const dependencyTarget = path.join(destinationRoot, "_dependencies", path.relative(canonicalPath(pluginRoot), canonicalPath(dependency)));
+      fs.mkdirSync(path.dirname(dependencyTarget), { recursive: true });
+      if (!fs.existsSync(dependencyTarget)) fs.copyFileSync(dependency, dependencyTarget, fs.constants.COPYFILE_EXCL);
+      queue.push({ source: dependency, target: dependencyTarget });
+      return path.relative(path.dirname(target), dependencyTarget).split(path.sep).join("/");
+    });
+    if (updated !== text) fs.writeFileSync(target, updated, "utf8");
+  }
 }
 
 function unsafeCopiedSkillReferences(skillPath, previousName, sourcePath, renamed) {
@@ -223,7 +263,14 @@ function unsafeCopiedSkillReferences(skillPath, previousName, sourcePath, rename
     // them while still inspecting every ordinary text file.
     if (buffer.includes(0)) continue;
     const source = buffer.toString("utf8");
+    // A copied Skill must not quietly keep a dependency outside its own tree.
+    // Do not guess at script imports or copy neighbouring private directories.
+    const escapingReference = [...source.matchAll(/(?:\.\.\/)+[^\s`"'<>()[\]{};,]+/g)].some(([reference]) => (
+      !pathInside(skillPath, path.resolve(path.dirname(file.absolutePath), reference))
+    ));
     if (
+      escapingReference
+      ||
       (renamed && invocationPattern.test(source))
       || source.includes(canonicalSource)
       || (renamed && pathPattern.test(source))
@@ -250,7 +297,8 @@ class SkillHubService {
     userDataPath,
     codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
     agentsHome = path.join(os.homedir(), ".agents"),
-    officialSkillNames = []
+    officialSkillNames = [],
+    officialPlugin = null
   }) {
     this.userDataPath = userDataPath;
     this.codexHome = codexHome;
@@ -261,12 +309,70 @@ class SkillHubService {
     ];
     this.registryPath = path.join(userDataPath, "skill-hub", "user-skills.json");
     this.setOfficialSkillNames(officialSkillNames);
+    this.officialPlugin = officialPlugin;
   }
 
   setOfficialSkillNames(officialSkillNames = []) {
     this.officialSkillNames = new Set(
       officialSkillNames.map((name) => normalizedSkillName(name))
     );
+  }
+
+  setOfficialPlugin(plugin, bundledPlugin = null) {
+    this.officialPlugin = plugin;
+    this.bundledPlugin = bundledPlugin;
+  }
+
+  officialSkills() {
+    const plugin = this.officialPlugin;
+    if (!plugin?.root) return [];
+    return discoverSkillDirectories(path.join(plugin.root, "skills"), 1, true).map((target) => {
+      const base = { id: `official:${candidateId(target)}`, path: target,
+        version: plugin.manifest?.version || "", source: "official" };
+      try {
+        const metadata = skillMetadata(target);
+        const bundled = this.bundledPlugin;
+        const reference = bundled?.root && path.join(bundled.root, path.relative(canonicalPath(plugin.root), target));
+        const comparable = reference && base.version && bundled.manifest?.version === base.version && fs.existsSync(reference);
+        const integrity = comparable
+          ? (skillFingerprint(target) === skillFingerprint(reference) ? "matches-bundled" : "modified")
+          : "unverified";
+        return { ...base, ...metadata, integrity };
+      } catch (error) {
+        return { ...base, name: path.basename(target), title: path.basename(target),
+          description: "官方 Skill 无法读取", error: error.message };
+      }
+    });
+  }
+
+  details(id) {
+    const skill = this.listImported().skills.find((entry) => entry.id === id);
+    if (!skill) throw new Error("用户 Skill 已不存在，请重新扫描。");
+    const files = skillFiles(skill.path);
+    const current = Object.fromEntries(files.map((file) => [file.relativePath,
+      crypto.createHash("sha256").update(fs.readFileSync(file.absolutePath)).digest("hex")]));
+    const baseline = skill.baseline || {};
+    const changes = [...new Set([...Object.keys(baseline), ...Object.keys(current)])]
+      .filter((name) => baseline[name] !== current[name])
+      .map((name) => `${!baseline[name] ? "新增" : !current[name] ? "删除" : "修改"} · ${name}`);
+    return { ok: true, skill, changes, baselineAvailable: Boolean(skill.baseline),
+      upstreamVersion: skill.sourceVersion ? this.officialPlugin?.manifest?.version || "" : "" };
+  }
+
+  manage(request = {}) {
+    if (request.action === "fork") {
+      const official = this.officialSkills().find((entry) => entry.id === request.id);
+      if (!official) throw new Error("官方 Skill 已更新，请重新扫描后复制。");
+      return this.import({ candidateIds: [official.id], fork: true });
+    }
+    if (request.action === "details") return this.details(request.id);
+    if (request.action !== "enable" || typeof request.enabled !== "boolean") throw new Error("不支持的 Skill 管理操作。");
+    const skills = this.listImported().skills;
+    const skill = skills.find((entry) => entry.id === request.id);
+    if (!skill) throw new Error("用户 Skill 已不存在，请重新扫描。");
+    skill.enabled = request.enabled;
+    this.writeRegistry(skills);
+    return { ok: true, skills, changed: true };
   }
 
   readRegistry() {
@@ -381,9 +487,7 @@ class SkillHubService {
         const sourceIsDestination = directChildPath(this.destinationRoot, sourcePath);
         const duplicateBareName = !registered && reservedNames.has(safeName);
         const collision = duplicateBareName || (!sourceIsDestination && fs.existsSync(destinationPath));
-        const suggestedName = registered?.name || (sourceIsDestination
-          ? safeName
-          : collision
+        const suggestedName = registered?.name || (sourceIsDestination || collision
             ? availableDestinationName(this.destinationRoot, `${safeName}-imported`, reservedNames)
             : safeName);
         reservedNames.add(suggestedName);
@@ -392,6 +496,7 @@ class SkillHubService {
           name: safeName,
           title: metadata.title,
           description: metadata.description,
+          producesSlides: metadata.producesSlides,
           sourcePath,
           sourceLabel: root.label,
           status: registered ? (registered.available ? "imported" : "unavailable") : "available",
@@ -435,6 +540,7 @@ class SkillHubService {
       ok: true,
       candidates,
       imported,
+      official: this.officialSkills(),
       changed: listed.changed,
       scannedAt: Date.now()
     };
@@ -454,7 +560,11 @@ class SkillHubService {
     const records = [...registry.skills];
     const imported = [];
     const failures = [];
-    const selectedCandidates = snapshot.candidates.filter((item) => requestedIds.has(item.id));
+    const officialCandidates = request.fork ? snapshot.official.map((entry) => ({
+      ...entry, sourcePath: entry.path, status: "available", sourceVersion: entry.version,
+      suggestedName: availableDestinationName(this.destinationRoot, `${entry.name}-personal`)
+    })) : [];
+    const selectedCandidates = [...snapshot.candidates, ...officialCandidates].filter((item) => requestedIds.has(item.id));
     const matchedIds = new Set(selectedCandidates.map((candidate) => candidate.id));
     for (const staleId of requestedIds) {
       if (matchedIds.has(staleId)) continue;
@@ -485,13 +595,11 @@ class SkillHubService {
       try {
         const sourcePath = canonicalPath(candidate.sourcePath);
         const destinationName = candidate.suggestedName;
-        const sourceIsDestination = directChildPath(this.destinationRoot, sourcePath);
-        const destinationPath = sourceIsDestination
-          ? sourcePath
-          : path.join(this.destinationRoot, destinationName);
-        if (!sourceIsDestination) {
+        const destinationPath = path.join(this.destinationRoot, destinationName);
+        {
           copySkillDirectory(sourcePath, destinationPath);
           createdDestinationPath = destinationPath;
+          if (candidate.sourceVersion) bundleOfficialReferences(sourcePath, destinationPath, this.officialPlugin.root);
           if (destinationName !== candidate.name) {
             rewriteSkillName(destinationPath, destinationName);
             rewriteSkillSelfReferences(destinationPath, candidate.name, destinationName);
@@ -504,7 +612,7 @@ class SkillHubService {
           );
           if (unresolved.length > 0) {
             throw new Error(
-              `${destinationName !== candidate.name ? `名称冲突需要改为 $${destinationName}，但` : "复制到 Codex 顶层目录后"} ${unresolved.join("、")} 仍含${destinationName !== candidate.name ? ` $${candidate.name} 或` : ""}旧路径自引用；为避免导入损坏，请先在原 Skill 中改名后重试。`
+              `${unresolved.join("、")} 仍含外部相对依赖或旧路径自引用；为避免导入损坏，请先通过新建 Skill 对话把所需资源完整收进 Skill 自身目录，再导入。原文件未修改。`
             );
           }
         }
@@ -517,6 +625,12 @@ class SkillHubService {
           description: metadata.description,
           path: canonicalPath(destinationPath),
           sourcePath,
+          sourceVersion: candidate.sourceVersion || "",
+          sourceName: candidate.name,
+          enabled: true,
+          independentCopy: true,
+          baseline: Object.fromEntries(skillFiles(destinationPath).map((file) => [file.relativePath,
+            crypto.createHash("sha256").update(fs.readFileSync(file.absolutePath)).digest("hex")])),
           fingerprint: skillFingerprint(destinationPath),
           metadataFingerprint: metadata.metadataFingerprint,
           available: true,

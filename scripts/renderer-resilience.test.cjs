@@ -48,7 +48,7 @@ assert.match(
 
 assert.match(
   messageContent,
-  /remarkPlugins=\{\[remarkGfm, remarkCodexFileCitations\]\}/,
+  /remarkPlugins=\{\[remarkGfm, remarkCodexFileCitations, remarkMessageFormatting\]\}/,
   "Assistant messages must turn Codex file citation markers into material links."
 );
 assert.match(
@@ -413,7 +413,7 @@ assert.match(
 );
 const newTaskIndex = app.indexOf("<strong>新建任务</strong>");
 const sidebarEntitySearchIndex = app.indexOf('<div className="sidebar-entity-search"');
-const sidebarPrimaryNavIndex = app.indexOf('<nav className="sidebar-primary-nav"');
+const sidebarPrimaryNavIndex = app.indexOf('<nav className={`sidebar-primary-nav ');
 assert.ok(
   newTaskIndex >= 0
     && sidebarEntitySearchIndex > newTaskIndex
@@ -729,8 +729,18 @@ assert.match(
 );
 assert.match(
   styles,
-  /\.sidebar-primary-nav \{[\s\S]*?min-height: 0;[\s\S]*?flex: 0 1 auto;[\s\S]*?overflow: hidden;/,
-  "The primary sidebar navigation must shrink before it can overlap the fixed footer."
+  /\.sidebar-primary-nav \{[^}]*?min-height: 0;[^}]*?flex: 0 0 auto;[^}]*?overflow: hidden;/,
+  "Collapsed primary navigation must not shrink and clip its last row."
+);
+assert.match(
+  app,
+  /<nav className=\{`sidebar-primary-nav \$\{documentLibrarySidebarExpanded \? "documents-open" : ""\}`\}/,
+  "The navigation shrink boundary must follow the actual document tree state."
+);
+assert.match(
+  styles,
+  /\.sidebar-primary-nav\.documents-open \{[^}]*?min-height: 160px;[^}]*?flex: 0 1 auto;/,
+  "Expanded navigation can shrink its tree, but must preserve all four navigation rows."
 );
 assert.match(
   styles,
