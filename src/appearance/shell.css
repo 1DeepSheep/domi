@@ -1,0 +1,480 @@
+/* Shared visual finish. Layout, resizing and action contracts stay in styles.css. */
+.brand-mark {
+  background: var(--text);
+  box-shadow: none;
+}
+
+.brand-mark img,
+.setup-brand img {
+  filter: grayscale(1);
+}
+
+.brand-title {
+  font-family: var(--font-ui);
+  font-size: 18px;
+  font-weight: 550;
+  letter-spacing: -0.4px;
+}
+
+.brand-subtitle {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.new-thread {
+  background: var(--hover);
+  transition: background 140ms ease;
+}
+
+.new-thread > span {
+  color: var(--text);
+  background: transparent;
+}
+
+.new-thread:hover {
+  background: var(--selected);
+}
+
+.new-thread:active,
+.sidebar-nav-item:active,
+.sidebar-section-toggle:active,
+.workflow-mini:active,
+.thread-item:active {
+  transform: none;
+}
+
+.sidebar-nav-item,
+.sidebar-section-toggle,
+.workflow-mini {
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+.sidebar-nav-item strong,
+.sidebar-section-toggle strong,
+.thread-item strong {
+  font-weight: 500;
+}
+
+.sidebar-nav-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+  stroke-width: 1.6;
+}
+
+.workflow-mini svg,
+.new-thread svg,
+.icon-button svg {
+  stroke-width: 1.6;
+}
+
+.sidebar-nav-disclosure,
+.sidebar-workflow-section.open .sidebar-nav-disclosure,
+.sidebar-document-section.open .sidebar-nav-disclosure {
+  color: var(--muted);
+  background: transparent;
+  box-shadow: none;
+  border-radius: 6px;
+}
+
+.sidebar-section-toggle:hover .sidebar-nav-disclosure,
+.sidebar-section-toggle:focus-visible .sidebar-nav-disclosure {
+  color: var(--text);
+  background: transparent;
+  box-shadow: none;
+}
+
+.sidebar-nav-count {
+  color: var(--muted);
+  background: var(--hover);
+  border-radius: 6px;
+  box-shadow: none;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.sidebar-nav-item.active {
+  background: var(--selected);
+  box-shadow: none;
+}
+
+.sidebar-skill-hub-manage {
+  border-top-color: transparent;
+}
+
+.sidebar-skill-hub-manage:hover,
+.sidebar-skill-hub-manage:focus-visible {
+  background: var(--hover);
+}
+
+.thread-section-heading {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.sidebar .domi-entity-search,
+.thread-search {
+  background: transparent;
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+
+.sidebar .domi-entity-search:focus-within,
+.thread-search:focus-within,
+.thread-rename-form:focus-within {
+  border-color: #a9a69b;
+  background: var(--surface);
+  box-shadow: 0 0 0 2px rgba(47, 46, 42, 0.055);
+}
+
+.thread-menu,
+.domi-search-results {
+  background: var(--surface);
+  border-color: var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-popover);
+}
+
+.domi-result-group .domi-document-result-snippet {
+  color: var(--muted);
+}
+
+.topbar,
+.topbar.new-task-topbar,
+.new-task-stage {
+  background: var(--canvas);
+}
+
+.topbar .project-title strong {
+  font-weight: 500;
+}
+
+.new-task-intro {
+  gap: 16px;
+}
+
+.new-task-quote-row {
+  container-type: inline-size;
+}
+
+.new-task-intro blockquote {
+  max-width: 680px;
+  margin-inline: auto;
+  font-size: clamp(24px, 1.9vw, 28px);
+  font-weight: 400;
+  line-height: 1.26;
+  letter-spacing: -0.35px;
+  font-optical-sizing: auto;
+}
+
+.new-task-intro blockquote span {
+  color: #65635c;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.new-task-intro blockquote > svg {
+  width: 26px;
+  height: 26px;
+  margin-right: 10px;
+  stroke-width: 1.6;
+  transform: translateY(-2px);
+}
+
+.new-task-intro cite {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.15px;
+}
+
+@container (min-width: 500px) {
+  .new-task-intro blockquote span {
+    white-space: nowrap;
+  }
+}
+
+.new-task-suggestions > button {
+  background: transparent;
+  border-color: var(--line);
+  border-radius: 12px;
+  box-shadow: none;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.new-task-suggestions > button > svg,
+.new-task-suggestions > button[data-workflow="people-intake"] > svg,
+.new-task-suggestions > button[data-workflow="project-intake"] > svg {
+  color: var(--muted);
+  stroke-width: 1.65;
+}
+
+.new-task-suggestions strong {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.new-task-suggestions > button:hover {
+  background: var(--surface);
+  border-color: var(--line-strong);
+  box-shadow: 0 2px 6px rgba(47, 46, 42, 0.025);
+  transform: none;
+}
+
+.new-task-suggestions > button.active {
+  border-color: #cfb2a3;
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.new-task-suggestions > button.active > svg {
+  color: var(--accent-strong);
+}
+
+.new-task-suggestions > button:active {
+  transform: none;
+}
+
+.composer,
+.composer-home,
+.composer-dock,
+.new-task-composer-zone .composer-home {
+  background: var(--surface);
+  border-color: var(--line);
+  border-radius: 20px;
+  box-shadow: var(--shadow-panel);
+}
+
+.composer:focus-within {
+  border-color: #bcb8ae;
+  box-shadow: 0 0 0 1px rgba(47, 46, 42, 0.04), var(--shadow-panel);
+}
+
+.composer.drag-active {
+  border-color: var(--accent);
+  background: #fffaf7;
+  box-shadow: 0 0 0 3px rgba(197, 104, 72, 0.1), var(--shadow-panel);
+}
+
+.composer textarea {
+  font-family: var(--font-ui);
+  line-height: 1.65;
+}
+
+.composer textarea::placeholder {
+  color: var(--muted);
+}
+
+.composer-icon-button,
+.composer-dock .composer-icon-button {
+  color: var(--text);
+  background: transparent;
+  border-radius: 8px;
+}
+
+.composer-icon-button svg {
+  stroke-width: 1.6;
+}
+
+.composer-icon-button:hover,
+.composer-dock .composer-icon-button:hover {
+  background: var(--hover);
+}
+
+.composer-agent-button,
+.composer-dock .composer-agent-button {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  border-color: transparent;
+  border-radius: 7px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.composer-agent-button.active,
+.composer-agent-button.active:hover,
+.composer-dock .composer-agent-button.active,
+.composer-dock .composer-agent-button.active:hover {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  box-shadow: none;
+}
+
+.selected-workflow {
+  border-color: transparent;
+  border-radius: 7px;
+}
+
+.model-picker-trigger > span {
+  font-weight: 500;
+}
+
+.model-picker-trigger > small,
+.model-menu-label {
+  color: var(--muted);
+}
+
+.model-picker-menu {
+  border-color: var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-popover);
+  backdrop-filter: none;
+}
+
+.send-button,
+.composer-dock .send-button:not(.stop) {
+  background: var(--text);
+  box-shadow: none;
+}
+
+.send-button:hover:not(:disabled),
+.composer-dock .send-button:hover:not(:disabled):not(.stop) {
+  background: #49473f;
+  box-shadow: none;
+  transform: none;
+}
+
+.send-button:disabled,
+.composer-dock .send-button:disabled:not(.stop) {
+  background: var(--hover);
+  color: #a29f94;
+}
+
+.right-panel {
+  background: var(--context);
+}
+
+.right-panel-header {
+  border-bottom-color: var(--line);
+}
+
+.right-panel-header strong {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.right-panel-header span,
+.right-panel .empty-state,
+.plaud-disabled-card small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.panel-title {
+  color: var(--text);
+}
+
+.panel-title > span {
+  font-weight: 500;
+}
+
+.panel-title svg {
+  stroke-width: 1.6;
+  color: var(--muted);
+}
+
+.plaud-disabled-card {
+  border-color: var(--line);
+  border-radius: 10px;
+  background: transparent;
+  padding: 12px;
+}
+
+.plaud-disabled-card strong,
+.plaud-disabled-card button {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.plaud-disabled-card button {
+  color: var(--text);
+  border-color: var(--line);
+  border-radius: 6px;
+  box-shadow: none;
+  background: var(--surface);
+}
+
+.domi-health-list span,
+.domi-health-list strong {
+  font-size: 12px;
+}
+
+.message.user .message-text {
+  background: var(--hover);
+  color: var(--text);
+  border-radius: 16px;
+}
+
+.message.assistant .message-text {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.8;
+}
+
+.message-markdown p {
+  margin-bottom: 16px;
+}
+
+.message-markdown :is(h1, h2, h3, h4) {
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.message-markdown a {
+  color: var(--accent-strong);
+  text-decoration-color: #c9a090;
+}
+
+.message-markdown a:hover {
+  color: #84432e;
+}
+
+.message-markdown .message-file-citation {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: #e9d6cb;
+}
+
+.message-run-summary {
+  color: var(--muted);
+  border-bottom-color: var(--line);
+}
+
+.message-run-summary.error {
+  color: var(--danger);
+}
+
+.message-run-detail,
+.message-attachment {
+  background: var(--surface-subtle);
+  border-color: var(--line);
+}
+
+.message-run-detail strong,
+.message-run-detail span {
+  font-size: 12px;
+}
+
+.message-run-detail span {
+  color: var(--muted);
+}
+
+.message-meta > span {
+  font-weight: 500;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .new-task-content,
+  .message {
+    animation: none;
+  }
+}

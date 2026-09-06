@@ -1,0 +1,545 @@
+/* Content surfaces share the workbench palette without changing their geometry.
+   Category pills, financial values, severity and completion colors stay semantic. */
+
+.chat-pane.task-mode,
+.chat-pane.document-library-mode,
+.chat-pane.news-mode,
+.database-stage,
+.task-board,
+.news-stage {
+  background: #faf9f6;
+  font-family: var(--font-ui);
+}
+
+.document-library-workspace,
+.document-library-content,
+.markdown-panel-shell,
+.rich-markdown-editor,
+.database-grid-layout {
+  color: var(--text);
+  background: var(--surface);
+}
+
+/* Repository tables and their portaled editors. */
+.database-grid-component,
+.database-floating-editor,
+.database-cell-overlay,
+.database-grid-context-menu {
+  --database-grid-line: var(--line);
+  --database-grid-muted: var(--muted);
+  --database-grid-blue: var(--accent-strong);
+  --database-grid-blue-soft: var(--accent-soft);
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+.database-grid-layout,
+.database-grid-shell {
+  border-color: var(--line);
+  box-shadow: 0 1px 3px rgba(47, 46, 42, 0.035);
+}
+
+.database-grid-controls,
+.database-grid-viewbar,
+.database-grid-statusbar,
+.database-grid-viewport,
+.database-grid-row,
+.database-grid-cell.editing {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.database-grid-header,
+.database-grid-row-number.header,
+.database-grid-table th,
+.database-grid-table th.row-number,
+.database-grid-table th.primary-column,
+.database-tabs {
+  border-color: var(--line);
+  background: var(--surface-subtle);
+}
+
+.database-grid-column-header,
+.database-grid-cell,
+.database-grid-table td,
+.database-grid-table th {
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+.database-grid-row:hover,
+.database-grid-row-number,
+.database-grid-view-context > span,
+.database-grid-density button:hover,
+.database-grid-table tbody tr:hover td,
+.database-grid-table tbody tr:hover .primary-column {
+  background: var(--surface-subtle);
+}
+
+.database-grid-cell.selected,
+.database-grid-density button.active,
+.database-grid-table tbody tr.selected td,
+.database-grid-table tbody tr.selected .primary-column,
+.database-choice-list > button.selected,
+.database-choice-list > button.highlighted {
+  background: var(--accent-soft);
+}
+
+.database-grid-density button.active,
+.database-choice-list > button.create,
+.database-choice-list > button > svg:last-child {
+  color: var(--accent-strong);
+}
+
+.database-grid-viewport:focus-visible,
+.database-choice-list > button.highlighted {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-strong) 40%, transparent);
+}
+
+.database-search,
+.database-grid-filter,
+.database-sort-direction,
+.database-grid-more button {
+  border-color: var(--line);
+  color: var(--muted);
+  background: var(--surface);
+  font-family: var(--font-ui);
+}
+
+.database-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.database-tabs button.active {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(47, 46, 42, 0.07);
+}
+
+.database-grid-viewbar,
+.database-grid-record-count,
+.database-grid-row-number,
+.database-grid-empty,
+.database-grid-empty-value,
+.database-grid-statusbar,
+.database-grid-count,
+.database-grid-hint,
+.database-choice-search,
+.database-choice-footer,
+.database-cell-expanded-editor footer > span,
+.database-list-empty,
+.database-empty,
+.database-grid-no-records {
+  color: var(--muted);
+}
+
+.database-grid-density button,
+.database-grid-statusbar,
+.database-grid-selection-toolbar strong,
+.database-grid-selection-toolbar button,
+.database-choice-footer,
+.database-choice-footer button,
+.database-choice-list > p,
+.database-grid-hint,
+.database-grid-more button,
+.database-cell-expanded-editor header span,
+.database-cell-expanded-editor footer > span {
+  font-size: 12px;
+}
+
+.database-tabs button span,
+.database-grid-row-number.header,
+.database-grid-pill,
+.database-pill {
+  font-size: 11px;
+}
+
+.database-floating-editor,
+.database-cell-overlay,
+.database-grid-context-menu,
+.database-row-context-menu,
+.database-grid-selection-toolbar {
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: 0 10px 30px rgba(47, 46, 42, 0.10), 0 2px 6px rgba(47, 46, 42, 0.04);
+}
+
+.database-cell-overlay {
+  border-color: var(--accent-strong);
+}
+
+.database-grid-context-menu button:not(.danger),
+.database-row-context-menu button:not(.danger),
+.database-grid-selection-toolbar button {
+  color: var(--text);
+}
+
+.database-grid-context-menu button:not(.danger):hover,
+.database-row-context-menu button:not(.danger):hover,
+.database-grid-selection-toolbar button:hover,
+.database-choice-list > button:hover:not(.selected):not(.highlighted) {
+  background: var(--surface-subtle);
+}
+
+.database-choice-footer,
+.database-choice-search {
+  border-color: var(--line);
+}
+
+.database-choice-footer button {
+  background: var(--accent-strong);
+}
+
+.database-inline-editor > input,
+.database-longtext-editor textarea,
+.database-cell-expanded-editor > textarea,
+.database-choice-search input {
+  color: var(--text);
+  background: var(--surface);
+  font-family: var(--font-ui);
+}
+
+.database-longtext-content a,
+.database-grid-preview-link,
+.database-grid-link {
+  color: var(--accent-strong);
+  text-decoration-color: color-mix(in srgb, var(--accent-strong) 35%, transparent);
+}
+
+/* Document tree and editing chrome; document content retains its own hierarchy. */
+.document-library-truncated,
+.rich-markdown-formatbar {
+  border-color: var(--line);
+  background: var(--surface-subtle);
+}
+
+.markdown-panel-header,
+.document-library-search,
+.document-library-create {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.document-library-node-name,
+.document-library-root-row,
+.document-library-welcome h2,
+.markdown-file-title strong,
+.markdown-title-input,
+.rich-markdown-content,
+.rich-markdown-content h1,
+.rich-markdown-content h2,
+.rich-markdown-content h3,
+.rich-markdown-content h4 {
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+.document-library-node-row small,
+.document-library-empty-folder,
+.document-library-state:not(.error),
+.document-library-truncated,
+.document-library-welcome,
+.document-library-welcome p,
+.markdown-file-title small,
+.markdown-save-state:not(.dirty),
+.markdown-panel-state:not(.error),
+.rich-markdown-search-count,
+.rich-markdown-editor .rich-markdown-image-drop-hint span {
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.document-library-node-row small {
+  font-size: 11px;
+}
+
+.document-library-root-row:hover,
+.document-library-node-row:hover,
+.markdown-header-actions button:hover,
+.rich-markdown-formatbar button:hover:not(:disabled):not(.active),
+.rich-markdown-search button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+.document-library-root-row.selected,
+.document-library-node-row.selected,
+.document-library-node-row.keyboard-active,
+.rich-markdown-formatbar button.active,
+.rich-markdown-formatbar button.active:hover {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.document-library-node-row.keyboard-active {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-strong) 38%, transparent);
+}
+
+.document-library-search input,
+.document-library-create input,
+.rich-markdown-search input {
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.document-library-search input::placeholder,
+.document-library-create input::placeholder {
+  color: var(--muted);
+}
+
+.document-library-welcome > span {
+  border-color: var(--line);
+  color: var(--muted);
+  background: var(--surface-subtle);
+  box-shadow: 0 2px 8px rgba(47, 46, 42, 0.03);
+}
+
+.rich-markdown-search {
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(47, 46, 42, 0.10);
+}
+
+.rich-markdown-content blockquote:not(:has(a[href^="domi-callout:"])) {
+  border-left-color: var(--accent);
+  color: var(--muted);
+  background: var(--surface-subtle);
+}
+
+.rich-markdown-content pre,
+.rich-markdown-content th {
+  border-color: var(--line);
+  background: var(--surface-subtle);
+}
+
+.rich-markdown-content td {
+  border-color: var(--line);
+}
+
+.rich-markdown-editor .rich-markdown-image-drop-hint {
+  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent) 8%);
+  box-shadow: 0 10px 28px rgba(47, 46, 42, 0.08);
+}
+
+/* Industry updates remain a reading surface instead of another wall of cards. */
+.home-weekly-news,
+.radar-source-panel {
+  font-family: var(--font-ui);
+}
+
+.weekly-news-heading h2,
+.weekly-news-item > strong,
+.weekly-news-domain-manager-heading strong,
+.radar-source-panel > header h2 {
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+.weekly-news-heading p,
+.weekly-news-summary,
+.weekly-news-meta,
+.weekly-news-meta small,
+.weekly-news-empty,
+.weekly-news-pagination > span,
+.weekly-news-pagination small,
+.weekly-news-domain-manager-heading small,
+.weekly-news-domain-manager > p,
+.weekly-news-subdomain-label,
+.radar-source-panel > header p,
+.radar-source-toolbar > p,
+.radar-source-empty,
+.radar-source-row small:not(.error) {
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.weekly-news-source,
+.weekly-news-refresh,
+.weekly-news-filters button,
+.weekly-news-subdomain-filters button,
+.weekly-news-pagination button,
+.weekly-news-domain-options label,
+.weekly-news-domain-manager-actions button,
+.weekly-news-followed-summary,
+.weekly-news-error,
+.weekly-news-notice {
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.weekly-news-item-top small,
+.weekly-news-item-top .weekly-news-fresh-label,
+.weekly-news-subdomain-filters button small,
+.radar-source-tabs small {
+  font-family: var(--font-ui);
+  font-size: 11px;
+}
+
+.weekly-news-source-manager,
+.weekly-news-pagination button:not(:disabled),
+.radar-source-panel > header,
+.radar-source-tabs,
+.radar-source-toolbar,
+.radar-source-toolbar button,
+.radar-source-form,
+.radar-source-bulk {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.weekly-news-source-manager {
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(47, 46, 42, 0.04);
+}
+
+.weekly-news-filters button {
+  border-color: var(--line);
+}
+
+.weekly-news-filters button.active,
+.weekly-news-subdomain-filters button.active,
+.weekly-news-domain-manager-button {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.weekly-news-subdomain-panel {
+  border-left-color: var(--line);
+  background: var(--surface-subtle);
+}
+
+.weekly-news-item.fresh {
+  border-top-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+  background: transparent;
+}
+
+.weekly-news-source:hover,
+.weekly-news-refresh:hover:not(:disabled),
+.weekly-news-pagination button:hover:not(:disabled),
+.weekly-news-item:not(:disabled):hover {
+  background: var(--surface-subtle);
+}
+
+.weekly-news-domain-manager {
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgba(47, 46, 42, 0.11);
+}
+
+.radar-source-panel {
+  border-color: var(--line);
+  background: #faf9f6;
+  box-shadow: -10px 0 32px rgba(47, 46, 42, 0.08);
+}
+
+.radar-source-tabs button.active {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+}
+
+.radar-source-row {
+  border-color: var(--line);
+}
+
+/* Task-board priority and completion accents are deliberately left intact. */
+.task-column {
+  border-color: var(--line);
+  background: var(--surface-subtle);
+}
+
+.task-column-header,
+.task-board-scroll {
+  border-color: var(--line);
+}
+
+.task-card {
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(47, 46, 42, 0.035);
+}
+
+.task-card:hover {
+  border-top-color: color-mix(in srgb, var(--text) 18%, var(--line));
+  border-right-color: color-mix(in srgb, var(--text) 18%, var(--line));
+  border-bottom-color: color-mix(in srgb, var(--text) 18%, var(--line));
+  box-shadow: 0 3px 12px rgba(47, 46, 42, 0.06);
+}
+
+.task-board-heading h1,
+.task-column-header strong,
+.task-card-title,
+.task-card > p,
+.task-card-open > p,
+.task-board-history-menu button strong,
+.task-board-history-menu > header strong {
+  font-family: var(--font-ui);
+}
+
+.task-board-heading p,
+.task-column-empty,
+.task-card-topline time,
+.task-card > small,
+.task-board-history-menu > header small,
+.task-board-history-menu time,
+.task-board-history-menu button small,
+.task-board-history-menu > div > p {
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.task-board-running-status,
+.task-board-history > summary,
+.task-board-header-actions > button,
+.task-card-actions button {
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.task-board-history > summary,
+.task-board-header-actions > button:not(.task-board-generate) {
+  border-color: var(--line);
+  color: var(--muted);
+  background: var(--surface);
+}
+
+.task-board-history > summary:hover,
+.task-board-history[open] > summary,
+.task-board-header-actions > button:not(.task-board-generate):hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+.task-board-heading-icon {
+  border-color: var(--line);
+  background: var(--accent-soft);
+}
+
+.task-card-kind,
+.task-card-topline > b,
+.task-column-header > b,
+.task-board-history > summary b {
+  font-size: 11px;
+}
+
+.task-column-header > b,
+.task-board-history > summary b {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--line) 70%, var(--surface));
+}
+
+.task-board-history-menu {
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgba(47, 46, 42, 0.11);
+}
+
+.task-board-history-menu button.unread {
+  background: var(--accent-soft);
+}
