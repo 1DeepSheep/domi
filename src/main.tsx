@@ -1,11 +1,12 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "@fontsource-variable/instrument-sans/wght.css";
-import "@fontsource-variable/newsreader/wght.css";
+import "@fontsource-variable/newsreader/standard.css";
 import App from "./App";
 import AppErrorBoundary from "./AppErrorBoundary";
 import { workbench } from "./bridge";
 import "./styles.css";
+import "./appearance/index.css";
 
 function errorMessage(value: unknown) {
   if (value instanceof Error) return value.message || value.name;

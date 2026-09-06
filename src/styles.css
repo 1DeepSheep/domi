@@ -1,14 +1,15 @@
 :root {
   color-scheme: light;
   --font-ui:
-    "Anthropic Sans", "Instrument Sans Variable", "PingFang SC",
+    "Instrument Sans Variable", "PingFang SC",
     -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Microsoft YaHei",
     "Noto Sans CJK SC", Arial, sans-serif;
   --font-cn:
     "PingFang SC", -apple-system, BlinkMacSystemFont, "Helvetica Neue",
     "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   --font-display-en:
-    "Anthropic Serif", "Newsreader Variable", "Iowan Old Style", Georgia, serif;
+    "Newsreader Variable", "Iowan Old Style", Georgia, serif;
+  --font-en: var(--font-ui);
   --text-caption: 11px;
   --text-secondary: 12px;
   --text-control: 13px;
@@ -16,25 +17,29 @@
   --text-input: 16px;
   --text-display: 17px;
   font-family: var(--font-ui);
-  color: #282826;
-  background: #f5f5f3;
+  color: var(--text);
+  background: var(--canvas);
   font-synthesis: none;
   letter-spacing: 0;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  --canvas: #ffffff;
-  --sidebar: #f7f7f5;
-  --context: #fafaf8;
-  --text: #282826;
-  --muted: #73736f;
-  --faint: #a1a19b;
-  --line: #e8e8e4;
-  --line-strong: #d9d9d4;
-  --hover: #efefec;
-  --selected: #eaeae6;
-  --accent: #d97757;
-  --accent-strong: #c96647;
-  --accent-soft: #f8eae5;
+  --canvas: #faf9f6;
+  --sidebar: #f3f2ee;
+  --context: #f7f6f2;
+  --surface: #ffffff;
+  --surface-subtle: #f3f2ee;
+  --text: #2f2e2a;
+  --muted: #6f6e68;
+  --faint: #6f6e68;
+  --line: #e6e4dd;
+  --line-strong: #d7d4cb;
+  --hover: #eeede7;
+  --selected: #e9e7df;
+  --accent: #c56848;
+  --accent-strong: #a45439;
+  --accent-soft: #f7e9e2;
+  --shadow-panel: 0 8px 28px rgba(47, 46, 42, 0.035), 0 1px 3px rgba(47, 46, 42, 0.025);
+  --shadow-popover: 0 16px 48px rgba(47, 46, 42, 0.1), 0 2px 8px rgba(47, 46, 42, 0.04);
   --green: #64806d;
   --danger: #b75843;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -70,6 +75,7 @@ button {
 }
 
 button:focus-visible,
+input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
   outline: 2px solid rgba(201, 102, 71, 0.3);
