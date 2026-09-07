@@ -19,6 +19,10 @@ for (const file of ["scripts/domi-workflow.cjs", "scripts/domi-repo.cjs", "skill
 const { DomiRepository } = require(path.join(pluginRoot, "scripts/domi-repo.cjs"));
 const { artifact, contextBundle, saveManifest } = require(path.join(pluginRoot, "scripts/domi-workflow.cjs"));
 const { renderLedger } = require(path.join(pluginRoot, "skills/todo/scripts/todo-ledger.js"));
+// 7.0.0 remains a supported contract target; newer plugins add source coverage
+// without changing the storage receipt's owner/hash contract.
+const coverageModule = path.join(pluginRoot, "scripts/notes-coverage.cjs");
+const prepareNotesCoverage = fs.existsSync(coverageModule) ? require(coverageModule).prepareNotesCoverage : null;
 const NOW = "2026-09-07T00:00:00.000Z";
 
 function fixture(t) {
@@ -110,14 +114,23 @@ function podcastFixture(t, ownerType) {
   const f = fixture(t), workflowRunId = `podcast:contract-${ownerType}`, runId = `run-${ownerType}`;
   const canonicalDocumentId = `podcast:rss:contract-${ownerType}`;
   const transcript = artifact({ role: "transcript", stage: "notes", path: f.write("workflow/transcript.md", "嘉宾：公司仍在研发阶段。\n公司尚未产生收入。\n") });
-  const notes = artifact({ role: "notes", stage: "notes", path: f.write("workflow/notes.md", "# 虚构访谈纪要\n\n公司仍在研发，尚未产生收入。\n") });
+  const notes = artifact({ role: "notes", stage: "notes", path: f.write("workflow/notes.md", "#### 虚构访谈纪要\n\n公司仍在研发，尚未产生收入。\n") });
   const index = { schema: "asr.evidence-index.v1", workflowRunId, notesScope: "current_session", mode: "B", transcript,
     sources: [{ ...transcript, role: "current_transcript", sourceId: "source-1" }],
-    claims: [{ claimId: "claim-1", statement: "公司尚无收入", sourceRefs: [{ sourceId: "source-1", lines: [2, 2], quote: "尚未产生收入" }] }] };
+    claims: [{ claimId: "claim-1", statement: "公司仍在研发，尚无收入", sourceRefs: [{ sourceId: "source-1", lines: [1, 2], quote: "尚未产生收入" }],
+      ...(prepareNotesCoverage ? { notesRefs: [{ lines: [3, 3], quote: "公司仍在研发，尚未产生收入。" }] } : {}) }] };
+  if (prepareNotesCoverage) {
+    const coverage = prepareNotesCoverage({ workflowRunId, sources: index.sources });
+    for (const source of coverage.sources) for (const segment of source.segments) segment.review = {
+      status: "reviewed", reviewer: "model", claimIds: ["claim-1"], exclusions: []
+    };
+    index.coverage = artifact({ path: f.write("workflow/coverage.json", coverage) });
+  }
   const evidence = artifact({ role: "evidence_index", stage: "notes", path: f.write("workflow/evidence.json", index) });
   const checks = Object.fromEntries(["source_manifest", "transcript_traceability", "entity_verification", "number_audit", "completeness", "attribution", "education", "career_model_work", "material_verification", "pending_items", "markdown_rendering"].map(key => [key, "passed"]));
   const qa = { schema: "asr.qa-receipt.v1", workflowRunId, mode: "B", notes, evidenceIndex: evidence,
-    checks, overall: "passed", materialConflicts: [], checkedAt: NOW };
+    ...(prepareNotesCoverage ? { reviewer: "model" } : {}),
+    checks: { ...checks, ...(prepareNotesCoverage ? { editorial: "passed" } : {}) }, overall: "passed", materialConflicts: [], checkedAt: NOW };
   const qaReceipt = artifact({ role: "qa_receipt", stage: "notes", path: f.write("workflow/qa.json", qa) });
   const repository = new DomiRepository({ libraryDir: f.libraryDir, databasePath: f.databasePath });
   let entity, document;
@@ -162,6 +175,7 @@ for (const ownerType of ["project", "person", "industry"]) {
     assert.equal(receipt.workflowRunId, f.workflowRunId);
     assert.equal(receipt.canonicalDocumentId, f.entity.canonicalDocumentId);
     assert.equal(receipt.quality?.schema, "domi.podcast-quality.v1", "podcast completion must bind the semantic QA artifacts");
+    if (prepareNotesCoverage) assert.equal(receipt.quality.qualityStatus, "verified", "new notes must satisfy source coverage and actual notes bindings");
     for (const [key, expected] of Object.entries({ qaReceipt: f.qaReceipt, evidenceIndex: f.evidence, notes: f.notes, transcript: f.transcript })) {
       assert.equal(receipt.quality[key].path, expected.path);
       assert.equal(receipt.quality[key].sha256, expected.sha256);
