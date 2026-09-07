@@ -2,6 +2,8 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { NEWS_DISCOVERY_PREFIX, discoverySnapshot, parseNewsFeed } = require("./news-discovery.cjs");
+const { normalizeArchive } = require("./podcast-progress.cjs");
 
 const RADAR_SOURCES_SETTINGS_KEY = "radar-sources-v1";
 const PODCAST_JOBS_CACHE_KEY = "radar-podcast-jobs-v1";
@@ -614,6 +616,7 @@ function normalizeJob(job) {
     localAudioPath: String(job.localAudioPath || ""),
     transcriptPath: String(job.transcriptPath || ""),
     plaudFileId: String(job.plaudFileId || ""),
+    ...(job.archive ? { archive: normalizeArchive(job.archive) } : {}),
     discoveredAt: Number(job.discoveredAt) || Date.now(),
     updatedAt: Number(job.updatedAt) || Date.now(),
     error: String(job.error || "")
@@ -686,7 +689,7 @@ async function safeFetch(fetchImpl, rawUrl, options = {}) {
       current = normalizePublicUrl(new URL(location, current).href);
       continue;
     }
-    if (!response.ok) {
+    if (!response.ok && !(options.allowNotModified && response.status === 304)) {
       clearTimeout(timer);
       throw new Error(`信源返回 HTTP ${response.status}。`);
     }
@@ -772,6 +775,7 @@ class RadarSourceService {
       ok: true,
       sources: sourceState.sources,
       jobs: jobState.jobs,
+      discovery: discoverySnapshot(this.stateStore, sourceState.sources),
       updatedAt: Math.max(sourceState.updatedAt, jobState.updatedAt)
     };
   }
@@ -913,10 +917,55 @@ class RadarSourceService {
     return [parseXiaoyuzhouEpisode(first.text, first.url)];
   }
 
+  async discoverNewsSource(source, limit) {
+    const key = `${NEWS_DISCOVERY_PREFIX}${source.id}`;
+    const stored = this.stateStore.loadCache(key)?.value;
+    const previous = stored?.sourceUrl === source.url ? stored : null;
+    const checkedAt = this.now();
+    let request;
+    let next;
+    try {
+      if (!source.url) throw new Error("该公众号未配置公开订阅地址，需要按名称搜索核验。");
+      const headers = {};
+      if (previous?.etag) headers["If-None-Match"] = previous.etag;
+      if (previous?.lastModified) headers["If-Modified-Since"] = previous.lastModified;
+      request = await safeFetch(this.fetchImpl, source.url, { headers, allowNotModified: true, timeoutMs: 12000 });
+      if (request.response.status === 304 && Array.isArray(previous?.candidates)) {
+        next = { ...previous, checkedAt, status: "unchanged", error: "" };
+      } else {
+        const bytes = await readResponseLimited(request.response, DEFAULT_TEXT_LIMIT_BYTES);
+        const parsed = parseNewsFeed(bytes.toString("utf8"), request.url, normalizePublicUrl);
+        if (!parsed) throw new Error("该地址不是可直接解析的 RSS/Atom，需继续搜索并打开原文核验。");
+        next = {
+          ...parsed, sourceUrl: source.url, checkedAt, status: "fetched", error: "",
+          etag: String(request.response.headers?.get?.("etag") || ""),
+          lastModified: String(request.response.headers?.get?.("last-modified") || "")
+        };
+      }
+    } catch (error) {
+      next = {
+        sourceUrl: source.url, checkedAt,
+        status: !source.url || /RSS\/Atom/.test(String(error.message)) ? "requires_search" : "failed",
+        candidates: previous?.candidates || [], omittedCount: previous?.omittedCount || 0,
+        error: request?.didTimeout() ? "新闻订阅源读取超时，需搜索补查。" : String(error.message || error)
+      };
+    } finally {
+      request?.cleanup();
+    }
+    // A deleted or edited source must not receive a late result for its old URL.
+    const latest = this.loadSources().sources.find((item) => item.id === source.id);
+    if (latest?.url === source.url && latest.enabled) this.stateStore.saveCache(key, next);
+    const collected = ["fetched", "unchanged"].includes(next.status);
+    const ok = next.status !== "failed";
+    return { sourceId: source.id, ok, discoveredCount: next.candidates.length, totalCount: next.candidates.length,
+      status: next.status, collected, error: next.error, checkedAt, limit };
+  }
+
   async sync(request = {}) {
     const sourceState = this.loadSources();
     const selected = sourceState.sources.filter((source) =>
       source.enabled && (!request.sourceId || source.id === String(request.sourceId))
+      && (!request.kind || (request.kind === "news" ? source.kind !== "podcast" : source.kind === request.kind))
     );
     const limit = Math.min(Math.max(Number(request.limit) || DEFAULT_DISCOVERY_LIMIT, 1), MAX_DISCOVERY_LIMIT);
     const existingJobs = this.loadJobs().jobs;
@@ -924,11 +973,14 @@ class RadarSourceService {
     const results = [];
     const checkedAt = this.now();
     const sourceUpdates = new Map();
-    for (const source of selected) {
+    const collect = async (source, index) => {
       if (source.kind !== "podcast") {
-        sourceUpdates.set(source.id, { ...source, lastCheckedAt: checkedAt, lastSuccessAt: checkedAt, error: "" });
-        results.push({ sourceId: source.id, ok: true, discoveredCount: 0 });
-        continue;
+        const result = await this.discoverNewsSource(source, limit);
+        sourceUpdates.set(source.id, { ...source, lastCheckedAt: result.checkedAt,
+          lastSuccessAt: result.collected ? result.checkedAt : source.lastSuccessAt,
+          error: result.status === "failed" ? result.error : "" });
+        results[index] = result;
+        return;
       }
       try {
         const episodes = await this.discoverSource(source, limit);
@@ -950,20 +1002,27 @@ class RadarSourceService {
           jobsById.set(id, job);
         }
         sourceUpdates.set(source.id, { ...source, lastCheckedAt: checkedAt, lastSuccessAt: checkedAt, error: "" });
-        results.push({ sourceId: source.id, ok: true, discoveredCount, totalCount: episodes.length });
+        results[index] = { sourceId: source.id, ok: true, discoveredCount, totalCount: episodes.length };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         sourceUpdates.set(source.id, { ...source, lastCheckedAt: checkedAt, error: message });
-        results.push({ sourceId: source.id, ok: false, discoveredCount: 0, error: message });
+        results[index] = { sourceId: source.id, ok: false, discoveredCount: 0, error: message };
       }
-    }
+    };
+    let nextSource = 0;
+    await Promise.all(Array.from({ length: Math.min(4, selected.length) }, async () => {
+      while (nextSource < selected.length) {
+        const index = nextSource++;
+        await collect(selected[index], index);
+      }
+    }));
     // Network discovery can take several seconds. Merge only health fields into
     // the latest source rows so an edit/delete made while discovery was running
     // is never reverted by an older snapshot.
     const latestSources = this.loadSources().sources;
     const sources = latestSources.map((source) => {
       const update = sourceUpdates.get(source.id);
-      if (!update) return source;
+      if (!update || update.url !== source.url || update.kind !== source.kind) return source;
       return {
         ...source,
         lastCheckedAt: update.lastCheckedAt,
@@ -999,6 +1058,7 @@ class RadarSourceService {
       partial: results.some((item) => item.ok) && results.some((item) => !item.ok),
       sources,
       jobs: this.loadJobs().jobs,
+      discovery: discoverySnapshot(this.stateStore, sources, { limit }),
       results,
       updatedAt: Math.max(sourceSaved.updatedAt, jobSaved.updatedAt)
     };

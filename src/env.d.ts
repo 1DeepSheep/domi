@@ -134,6 +134,7 @@ declare global {
       deleteRadarSource: (request: { sourceId: string }) => Promise<RadarSourceMutationResult>;
       syncRadarSources: (request?: RadarSourceSyncRequest) => Promise<RadarSourceSyncResult>;
       processPodcastEpisode: (request: PodcastProcessRequest) => Promise<PodcastProcessResult>;
+      updatePodcastProgress: (request: PodcastProgressRequest) => Promise<PodcastProgressResult>;
       listDomiTasks: (request?: DomiTaskBoardRequest) => Promise<DomiTaskBoardSnapshot>;
       updateDomiTask: (request: DomiTaskUpdateRequest) => Promise<DomiTaskUpdateResult>;
       loginPlaud: (request: DomiPlaudConnectionRequest) => Promise<DomiPlaudConnectionResult>;
@@ -809,6 +810,52 @@ export type PodcastJob = {
   discoveredAt: number;
   updatedAt: number;
   error: string;
+  archive?: PodcastArchiveProgress;
+};
+
+export type PodcastArchiveProgress = {
+  status: "pending" | "running" | "notes_ready" | "archived" | "failed";
+  runId: string;
+  stage: "transcript_ready" | "notes_ready" | "archived";
+  attempt: number;
+  nextRetryAt: number;
+  manifestPath: string;
+  notesPath: string;
+  qaReceiptPath: string;
+  archiveReceiptPath: string;
+  verifiedAt: number;
+  error?: string;
+};
+
+export type PodcastProgressRequest = {
+  jobId: string;
+  action: "claim" | "checkpoint" | "complete" | "fail";
+  runId?: string;
+  stage?: "notes_ready" | "archived";
+  receiptPath?: string;
+  notesPath?: string;
+  qaReceiptPath?: string;
+  artifactHash?: string;
+  error?: string;
+};
+
+export type PodcastProgressResult = {
+  ok: boolean;
+  job?: PodcastJob;
+  claimed?: boolean;
+  verified?: boolean;
+  unsupported?: boolean;
+  error?: string;
+};
+
+export type RadarNewsDiscovery = {
+  schema: "domi.news-discovery.v1";
+  sources: Array<{
+    sourceId: string; name: string; url: string;
+    status: "fetched" | "unchanged" | "requires_search" | "failed";
+    checkedAt: number; totalCount: number; omittedCount: number; error?: string;
+    candidates: Array<{ id: string; title: string; url: string; publishedAt: number | null; summary: string }>;
+  }>;
 };
 
 export type RadarSourceSnapshot = {
@@ -817,6 +864,7 @@ export type RadarSourceSnapshot = {
   jobs: PodcastJob[];
   updatedAt: number;
   error?: string;
+  discovery?: RadarNewsDiscovery;
 };
 
 export type RadarSourceMutationResult = {
@@ -834,6 +882,7 @@ export type RadarSourceSyncRequest = {
   sourceId?: string;
   limit?: number;
   fresh?: boolean;
+  kind?: "news" | "podcast";
 };
 
 export type RadarSourceSyncItem = {
@@ -852,6 +901,7 @@ export type RadarSourceSyncResult = {
   results: RadarSourceSyncItem[];
   updatedAt: number;
   error?: string;
+  discovery?: RadarNewsDiscovery;
 };
 
 export type PodcastProcessRequest = {
@@ -1085,6 +1135,7 @@ export type DomiDatabaseDeleteResult = {
 
 export type DomiWeeklyNewsSnapshot = {
   ok: boolean;
+  stale?: boolean;
   syncedAt?: number;
   checkedAt?: number;
   contentUpdatedAt?: number;
@@ -1123,6 +1174,7 @@ export type DomiTask = {
   category: DomiTaskCategory;
   status: DomiTaskStatus;
   signalKey: string;
+  purposeKey?: string;
   source: {
     kind: "project" | "person" | "news" | "manual";
     recordId: string;
@@ -1152,6 +1204,9 @@ export type DomiTaskBoardSnapshot = {
   syncedAt: number;
   updatedAt: string | null;
   tasks: DomiTask[];
+  documentSha256?: string;
+  ledgerSha256?: string;
+  syncReceipt?: import("./todo-sync-policy").TodoRunReceipt;
   error?: string;
 };
 

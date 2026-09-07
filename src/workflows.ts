@@ -21,6 +21,18 @@ export const RADAR_MAX_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 export const RADAR_OVERLAP_MS = 48 * 60 * 60 * 1000;
 export const TODO_NEW_ENTRY_WINDOW_MS = 28 * 24 * 60 * 60 * 1000;
 
+export function todoRunContract(runId: string, ledgerSha256 = "") {
+  return [
+    "DOMI_TODO_RUN_V1",
+    `runId=${runId}`,
+    ledgerSha256 ? `expectedLedgerHash=${ledgerSha256}` : "",
+    "本地主库执行 node <todo-skill-dir>/scripts/todo-ledger.js local-read <localRepositoryDir>/0.待办事项.md，再通过 stdin 向 local-merge <同一绝对文档路径> 提交 {schema:domi.todo-merge.v1,runId,now,expectedLedgerHash,candidates}；now 是本轮真实 ISO 时间，expectedLedgerHash 原样取刚才 local-read.ledgerSha256，发生并发变更只重新读当前状态再合并。candidates 使用 Todo Skill 的 {task,review} 合同，保留 purposeKey、完整证据与语义审核字段。程序负责账本合并、冷却、并发校验和真实写后回读；项目相关性、行动价值、期限证据与排序仍由你判断，不得以规则合并替代语义判断。",
+    "local-merge 返回真实 domi.todo-result.v1 receipt 后，在最终回复末尾原样输出一次 <!-- DOMI_TODO_RESULT_V1 {receipt的完整JSON} -->。不得手写或猜测哈希、verified、任务ID。若候选为空或内容不变，也调用程序完成当前 runId 的验证与回执；解析失败只修复当前阶段，不重跑全部研究。",
+    "若最终回复或回执输出遗失，执行 local-read <同一绝对文档路径> --run-id <当前runId>；仅复用程序返回且与原运行和当前文件匹配的 receipt，不以任意新 runId 或文件时间推断成功。",
+    "旧飞书主库继续使用原有唯一 marker 写入与 fetch/parse 回读，不得调用 local-merge 或伪造本地回执。"
+  ].filter(Boolean).join("\n");
+}
+
 export function radarDiscoveryWindow(now: number, checkpoint: number) {
   const earliestStart = now - RADAR_MAX_LOOKBACK_MS;
   const validCheckpoint = Number.isFinite(checkpoint) && checkpoint > 0 ? checkpoint : 0;

@@ -21,6 +21,7 @@ const {
   LocalDomiRepository,
   scanManagedEntityIdentityCandidates
 } = require("../electron/local-domi-repository.cjs");
+const { TaskQueue } = require("../electron/service-coordinator.cjs");
 
 test("critical operation snapshot accounts for queues that must finish before an app update", () => {
   const integration = new DomiIntegration({
@@ -48,6 +49,14 @@ test("critical operation snapshot accounts for queues that must finish before an
 });
 
 test("PLAUD connection errors request login only for confirmed authentication failures", () => {
+  const busy = classifyPlaudConnectionFailure(
+    new Error("PLAUD 专用浏览器正在被另一个任务使用，请稍后重试。"),
+    "chrome"
+  );
+  assert.equal(busy.status, "profile_locked");
+  assert.match(busy.error, /等待当前操作完成/);
+  assert.doesNotMatch(busy.error, /请点击.*登录/);
+
   const pending = classifyPlaudConnectionFailure(
     new Error("PLAUD_SESSION_PROBE_INCOMPLETE: authorization request was not observed"),
     "tabbit"
@@ -4012,6 +4021,54 @@ test("PLAUD workers receive the app Playwright runtime through NODE_PATH", async
   });
 });
 
+for (const command of ["login", "logout"]) {
+  test(`PLAUD ${command} releases the reader inside its queued profile operation`, async () => {
+    const integration = Object.create(DomiIntegration.prototype);
+    let brokerRunning = false;
+    const events = [];
+    Object.assign(integration, {
+      configProvider: () => ({ plaudConnectionMode: "enabled", plaudBrowser: "chrome" }),
+      plaudPaths: () => ({
+        plugin: { root: "/synthetic-plaud-plugin" },
+        script: "/synthetic-plaud-plugin/plaud.js"
+      }),
+      plaudRuntimeEnv: () => ({}),
+      plaudCommandQueue: new TaskQueue(1),
+      plaudShuttingDown: false,
+      plaudConfigFingerprint: "",
+      plaudConfigGeneration: 0,
+      plaudBroker: {
+        stop: async (reason) => {
+          events.push({ type: "stop", reason });
+          brokerRunning = false;
+        },
+        request: async () => {
+          events.push({ type: "read" });
+          brokerRunning = true;
+          return { ok: true, items: [] };
+        }
+      },
+      execTrackedPlaudFile: async () => {
+        events.push({ type: "cli", brokerRunning });
+        if (brokerRunning) throw new Error("Profile is already in use: SingletonLock");
+        return { stdout: JSON.stringify({ ok: true }) };
+      }
+    });
+
+    // A refresh can arrive while stopping the old reader is awaiting completion.
+    // It must not acquire the Profile between release and the queued CLI command.
+    const results = await Promise.allSettled([
+      integration.runPlaudConnectionCommand(command, "chrome"),
+      integration.runPlaudWorker("list", ["50", "0"])
+    ]);
+
+    assert.equal(results[0].status, "fulfilled", JSON.stringify(events));
+    assert.equal(results[1].status, "fulfilled");
+    assert.equal(events.find((event) => event.type === "cli")?.brokerRunning, false);
+    assert.equal(events.filter((event) => event.type === "stop").length, 1);
+  });
+}
+
 test("PLAUD connection uses the selected private browser profile command", async () => {
   let selectedBrowser = "chrome";
   const brokerCalls = [];
@@ -4036,14 +4093,18 @@ test("PLAUD connection uses the selected private browser profile command", async
   });
   integration.findPlugin = () => ({ root: "/tmp/domi-plugin" });
   const calls = [];
-  integration.runJson = async (binary, args, options) => {
-    calls.push({ binary, args, options });
-    return {
+  integration.execTrackedPlaudFile = async (_binary, args) => ({
+    stdout: JSON.stringify({
       ok: true,
       connected: args[1] === "login",
       browser: args[2],
       browserLabel: args[2] === "tabbit" ? "Tabbit" : "Google Chrome"
-    };
+    })
+  });
+  const runJson = integration.runJson.bind(integration);
+  integration.runJson = async (binary, args, options) => {
+    calls.push({ binary, args, options });
+    return runJson(binary, args, options);
   };
 
   const login = await integration.loginPlaud({ browser: "chrome" });

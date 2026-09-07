@@ -1,3 +1,7 @@
+import { newsDiscoveryContext } from "./news-discovery-context";
+import { podcastAutomationJob, podcastProgressRequests, podcastWorkflowContract } from "./podcast-progress";
+import { canSkipTodoSync, nextTodoEvaluationAt, parseTodoReceipt, todoInputFingerprint, TODO_RULE_VERSION, verifiedTodoReceipt, type TodoSyncCheckpoint } from "./todo-sync-policy";
+import { indexBy, indexConversation, latestAssistant } from "./render-indexes";
 import {
   AlertCircle,
   ArrowUp,
@@ -137,6 +141,7 @@ import {
   PodcastJob,
   PodcastProcessResult,
   RadarSourceSnapshot,
+  RadarSourceSyncResult,
   SkillHubUserSkill,
   UpdateStatus
 } from "./env";
@@ -160,6 +165,7 @@ import {
   radarPriorityPeopleContext,
   TODO_NEW_ENTRY_WINDOW_MS,
   todoRecentEntriesContext,
+  todoRunContract,
   Workflow,
   workflowPrompt,
   workflows
@@ -1727,7 +1733,7 @@ function plaudQueueSummary(snapshot: DomiPlaudSnapshot) {
 function domiContextForThread(snapshot: DomiSnapshot | null, thread: Thread) {
   if (!snapshot || !thread.externalRecordId || !thread.externalType) return "";
   if (thread.externalType === "project") {
-    const project = snapshot.projects.find((item) => item.recordId === thread.externalRecordId);
+    const project = indexBy(snapshot.projects, "recordId").get(thread.externalRecordId);
     if (!project) return "";
     return [
       "实体类型：Watching List项目",
@@ -1746,7 +1752,7 @@ function domiContextForThread(snapshot: DomiSnapshot | null, thread: Thread) {
       "归档约束：该任务已绑定正式项目。项目相关文件必须直接进入稳定项目目录的纪要／研究／原始材料／导出，不得写入任务 outputs 后再搬运。"
     ].join("\n");
   }
-  const person = snapshot.people.find((item) => item.recordId === thread.externalRecordId);
+  const person = indexBy(snapshot.people, "recordId").get(thread.externalRecordId);
   if (!person) return "";
   return [
     "实体类型：People人脉记录",
@@ -1790,6 +1796,7 @@ type WorkbenchSnapshot = {
     domiPluginEnabled?: boolean;
   };
   executionSuggestionState?: Record<string, ExecutionSuggestionDisposition>;
+  todoSyncCheckpoint?: TodoSyncCheckpoint | null;
 };
 
 const initialSnapshot: WorkbenchSnapshot = {
@@ -1925,6 +1932,8 @@ function App() {
   const [radarDomainDraft, setRadarDomainDraft] = useState<RadarDomain[]>([]);
   const [radarDomainSaving, setRadarDomainSaving] = useState(false);
   const [radarSourceSnapshot, setRadarSourceSnapshot] = useState<RadarSourceSnapshot | null>(null);
+  const radarSourceSnapshotRef = useRef(radarSourceSnapshot);
+  radarSourceSnapshotRef.current = radarSourceSnapshot;
   const [assistantInteractions, setAssistantInteractions] = useState<AssistantInteraction[]>([]);
   const [domiTaskBoard, setDomiTaskBoard] = useState<DomiTaskBoardSnapshot | null>(null);
   const [domiTaskLoading, setDomiTaskLoading] = useState(false);
@@ -2071,8 +2080,14 @@ function App() {
   const weeklyNewsAutomationOperationRef = useRef(false);
   const weeklyNewsAutoRefreshActionRef = useRef<(() => Promise<boolean>) | null>(null);
   const weeklyNewsAutoScanActionRef = useRef<(() => Promise<WeeklyNewsScanOutcome>) | null>(null);
+  const [todoSyncCheckpoint, setTodoSyncCheckpoint] = useState<TodoSyncCheckpoint | null>(null);
+  const todoSyncCheckpointRef = useRef<TodoSyncCheckpoint | null>(null);
   const podcastSourceAutomationRef = useRef(false);
   const podcastArchiveRunIdsRef = useRef(new Set<string>());
+  const podcastProgressRunsRef = useRef(new Map<string, {
+    jobId: string; output: string; seen: Set<string>; pending: Promise<void>;
+    verified: boolean; error?: string;
+  }>());
   const appSettingsRef = useRef(appSettings);
   const localSearchRefreshAtRef = useRef(0);
   const domiSearchComposingRef = useRef(false);
@@ -2235,9 +2250,8 @@ function App() {
   }
 
   function currentMessageContent(threadId: string, messageId: string) {
-    return threadsRef.current
-      .find((thread) => thread.id === threadId)
-      ?.messages.find((message) => message.id === messageId)?.content || "";
+    const thread = indexBy(threadsRef.current, "id").get(threadId);
+    return thread ? indexBy(thread.messages, "id").get(messageId)?.content || "" : "";
   }
 
   function workspaceScrollElements(view: WorkspaceView) {
@@ -2316,7 +2330,8 @@ function App() {
         version: 2,
         activeThreadId: activeThreadIdRef.current,
         agentPreferences: { model, reasoningEffort, serviceTier, domiPluginEnabled },
-        executionSuggestionState
+        executionSuggestionState,
+        todoSyncCheckpoint: todoSyncCheckpointRef.current
       },
       threads: currentThreads,
       deletedThreadIds: [...persistedThreadsRef.current.keys()]
@@ -2569,7 +2584,7 @@ function App() {
   }
 
   const activeThread = useMemo(
-    () => threads.find((thread) => thread.id === activeThreadId) || threads[0] || initialThreads[0],
+    () => indexBy(threads, "id").get(activeThreadId) || threads[0] || initialThreads[0],
     [activeThreadId, threads]
   );
   activeThreadIdRef.current = activeThreadId;
@@ -2630,7 +2645,7 @@ function App() {
     [userSkillWorkflows]
   );
   const selectedWorkflow = useMemo(
-    () => allWorkflows.find((workflow) => workflow.id === selectedWorkflowId),
+    () => indexBy(allWorkflows, "id").get(selectedWorkflowId || ""),
     [allWorkflows, selectedWorkflowId]
   );
   const plaudEnabled = appSettings?.plaudConnectionMode === "enabled";
@@ -2884,7 +2899,7 @@ function App() {
   const queuedTaskItems = useMemo(() => Object.entries(queuedSubmissionsByThread)
     .flatMap(([threadId, submissions]) => submissions.map((submission) => ({
       submission,
-      thread: threads.find((thread) => thread.id === threadId)
+      thread: indexBy(threads, "id").get(threadId)
     })))
     .sort((left, right) => left.submission.createdAt - right.submission.createdAt),
   [queuedSubmissionsByThread, threads]);
@@ -2897,10 +2912,8 @@ function App() {
   const failedTaskThreads = useMemo(() => threads
     .filter((thread) => {
       if (activeRunsByThread[thread.id]) return false;
-      const latestAssistant = [...thread.messages]
-        .reverse()
-        .find((message) => message.role === "assistant");
-      return latestAssistant?.status === "error";
+      const lastAssistant = latestAssistant(thread.messages);
+      return lastAssistant?.status === "error";
     })
     .sort((left, right) => (right.lastActiveAt || 0) - (left.lastActiveAt || 0))
     .slice(0, 8),
@@ -2909,10 +2922,8 @@ function App() {
   const completedTaskThreads = useMemo(() => threads
     .filter((thread) => {
       if (activeRunsByThread[thread.id] || isUnusedDraftThread(thread)) return false;
-      const latestAssistant = [...thread.messages]
-        .reverse()
-        .find((message) => message.role === "assistant");
-      return latestAssistant?.status === "done";
+      const lastAssistant = latestAssistant(thread.messages);
+      return lastAssistant?.status === "done";
     })
     .sort((left, right) => (right.lastActiveAt || 0) - (left.lastActiveAt || 0))
     .slice(0, 12),
@@ -3142,7 +3153,15 @@ function App() {
           && !activeThread.externalType
         )
       )
-    : [], [activeThread.messages, hasConversation]);
+    : [], [activeThread.messages, activeThread.externalType, hasConversation]);
+  const latestVisibleAssistantId = useMemo(
+    () => latestAssistant(visibleMessages)?.id,
+    [visibleMessages]
+  );
+  const conversationIndex = useMemo(
+    () => indexConversation(timeline, assistantInteractions),
+    [timeline, assistantInteractions]
+  );
 
   useLayoutEffect(() => {
     const textarea = composerRef.current;
@@ -3382,6 +3401,8 @@ function App() {
         setThreads(loadedThreads);
         activateThreadNow(loadedActiveThreadId);
         setExecutionSuggestionState(state.executionSuggestionState || {});
+        todoSyncCheckpointRef.current = state.todoSyncCheckpoint || null;
+        setTodoSyncCheckpoint(todoSyncCheckpointRef.current);
         if (state.agentPreferences) {
           const loadedActiveThread = loadedThreads.find(
             (thread) => thread.id === loadedActiveThreadId
@@ -3431,7 +3452,8 @@ function App() {
           version: 2,
           activeThreadId,
           agentPreferences: { model, reasoningEffort, serviceTier, domiPluginEnabled },
-          executionSuggestionState
+          executionSuggestionState,
+          todoSyncCheckpoint: todoSyncCheckpointRef.current
         },
         threads: changedThreads,
         deletedThreadIds,
@@ -3457,6 +3479,7 @@ function App() {
     activeThreadId,
     domiPluginEnabled,
     executionSuggestionState,
+    todoSyncCheckpoint,
     model,
     reasoningEffort,
     serviceTier,
@@ -3494,6 +3517,12 @@ function App() {
           : `${weeklyNewsOutputRef.current}${payload.text || ""}`;
         setWeeklyNewsScanStage(weeklyNewsScanStageFromOutput(weeklyNewsOutputRef.current));
       }
+      const podcastProgress = podcastProgressRunsRef.current.get(payload.runId);
+      if (podcastProgress && payload.type === "assistant-delta") {
+        podcastProgress.output = payload.output !== undefined
+          ? payload.output : `${podcastProgress.output}${payload.text || ""}`;
+        consumePodcastProgress(payload.runId, podcastProgress.output);
+      }
       handleCodexEvent(payload);
     });
     return () => {
@@ -3516,15 +3545,13 @@ function App() {
 
     const allLocalThreads = threadsRef.current;
     const candidates = allLocalThreads.filter((thread) => {
-      const latestAssistant = [...thread.messages]
-        .reverse()
-        .find((message) => message.role === "assistant");
+      const lastAssistant = latestAssistant(thread.messages);
       // Include every unfinished local turn, even when its recovery id is
       // missing. In particular, an isolated turn must fail closed instead of
       // falling back to the source task's canonical Codex conversation.
       return Boolean(
-        latestAssistant
-        && (latestAssistant.status === "running" || latestAssistant.status === "error")
+        lastAssistant
+        && (lastAssistant.status === "running" || lastAssistant.status === "error")
       );
     });
 
@@ -3779,7 +3806,7 @@ function App() {
       if (submissionStartingThreadIdsRef.current.has(threadId)) continue;
       if ([...runContextRef.current.values()].some((context) => context.threadId === threadId)) continue;
 
-      const targetThread = threads.find((thread) => thread.id === threadId);
+      const targetThread = indexBy(threads, "id").get(threadId);
       if (!targetThread) {
         setPausedQueuedSubmissionIds((current) => {
           const next = new Set(current);
@@ -3806,7 +3833,7 @@ function App() {
       // registry. Treating an unresolved id as a generic task would silently
       // drop the user's selected Skill and produce the wrong deliverable.
       if (queuedUserSkill && !skillHubReady) continue;
-      const workflow = allWorkflows.find((item) => item.id === queued.workflowId);
+      const workflow = indexBy(allWorkflows, "id").get(queued.workflowId || "");
       if (queuedUserSkill && !workflow) {
         setThreadAttachmentError(
           threadId,
@@ -5070,8 +5097,25 @@ function App() {
         const address = source.url ? `；${source.url}` : "";
         return `- ${typeLabel}：${source.name}${address}${keywords}`;
       });
+    let discoveryContext = "";
+    if (configuredSourceLines.length) {
+      setWeeklyNewsScanStage("正在读取已配置新闻信源的候选索引");
+      try {
+        const discovered = await workbench.syncRadarSources({ kind: "news", limit: 50 });
+        discoveryContext = newsDiscoveryContext(discovered.discovery);
+        if (discovered.sources) setRadarSourceSnapshot({
+          ok: discovered.ok || Boolean(discovered.partial), sources: discovered.sources,
+          jobs: discovered.jobs, updatedAt: discovered.updatedAt,
+          discovery: discovered.discovery, error: discovered.error
+        });
+        if (!discoveryContext) discoveryContext = "程序抓取未返回候选；按原规则逐个尝试已配置新闻信源，不能因此省略搜索或计作已覆盖。";
+      } catch {
+        discoveryContext = "程序抓取暂时失败；继续按原规则搜索补查已配置新闻信源，失败范围如实记入覆盖结果。";
+      }
+    }
     const requestText = [
       radarWorkflow.defaultPrompt,
+      discoveryContext,
       `followed_domains=${JSON.stringify(radarDomainsSnapshot)}`,
       `本轮设置修订快照只包含以上 ${radarDomainsSnapshot.length} 个关注领域；不得搜索、返回、归档或通知其他领域。`,
       radarTaxonomyPrompt(radarDomainsSnapshot),
@@ -5261,80 +5305,129 @@ function App() {
     }
   }
 
+  function consumePodcastProgress(runId: string, output: string) {
+    const progress = podcastProgressRunsRef.current.get(runId);
+    if (!progress) return;
+    for (const request of podcastProgressRequests(output, progress.jobId, runId)) {
+      const key = JSON.stringify(request);
+      if (progress.seen.has(key)) continue;
+      progress.seen.add(key);
+      progress.pending = progress.pending.then(async () => {
+        const updated = await workbench.updatePodcastProgress(request);
+        if (!updated.ok) { progress.error = updated.error; return; }
+        if (updated.job) setRadarSourceSnapshot((current) => current ? {
+          ...current, jobs: current.jobs.map((job) => job.id === updated.job!.id ? updated.job! : job)
+        } : current);
+        if (request.action === "complete" && updated.verified) progress.verified = true;
+      }).catch((error) => { progress.error = error instanceof Error ? error.message : String(error); });
+    }
+  }
+
   async function archivePodcastTranscript(
     job: PodcastJob,
     result: PodcastProcessResult
-  ) {
+  ): Promise<boolean> {
     const transcriptPath = result.transcriptPath || result.job?.transcriptPath || job.transcriptPath;
     if (!transcriptPath) throw new Error("PLAUD 已完成，但没有返回可读取的文字稿路径。");
-    if (podcastArchiveRunIdsRef.current.has(job.id)) return;
-    const routerWorkflow = workflows.find((workflow) => workflow.id === "domi-router");
+    if (podcastArchiveRunIdsRef.current.has(job.id)) return false;
+    const routerWorkflow = indexBy(workflows, "id").get("domi-router");
     if (!routerWorkflow) throw new Error("未找到 domi 播客归档工作流。");
-
-    const normalizedEpisodeText = `${job.title} ${job.description}`
-      .toLocaleLowerCase("zh-CN")
-      .replace(/\s+/g, "");
-    const matchedProjects = (domiSnapshotRef.current?.projects || []).filter((project) => {
-      const normalizedName = project.name.toLocaleLowerCase("zh-CN").replace(/\s+/g, "");
-      return normalizedName.length >= 2 && normalizedEpisodeText.includes(normalizedName);
-    });
-    const projectHint = matchedProjects.length === 1 ? matchedProjects[0] : null;
-    const primaryArchiveHint = projectHint ? "project_dominant" : "industry_dominant";
-    const canonicalDocumentId = `podcast:${job.sourceFormat || "public"}:${job.id}`;
-    const requestText = [
-      "处理一条已经由用户自己的 PLAUD 完成转写的公开播客。不要调用本地 ASR，不要重新下载音频，也不要创建临时任务工作区或 outputs 目录。",
-      `sourceKind=podcast`,
-      `transcriptProvider=plaud`,
-      `transcriptPath=${transcriptPath}`,
-      `sourceId=${job.sourceId}`,
-      `provider=${job.sourceFormat || "public-web-page"}`,
-      `episodeId=${job.id}`,
-      `episodeUrl=${job.episodeUrl}`,
-      `podcastName=${job.podcastTitle || ""}`,
-      `episodeTitle=${job.title}`,
-      `publishedAt=${job.publishedAt ? new Date(job.publishedAt).toISOString() : ""}`,
-      `description=${job.description || ""}`,
-      `canonicalDocumentId=${canonicalDocumentId}`,
-      `primaryArchiveHint=${primaryArchiveHint}`,
-      projectHint
-        ? `唯一明确项目匹配：${projectHint.name}（recordId=${projectHint.recordId}）。若正文证据一致，将主文档归入该项目的“纪要”，原始 PLAUD 文字稿归入“原始材料”。`
-        : "标题和简介未唯一匹配项目库中的单一公司；按行业趋势材料归档到对应行业研究/播客目录。若正文明确由唯一公司创始人或高管主讲，再按规则校正。",
-      "先用 asr-notes 把转写错误校正为准确结果，删去校验过程和低信息量废话；再用 investment-mgmt 完成唯一主归档。其他相关项目、人脉和行业入口仅保存 URI 与摘要引用，不复制第二份正文。",
-      "若正文证据与 primaryArchiveHint 冲突且仍无法确定，不要猜测写入错误目录：进入分类待审核，并在最终结果中明确返回待审核原因。"
-    ].join("\n");
-
     podcastArchiveRunIdsRef.current.add(job.id);
+    let archiveRunId = createId("podcast-archive");
+    let claimed = false;
+    const durable = appSettingsRef.current?.storageBackend === "local";
     try {
-      const archiveRunId = createId("podcast-archive");
-      const runModelPolicy = resolveRunModelPolicy(routerWorkflow.id, {
-        runKind: "podcast-archive"
+      let progressContract = "";
+      if (durable) {
+        const claim = await workbench.updatePodcastProgress({ jobId: job.id, action: "claim", runId: archiveRunId });
+        if (!claim.ok) throw new Error(claim.error || "无法安全恢复播客归档进度。");
+        if (claim.verified && claim.job?.archive?.status === "archived") return true;
+        if (!claim.claimed) return false;
+        claimed = true;
+        job = claim.job || job;
+        archiveRunId = job.archive?.runId || archiveRunId;
+        progressContract = podcastWorkflowContract(job, archiveRunId);
+        podcastProgressRunsRef.current.set(archiveRunId, {
+          jobId: job.id, output: "", seen: new Set(), pending: Promise.resolve(), verified: false
+        });
+      }
+      const normalizedEpisodeText = `${job.title} ${job.description}`
+        .toLocaleLowerCase("zh-CN")
+        .replace(/\s+/g, "");
+      const matchedProjects = (domiSnapshotRef.current?.projects || []).filter((project) => {
+        const normalizedName = project.name.toLocaleLowerCase("zh-CN").replace(/\s+/g, "");
+        return normalizedName.length >= 2 && normalizedEpisodeText.includes(normalizedName);
       });
+      const projectHint = matchedProjects.length === 1 ? matchedProjects[0] : null;
+      const primaryArchiveHint = projectHint ? "project_dominant" : "industry_dominant";
+      const canonicalDocumentId = `podcast:${job.sourceFormat || "public"}:${job.id}`;
+      const requestText = [
+        progressContract,
+        "处理一条已经由用户自己的 PLAUD 完成转写的公开播客。不要调用本地 ASR，不要重新下载音频，也不要创建临时任务工作区或 outputs 目录。",
+        `sourceKind=podcast`,
+        `transcriptProvider=plaud`,
+        `transcriptPath=${transcriptPath}`,
+        `sourceId=${job.sourceId}`,
+        `provider=${job.sourceFormat || "public-web-page"}`,
+        `episodeId=${job.id}`,
+        `episodeUrl=${job.episodeUrl}`,
+        `podcastName=${job.podcastTitle || ""}`,
+        `episodeTitle=${job.title}`,
+        `publishedAt=${job.publishedAt ? new Date(job.publishedAt).toISOString() : ""}`,
+        `description=${job.description || ""}`,
+        `canonicalDocumentId=${canonicalDocumentId}`,
+        `primaryArchiveHint=${primaryArchiveHint}`,
+        projectHint
+          ? `唯一明确项目匹配：${projectHint.name}（recordId=${projectHint.recordId}）。若正文证据一致，将主文档归入该项目的“纪要”，原始 PLAUD 文字稿归入“原始材料”。`
+          : "标题和简介未唯一匹配项目库中的单一公司；按行业趋势材料归档到对应行业研究/播客目录。若正文明确由唯一公司创始人或高管主讲，再按规则校正。",
+        "先用 asr-notes 把转写错误校正为准确结果，删去校验过程和低信息量废话；再用 investment-mgmt 完成唯一主归档。其他相关项目、人脉和行业入口仅保存 URI 与摘要引用，不复制第二份正文。",
+        "若正文证据与 primaryArchiveHint 冲突且仍无法确定，不要猜测写入错误目录：进入分类待审核，并在最终结果中明确返回待审核原因。"
+      ].join("\n");
+
+      const runModelPolicy = resolveRunModelPolicy(routerWorkflow.id, { runKind: "podcast-archive" });
       const archiveResult = await workbench.runCodex({
         runId: archiveRunId,
         prompt: workflowPrompt(routerWorkflow, requestText, "播客处理必须使用 PLAUD 文字稿，并遵守唯一主归档规则。", true, "programmatic"),
-        requestText,
-        requestOrigin: "programmatic",
-        userInstructionText: "",
-        ephemeral: true,
-        background: true,
-        allowUserInput: false,
-        workflowId: routerWorkflow.id,
-        webSearch: true,
-        model: runModelPolicy.model,
-        reasoningEffort: runModelPolicy.reasoningEffort,
+        requestText, requestOrigin: "programmatic", userInstructionText: "",
+        ephemeral: true, background: true, allowUserInput: false,
+        workflowId: routerWorkflow.id, webSearch: true,
+        model: runModelPolicy.model, reasoningEffort: runModelPolicy.reasoningEffort,
         serviceTier: runModelPolicy.serviceTier,
-        workspacePath: appSettingsRef.current?.localRepositoryDir
-          || codexStatus?.workspacePath
-          || activeThread.workspacePath
+        workspacePath: appSettingsRef.current?.localRepositoryDir || codexStatus?.workspacePath || activeThread.workspacePath
       });
-      if (!archiveResult.ok) {
+      const progress = podcastProgressRunsRef.current.get(archiveRunId);
+      if (progress) {
+        await progress.pending;
+        if (!progress.verified) {
+          progress.seen.clear();
+          consumePodcastProgress(archiveRunId, archiveResult.output || progress.output);
+          await progress.pending;
+        }
+        if (!progress.verified) {
+          // A completed manifest may survive even when the final marker was lost.
+          const recovered = await workbench.updatePodcastProgress({ jobId: job.id, action: "complete", runId: archiveRunId });
+          progress.verified = Boolean(recovered.ok && recovered.verified);
+          if (!progress.verified) throw new Error(recovered.error || progress.error || "纪要已保留，唯一归档的真实回执尚未通过；稍后从检查点继续。");
+        }
+      } else if (!archiveResult.ok) {
         throw new Error(archiveResult.error || "播客纪要整理或归档失败。");
       }
-      await Promise.all([
-        refreshDomi(),
-        refreshDocumentLibrary({ silent: true, force: true })
+      // The durable receipt is authoritative; a transient view refresh must not
+      // turn an already committed archive into a failed job.
+      const refreshed = await Promise.allSettled([
+        refreshDomi(), refreshDocumentLibrary({ silent: true, force: true }), workbench.listRadarSources()
       ]);
+      const sourceRefresh = refreshed[2];
+      if (sourceRefresh.status === "fulfilled" && sourceRefresh.value.ok) setRadarSourceSnapshot(sourceRefresh.value);
+      return true;
+    } catch (error) {
+      if (claimed) await workbench.updatePodcastProgress({
+        jobId: job.id, action: "fail", runId: archiveRunId,
+        error: error instanceof Error ? error.message : String(error)
+      }).catch(() => undefined);
+      throw error;
     } finally {
+      podcastProgressRunsRef.current.delete(archiveRunId);
       podcastArchiveRunIdsRef.current.delete(job.id);
     }
   }
@@ -5549,35 +5642,39 @@ function App() {
       ) return;
       podcastSourceAutomationRef.current = true;
       try {
-        const synced = await workbench.syncRadarSources({ limit: 10 });
-        if (disposed || (!synced.ok && !synced.partial)) return;
+        let synced: RadarSourceSyncResult | undefined;
+        let discoveryError = "";
+        try {
+          synced = await workbench.syncRadarSources({ kind: "podcast", limit: 10 });
+          discoveryError = synced.error || (!synced.ok ? "部分播客信源更新失败，已保留可恢复任务。" : "");
+        } catch (error) {
+          discoveryError = error instanceof Error ? error.message : String(error);
+        }
+        if (disposed) return;
+        const discoveryReliable = Boolean(synced?.ok || synced?.partial);
+        const cached = radarSourceSnapshotRef.current;
         const nextSnapshot: RadarSourceSnapshot = {
-          ok: true,
-          sources: synced.sources,
-          jobs: synced.jobs,
-          updatedAt: synced.updatedAt,
-          error: synced.error
+          ok: discoveryReliable,
+          sources: synced?.sources?.length || discoveryReliable ? synced!.sources : cached?.sources || [],
+          jobs: synced?.jobs?.length || discoveryReliable ? synced!.jobs : cached?.jobs || [],
+          updatedAt: synced?.updatedAt || cached?.updatedAt || 0,
+          error: discoveryError
         };
         setRadarSourceSnapshot(nextSnapshot);
-        const sourcesById = new Map(synced.sources.map((source) => [source.id, source] as const));
-        const nextJob = [...synced.jobs]
-          .filter((job) => {
-            const source = sourcesById.get(job.sourceId);
-            if (!source?.enabled || !source.autoProcess || job.status !== "discovered") return false;
-            if (!source.keywords.length) return true;
-            const haystack = `${job.title} ${job.description}`.toLocaleLowerCase("zh-CN");
-            return source.keywords.some((keyword) => haystack.includes(keyword.toLocaleLowerCase("zh-CN")));
-          })
-          .sort((left, right) => (right.publishedAt || right.discoveredAt) - (left.publishedAt || left.discoveredAt))[0];
+        if (discoveryError) setPlaudError(`播客信源更新：${discoveryError}`);
+        const nextJob = podcastAutomationJob(nextSnapshot, Date.now(),
+          appSettingsRef.current?.storageBackend === "local", discoveryReliable);
         if (!nextJob) return;
 
-        const processed = await workbench.processPodcastEpisode({ jobId: nextJob.id });
+        const processed: PodcastProcessResult = nextJob.transcriptPath
+          ? { ok: true, reused: true, job: nextJob, transcriptPath: nextJob.transcriptPath }
+          : await workbench.processPodcastEpisode({ jobId: nextJob.id });
         if (!processed.ok || !processed.job) {
           setPlaudError(processed.error || `“${nextJob.title}”没有成功交给 PLAUD。`);
           return;
         }
-        await archivePodcastTranscript(processed.job, processed);
-        if (!document.hasFocus()) {
+        const archived = await archivePodcastTranscript(processed.job, processed);
+        if (archived && !document.hasFocus()) {
           await workbench.showNotification({
             title: "domi 已整理一条播客",
             body: processed.job.title
@@ -6288,7 +6385,8 @@ function App() {
     let postWriteGraceHandle: number | undefined;
     let ledgerPollingActive = true;
     const startedAt = Date.now();
-    const baselineUpdatedAt = domiTaskBoard?.updatedAt || null;
+    const repositoryIdentity = queueRepositoryIdentity(appSettingsRef.current);
+    const localBackend = appSettingsRef.current?.storageBackend === "local";
     let candidateCount = 0;
     let outcome = "failed";
     let boardRefreshedAfterFailure = false;
@@ -6308,11 +6406,51 @@ function App() {
     try {
       const synced = await workbench.syncDomi();
       const currentSnapshot = synced.snapshot || domiSnapshot;
+      const [baselineBoard, newsRevision] = await Promise.all([
+        workbench.listDomiTasks({ fresh: true }),
+        workbench.listWeeklyNews({ days: 7, limit: 1 })
+          .catch(() => ({ ok: false } as DomiWeeklyNewsSnapshot))
+      ]);
+      if (baselineBoard.ok) setDomiTaskBoard(baselineBoard);
       if (synced.snapshot) setDomiSnapshot(synced.snapshot);
       if (!synced.ok && !currentSnapshot) {
         throw new Error(synced.error || "资料库刷新失败，暂时无法生成待办事项。");
       }
       candidateCount = recentTodoCandidateCount(currentSnapshot);
+      const inputFingerprint = currentSnapshot
+        ? await todoInputFingerprint(currentSnapshot, baselineBoard, newsRevision, repositoryIdentity)
+        : "";
+      if (localBackend && canSkipTodoSync(todoSyncCheckpointRef.current, {
+        fingerprint: inputFingerprint, repositoryIdentity, now: Date.now(),
+        snapshotFresh: synced.ok && !synced.stale && Boolean(synced.snapshot),
+        board: baselineBoard, news: newsRevision
+      })) {
+        outcome = "skipped";
+        updateSyncPhase("completed", "资料与待办未变化，已复用最近一次验证结果");
+        return;
+      }
+      const checkpointVerifiedBoard = async (board: DomiTaskBoardSnapshot) => {
+        if (!localBackend || !currentSnapshot || !synced.ok || synced.stale
+          || !board.documentSha256 || !newsRevision.ok || newsRevision.cacheMiss || newsRevision.stale
+          || !Number.isFinite(newsRevision.contentUpdatedAt) || !newsRevision.contentUpdatedAt
+          || repositoryIdentity !== queueRepositoryIdentity(appSettingsRef.current)) return;
+        const verifiedAt = Date.now();
+        // A run crossing a date/cooldown boundary has not necessarily evaluated
+        // that new state. Keep its result, but require another evaluation.
+        const nextEvaluationAt = Math.min(
+          nextTodoEvaluationAt(currentSnapshot, baselineBoard.tasks, startedAt),
+          nextTodoEvaluationAt(currentSnapshot, board.tasks, startedAt)
+        );
+        if (nextEvaluationAt <= verifiedAt) return;
+        const checkpoint: TodoSyncCheckpoint = {
+          fingerprint: await todoInputFingerprint(currentSnapshot, board, newsRevision, repositoryIdentity),
+          ruleVersion: TODO_RULE_VERSION, repositoryIdentity, verifiedAt,
+          nextEvaluationAt,
+          ledgerFingerprint: board.documentSha256
+        };
+        todoSyncCheckpointRef.current = checkpoint;
+        setTodoSyncCheckpoint(checkpoint);
+      };
       updateSyncPhase(
         "preparing",
         candidateCount
@@ -6321,8 +6459,9 @@ function App() {
       );
       const recentEntriesContext = todoRecentEntriesContext(
         currentSnapshot?.projects,
-        currentSnapshot?.people
-      );
+        currentSnapshot?.people,
+        startedAt
+      ) + "\n" + todoRunContract(runId, baselineBoard.ledgerSha256);
       updateSyncPhase("generating", "Todo Skill 正在排序并维护待办事项文档");
       const runModelPolicy = resolveRunModelPolicy(todoWorkflow.id);
       const runPromise = workbench.runCodex({
@@ -6341,11 +6480,8 @@ function App() {
           workspacePath: activeThread.workspacePath
         });
       const isFreshLedger = (snapshot: DomiTaskBoardSnapshot | null) => {
-        if (!snapshot?.ok || !snapshot.updatedAt) return false;
-        const updatedTimestamp = Date.parse(snapshot.updatedAt);
-        return snapshot.updatedAt !== baselineUpdatedAt
-          && Number.isFinite(updatedTimestamp)
-          && updatedTimestamp >= startedAt - 10_000;
+        return Boolean(localBackend && snapshot
+          && verifiedTodoReceipt(snapshot.syncReceipt, runId, snapshot));
       };
       const ledgerWritePromise = new Promise<{
         kind: "ledger";
@@ -6400,6 +6536,7 @@ function App() {
         if (!isFreshLedger(verified)) {
           throw new Error("待办事项文档已写入，但最终回读验证失败。");
         }
+        await checkpointVerifiedBoard(verified!);
         outcome = "completed";
         updateSyncPhase("completed", `同步完成，已核验 ${candidateCount} 个新入库候选`);
         return;
@@ -6411,6 +6548,7 @@ function App() {
         const recovered = await refreshDomiTaskBoard({ silent: true, fresh: true });
         boardRefreshedAfterFailure = true;
         if (isFreshLedger(recovered)) {
+          await checkpointVerifiedBoard(recovered!);
           outcome = "completed";
           setDomiTaskError("");
           updateSyncPhase("completed", `同步完成，已核验 ${candidateCount} 个新入库候选`);
@@ -6421,14 +6559,31 @@ function App() {
           : `后台待办事项同步超过 8 分钟，但停止确认失败：${stopResult.error || "未知错误"}`);
       }
       const result = resultOrTimeout.result;
-      if (result.stopped) {
-        throw new Error("后台待办事项同步已暂停，Codex 连接维护完成后可重新同步。");
-      }
-      if (!result.ok) {
-        throw new Error(result.error || "待办事项后台同步失败。");
+      if (result.stopped || !result.ok) {
+        // A connection can end after the atomic write but before its final
+        // response. Recover the persisted receipt without a second model run.
+        const recovered = localBackend
+          ? await refreshDomiTaskBoard({ silent: true, fresh: true }) : null;
+        if (localBackend) boardRefreshedAfterFailure = true;
+        if (isFreshLedger(recovered)) {
+          await checkpointVerifiedBoard(recovered!);
+          outcome = "completed";
+          updateSyncPhase("completed", `同步完成，已核验 ${candidateCount} 个新入库候选`);
+          return;
+        }
+        throw new Error(result.stopped
+          ? "后台待办事项同步已暂停，Codex 连接维护完成后可重新同步。"
+          : result.error || "待办事项后台同步失败。");
       }
       updateSyncPhase("reading", "写入完成，正在验证并刷新看板");
-      await refreshDomiTaskBoard({ fresh: true });
+      const verified = await refreshDomiTaskBoard({ fresh: true });
+      if (!verified?.ok || verified.stale) throw new Error("待办事项最终回读失败，已保留当前结果等待重试。");
+      if (localBackend && !verifiedTodoReceipt(verified.syncReceipt || parseTodoReceipt(result.output || ""), runId, verified)) {
+        // Missing/malformed model output never turns a touched file into success.
+        // The backend's persistent receipt lets a later retry verify without a write.
+        throw new Error("待办事项已回读，但缺少匹配本轮与文件哈希的真实回执；已保留结果，可重试验证。");
+      }
+      await checkpointVerifiedBoard(verified);
       outcome = "completed";
       updateSyncPhase("completed", `同步完成，已核验 ${candidateCount} 个新入库候选`);
     } catch (error) {
@@ -7126,7 +7281,7 @@ function App() {
       workspacePath: workspace.workspacePath
     };
     if (!thread.manualTitle) {
-      const workflow = allWorkflows.find((item) => item.id === context.workflowId);
+      const workflow = indexBy(allWorkflows, "id").get(context.workflowId || "");
       patch.title = `${workflow?.title || (result.entityType === "project" ? "项目任务" : "人物任务")}：${result.name}`;
     }
     const boundThread = { ...thread, ...patch };
@@ -8893,7 +9048,17 @@ function App() {
     if (!activeRunId) {
       return;
     }
-    await workbench.stopCodex(activeRunId);
+    const stopResult = await workbench.stopCodex(activeRunId);
+    if (!stopResult.ok) {
+      addTimeline(activeThread.id, {
+        runId: activeRunId,
+        title: "正在确认停止请求",
+        detail: stopResult.error || "运行状态尚未确认，确认后会自动停止。",
+        kind: "event",
+        status: "running"
+      });
+      return;
+    }
     addTimeline(activeThread.id, {
       runId: activeRunId,
       title: "用户已停止",
@@ -12325,7 +12490,7 @@ function App() {
         {variant === "dock" && activeQueuedSubmissions.length > 0 && (
           <div className="queued-submissions" aria-label="待执行消息" aria-live="polite">
             {activeQueuedSubmissions.map((queued, index) => {
-              const workflow = allWorkflows.find((item) => item.id === queued.workflowId);
+              const workflow = indexBy(allWorkflows, "id").get(queued.workflowId || "");
               const repositoryMismatch = Boolean(
                 appSettings
                 && (!queued.repositoryIdentity
@@ -13290,15 +13455,13 @@ function App() {
                 >
                   <div className="transcript">
                     {visibleMessages.map((message) => {
-                      const workflow = allWorkflows.find((item) => item.id === message.workflowId);
+                      const workflow = indexBy(allWorkflows, "id").get(message.workflowId || "");
                       const isLatestAssistant = message.role === "assistant"
-                        && message.id === [...visibleMessages]
-                          .reverse()
-                          .find((item) => item.role === "assistant")?.id;
+                        && message.id === latestVisibleAssistantId;
                       const fullRunTimeline = message.runId
-                        ? timeline.filter((item) => item.runId === message.runId).reverse()
+                        ? conversationIndex.timelineByRunId.get(message.runId) || []
                         : isLatestAssistant
-                          ? [...timeline].reverse()
+                          ? conversationIndex.chronologicalTimeline
                           : [];
                       const runTimeline = fullRunTimeline.slice(-5);
                       const runDuration = formatMessageRunDuration(
@@ -13309,11 +13472,9 @@ function App() {
                         && message.status !== "running"
                         && Boolean(message.content);
                       const messageInteractions = message.role === "assistant"
-                        ? assistantInteractions.filter((interaction) => interaction.messageId === message.id)
+                        ? conversationIndex.interactionsByMessageId.get(message.id) || []
                         : [];
-                      const hasPendingInteraction = messageInteractions.some(
-                        (interaction) => interaction.status === "pending"
-                      );
+                      const hasPendingInteraction = conversationIndex.pendingMessageIds.has(message.id);
                       return (
                         <article key={message.id} className={`message ${message.role} ${message.status || ""}`}>
                           {message.role === "assistant" && (message.status === "running" || message.status === "error") && (
@@ -13557,7 +13718,7 @@ function App() {
                     const editing = editingPlaudId === item.fileId;
                     const renaming = renamingPlaudId === item.fileId;
                     const launchingNotes = launchingPlaudIds.has(item.fileId);
-                    const notesThread = threads.find((thread) => thread.projectId === `plaud-${item.fileId}`);
+                    const notesThread = indexBy(threads, "projectId").get(`plaud-${item.fileId}`);
                     const notesRunning = launchingNotes || Boolean(
                       notesThread && activeRunsByThread[notesThread.id]
                     );

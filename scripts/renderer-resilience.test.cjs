@@ -1096,7 +1096,7 @@ assert.match(
 );
 assert.match(
   main,
-  /localEntityRequest[\s\S]*?resolveCanonicalEntityWorkspace\(localEntityRequest, \{ repairMissing: true \}\)[\s\S]*?genericWorkspace = requestedWorkspace && !isEntityWorkspace[\s\S]*?const workspacePath = localEntityRequest[\s\S]*?canonicalEntityWorkspace/,
+  /localEntityRequest[\s\S]*?resolveCanonicalEntityWorkspace\(localEntityRequest, \{ repairMissing: true \}\)[\s\S]*?genericWorkspace = requestedWorkspace && !isEntityWorkspace[\s\S]*?workspacePath = localEntityRequest[\s\S]*?canonicalEntityWorkspace/,
   "A persisted project or person thread must run in the record's current canonical directory, not a stale task workspace."
 );
 assert.match(
