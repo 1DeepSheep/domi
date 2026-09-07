@@ -444,6 +444,10 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "请在 Electron 窗口中通过 PLAUD 处理播客。"
   }),
+  updatePodcastProgress: async () => ({
+    ok: false,
+    error: "请在 Electron 窗口中保存和验证播客处理进度。"
+  }),
   listDomiTasks: async () => ({
     ok: false,
     configured: false,

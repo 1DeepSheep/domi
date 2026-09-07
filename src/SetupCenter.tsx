@@ -96,13 +96,13 @@ function outlookVerificationTime(timestamp: number) {
 function plaudStatusLabel(status: string) {
   return {
     auth_required: "需要重新登录",
-    authorization_pending: "正在自动续期",
+    authorization_pending: "授权验证未完成",
     access_denied: "PLAUD 暂时拒绝访问",
-    verification_pending: "正在自动恢复登录",
+    verification_pending: "会话验证未完成",
     profile_locked: "专用浏览器被占用",
     browser_unavailable: "浏览器连接不可用",
     runtime_unavailable: "内置音频组件不完整",
-    network_error: "网络不可用",
+    network_error: "网络或服务暂时不可用",
     rate_limited: "PLAUD 暂时限流",
     service_unavailable: "PLAUD 服务暂时不可用",
     service_changed: "PLAUD 服务可能已更新",
@@ -1851,11 +1851,13 @@ export default function SetupCenter({
                       {plaudCheck?.ok ? <BadgeCheck size={21} /> : <Mic size={21} />}
                     </span>
                     <div>
-                      <strong>{plaudCheck?.ok
-                        ? "PLAUD 已连接"
-                        : `使用 ${draft.plaudBrowser === "tabbit" ? "Tabbit" : "Chrome"} 登录 PLAUD`}</strong>
+                      <strong>{plaudChecking
+                        ? "正在处理 PLAUD 连接"
+                        : plaudCheck?.ok
+                          ? "PLAUD 已连接"
+                          : plaudStatusLabel(plaudStatus) || "PLAUD 连接尚未验证"}</strong>
                       <small>{plaudCheck?.detail
-                        || "domi 会打开独立的本地浏览器 Profile；请登录你自己的 PLAUD 账号，不读取日常浏览器 Profile。"}</small>
+                        || "首次使用请点击“登录并验证”；已经登录可点击“重新检测”。domi 只使用专用浏览器 Profile。"}</small>
                       {plaudCheckedAt ? (
                         <small>
                           最近检测：{outlookVerificationTime(plaudCheckedAt)}

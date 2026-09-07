@@ -33,13 +33,208 @@ test("Skill reload waits for both preflight and active tasks", () => {
 
 test("Skill reload coordination guards the real task preflight and its cleanup", () => {
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  assert.match(main, /startingCodexRunIds\.add\(runId\);\s*try\s*\{\s*await ensureCodexRuntimeReady/);
+  assert.match(main, /startingCodexRunIds\.add\(runId\);[\s\S]*?try\s*\{[\s\S]*?await ensureCodexRuntimeReady/);
   assert.match(main, /finally\s*\{\s*startingCodexRunIds\.delete\(runId\);\s*schedulePendingSkillHubCodexReload\(\)/);
   assert.match(main, /if \(activeRuns\.has\(runId\) \|\| startingCodexRunIds\.has\(runId\)\)/);
   assert.match(main, /function activateImportedSkillsWhenSafe\(\)[\s\S]*?codexClientIdleForSkillReload\(activeRuns, startingCodexRunIds\)/);
   assert.match(main, /startsWith\("user-skill:"\) && skillHubCodexReloadPending/);
   assert.match(main, /用户 Skill 更新正在等待当前任务结束后生效/);
   assert.match(main, /\["skill-creator", "[^"\n]*Codex 用户 Skill 目录/);
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function mainRunHarness(overrides = {}) {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const calls = [];
+  const events = [];
+  const context = {
+    path, process, setTimeout, clearTimeout,
+    activeRuns: new Map(), startingCodexRunIds: new Set(), cancelledCodexRunIds: new Set(),
+    startingCodexThreadIds: new Set(), liveCodexThreads: new Map(), codexThreadTurnIds: new Map(),
+    updateRestartPreparing: false, skillHubCodexReloadPending: false, demoWorkspace: "/synthetic/workspace",
+    ensureDemoWorkspace() {}, getAppSettings: () => ({ load: () => ({ settings: { storageBackend: "local" } }) }),
+    resolveCanonicalEntityWorkspace: async () => ({ ok: true, workspacePath: "/synthetic/entity" }),
+    validCodexWorkspace: () => "/synthetic/workspace", isEntityWorkspace: () => false,
+    ensureCodexRuntimeReady: async () => {}, needsLarkAccess: () => false,
+    confirmExternalDomiRun: async () => ({ allowed: true, sandbox: "workspace-write" }),
+    getDomiPluginActivationGate: () => ({ waitForActivation: async () => {}, withStableClient: callback => callback() }),
+    getDomiIntegration: () => ({ stopPlaudBackgroundSession: async () => {} }),
+    projectResearchCacheScope: () => ({ allowed: false, workspacePath: "" }),
+    prepareProjectResearchCache: async () => ({}), preparedProjectResearchCacheContext: () => ({}),
+    markProjectMaterialIndexInjected() {},
+    getStateStore: () => ({}), researchCacheNamespace: () => "synthetic",
+    repositoryRuntimeContext: () => "", larkRuntimeContext: async () => "", feishuDocumentWriteContext: async () => "",
+    createRunUsageTracker: () => ({}), directoryIdentity: () => ({}), normalizedSlidesDeliveryPolicy: () => null,
+    armRunIdleTimeout() {}, appendRuntimeLog() {}, boundedRuntimeText: String,
+    schedulePendingSkillHubCodexReload() {}, resetCodexClient() {},
+    codexClientIdleForSkillReload, codexRunExecutionMode, threadPersistenceOptions, bindCodexRunToTurn,
+    normalizeCodexRoutingParams, requestCodexTurn, resolveCodexActiveRun,
+    classifyCodexTurnStatus: require("../electron/codex-turn-status.cjs").classifyCodexTurnStatus,
+    publishCodexEvent: (_sender, _runId, event) => events.push(event),
+    finishRun(run, type, details = {}) {
+      run.finished = true;
+      clearTimeout(run.reconcileTimer);
+      context.activeRuns.delete(run.runId);
+      run.resolve({ ok: type === "completed" || type === "stopped", stopped: type === "stopped", output: run.output, ...details });
+    },
+    completeRunThroughSlidesDeliveryGate(run) {
+      calls.push({ method: "quality-gate" });
+      context.finishRun(run, "completed");
+    },
+    ...overrides
+  };
+  context.findActiveRun = params => resolveCodexActiveRun(context.activeRuns.values(), params).run;
+  context.getCodexClient ||= () => ({
+    start: async () => {}, capabilities: () => ({ experimentalApi: true }),
+    request: async (method, params) => {
+      calls.push({ method, params });
+      if (method === "thread/start") return { thread: { id: "new-thread" } };
+      if (method === "thread/resume") return { thread: { id: params.threadId, turns: [] } };
+      if (method === "turn/start") return { turn: { id: "new-turn" } };
+      throw new Error(`Unexpected fake call: ${method}`);
+    }
+  });
+  vm.createContext(context);
+  for (const name of ["codexThreadRuntimeKey", "resolveThread", "assertCodexRunNotCancelled", "markRunMaterialIndexInjected", "reconcileCodexTurnStart", "runCodex", "stopCodex", "handleCodexNotification", "recoverCodexThread"]) {
+    const implementation = main.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n\\}\\n`));
+    assert.ok(implementation, `missing real function ${name}`);
+    vm.runInContext(implementation[0], context);
+  }
+  return { context, calls, events };
+}
+
+test("resume failures preserve the original thread without creating a blank replacement", async () => {
+  for (const failure of ["timeout", "not found", "permission denied"]) {
+    const { context, calls } = mainRunHarness();
+    const client = { request: async (method) => {
+      calls.push({ method });
+      throw new Error(failure);
+    } };
+    await assert.rejects(context.resolveThread(client, { threadId: "original", model: "chosen" }, "/synthetic/workspace", "read-only"), /原对话已保留/);
+    assert.deepEqual(calls.map(call => call.method), ["thread/resume"]);
+  }
+});
+
+test("resume refuses an active remote turn and preserves model settings for a completed thread", async () => {
+  const { context } = mainRunHarness();
+  let status = "inProgress";
+  const calls = [];
+  const client = { request: async (method, params) => {
+    calls.push({ method, params });
+    return { thread: { id: "original", turns: [{ id: "old-turn", status }] } };
+  } };
+  const payload = { threadId: "original", model: "chosen-model", reasoningEffort: "high", serviceTier: "fast" };
+  await assert.rejects(context.resolveThread(client, payload, "/synthetic/workspace", "workspace-write"), /仍有任务运行/);
+  status = "completed";
+  assert.equal(await context.resolveThread(client, payload, "/synthetic/workspace", "workspace-write"), "original");
+  assert.equal(calls.at(-1).params.model, "chosen-model");
+  assert.equal(calls.at(-1).params.config.model_reasoning_effort, "high");
+  assert.equal(calls.at(-1).params.serviceTier, "fast");
+});
+
+for (const phase of ["entity", "runtime", "client"]) {
+  test(`cancel during ${phase} preparation never submits a turn`, async () => {
+    const pending = deferred();
+    const entered = deferred();
+    const wait = () => { entered.resolve(); return pending.promise; };
+    const { context, calls } = mainRunHarness(phase === "entity"
+      ? { resolveCanonicalEntityWorkspace: wait }
+      : phase === "runtime" ? { ensureCodexRuntimeReady: wait } : {});
+    if (phase === "client") {
+      const client = context.getCodexClient();
+      context.getCodexClient = () => ({ ...client, start: wait });
+    }
+    const running = context.runCodex({}, { runId: "cancel-me", prompt: "synthetic", externalType: "project", externalRecordId: "fake-project" });
+    await entered.promise;
+    assert.equal((await context.stopCodex("cancel-me")).ok, true);
+    pending.resolve({ ok: true, workspacePath: "/synthetic/entity" });
+    const result = await running;
+    assert.equal(result.stopped, true);
+    assert.equal(calls.some(call => call.method === "turn/start"), false);
+    assert.equal(context.startingCodexRunIds.size, 0);
+  });
+}
+
+test("a lost turn/start response recovers the new final answer through the delivery gate without resending", async () => {
+  let turnStarts = 0;
+  const { context, calls } = mainRunHarness({ getCodexClient: () => ({
+    start: async () => {}, capabilities: () => ({ experimentalApi: true }),
+    request: async (method, params) => {
+      if (method === "thread/resume") return { thread: { id: params.threadId, turns: [{ id: "old", status: "completed" }] } };
+      if (method === "turn/start") {
+        turnStarts += 1;
+        throw Object.assign(new Error("lost response"), { code: "DOMI_CODEX_REQUEST_TIMEOUT", requestSent: true });
+      }
+      assert.equal(method, "thread/read");
+      return { thread: { turns: [
+        { id: "old", status: "completed", items: [{ type: "agentMessage", text: "Previous answer" }] },
+        { id: "new", status: "completed", items: [{ type: "agentMessage", phase: "final_answer", text: "Recovered exact answer" }] }
+      ] } };
+    }
+  }) });
+  const result = await context.runCodex({}, { runId: "lost", threadId: "original", prompt: "new request" });
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "Recovered exact answer");
+  assert.equal(turnStarts, 1);
+  assert.equal(calls.filter(call => call.method === "quality-gate").length, 1);
+});
+
+test("an unknown submission keeps its owner and blocks a different run id on the same thread", async () => {
+  const read = deferred();
+  const { context } = mainRunHarness({ getCodexClient: () => ({
+    start: async () => {}, capabilities: () => ({ experimentalApi: true }),
+    request: async (method, params) => {
+      if (method === "thread/resume") return { thread: { id: params.threadId, turns: [{ id: "old", status: "completed" }] } };
+      if (method === "turn/start") throw Object.assign(new Error("timeout"), { requestSent: true });
+      read.resolve();
+      return { thread: { turns: [{ id: "old", status: "completed", items: [{ type: "agentMessage", text: "Old result" }] }] } };
+    }
+  }) });
+  const running = context.runCodex({}, { runId: "original-run", threadId: "original", prompt: "new request" });
+  await read.promise;
+  const retry = await context.runCodex({}, { runId: "different-run", threadId: "original", prompt: "new request" });
+  assert.equal(retry.ok, false);
+  assert.match(retry.error, /避免重复提交/);
+  const run = context.activeRuns.get("original-run");
+  assert.ok(run);
+  assert.equal(run.output, "");
+  assert.equal(run.startOutcomeUnknown, true);
+  const recovered = await context.recoverCodexThread("original");
+  assert.equal(recovered.status, "running");
+  assert.equal(recovered.output, "", "reopening the renderer must not show the previous answer as this submission");
+  assert.equal(recovered.turnId, "");
+  context.handleCodexNotification("turn/completed", { threadId: "original", turnId: "late-turn", turn: { id: "late-turn", status: "completed" } });
+  assert.equal((await running).ok, true);
+});
+
+test("a stop requested before the turn id arrives interrupts that same turn when it becomes known", async () => {
+  const sent = deferred();
+  const response = deferred();
+  const interrupts = [];
+  const { context } = mainRunHarness({ getCodexClient: () => ({
+    start: async () => {}, capabilities: () => ({ experimentalApi: true }),
+    request: async (method, params) => {
+      if (method === "thread/start") return { thread: { id: "original" } };
+      if (method === "turn/start") { sent.resolve(); return response.promise; }
+      assert.equal(method, "turn/interrupt");
+      interrupts.push(params.turnId);
+      context.handleCodexNotification("turn/completed", { threadId: "original", turnId: "late", turn: { id: "late", status: "interrupted" } });
+      return {};
+    }
+  }) });
+  const running = context.runCodex({}, { runId: "cancel-sent", prompt: "synthetic" });
+  await sent.promise;
+  const stopping = context.stopCodex("cancel-sent");
+  assert.equal(context.activeRuns.get("cancel-sent").stopRequested, true);
+  response.resolve({ turn: { id: "late" } });
+  assert.equal((await running).stopped, true);
+  assert.equal((await stopping).ok, true);
+  assert.deepEqual(interrupts, ["late"]);
 });
 
 test("safe app updates wait for a task in preflight without counting it twice once active", () => {

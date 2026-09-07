@@ -89,6 +89,7 @@ const { withMediaRuntimeEnvironment } = require("./media-runtime.cjs");
 const {
   preparedProjectResearchCacheContext,
   prepareProjectResearchCache,
+  markProjectMaterialIndexInjected,
   updateProjectResearchCache
 } = require("./research-cache.cjs");
 const {
@@ -127,7 +128,10 @@ protocol.registerSchemesAsPrivileged([
 ]);
 const activeRuns = new Map();
 const startingCodexRunIds = new Set();
+const cancelledCodexRunIds = new Set();
+const startingCodexThreadIds = new Set();
 const liveCodexThreads = new Map();
+const codexThreadTurnIds = new Map();
 const resolvedCodexUserInputs = new Map();
 const pendingRunPostProcessing = new Set();
 let researchCacheWriteQueue = Promise.resolve();
@@ -2108,6 +2112,10 @@ function armRunIdleTimeout(run) {
   }
   run.idleTimer = setTimeout(() => {
     if (run.finished || activeRuns.get(run.runId) !== run) return;
+    if (run.startOutcomeUnknown) {
+      void reconcileCodexTurnStart(run);
+      return;
+    }
     const error = "Codex 任务长时间没有返回事件，已停止等待。可以在当前对话中继续执行。";
     const interrupt = run.turnId
       ? getCodexClient().request("turn/interrupt", {
@@ -2193,11 +2201,13 @@ function finishRun(run, type, details = {}) {
   }
   run.finished = true;
   clearTimeout(run.idleTimer);
+  clearTimeout(run.reconcileTimer);
   for (const request of run.pendingUserInputs.values()) {
     codexClient?.cancelUserInput(request.requestId, "对应的 domi 任务已经结束。");
   }
   run.pendingUserInputs.clear();
   activeRuns.delete(run.runId);
+  if (!liveCodexThreads.has(run.threadId)) codexThreadTurnIds.delete(run.threadId);
 
   const stopped = type === "stopped";
   const awaitingSlidesInput = type === "waiting-input";
@@ -2393,7 +2403,19 @@ function handleCodexNotification(method, params) {
   if (!run) {
     return;
   }
+  const wasUnbound = !run.turnId;
   if (!run.turnId && params.turnId) bindCodexRunToTurn(run, params.turnId);
+  if (run.turnId) {
+    const knownTurns = codexThreadTurnIds.get(run.threadId) || new Set();
+    knownTurns.add(run.turnId);
+    codexThreadTurnIds.set(run.threadId, knownTurns);
+    run.startOutcomeUnknown = false;
+    markRunMaterialIndexInjected(run);
+    clearTimeout(run.reconcileTimer);
+    if (wasUnbound && run.stopRequested && method !== "turn/completed") {
+      void stopCodex(run.runId);
+    }
+  }
 
   run.eventCount += 1;
   armRunIdleTimeout(run);
@@ -2544,6 +2566,7 @@ function getCodexClient() {
       },
       onExit: ({ error, intentional }) => {
         liveCodexThreads.clear();
+        codexThreadTurnIds.clear();
         if (!intentional) {
           failAllRuns(error);
         }
@@ -2557,6 +2580,7 @@ function resetCodexClient() {
   codexClient?.close();
   codexClient = null;
   liveCodexThreads.clear();
+  codexThreadTurnIds.clear();
   resolvedCodexUserInputs.clear();
   serviceCoordinator.invalidate("codex:check");
 }
@@ -2795,10 +2819,26 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
         approvalPolicy: "never",
         sandbox
       });
+      if (resumed?.thread?.id !== payload.threadId) {
+        throw new Error("Codex 返回的对话标识与原对话不一致。");
+      }
+      // Establish the pre-submission turn set once per resumed thread. This
+      // lets a timed-out turn/start be reconciled without mistaking an earlier
+      // completed answer for the result of the new request.
+      const thread = Array.isArray(resumed.thread.turns)
+        ? resumed.thread
+        : (await client.request("thread/read", { threadId: payload.threadId, includeTurns: true })).thread;
+      if (!Array.isArray(thread?.turns)) throw new Error("Codex 未返回可核验的原对话状态。");
+      if (thread.turns.some((turn) => !["completed", "failed", "stopped"].includes(classifyCodexTurnStatus(turn.status)))) {
+        throw new Error("原对话仍有任务运行，请先恢复或停止该任务。");
+      }
+      codexThreadTurnIds.set(payload.threadId, new Set(thread.turns.map((turn) => turn.id).filter(Boolean)));
       liveCodexThreads.set(resumed.thread.id, runtimeKey);
       return resumed.thread.id;
-    } catch {
-      // Switching identity/provider can make an old Codex thread unavailable.
+    } catch (error) {
+      const failure = new Error(`无法恢复原 Codex 对话：${error instanceof Error ? error.message : String(error)} 原对话已保留，未创建空白对话；请稍后重试，或明确新建任务。`);
+      failure.code = error?.code || "DOMI_CODEX_THREAD_RESUME_FAILED";
+      throw failure;
     }
   }
 
@@ -2815,6 +2855,8 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
       ...(effort ? { model_reasoning_effort: effort } : {})
     }
   });
+  if (!started?.thread?.id) throw new Error("Codex 未返回新对话标识。");
+  codexThreadTurnIds.set(started.thread.id, new Set());
   if (payload.ephemeral !== true) {
     liveCodexThreads.set(
       started.thread.id,
@@ -3349,6 +3391,85 @@ async function confirmExternalDomiRun(sender, payload) {
   };
 }
 
+function assertCodexRunNotCancelled(runId) {
+  if (!cancelledCodexRunIds.has(runId)) return;
+  const error = new Error("任务已在准备阶段停止，未提交给 Codex。");
+  error.code = "DOMI_CODEX_RUN_CANCELLED";
+  throw error;
+}
+
+function markRunMaterialIndexInjected(run) {
+  if (run.materialIndexMarked || !run.researchCache?.materialContext) return;
+  try {
+    markProjectMaterialIndexInjected(run.researchCache, run.threadId);
+    run.materialIndexMarked = true;
+  } catch {
+    // Index bookkeeping is optional. A later turn may repeat the index, but a
+    // cache write failure must never interrupt or invalidate the user's task.
+  }
+}
+
+async function reconcileCodexTurnStart(run) {
+  if (run.finished || activeRuns.get(run.runId) !== run) return;
+  if (run.reconciliation) return run.reconciliation;
+  clearTimeout(run.reconcileTimer);
+  const pending = (async () => {
+    try {
+      const response = await getCodexClient().request("thread/read", {
+        threadId: run.threadId, includeTurns: true
+      }, { timeoutMs: 5_000 });
+      if (run.finished || activeRuns.get(run.runId) !== run) return;
+      const turns = Array.isArray(response?.thread?.turns) ? response.thread.turns : [];
+      const candidates = run.turnId
+        ? turns.filter((turn) => turn.id === run.turnId)
+        : turns.filter((turn) => turn.id && !run.retiredTurnIds.has(turn.id));
+      // No new turn, multiple new turns, or an unreadable snapshot is still an
+      // unknown submission outcome. Never resend the prompt or release its
+      // thread to the queue based on absence from one diagnostic read.
+      if (candidates.length !== 1) return;
+      const turn = candidates[0];
+      if (!bindCodexRunToTurn(run, turn.id)) return;
+      const status = classifyCodexTurnStatus(turn.status);
+      const running = /^(inprogress|in_progress|running)$/i.test(String(turn.status || ""));
+      if (!running && !["completed", "failed", "stopped"].includes(status)) return;
+      const knownTurns = codexThreadTurnIds.get(run.threadId) || new Set();
+      knownTurns.add(turn.id);
+      codexThreadTurnIds.set(run.threadId, knownTurns);
+      run.startOutcomeUnknown = false;
+      markRunMaterialIndexInjected(run);
+      run.turnAcceptedAt ||= Date.now();
+      const messages = (Array.isArray(turn.items) ? turn.items : [])
+        .filter((item) => item.type === "agentMessage");
+      const message = messages.findLast((item) => item.phase === "final_answer") || messages.at(-1);
+      if (message?.text) run.output = message.text;
+      if (!running) {
+        handleCodexNotification("turn/completed", { threadId: run.threadId, turnId: turn.id, turn });
+      } else {
+        publishCodexEvent(run.sender, run.runId, { type: "reconnected", threadId: run.threadId,
+          turnId: turn.id, summary: "已确认原任务正在执行，继续接收结果" });
+        armRunIdleTimeout(run);
+        if (run.stopRequested) void stopCodex(run.runId);
+      }
+    } catch (error) {
+      appendRuntimeLog("codex-turn-start-reconcile-pending", {
+        runId: run.runId, error: boundedRuntimeText(error?.message || error, 1_000)
+      });
+    }
+  })();
+  run.reconciliation = pending;
+  try {
+    await pending;
+  } finally {
+    if (run.reconciliation === pending) run.reconciliation = null;
+    if (!run.finished && activeRuns.get(run.runId) === run && run.startOutcomeUnknown) {
+      const delay = Math.min(30_000, 1_000 * 2 ** Math.min(run.reconcileAttempts || 0, 5));
+      run.reconcileAttempts = (run.reconcileAttempts || 0) + 1;
+      run.reconcileTimer = setTimeout(() => void reconcileCodexTurnStart(run), delay);
+      run.reconcileTimer.unref();
+    }
+  }
+}
+
 async function runCodex(sender, payload) {
   if (updateRestartPreparing) {
     return {
@@ -3357,6 +3478,10 @@ async function runCodex(sender, payload) {
       error: "domi 正在安全重启以完成更新，重启后会恢复当前对话。"
     };
   }
+  const runId = payload?.runId || `run-${Date.now()}`;
+  const acceptedAt = Date.now();
+  const prompt = String(payload?.prompt || "").trim();
+  const requestedThreadId = payload?.ephemeral === true ? "" : String(payload?.threadId || "");
   ensureDemoWorkspace();
   const settings = getAppSettings().load().settings;
   const localEntityRequest = settings.storageBackend === "local"
@@ -3367,32 +3492,7 @@ async function runCodex(sender, payload) {
         recordId: String(payload.externalRecordId).trim()
       }
     : null;
-  const entityWorkspaceResolution = localEntityRequest
-    ? await resolveCanonicalEntityWorkspace(localEntityRequest, { repairMissing: true })
-    : null;
-  const canonicalEntityWorkspace = entityWorkspaceResolution?.ok
-    ? entityWorkspaceResolution.workspacePath
-    : null;
-  const requestedWorkspace = validCodexWorkspace(payload?.workspacePath);
-  const genericWorkspace = requestedWorkspace && !isEntityWorkspace(requestedWorkspace)
-    ? requestedWorkspace
-    : null;
-  const workspacePath = localEntityRequest
-    ? canonicalEntityWorkspace
-    : genericWorkspace || demoWorkspace;
-
-  const runId = payload?.runId || `run-${Date.now()}`;
-  const acceptedAt = Date.now();
-  const prompt = String(payload?.prompt || "").trim();
-  if (localEntityRequest && !canonicalEntityWorkspace) {
-    return {
-      ok: false,
-      runId,
-      output: "",
-      error: entityWorkspaceResolution?.error
-        || "当前项目或人物记录没有唯一且可访问的本地目录，请先处理目录冲突后重试。"
-    };
-  }
+  let workspacePath = demoWorkspace;
   if (!prompt) {
     return {
       ok: false,
@@ -3412,6 +3512,11 @@ async function runCodex(sender, payload) {
       workspacePath
     };
   }
+  if (requestedThreadId && (startingCodexThreadIds.has(requestedThreadId)
+    || [...activeRuns.values()].some((run) => run.threadId === requestedThreadId))) {
+    return { ok: false, runId, output: "", workspacePath,
+      error: "原对话仍有任务运行或正在确认执行状态，请先恢复或停止它，避免重复提交。" };
+  }
 
   if (String(payload?.workflowId || "").startsWith("user-skill:") && skillHubCodexReloadPending) {
     if (!codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) {
@@ -3428,10 +3533,27 @@ async function runCodex(sender, payload) {
   }
 
   startingCodexRunIds.add(runId);
+  if (requestedThreadId) startingCodexThreadIds.add(requestedThreadId);
   try {
+    const entityWorkspaceResolution = localEntityRequest
+      ? await resolveCanonicalEntityWorkspace(localEntityRequest, { repairMissing: true })
+      : null;
+    assertCodexRunNotCancelled(runId);
+    const canonicalEntityWorkspace = entityWorkspaceResolution?.ok
+      ? entityWorkspaceResolution.workspacePath : null;
+    if (localEntityRequest && !canonicalEntityWorkspace) {
+      return { ok: false, runId, output: "", error: entityWorkspaceResolution?.error
+        || "当前项目或人物记录没有唯一且可访问的本地目录，请先处理目录冲突后重试。" };
+    }
+    const requestedWorkspace = validCodexWorkspace(payload?.workspacePath);
+    const genericWorkspace = requestedWorkspace && !isEntityWorkspace(requestedWorkspace)
+      ? requestedWorkspace : null;
+    workspacePath = localEntityRequest ? canonicalEntityWorkspace : genericWorkspace || demoWorkspace;
     await ensureCodexRuntimeReady();
+    assertCodexRunNotCancelled(runId);
     const larkRequired = needsLarkAccess(payload);
     const execution = await confirmExternalDomiRun(sender, payload);
+    assertCodexRunNotCancelled(runId);
     if (!execution.allowed) {
       return {
         ok: false,
@@ -3448,14 +3570,17 @@ async function runCodex(sender, payload) {
       // Codex PLAUD skills own the same private Profile. Release the renderer's
       // hidden read session first so the task never sees a false profile lock.
       await getDomiIntegration().stopPlaudBackgroundSession("codex-plaud-workflow");
+      assertCodexRunNotCancelled(runId);
     }
     // Imports/updates that claimed an idle activation slot before this task
     // arrived must finish (including reset) before it touches the app-server.
     await getDomiPluginActivationGate().waitForActivation();
     const client = getCodexClient();
+    assertCodexRunNotCancelled(runId);
     const researchCacheScope = projectResearchCacheScope(payload, workspacePath);
     const researchCachePromise = prepareProjectResearchCache({
       stateStore: getStateStore(),
+      includeMaterialIndex: payload?.privateOutput !== true,
       payload: {
         ...payload,
         ...(researchCacheScope.allowed ? {} : { externalType: undefined }),
@@ -3472,9 +3597,10 @@ async function runCodex(sender, payload) {
     const repositoryContextPromise = Promise.resolve(repositoryRuntimeContext(payload));
     const larkContextPromise = larkRuntimeContext(larkRequired);
     const feishuWriteContextPromise = feishuDocumentWriteContext(payload);
-    const threadPromise = client.start().then(() =>
-      resolveThread(client, payload, workspacePath, execution.sandbox)
-    );
+    const threadPromise = client.start().then(() => {
+      assertCodexRunNotCancelled(runId);
+      return resolveThread(client, payload, workspacePath, execution.sandbox);
+    });
     const [threadId, repositoryContext, larkContext, feishuWriteContext, preparedResearchCache] = await Promise.all([
       threadPromise,
       repositoryContextPromise,
@@ -3482,12 +3608,13 @@ async function runCodex(sender, payload) {
       feishuWriteContextPromise,
       researchCachePromise
     ]);
+    assertCodexRunNotCancelled(runId);
     const actualCacheContext = preparedProjectResearchCacheContext(
       preparedResearchCache,
       threadId
     );
     const researchCache = { ...preparedResearchCache, ...actualCacheContext };
-    const runtimeContext = [repositoryContext, larkContext, feishuWriteContext, researchCache.context]
+    const runtimeContext = [repositoryContext, larkContext, feishuWriteContext, researchCache.materialContext, researchCache.context]
       .filter(Boolean)
       .join("\n\n");
     const threadReadyAt = Date.now();
@@ -3507,6 +3634,7 @@ async function runCodex(sender, payload) {
         sender,
         threadId,
         turnId: null,
+        retiredTurnIds: new Set(codexThreadTurnIds.get(threadId) || []),
         executionMode: codexRunExecutionMode(payload),
         output: "",
         eventCount: 0,
@@ -3540,7 +3668,7 @@ async function runCodex(sender, payload) {
     publishCodexEvent(sender, runId, {
       type: "thread",
       threadId,
-      summary: payload.threadId ? "已恢复 Codex 对话" : "已创建 Codex 对话"
+      summary: requestedThreadId === threadId ? "已恢复 Codex 对话" : "已创建 Codex 对话"
     });
 
     try {
@@ -3568,18 +3696,32 @@ async function runCodex(sender, payload) {
       const run = activeRuns.get(runId);
       if (run && bindCodexRunToTurn(run, response.turn.id)) {
         run.turnAcceptedAt = Date.now();
+        markRunMaterialIndexInjected(run);
+        const knownTurns = codexThreadTurnIds.get(threadId) || new Set();
+        knownTurns.add(run.turnId);
+        codexThreadTurnIds.set(threadId, knownTurns);
+        if (run.stopRequested) void stopCodex(runId);
       }
     } catch (error) {
       const run = activeRuns.get(runId);
       if (run) {
-        finishRun(run, "failed", {
-          error: error instanceof Error ? error.message : String(error)
-        });
+        if (error?.responseReceived === true || error?.requestSent === false) {
+          finishRun(run, "failed", { error: error instanceof Error ? error.message : String(error) });
+        } else {
+          run.startOutcomeUnknown = true;
+          clearTimeout(run.idleTimer);
+          publishCodexEvent(sender, runId, { type: "reconnecting", threadId, turnId: run.turnId,
+            summary: "正在确认原任务是否已开始；确认前保留任务，不重复提交" });
+          await reconcileCodexTurnStart(run);
+        }
       }
     }
 
     return completion;
   } catch (error) {
+    if (error?.code === "DOMI_CODEX_RUN_CANCELLED") {
+      return { ok: true, stopped: true, runId, output: "", error: "", workspacePath };
+    }
     return {
       ok: false,
       runId,
@@ -3590,14 +3732,22 @@ async function runCodex(sender, payload) {
   } finally {
     startingCodexRunIds.delete(runId);
     schedulePendingSkillHubCodexReload();
+    cancelledCodexRunIds.delete(runId);
+    if (requestedThreadId) startingCodexThreadIds.delete(requestedThreadId);
   }
 }
 
 async function stopCodex(runId) {
   let run = activeRuns.get(runId);
   if (!run) {
+    if (startingCodexRunIds.has(runId)) {
+      cancelledCodexRunIds.add(runId);
+      return { ok: true };
+    }
     return { ok: false, error: "没有找到正在执行的任务。" };
   }
+
+  run.stopRequested = true;
 
   for (let attempt = 0; attempt < 25 && !run.turnId; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -3605,7 +3755,7 @@ async function stopCodex(runId) {
     if (!run) return { ok: true };
   }
   if (!run.turnId) {
-    return { ok: false, error: "Codex 启动超时，尚未取得可停止的运行标识。" };
+    return { ok: false, error: "已记录停止请求，正在确认 Codex 的运行状态；确认后会自动停止。" };
   }
 
   run.stopRequested = true;
@@ -3676,7 +3826,14 @@ async function recoverCodexThread(threadId, request = {}) {
       })
     );
     const turns = Array.isArray(response?.thread?.turns) ? response.thread.turns : [];
-    const lastTurn = turns.at(-1);
+    const pendingTurns = activeRun?.retiredTurnIds
+      ? turns.filter((turn) => !activeRun.retiredTurnIds.has(turn.id))
+      : turns;
+    const lastTurn = activeRun
+      ? activeRun.turnId
+        ? turns.find((turn) => turn.id === activeRun.turnId)
+        : pendingTurns.length === 1 ? pendingTurns[0] : undefined
+      : turns.at(-1);
     const items = Array.isArray(lastTurn?.items) ? lastTurn.items : [];
     const finalMessage = [...items]
       .reverse()
@@ -4343,6 +4500,15 @@ ipcMain.handle("domi:radar-source-sync", async (_event, request) => {
     );
   } catch (error) {
     return { ok: false, sources: [], jobs: [], results: [], updatedAt: Date.now(), error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:podcast-progress", async (_event, request) => {
+  try {
+    return await getDomiIntegration().updatePodcastProgress(request, {
+      activeRunIds: new Set([...activeRuns.keys(), ...startingCodexRunIds])
+    });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
 ipcMain.handle("domi:podcast-process", async (_event, request) => {
