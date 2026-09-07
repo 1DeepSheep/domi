@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
+const { prepareMaterialIndex, materialIndexContext, markMaterialIndexInjected } = require("./research-material-index.cjs");
 
 const CACHE_VERSION = 1;
 const CACHE_PREFIX = "research-cache-v1:project:";
@@ -324,10 +325,11 @@ function cacheContext(cache, inventory, now, currentEntityUpdatedAt = 0) {
 }
 
 function preparedProjectResearchCacheContext(preparation, sourceThreadId, now = Date.now()) {
+  const materialContext = sanitizeUrlsInText(materialIndexContext(preparation?.materialIndex, sourceThreadId));
   const cache = preparation?.previous;
   const inventory = preparation?.inventory;
   const identity = preparation?.identity;
-  if (!cache || !inventory || !identity) return { context: "", cacheHit: false };
+  if (!cache || !inventory || !identity) return { context: "", cacheHit: false, materialContext };
   const sameThread = Boolean(sourceThreadId)
     && String(sourceThreadId) === String(cache.sourceThreadId || "");
   const context = sameThread
@@ -339,21 +341,26 @@ function preparedProjectResearchCacheContext(preparation, sourceThreadId, now = 
     && (!cache.entityUpdatedAt
       || !identity.entityUpdatedAt
       || identity.entityUpdatedAt <= cache.entityUpdatedAt);
-  return { context, cacheHit };
+  return { context, cacheHit, materialContext };
 }
 
-async function prepareProjectResearchCache({ stateStore, payload, workspacePath }) {
+async function prepareProjectResearchCache({ stateStore, payload, workspacePath, includeMaterialIndex = false }) {
   const identity = cacheIdentity(payload);
   if (!identity || !stateStore) {
     return { context: "", cacheHit: false, identity: null, inventory: null, previous: null };
   }
   const inventory = await projectInventory(workspacePath);
+  const materialIndex = includeMaterialIndex ? await prepareMaterialIndex({
+    stateStore, identityKey: identity.key, workspacePath, inventory,
+    query: String(payload?.requestText || payload?.prompt || "")
+  }) : null;
   const previousStored = stateStore.loadCache(identity.key);
   const previous = previousStored?.value || null;
   const cache = previous && previous.version === CACHE_VERSION ? previous : null;
   const preparation = {
     identity,
     inventory,
+    materialIndex,
     previous: cache,
     baselineStoredAt: Number(previousStored?.updatedAt || 0),
     workspacePath: String(workspacePath || "")
@@ -362,6 +369,10 @@ async function prepareProjectResearchCache({ stateStore, payload, workspacePath 
     ...preparation,
     ...preparedProjectResearchCacheContext(preparation, identity.sourceThreadId)
   };
+}
+
+function markProjectMaterialIndexInjected(preparation, threadId) {
+  if (preparation?.materialContext) markMaterialIndexInjected(preparation.materialIndex, threadId);
 }
 
 function cacheFileMetadata(inventory) {
@@ -459,6 +470,7 @@ module.exports = {
   extractResearchExcerpts,
   extractSources,
   preparedProjectResearchCacheContext,
+  markProjectMaterialIndexInjected,
   prepareProjectResearchCache,
   projectInventory,
   updateProjectResearchCache

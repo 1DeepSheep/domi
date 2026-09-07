@@ -1,0 +1,713 @@
+/* Appearance only: retain the existing settings, Skill Hub and dialog structure. */
+
+.setup-overlay,
+body .skill-hub-overlay,
+.app-confirm-backdrop {
+  background: rgb(47 46 42 / 18%);
+  backdrop-filter: blur(3px);
+}
+
+.setup-window,
+.skill-hub-overlay .skill-hub-panel,
+.app-confirm-backdrop .app-confirm-dialog {
+  --settings-success: #496554;
+  --settings-success-soft: #eff4ef;
+  --settings-warning: #87602f;
+  --settings-warning-soft: #faf3e8;
+  --settings-danger: #a34a3b;
+  --settings-danger-soft: #fbefeb;
+  border-color: var(--line);
+  border-radius: 16px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 18px 56px rgb(47 46 42 / 12%), 0 2px 6px rgb(47 46 42 / 4%);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+
+.setup-window :is(button, input, textarea, select, small, strong, label, summary),
+.skill-hub-panel :is(button, input, small, strong, em),
+.app-confirm-dialog :is(button, h2) {
+  font-family: var(--font-ui);
+}
+
+.setup-window :is(button, input, textarea, select) {
+  font-size: 13px;
+}
+
+.setup-window :is(small, p, .setup-header p, .setup-security-note, .setup-footer > span) {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.setup-window :is(
+  .codex-install-step,
+  .codex-mode-options,
+  .connection-options,
+  .plaud-mode-options,
+  .plaud-browser-options,
+  .plaud-setup-copy,
+  .plaud-skip-note,
+  .storage-backend-options,
+  .data-privacy-note,
+  .local-storage-summary,
+  .task-calendar-settings-heading,
+  .outlook-account-copy,
+  .permission-setting,
+  .feishu-connection-copy
+) strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.setup-window :is(
+  .relay-settings,
+  .api-fields,
+  .advanced-settings,
+  .local-storage-panel,
+  .local-database-location,
+  .task-calendar-settings-grid,
+  .data-connection-grid
+) label > span,
+.setup-window .local-database-location > span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.setup-window :is(
+  .codex-install-badge,
+  .connection-status-badge,
+  .task-calendar-settings-heading em,
+  .setup-header > div > span
+) {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.setup-window .setup-brand span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.setup-window .setup-nav {
+  border-color: var(--line);
+  background: var(--surface-subtle);
+}
+
+.setup-window .setup-nav nav button {
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.setup-window .setup-nav nav button:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 4%, var(--surface-subtle));
+}
+
+.setup-window .setup-nav nav button.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 6%, var(--surface-subtle));
+  font-weight: 550;
+}
+
+.setup-window .setup-security-note {
+  border-color: var(--line);
+}
+
+.setup-window .setup-content {
+  background: var(--canvas, #faf9f6);
+}
+
+.setup-window :is(.setup-header, .setup-footer) {
+  border-color: var(--line);
+  background: transparent;
+}
+
+.setup-window .setup-header > div > span {
+  color: var(--accent-strong);
+  letter-spacing: 0.02em;
+}
+
+.setup-window .setup-header h2,
+.skill-hub-overlay .skill-hub-panel > header h2 {
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.025em;
+}
+
+.setup-window .setup-content.connection-tab .setup-header h2 {
+  font-size: 21px;
+}
+
+.setup-window .setup-content.connection-tab .setup-header p {
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.setup-window :is(
+  .relay-settings,
+  .local-storage-panel,
+  .advanced-settings,
+  .codex-runtime-update,
+  .update-channel-setting,
+  .task-calendar-settings-grid > section,
+  .data-connection-grid > section
+) {
+  border-color: var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.setup-window :is(
+  .connection-options,
+  .codex-mode-options,
+  .plaud-mode-options,
+  .plaud-browser-options
+) > button {
+  border-color: var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--surface);
+  box-shadow: none;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.setup-window :is(
+  .connection-options,
+  .codex-mode-options,
+  .plaud-mode-options,
+  .plaud-browser-options
+) > button:hover:not(:disabled):not(.selected) {
+  border-color: color-mix(in srgb, var(--text) 20%, var(--line));
+  background: var(--canvas, #faf9f6);
+}
+
+.setup-window :is(
+  .connection-options,
+  .codex-mode-options,
+  .plaud-mode-options,
+  .plaud-browser-options
+) > button.selected {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface));
+  box-shadow: none;
+}
+
+.setup-window :is(
+  .relay-settings,
+  .api-fields,
+  .advanced-settings,
+  .local-storage-panel,
+  .task-calendar-settings-grid,
+  .data-connection-grid
+) :is(input, textarea, select) {
+  border-color: var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 13px;
+  box-shadow: none;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.setup-window :is(input, textarea)::placeholder,
+.skill-hub-overlay .skill-hub-search input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+.setup-window :is(
+  .relay-settings,
+  .api-fields,
+  .advanced-settings,
+  .local-storage-panel,
+  .task-calendar-settings-grid,
+  .data-connection-grid
+) :is(input, textarea, select):focus {
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: none;
+}
+
+.setup-window :is(
+  .setup-inline-actions,
+  .codex-runtime-actions,
+  .update-actions,
+  .feishu-connection-actions,
+  .diagnostic-summary,
+  .directory-picker
+) button,
+.setup-window :is(.relay-configure-button, .export-diagnostics),
+.setup-window .codex-install-step > button,
+.setup-window .outlook-account-card > button {
+  border-color: var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: 0 1px 1px rgb(47 46 42 / 2%);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.setup-window :is(
+  .setup-inline-actions,
+  .codex-runtime-actions,
+  .update-actions,
+  .feishu-connection-actions,
+  .diagnostic-summary,
+  .directory-picker
+) button:hover:not(:disabled),
+.setup-window :is(.relay-configure-button, .export-diagnostics):hover:not(:disabled),
+.setup-window .codex-install-step > button:hover:not(:disabled),
+.setup-window .outlook-account-card > button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--text) 16%, var(--line));
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+.setup-window .setup-inline-actions .connection-test-cancel {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.setup-window .setup-primary,
+.setup-window .update-actions button.primary,
+.skill-hub-overlay .skill-hub-panel .skill-hub-import,
+.app-confirm-dialog .app-confirm-actions button.primary {
+  border-color: var(--accent-strong);
+  border-radius: 8px;
+  color: #fff;
+  background: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 550;
+  box-shadow: none;
+}
+
+.setup-window .setup-primary:hover:not(:disabled),
+.setup-window .update-actions button.primary:hover:not(:disabled),
+.skill-hub-overlay .skill-hub-panel .skill-hub-import:hover:not(:disabled),
+.app-confirm-dialog .app-confirm-actions button.primary:hover {
+  border-color: color-mix(in srgb, var(--accent-strong) 90%, var(--text));
+  color: #fff;
+  background: color-mix(in srgb, var(--accent-strong) 90%, var(--text));
+  filter: none;
+}
+
+.setup-window :is(.setup-close, .advanced-settings summary),
+.skill-hub-overlay .skill-hub-panel > header > button {
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.setup-window .advanced-settings summary {
+  font-size: 12px;
+}
+
+.setup-window :is(.setup-close, .advanced-settings summary):hover,
+.skill-hub-overlay .skill-hub-panel > header > button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+/* Status remains semantic; only its saturation and surface treatment change. */
+.setup-window :is(
+  .codex-install-step,
+  .connection-panel,
+  .plaud-setup-panel,
+  .feishu-connection-card,
+  .outlook-account-card,
+  .data-privacy-note,
+  .plaud-skip-note
+),
+.setup-window .storage-backend-options.local-only > div {
+  border-color: var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.setup-window :is(
+  .connection-panel.ok,
+  .plaud-setup-panel.ok,
+  .feishu-connection-card.connected,
+  .outlook-account-card.verified,
+  .storage-backend-options.local-only > div,
+  .data-privacy-note,
+  .plaud-skip-note
+) {
+  border-color: color-mix(in srgb, var(--settings-success) 20%, var(--line));
+}
+
+.setup-window :is(.codex-install-step, .connection-panel).warning {
+  border-color: color-mix(in srgb, var(--settings-warning) 20%, var(--line));
+  background: var(--settings-warning-soft);
+}
+
+.setup-window .codex-install-step.error {
+  border-color: color-mix(in srgb, var(--settings-danger) 24%, var(--line));
+  color: var(--settings-danger);
+  background: var(--settings-danger-soft);
+}
+
+.setup-window :is(.connection-status-icon, .connection-status-badge),
+.setup-window .codex-install-step:not(.warning):not(.working):not(.error) > i,
+.setup-window .plaud-setup-panel.ok .plaud-setup-icon,
+.setup-window .feishu-connection-card.connected .feishu-connection-icon {
+  color: var(--settings-success);
+  background: var(--settings-success-soft);
+}
+
+.setup-window .connection-panel.warning :is(.connection-status-icon, .connection-status-badge),
+.setup-window .codex-install-step.warning > i {
+  color: var(--settings-warning);
+  background: color-mix(in srgb, var(--settings-warning) 8%, var(--surface));
+}
+
+.setup-window :is(.connection-status-icon, .plaud-setup-icon, .feishu-connection-icon) {
+  border-radius: 9px;
+}
+
+.setup-window .connection-status strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.setup-window .connection-status span,
+.setup-window :is(
+  .connection-test-progress,
+  .connection-test-prerequisite,
+  .plaud-setup-panel ol,
+  .plaud-assist-result p,
+  .plaud-choice-note,
+  .local-database-location code,
+  .setup-feedback,
+  .codex-runtime-update > p,
+  .diagnostic-summary span,
+  .diagnostic-placeholder
+) {
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.setup-window .connection-status small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.setup-window .outlook-account-copy b {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.setup-window :is(.update-channel-setting span, .diagnostic-placeholder) {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.setup-window :is(.connection-test-progress, .local-database-location code) {
+  border-color: var(--line);
+  color: var(--muted);
+  background: var(--surface-subtle);
+}
+
+.setup-window :is(.plaud-assist-result, .feishu-assist-result, .setup-inline-actions) {
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--surface) 65%, var(--surface-subtle));
+}
+
+.setup-window :is(.plaud-assist-result strong, .feishu-assist-result strong) {
+  color: var(--settings-success);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.setup-window .setup-feedback {
+  border-left-color: var(--settings-success);
+  border-radius: 0 7px 7px 0;
+  color: var(--settings-success);
+  background: var(--settings-success-soft);
+}
+
+.setup-window .setup-feedback.error {
+  border-left-color: var(--settings-danger);
+  color: var(--settings-danger);
+  background: var(--settings-danger-soft);
+}
+
+.setup-window .update-channel-options {
+  border-color: var(--line);
+  border-radius: 9px;
+  background: var(--surface-subtle);
+}
+
+.setup-window .update-channel-options button {
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.setup-window .update-channel-options button.selected {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgb(47 46 42 / 6%);
+}
+
+.setup-window :is(.diagnostic-summary strong, .diagnostic-list strong) {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.setup-window .diagnostic-list > div:not(.diagnostic-placeholder) {
+  border-color: var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.setup-window .diagnostic-list svg.ok {
+  color: var(--settings-success);
+}
+
+.setup-window .diagnostic-list svg.bad {
+  color: var(--settings-danger);
+}
+
+/* Container specificity keeps these overrides stable after the lazy CSS loads. */
+.skill-hub-overlay .skill-hub-panel {
+  background: var(--canvas, #faf9f6);
+}
+
+.skill-hub-overlay .skill-hub-panel > :is(header, footer) {
+  border-color: var(--line);
+  background: transparent;
+}
+
+.skill-hub-overlay .skill-hub-panel > header span {
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.skill-hub-overlay .skill-hub-panel :is(
+  header p,
+  footer > span,
+  .skill-hub-create small,
+  .skill-hub-import-heading small,
+  .skill-hub-item-copy small,
+  .skill-hub-item-copy em,
+  .skill-hub-empty
+) {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.skill-hub-overlay .skill-hub-create {
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent-soft) 38%, var(--surface));
+  box-shadow: none;
+}
+
+.skill-hub-overlay .skill-hub-create:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 65%, var(--surface));
+}
+
+.skill-hub-overlay .skill-hub-create > span {
+  border-radius: 9px;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.skill-hub-overlay .skill-hub-create strong {
+  font-weight: 600;
+}
+
+.skill-hub-overlay :is(.skill-hub-create > svg, .skill-hub-import-heading > button) {
+  color: var(--muted);
+}
+
+.skill-hub-overlay .skill-hub-import-heading strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.skill-hub-overlay .skill-hub-search {
+  border-color: var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.skill-hub-overlay .skill-hub-search:focus-within {
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.skill-hub-overlay .skill-hub-search :is(input, button) {
+  color: var(--text);
+}
+
+.skill-hub-overlay .skill-hub-search input {
+  font-size: 13px;
+}
+
+.skill-hub-overlay .skill-hub-item {
+  border-color: var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.skill-hub-overlay .skill-hub-item:hover:not(:disabled),
+.skill-hub-overlay .skill-hub-item.selected {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 38%, var(--surface));
+}
+
+.skill-hub-overlay .skill-hub-check {
+  border-color: color-mix(in srgb, var(--text) 24%, var(--line));
+  border-radius: 5px;
+  background: var(--surface);
+}
+
+.skill-hub-overlay .skill-hub-item.selected .skill-hub-check,
+.skill-hub-overlay .skill-hub-item:disabled .skill-hub-check {
+  border-color: var(--accent-strong);
+  color: #fff;
+  background: var(--accent-strong);
+}
+
+.skill-hub-overlay .skill-hub-item-copy strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.skill-hub-overlay .skill-hub-status {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.skill-hub-overlay :is(.skill-hub-status.imported, .skill-hub-notice) {
+  color: var(--settings-success);
+  background: var(--settings-success-soft);
+}
+
+.skill-hub-overlay .skill-hub-error {
+  color: var(--settings-danger);
+  background: var(--settings-danger-soft);
+}
+
+.skill-hub-overlay :is(.skill-hub-notice, .skill-hub-error) {
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.skill-hub-overlay .skill-hub-managed-item {
+  border-color: var(--line);
+}
+
+.skill-hub-overlay .skill-hub-managed-item button {
+  border-color: var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 12px;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.skill-hub-overlay .skill-hub-managed-item button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--text) 16%, var(--line));
+  background: var(--surface-subtle);
+}
+
+.skill-hub-overlay .skill-hub-details {
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-subtle);
+  font: 12px / 1.6 var(--font-ui);
+}
+
+/* Confirmation dialogs retain their warning/danger meaning and action order. */
+.app-confirm-dialog .app-confirm-copy h2 {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.app-confirm-dialog .app-confirm-message {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.app-confirm-dialog .app-confirm-detail {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.app-confirm-dialog .app-confirm-icon {
+  border-radius: 9px;
+  color: var(--settings-warning);
+  background: var(--settings-warning-soft);
+}
+
+.app-confirm-backdrop .app-confirm-dialog.danger .app-confirm-icon {
+  color: var(--settings-danger);
+  background: var(--settings-danger-soft);
+}
+
+.app-confirm-dialog .app-confirm-actions button:not(.primary):not(.danger) {
+  border-color: var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.app-confirm-dialog .app-confirm-actions button:not(.primary):not(.danger):hover {
+  border-color: color-mix(in srgb, var(--text) 16%, var(--line));
+  background: var(--surface-subtle);
+}
+
+.app-confirm-dialog .app-confirm-actions button.danger {
+  border-color: var(--settings-danger);
+  border-radius: 8px;
+  color: #fff;
+  background: var(--settings-danger);
+  font-weight: 550;
+}
+
+.setup-window :is(button, summary):focus-visible,
+.skill-hub-overlay .skill-hub-panel button:focus-visible,
+.app-confirm-dialog .app-confirm-actions button:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}

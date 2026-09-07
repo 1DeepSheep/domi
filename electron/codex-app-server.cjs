@@ -102,6 +102,7 @@ class CodexAppServer {
     this.onExit = onExit;
     this.requestTimeoutMs = requestTimeoutMs;
     this.child = null;
+    this.initialized = false;
     this.startPromise = null;
     this.pending = new Map();
     this.pendingUserInput = new Map();
@@ -178,52 +179,76 @@ class CodexAppServer {
       return this.startPromise;
     }
 
-    if (this.child && !this.child.killed) {
+    if (this.child && !this.child.killed && this.initialized && !this.intentionalClose) {
       return;
     }
 
-    this.startPromise = this.#startProcess().catch((error) => {
-      this.startPromise = null;
+    const pending = this.#startProcess();
+    const startingChild = this.child;
+    this.startPromise = pending;
+    try {
+      await pending;
+    } catch (error) {
+      // A living process is not necessarily an initialized server. Retire a
+      // failed handshake before allowing another request to start a new one.
+      if (this.child === startingChild) {
+        this.close();
+        this.child = null;
+      }
       throw error;
-    });
-    return this.startPromise;
+    } finally {
+      if (this.startPromise === pending) this.startPromise = null;
+    }
   }
 
   async #startProcess() {
+    if (this.child) this.close();
     const runtime = this.runtimeProvider?.() || {};
     const binary = resolveCodexBinary(runtime.codexPath);
     this.intentionalClose = false;
+    this.initialized = false;
     this.stderrTail = "";
     this.pendingUserInput.clear();
     this.resolvedUserInput.clear();
     this.declaredCapabilities = codexClientCapabilities();
-    this.child = spawn(binary, ["app-server", "--listen", "stdio://", ...(runtime.args || [])], {
+    const child = spawn(binary, ["app-server", "--listen", "stdio://", ...(runtime.args || [])], {
       cwd: this.cwd,
       env: codexEnvironment(runtime.env),
       stdio: ["pipe", "pipe", "pipe"]
     });
+    this.child = child;
 
     const processStarted = new Promise((resolve, reject) => {
-      this.child.once("spawn", resolve);
-      this.child.once("error", reject);
+      child.once("spawn", resolve);
+      child.once("error", reject);
     });
 
-    const output = readline.createInterface({ input: this.child.stdout });
-    output.on("line", (line) => this.#handleLine(line));
+    const output = readline.createInterface({ input: child.stdout });
+    output.on("line", (line) => {
+      if (this.child === child) this.#handleLine(line);
+    });
 
-    this.child.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk) => {
+      if (this.child !== child) return;
       const text = chunk.toString();
       this.stderrTail = `${this.stderrTail}${text}`.slice(-8000);
       this.onLog?.(text);
     });
 
-    this.child.on("exit", (code, signal) => {
+    child.on("exit", (code, signal) => {
+      output.close();
+      // A late exit from a failed handshake must not clear the new child's
+      // pending requests or report that its active tasks have failed.
+      if (this.child !== child) return;
       const error = new Error(
         this.intentionalClose
           ? "Codex App Server 已关闭。"
           : this.stderrTail.trim() || `Codex App Server 已退出（${code ?? signal ?? "unknown"}）。`
       );
+      error.code = "DOMI_CODEX_TRANSPORT_CLOSED";
+      error.requestSent = true;
       this.child = null;
+      this.initialized = false;
       this.startPromise = null;
       for (const request of this.pending.values()) {
         clearTimeout(request.timeout);
@@ -255,7 +280,11 @@ class CodexAppServer {
       this.onLog?.("当前 Codex 版本不接受 experimentalApi 声明，domi 已切换稳定兼容模式。\n");
       await this.#sendRequest("initialize", initializeParams);
     }
+    if (this.child !== child || this.intentionalClose) {
+      throw new Error("Codex App Server 初始化已取消。");
+    }
     this.#send({ method: "initialized" });
+    this.initialized = true;
   }
 
   capabilities() {
@@ -269,7 +298,13 @@ class CodexAppServer {
 
   close() {
     this.intentionalClose = true;
+    this.initialized = false;
     this.#clearUserInputRequests("client-close", true);
+    for (const request of this.pending.values()) {
+      clearTimeout(request.timeout);
+      request.reject(new Error("Codex App Server 已关闭。"));
+    }
+    this.pending.clear();
     const child = this.child;
     if (child && child.exitCode === null) {
       child.stdin.end();
@@ -295,6 +330,7 @@ class CodexAppServer {
         if (!this.pending.delete(id)) return;
         const error = new Error(`Codex App Server 请求超时：${method}`);
         error.code = "DOMI_CODEX_REQUEST_TIMEOUT";
+        error.requestSent = true;
         reject(error);
       }, timeoutMs);
       timeout.unref();
@@ -302,6 +338,7 @@ class CodexAppServer {
       try {
         this.#send({ id, method, params });
       } catch (error) {
+        error.requestSent = false;
         const pending = this.pending.get(id);
         if (pending) clearTimeout(pending.timeout);
         this.pending.delete(id);
@@ -342,6 +379,7 @@ class CodexAppServer {
         const error = new Error(message.error.message || `${pending.method} 请求失败。`);
         error.code = message.error.code;
         error.data = message.error.data;
+        error.responseReceived = true;
         pending.reject(error);
       } else {
         pending.resolve(message.result);

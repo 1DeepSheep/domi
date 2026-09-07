@@ -48,6 +48,9 @@ import { createRoot } from "react-dom/client";
 import MessageContent from "/src/MessageContent.tsx";
 import RichMarkdownEditor from "/src/RichMarkdownEditor.tsx";
 import "/src/styles.css";
+import "/src/appearance/index.css";
+import "@fontsource-variable/instrument-sans/wght.css";
+import "@fontsource-variable/newsreader/standard.css";
 const fixtures = ${JSON.stringify(fixtures)};
 function Harness() {
   const [state, setState] = useState({ surface: "chat", id: fixtures[0].id, markdown: fixtures[0].markdown });

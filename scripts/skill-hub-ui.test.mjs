@@ -18,6 +18,9 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { workbench } from "/src/bridge";
 import "/src/styles.css";
+import "/src/appearance/index.css";
+import "@fontsource-variable/instrument-sans/wght.css";
+import "@fontsource-variable/newsreader/standard.css";
 const state = window.__skillHubTest = { failScan: false, failImport: false, holdImport: false, imports: [], runs: [], issues: [], importedIds: [] };
 const importedSkills = Array.from({ length: 18 }, (_, index) => ({
   id: "user-skill:fixture-" + index, name: "fixture-" + index, title: "合成用户技能 " + (index + 1),

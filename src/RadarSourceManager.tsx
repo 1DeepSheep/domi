@@ -31,7 +31,7 @@ type RadarSourceManagerProps = {
   onPodcastTranscript?: (
     job: PodcastJob,
     result: PodcastProcessResult
-  ) => Promise<void> | void;
+  ) => Promise<boolean | void> | void;
 };
 
 type SourceDraft = {
@@ -79,6 +79,11 @@ function splitKeywords(value: string) {
 }
 
 function podcastStatus(job: PodcastJob) {
+  if (job.archive?.status === "archived") return "纪要与唯一归档已验证";
+  if (job.archive?.status === "failed") return job.archive.stage === "notes_ready"
+    ? "纪要已保存，可继续归档" : "整理未完成，可从检查点重试";
+  if (job.archive?.stage === "notes_ready") return "纪要已验证，正在完成归档";
+  if (job.archive?.status === "running") return "正在整理并验证纪要";
   if (job.status === "transcript_ready") return "PLAUD 文字稿已就绪";
   if (job.status === "transcribing") return "PLAUD 正在生成";
   if (job.status === "downloading") return "正在下载公开音频";
@@ -302,17 +307,26 @@ export default function RadarSourceManager({
     if (processingIds.has(job.id)) return;
     setProcessingIds((current) => new Set(current).add(job.id));
     setError("");
-    setNotice(`正在下载“${job.title}”并交给 PLAUD，窗口可以继续使用。`);
+    setNotice(job.transcriptPath ? `正在继续整理“${job.title}”，复用已完成的文字稿。` : `正在下载“${job.title}”并交给 PLAUD，窗口可以继续使用。`);
     try {
-      const result = await workbench.processPodcastEpisode({ jobId: job.id });
+      const result: PodcastProcessResult = job.transcriptPath
+        ? { ok: true, reused: true, job, transcriptPath: job.transcriptPath }
+        : await workbench.processPodcastEpisode({ jobId: job.id });
       if (!result.ok) {
         setError(result.error || "播客处理失败。");
         return;
       }
       setNotice("PLAUD 文字稿已生成，domi 正在整理并归档。 ");
-      if (result.job) await onPodcastTranscript?.(result.job, result);
-      setNotice("播客纪要已整理并按项目或行业归档。 ");
+      const completed = result.job && onPodcastTranscript
+        ? await onPodcastTranscript(result.job, result) : false;
+      setNotice(completed === false
+        ? "文字稿已保留，整理任务正在运行或等待继续。"
+        : "播客纪要已整理并按项目或行业归档。 ");
       await load();
+    } catch (processError) {
+      await load();
+      setNotice("");
+      setError(processError instanceof Error ? processError.message : String(processError));
     } finally {
       setProcessingIds((current) => {
         const next = new Set(current);
@@ -581,13 +595,13 @@ export default function RadarSourceManager({
                     <div>
                       <strong>{job.title}</strong>
                       <span>{job.podcastTitle || "播客"}{job.publishedAt ? ` · ${new Date(job.publishedAt).toLocaleDateString("zh-CN")}` : ""}</span>
-                      <small className={job.status === "failed" ? "error" : ""}>{podcastStatus(job)}{job.error ? `：${job.error}` : ""}</small>
+                      <small className={job.status === "failed" || job.archive?.status === "failed" ? "error" : ""}>{podcastStatus(job)}{job.archive?.error || job.error ? `：${job.archive?.error || job.error}` : ""}</small>
                     </div>
-                    {job.status !== "transcript_ready" && job.status !== "skipped" ? (
+                    {job.archive?.status !== "archived" && job.status !== "skipped" ? (
                       <button type="button" disabled={processing} onClick={() => void processJob(job)}>
-                        <RefreshCw className={processing ? "spinning" : ""} size={14} />{processing ? "处理中" : "用 PLAUD 转写"}
+                        <RefreshCw className={processing ? "spinning" : ""} size={14} />{processing ? "处理中" : job.transcriptPath ? "继续整理" : "用 PLAUD 转写"}
                       </button>
-                    ) : <span className="podcast-ready"><Check size={14} />已就绪</span>}
+                    ) : <span className="podcast-ready"><Check size={14} />{job.archive?.status === "archived" ? "已完成" : "已跳过"}</span>}
                   </article>
                 );
               })}
