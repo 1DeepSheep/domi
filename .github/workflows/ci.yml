@@ -38,6 +38,19 @@ jobs:
       - name: Run build, privacy and unit checks
         run: npm run check
 
+      - name: Check out current public plugin for contract verification
+        uses: actions/checkout@v4
+        with:
+          repository: 1DeepSheep/domi-plugin
+          ref: main
+          path: build/contract-plugin
+          persist-credentials: false
+
+      - name: Verify client and plugin receipts with real scripts
+        env:
+          DOMI_PLUGIN_CONTRACT_ROOT: ${{ github.workspace }}/build/contract-plugin
+        run: npm run test:plugin-contracts
+
       - name: Prepare browser for interface regression tests
         run: npx playwright install chromium
 

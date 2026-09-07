@@ -45,6 +45,24 @@ function parseJson(value, fallback = null) {
   }
 }
 
+function normalizeTodoSyncCheckpoint(value) {
+  if (!value || typeof value !== "object"
+    || !/^[a-f0-9]{64}$/i.test(value.fingerprint || "")
+    || !/^[a-f0-9]{64}$/i.test(value.ledgerFingerprint || "")
+    || typeof value.ruleVersion !== "string" || !value.ruleVersion.trim() || value.ruleVersion.length > 120
+    || typeof value.repositoryIdentity !== "string" || !value.repositoryIdentity.trim() || value.repositoryIdentity.length > 4_096
+    || !Number.isFinite(value.verifiedAt) || value.verifiedAt <= 0
+    || !Number.isFinite(value.nextEvaluationAt) || value.nextEvaluationAt <= 0) return undefined;
+  return {
+    fingerprint: value.fingerprint,
+    ruleVersion: value.ruleVersion,
+    verifiedAt: value.verifiedAt,
+    nextEvaluationAt: value.nextEvaluationAt,
+    ledgerFingerprint: value.ledgerFingerprint,
+    repositoryIdentity: value.repositoryIdentity
+  };
+}
+
 function isUnusedDraftThread(thread) {
   const messages = Array.isArray(thread?.messages) ? thread.messages : [];
   const timeline = Array.isArray(thread?.timeline) ? thread.timeline : [];
@@ -148,6 +166,12 @@ class WorkbenchStateStore {
     `);
     this.readThreadsStatement = this.database.prepare(
       "SELECT id, value, sort_order, updated_at FROM workbench_threads ORDER BY sort_order, id"
+    );
+    this.readThreadOrderStatement = this.database.prepare(
+      "SELECT id, sort_order FROM workbench_threads ORDER BY sort_order, id"
+    );
+    this.updateThreadOrderStatement = this.database.prepare(
+      "UPDATE workbench_threads SET sort_order = ?, updated_at = ? WHERE id = ?"
     );
     this.writeThreadStatement = this.database.prepare(`
       INSERT INTO workbench_threads (id, value, sort_order, updated_at)
@@ -315,6 +339,7 @@ class WorkbenchStateStore {
       version: 2,
       activeThreadId,
       threads,
+      todoSyncCheckpoint: normalizeTodoSyncCheckpoint(state?.todoSyncCheckpoint),
       agentPreferences: {
         model: String(rawPreferences.model || "default").slice(0, 120),
         reasoningEffort: String(rawPreferences.reasoningEffort || "default").slice(0, 40),
@@ -335,6 +360,7 @@ class WorkbenchStateStore {
     return {
       version: 2,
       activeThreadId,
+      todoSyncCheckpoint: normalizeTodoSyncCheckpoint(meta?.todoSyncCheckpoint),
       agentPreferences: {
         model: String(rawPreferences.model || "default").slice(0, 120),
         reasoningEffort: String(rawPreferences.reasoningEffort || "default").slice(0, 40),
@@ -356,40 +382,37 @@ class WorkbenchStateStore {
     const metaValue = JSON.stringify(this.stateMeta(state));
     const nextThreadIds = new Set(state.threads.map((thread) => thread.id));
     const currentRows = this.readThreadsStatement.all();
-    if (!this.metaValueCache) {
-      this.metaValueCache = this.readMetaStatement.get("current")?.value || "";
-    }
-    if (this.threadValueCache.size === 0 && currentRows.length > 0) {
-      for (const row of currentRows) {
-        this.threadValueCache.set(row.id, { value: row.value, sortOrder: row.sort_order });
-      }
-    }
+    const storedMeta = this.readMetaStatement.get("current")?.value || "";
+    const currentById = new Map(currentRows.map((row) => [row.id, row]));
+    const nextCache = new Map();
 
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      if (metaValue !== this.metaValueCache) {
+      if (metaValue !== storedMeta) {
         this.writeMetaStatement.run("current", metaValue, updatedAt);
-        this.metaValueCache = metaValue;
       }
       state.threads.forEach((thread, sortOrder) => {
         const value = JSON.stringify(thread);
-        const cached = this.threadValueCache.get(thread.id);
-        if (!cached || cached.value !== value || cached.sortOrder !== sortOrder) {
+        const stored = currentById.get(thread.id);
+        if (!stored || stored.value !== value || stored.sort_order !== sortOrder) {
           this.writeThreadStatement.run(thread.id, value, sortOrder, updatedAt);
-          this.threadValueCache.set(thread.id, { value, sortOrder });
         }
+        nextCache.set(thread.id, { value, sortOrder });
       });
       for (const row of currentRows) {
         if (!nextThreadIds.has(row.id)) {
           this.deleteThreadStatement.run(row.id);
-          this.threadValueCache.delete(row.id);
         }
       }
       this.database.exec("COMMIT");
     } catch (error) {
-      this.database.exec("ROLLBACK");
+      try { this.database.exec("ROLLBACK"); } catch {}
       throw error;
     }
+    // In-memory values must describe committed rows, including after a failed
+    // COMMIT followed by a retry without a process restart.
+    this.metaValueCache = metaValue;
+    this.threadValueCache = nextCache;
   }
 
   load(defaultState) {
@@ -437,7 +460,9 @@ class WorkbenchStateStore {
   }
 
   savePatch(patch) {
-    const currentRows = this.readThreadsStatement.all();
+    // A message delta must not deserialize every historical conversation.
+    // Ordering only needs the small index rows, even on a cold store.
+    const currentRows = this.readThreadOrderStatement.all();
     const requestedOrder = Array.isArray(patch?.threadOrder)
       ? [...new Set(patch.threadOrder.map(String))]
       : currentRows.map((row) => row.id);
@@ -461,33 +486,38 @@ class WorkbenchStateStore {
     const meta = this.normalizeMeta(patch?.meta, finalOrder);
     const metaValue = JSON.stringify(meta);
     const updatedAt = Date.now();
+    const changedCache = new Map();
 
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const storedMeta = this.metaValueCache || this.readMetaStatement.get("current")?.value || "";
+      const storedMeta = this.readMetaStatement.get("current")?.value || "";
       if (storedMeta !== metaValue) {
         this.writeMetaStatement.run("current", metaValue, updatedAt);
-        this.metaValueCache = metaValue;
       }
       for (const deletedId of deletedIds) {
         this.deleteThreadStatement.run(deletedId);
-        this.threadValueCache.delete(deletedId);
       }
       finalOrder.forEach((id, sortOrder) => {
         const changed = changedById.get(id);
         const existing = currentById.get(id);
-        const value = changed ? JSON.stringify(changed) : existing?.value;
-        if (!value) return;
-        if (changed || existing?.sort_order !== sortOrder) {
+        if (changed) {
+          const value = JSON.stringify(changed);
           this.writeThreadStatement.run(id, value, sortOrder, updatedAt);
-          this.threadValueCache.set(id, { value, sortOrder });
+          changedCache.set(id, { value, sortOrder });
+        } else if (existing && existing.sort_order !== sortOrder) {
+          this.updateThreadOrderStatement.run(sortOrder, updatedAt, id);
+          const cached = this.threadValueCache.get(id);
+          if (cached) changedCache.set(id, { ...cached, sortOrder });
         }
       });
       this.database.exec("COMMIT");
     } catch (error) {
-      this.database.exec("ROLLBACK");
+      try { this.database.exec("ROLLBACK"); } catch {}
       throw error;
     }
+    this.metaValueCache = metaValue;
+    for (const id of deletedIds) this.threadValueCache.delete(id);
+    for (const [id, value] of changedCache) this.threadValueCache.set(id, value);
     return { updatedAt };
   }
 

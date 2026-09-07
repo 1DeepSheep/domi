@@ -19,6 +19,44 @@ function writeFakeCodex(binaryPath, source) {
   );
 }
 
+for (const firstFailure of ["rejected", "timeout"]) {
+  test(`a ${firstFailure} initialize retires its child and the retry initializes a fresh process`, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-init-retry-"));
+    const binary = path.join(root, "fake-codex");
+    writeFakeCodex(binary, `#!/usr/bin/env node
+const fs = require("node:fs");
+const readline = require("node:readline");
+const counter = ${JSON.stringify(path.join(root, "attempts"))};
+const generation = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0) + 1;
+fs.writeFileSync(counter, String(generation));
+let ready = false;
+readline.createInterface({ input: process.stdin }).on("line", line => {
+  const m = JSON.parse(line);
+  if (m.method === "initialize") {
+    if (generation === 1) {
+      if (${JSON.stringify(firstFailure)} === "rejected") process.stdout.write(JSON.stringify({ id: m.id, error: { code: -32002, message: "synthetic initialization failure" } }) + "\\n");
+      return;
+    }
+    ready = true;
+    process.stdout.write(JSON.stringify({ id: m.id, result: {} }) + "\\n");
+  }
+  if (m.method === "ping") process.stdout.write(JSON.stringify({ id: m.id, result: { ready, generation } }) + "\\n");
+});
+`);
+    const server = new CodexAppServer({ cwd: root, version: "test", requestTimeoutMs: 1_000,
+      runtimeProvider: () => ({ codexPath: binary }) });
+    try {
+      await assert.rejects(server.start(), /initialization failure|initialize/);
+      assert.deepEqual(await server.request("ping"), { ready: true, generation: 2 });
+      await new Promise(resolve => setTimeout(resolve, 200));
+      assert.deepEqual(await server.request("ping"), { ready: true, generation: 2 });
+    } finally {
+      server.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("Codex symlinks resolve to the real runtime directory containing the command host", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-symlink-test-"));
   try {

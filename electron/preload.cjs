@@ -90,6 +90,7 @@ contextBridge.exposeInMainWorld("workbench", {
   deleteRadarSource: (request) => ipcRenderer.invoke("domi:radar-source-delete", request),
   syncRadarSources: (request) => ipcRenderer.invoke("domi:radar-source-sync", request),
   processPodcastEpisode: (request) => ipcRenderer.invoke("domi:podcast-process", request),
+  updatePodcastProgress: (request) => ipcRenderer.invoke("domi:podcast-progress", request),
   listDomiTasks: (request) => ipcRenderer.invoke("domi:task-list", request),
   updateDomiTask: (request) => ipcRenderer.invoke("domi:task-update", request),
   loginPlaud: (request) => ipcRenderer.invoke("domi:plaud-login", request),
