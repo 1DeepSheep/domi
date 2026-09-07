@@ -30,6 +30,8 @@
 
 打包使用的是 GitHub 已提交版本，不会读取 `~/plugins/domi` 中尚未提交的工作区改动。这样正式安装包可复现，也不会意外发布半成品。`npm run pack:mac` 仅用于本机测试，会读取本机插件工作区。
 
+签名暂存目录应使用默认的 `~/Library/Caches/com.domi.workbench/build`，或通过 `DOMI_BUILD_OUTPUT` 指定独立的本地缓存目录；不要把未封装的 `.app` 放进 Documents、iCloud 或其他 File Provider 同步目录后再签名。`afterPack` 只在当前构建产物内清理会阻止签名的 `com.apple.FinderInfo` 与 `com.apple.ResourceFork`，保留 quarantine、provenance 等其他属性，不跟随资源符号链接。公证和封装在同一缓存目录完成，最后只将 DMG、ZIP、blockmap 和更新清单复制到 `release/<version>/`，避免同步服务再次给应用目录附加 Finder 元数据。
+
 安装或更新后的 domi 首次检查 Codex 时，会把安装包内的 domi 快照注册为 `domi@domi-managed`。如果本机插件较旧、来源不同，或版本相同但提交哈希变化，domi 会替换为随本次客户端发布的版本；用户手动安装的更高版本不会被降级。
 
 ## GitHub 发布保护
