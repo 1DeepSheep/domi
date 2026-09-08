@@ -73,6 +73,16 @@ import {
   useState
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
+import {
+  clearTaskResultUnread,
+  isTaskResultVisible,
+  navigateTaskNotification,
+  recordTaskResult,
+  taskNotificationContent,
+  taskNotificationId,
+  unreadTaskCount,
+  type TaskNotificationOutcome
+} from "./task-notifications";
 import { filesFromClipboardData } from "./clipboard-files";
 import { isLocalPdfResource } from "./document-resources";
 import {
@@ -873,6 +883,10 @@ type Message = {
   slidesDeliveryPolicy?: DomiSlidesDeliveryPolicy;
   /** This turn requested missing Slides input; no deliverable was completed. */
   awaitingSlidesInput?: boolean;
+  /** Durable per-turn receipt prevents duplicate alerts after recovery/reload. */
+  taskNotificationId?: string;
+  taskNotificationOutcome?: TaskNotificationOutcome;
+  taskNotificationRead?: boolean;
 };
 
 type Thread = {
@@ -2055,7 +2069,7 @@ function App() {
   });
   const documentPreviewOriginRef = useRef<DocumentPreviewOrigin | null>(null);
   const documentPanelFocusedRef = useRef(false);
-  const windowFocusedRef = useRef(true);
+  const windowFocusedRef = useRef(document.hasFocus());
   const threadsRef = useRef(threads);
   const composerDraftsByThreadRef = useRef(composerDraftsByThread);
   const activeRunsByThreadRef = useRef(activeRunsByThread);
@@ -2138,6 +2152,16 @@ function App() {
   const settlingThreadIdsRef = useRef(new Set<string>());
   const queuedSubmissionsByThreadRef = useRef(queuedSubmissionsByThread);
   const completedRunIdsRef = useRef(new Set<string>());
+  const announcedTaskResultIdsRef = useRef(new Set<string>());
+  const taskNotificationSendingRef = useRef(false);
+  const clickedTaskNotificationIdsRef = useRef(new Set<string>());
+  const openingTaskNotificationIdsRef = useRef(new Set<string>());
+  const [pendingTaskNotifications, setPendingTaskNotifications] = useState<Array<{
+    threadId: string;
+    messageId: string;
+    notificationId: string;
+    outcome: TaskNotificationOutcome;
+  }>>([]);
   const runContextRef = useRef(new Map<string, RunContext>());
   const pendingAssistantDeltasRef = useRef(
     new Map<string, { threadId: string; messageId: string; content: string }>()
@@ -2316,11 +2340,36 @@ function App() {
   }
 
   function isThreadActivelyVisible(threadId: string) {
-    return threadId === activeThreadIdRef.current
-      && workspaceViewRef.current === "conversation"
-      && windowFocusedRef.current
-      && document.visibilityState === "visible"
-      && !documentPanelFocusedRef.current;
+    return isTaskResultVisible({
+      threadId,
+      activeThreadId: activeThreadIdRef.current,
+      workspaceView: workspaceViewRef.current,
+      windowFocused: windowFocusedRef.current && document.hasFocus(),
+      visibilityState: document.visibilityState,
+      documentPanelFocused: documentPanelFocusedRef.current
+    });
+  }
+
+  function clearVisibleThreadCompletion() {
+    const threadId = activeThreadIdRef.current;
+    if (!isThreadActivelyVisible(threadId)) return;
+    setThreads((current) => clearTaskResultUnread(current, threadId));
+  }
+
+  function announceTaskResult(threadId: string, messageId: string, outcome: TaskNotificationOutcome) {
+    const notificationId = taskNotificationId(threadId, messageId);
+    const thread = threadsRef.current.find((item) => item.id === threadId);
+    const message = thread?.messages.find((item) => item.id === messageId);
+    if (!thread || !message || message.taskNotificationId === notificationId
+      || announcedTaskResultIdsRef.current.has(notificationId)) return;
+    announcedTaskResultIdsRef.current.add(notificationId);
+    const visible = isThreadActivelyVisible(threadId);
+    setThreads((current) => recordTaskResult(current, threadId, messageId, outcome, visible));
+    if (outcome !== "stopped" && !visible) {
+      setPendingTaskNotifications((current) => [
+        ...current, { threadId, messageId, notificationId, outcome }
+      ]);
+    }
   }
 
   async function persistWorkbenchStateNow(): Promise<boolean> {
@@ -3573,6 +3622,8 @@ function App() {
         ].filter(Boolean).join("\n\n"),
         status: "error"
       });
+      // A legacy error already shown before restart is not a new result.
+      if (assistant.status === "running") announceTaskResult(thread.id, assistant.id, "failed");
     };
     const clearRecoveredRun = (threadId: string, runId: string) => {
       if (!runId) return;
@@ -3651,20 +3702,21 @@ function App() {
               blockRecoveredThread(thread, latestAssistant, "检测到运行中任务，但缺少可恢复的运行标识。");
               continue;
             }
-            reboundRunId = result.runId;
-            runContextRef.current.set(reboundRunId, {
+            const recoveredRunId = result.runId;
+            reboundRunId = recoveredRunId;
+            runContextRef.current.set(recoveredRunId, {
               threadId: thread.id,
               assistantMessageId: latestAssistant.id,
               entityFinalizationMode: latestAssistant.entityFinalizationMode,
               entityExecutionIsolated: latestAssistant.entityExecutionIsolated,
               executionCodexThreadId: recoveryThreadId
             });
-            setActiveRunsByThread((current) => ({ ...current, [thread.id]: reboundRunId }));
+            setActiveRunsByThread((current) => ({ ...current, [thread.id]: recoveredRunId }));
             patchMessage(latestAssistant.id, {
               content: result.output || latestAssistant.content,
               status: "running"
             });
-            const bound = await workbench.bindCodexRun(reboundRunId);
+            const bound = await workbench.bindCodexRun(recoveredRunId);
             if (bound.ok) {
               reboundRunId = "";
               continue;
@@ -3699,6 +3751,7 @@ function App() {
               kind: "event",
               status: "waiting-input"
             });
+            announceTaskResult(thread.id, latestAssistant.id, "waiting-input");
             continue;
           }
 
@@ -3709,14 +3762,14 @@ function App() {
             });
             patchThread(thread.id, {
               updatedAt: nowLabel(),
-              lastActiveAt: Date.now(),
-              hasUnreadCompletion: !isThreadActivelyVisible(thread.id)
+              lastActiveAt: Date.now()
             });
-            await finalizeRecoveredEntityBinding(
+            const finalized = await finalizeRecoveredEntityBinding(
               thread,
               latestAssistant,
               result.output || latestAssistant.content
             );
+            announceTaskResult(thread.id, latestAssistant.id, finalized.ok ? "completed" : "failed");
             continue;
           }
 
@@ -3733,8 +3786,7 @@ function App() {
             });
             patchThread(thread.id, {
               updatedAt: nowLabel(),
-              lastActiveAt: Date.now(),
-              hasUnreadCompletion: !isThreadActivelyVisible(thread.id)
+              lastActiveAt: Date.now()
             });
             addTimeline(thread.id, {
               runId: result.runId || `recovery-${thread.id}`,
@@ -3744,6 +3796,7 @@ function App() {
               status: "stopped"
             });
             pauseRecoveredThreadQueue(thread.id);
+            announceTaskResult(thread.id, latestAssistant.id, "stopped");
             continue;
           }
 
@@ -3756,6 +3809,7 @@ function App() {
               status: "error"
             });
             pauseRecoveredThreadQueue(thread.id);
+            if (latestAssistant.status === "running") announceTaskResult(thread.id, latestAssistant.id, "failed");
             continue;
           }
 
@@ -3954,17 +4008,69 @@ function App() {
   }, [deferredThreadQuery]);
 
   useEffect(() => {
-    if (!isThreadActivelyVisible(activeThreadId)) return;
-    setThreads((current) => {
-      const activeHasUnreadCompletion = current.some(
-        (thread) => thread.id === activeThreadId && thread.hasUnreadCompletion
-      );
-      if (!activeHasUnreadCompletion) return current;
-      return current.map((thread) => thread.id === activeThreadId
-        ? { ...thread, hasUnreadCompletion: false }
-        : thread);
+    if (storageReady) clearVisibleThreadCompletion();
+  }, [activeThreadId, activeThread.hasUnreadCompletion, workspaceView, storageReady]);
+
+  const unreadTasks = unreadTaskCount(threads);
+  useEffect(() => {
+    if (!storageReady) return;
+    // Count the complete accessible task list, including search/pagination-hidden rows.
+    void workbench.setUnreadTaskCount(unreadTasks).catch(() => undefined);
+  }, [storageReady, unreadTasks]);
+
+  useEffect(() => {
+    if (!storageReady || taskNotificationSendingRef.current || !pendingTaskNotifications.length) return;
+    const pending = pendingTaskNotifications[0];
+    taskNotificationSendingRef.current = true;
+    void (async () => {
+      // Save the per-turn receipt before IPC. Main also durably deduplicates this ID.
+      await persistWorkbenchStateNow();
+      const thread = threadsRef.current.find((item) => item.id === pending.threadId);
+      const message = thread?.messages.find((item) => item.id === pending.messageId);
+      if (!thread || !message || !thread.hasUnreadCompletion || message.taskNotificationRead
+        || isThreadActivelyVisible(thread.id)) return;
+      const content = taskNotificationContent(pending.outcome, thread.title);
+      if (content) await workbench.showNotification({
+        ...content,
+        threadId: thread.id,
+        notificationId: pending.notificationId
+      });
+    })().catch((error) => {
+      workbench.reportRendererIssue({
+        kind: "codex-run",
+        message: `系统提醒未能显示：${error instanceof Error ? error.message : String(error)}`
+      });
+    }).finally(() => {
+      taskNotificationSendingRef.current = false;
+      setPendingTaskNotifications((current) => current.filter((item) => item.notificationId !== pending.notificationId));
     });
-  }, [activeThreadId, workspaceView]);
+  }, [pendingTaskNotifications, storageReady]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    let disposed = false;
+    const openTarget = async (target: { threadId: string; notificationId?: string } | null) => {
+      if (!target || disposed || !threadsRef.current.some((thread) => thread.id === target.threadId)) return;
+      // selectThread preserves unsaved documents. An obstructed navigation keeps the red dot.
+      const opened = await navigateTaskNotification(
+        target, clickedTaskNotificationIdsRef.current, openingTaskNotificationIdsRef.current,
+        () => selectThread(target.threadId)
+      );
+      if (!opened || disposed) return;
+      window.requestAnimationFrame(() => {
+        if (disposed || activeThreadIdRef.current !== target.threadId) return;
+        composerRef.current?.focus();
+        clearVisibleThreadCompletion();
+      });
+    };
+    const unsubscribe = workbench.onNotificationClicked((target) => {
+      void workbench.consumePendingNotification()
+        .then((pending) => openTarget(pending || target))
+        .catch(() => openTarget(target));
+    });
+    void workbench.consumePendingNotification().then(openTarget).catch(() => undefined);
+    return () => { disposed = true; unsubscribe(); };
+  }, [storageReady]);
 
   useLayoutEffect(() => {
     workspaceViewRef.current = workspaceView;
@@ -3977,15 +4083,6 @@ function App() {
   }, [rightPanelOpen, workspaceView]);
 
   useEffect(() => {
-    const clearVisibleThreadCompletion = () => {
-      const threadId = activeThreadIdRef.current;
-      if (!isThreadActivelyVisible(threadId)) return;
-      setThreads((current) => current.map((thread) =>
-        thread.id === threadId && thread.hasUnreadCompletion
-          ? { ...thread, hasUnreadCompletion: false }
-          : thread
-      ));
-    };
     const handleFocus = () => {
       windowFocusedRef.current = true;
       window.requestAnimationFrame(clearVisibleThreadCompletion);
@@ -4004,17 +4101,24 @@ function App() {
         const active = document.activeElement;
         documentPanelFocusedRef.current = active instanceof Element
           && Boolean(active.closest(".right-panel.document-panel, .document-library-content"));
+        if (!documentPanelFocusedRef.current) clearVisibleThreadCompletion();
       });
+    };
+    const handleVisibilityChange = () => {
+      windowFocusedRef.current = document.visibilityState === "visible" && document.hasFocus();
+      clearVisibleThreadCompletion();
     };
     window.addEventListener("focus", handleFocus);
     window.addEventListener("blur", handleBlur);
     document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("focusout", handleFocusOut);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       window.removeEventListener("focus", handleFocus);
       window.removeEventListener("blur", handleBlur);
       document.removeEventListener("focusin", handleFocusIn);
       document.removeEventListener("focusout", handleFocusOut);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 
@@ -7097,14 +7201,16 @@ function App() {
   ) {
     // A task may finish while every domi window is closed. Only replay a persisted,
     // machine-verifiable entity marker; never guess an entity from stale free text here.
-    if (!parseDomiEntityResult(output)) return;
+    if (!parseDomiEntityResult(output)
+      && !(assistantMessage.entityExecutionIsolated && assistantMessage.workflowId
+        && ENTITY_RESULT_WORKFLOW_IDS.has(assistantMessage.workflowId))) return { ok: true };
     const assistantIndex = thread.messages.findIndex((message) => message.id === assistantMessage.id);
     const userMessage = assistantIndex > 0
       ? [...thread.messages.slice(0, assistantIndex)].reverse().find((message) => message.role === "user")
       : undefined;
     settlingThreadIdsRef.current.add(thread.id);
     try {
-      await finalizeEntityBinding({
+      return await finalizeEntityBinding({
         threadId: thread.id,
         assistantMessageId: assistantMessage.id,
         userMessageId: userMessage?.id,
@@ -7115,19 +7221,18 @@ function App() {
         entityExecutionIsolated: assistantMessage.entityExecutionIsolated
       }, output);
     } catch (error) {
-      workbench.reportRendererIssue({
-        kind: "document-operation",
-        message: `恢复任务结果时实体归档失败：${error instanceof Error ? error.message : String(error)}`
-      });
+      const message = `恢复任务结果时实体归档失败：${error instanceof Error ? error.message : String(error)}`;
+      workbench.reportRendererIssue({ kind: "document-operation", message });
+      return { ok: false, error: message };
     } finally {
       settlingThreadIdsRef.current.delete(thread.id);
     }
   }
 
-  async function finalizeEntityBinding(context: RunContext, output: string) {
+  async function finalizeEntityBinding(context: RunContext, output: string): Promise<{ ok: boolean; error?: string }> {
     const stableResult = parseDomiEntityResult(output);
     if (!stableResult && (!context.workflowId || !ENTITY_RESULT_WORKFLOW_IDS.has(context.workflowId))) {
-      return;
+      return { ok: true };
     }
 
     const failBinding = (message: string) => {
@@ -7139,28 +7244,26 @@ function App() {
         kind: "error",
         status: "failed"
       });
+      return { ok: false, error: message };
     };
 
     // An isolated intake deliberately has no canonical entity context. Only a
     // machine-verifiable marker may release its staged files to an entity; do
     // not infer the target from conversational text after the run completes.
     if (!stableResult && context.entityExecutionIsolated) {
-      failBinding(
+      return failBinding(
         "隔离实体任务未返回可验证的 DOMI_ENTITY_RESULT_V1 回执；附件仍保留在本机暂存区，当前任务归属未改变。"
       );
-      return;
     }
 
     let synced;
     try {
       synced = await workbench.syncDomi();
     } catch (error) {
-      failBinding(`无法刷新资料库，未根据机器回执改变任务归属：${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return failBinding(`无法刷新资料库，未根据机器回执改变任务归属：${error instanceof Error ? error.message : String(error)}`);
     }
     if (!synced.ok || synced.stale || !synced.snapshot) {
-      failBinding(synced.error || "资料库刷新失败或只返回旧缓存，未根据机器回执改变任务归属。");
-      return;
+      return failBinding(synced.error || "资料库刷新失败或只返回旧缓存，未根据机器回执改变任务归属。");
     }
     const snapshot = synced.snapshot;
     domiSnapshotRef.current = snapshot;
@@ -7194,24 +7297,21 @@ function App() {
         };
       }
     }
-    if (!result) return;
+    if (!result) return { ok: true };
     if (!workflowAllowsEntityResult(context.workflowId, result.entityType)) {
-      failBinding(`工作流“${context.workflowId || "通用任务"}”与 ${result.entityType} 回执不兼容，未改变任务归属。`);
-      return;
+      return failBinding(`工作流“${context.workflowId || "通用任务"}”与 ${result.entityType} 回执不兼容，未改变任务归属。`);
     }
 
     const thread = threadsRef.current.find((item) => item.id === context.threadId);
-    if (!thread) return;
+    if (!thread) return { ok: false, error: "任务已移除。" };
     const entity = result.entityType === "project"
       ? snapshot.projects.find((item) => item.recordId === result!.recordId)
       : snapshot.people.find((item) => item.recordId === result!.recordId);
     if (!entity) {
-      failBinding(`最新资料库中不存在回执记录 ${result.recordId}，未改变任务归属。`);
-      return;
+      return failBinding(`最新资料库中不存在回执记录 ${result.recordId}，未改变任务归属。`);
     }
     if (normalizedEntityMention(entity.name) !== normalizedEntityMention(result.name)) {
-      failBinding(`回执名称“${result.name}”与资料库规范名称“${entity.name}”不一致，未改变任务归属。`);
-      return;
+      return failBinding(`回执名称“${result.name}”与资料库规范名称“${entity.name}”不一致，未改变任务归属。`);
     }
     const archiveOnly = context.entityFinalizationMode === "archive-only";
     if (
@@ -7220,10 +7320,9 @@ function App() {
       && thread.externalRecordId
       && (thread.externalType !== result.entityType || thread.externalRecordId !== result.recordId)
     ) {
-      failBinding(
+      return failBinding(
         `本轮回执指向“${entity.name}”，但当前任务已归属于“${thread.title}”；为避免后台静默改错归属，已保持当前任务和附件位置不变。`
       );
-      return;
     }
 
     let workspace;
@@ -7234,15 +7333,13 @@ function App() {
         repairMissing: true
       });
     } catch (error) {
-      failBinding(`无法读取“${entity.name}”的固定资料目录：${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return failBinding(`无法读取“${entity.name}”的固定资料目录：${error instanceof Error ? error.message : String(error)}`);
     }
     if (!workspace.ok || !workspace.workspacePath) {
-      failBinding(
+      return failBinding(
         workspace.error
           || `“${entity.name}”当前没有稳定的本地实体目录；未回退到通用任务目录，也未改变任务归属。`
       );
-      return;
     }
 
     const assistantIndex = thread.messages.findIndex(
@@ -7257,8 +7354,7 @@ function App() {
       ? context.attachments
       : userMessage?.attachments || [];
     if (attachmentsToCommit.length > 0 && !userMessage) {
-      failBinding("无法定位本轮用户消息，未提交附件，也未改变任务归属。");
-      return;
+      return failBinding("无法定位本轮用户消息，未提交附件，也未改变任务归属。");
     }
 
     const projectLabel = result.entityType === "project" && entity
@@ -7290,8 +7386,7 @@ function App() {
       attachmentsToCommit
     );
     if (!committed.ok) {
-      failBinding(committed.error || "附件仍保留在本机暂存区，实体归属未改变。");
-      return;
+      return failBinding(committed.error || "附件仍保留在本机暂存区，实体归属未改变。");
     }
 
     const byPath = new Map(
@@ -7334,6 +7429,7 @@ function App() {
       };
     }));
     void refreshDocumentLibrary({ silent: true, force: true });
+    return { ok: true };
   }
 
   function handleCodexEvent(payload: CodexEventPayload) {
@@ -7599,6 +7695,8 @@ function App() {
             ? "Codex 已完成。"
             : payload.type === "stopped"
               ? "任务已停止。"
+            : payload.type === "waiting-input"
+              ? "需要你补充材料后继续。"
             : payload.error || "Codex 执行失败。"),
         status: payload.type === "failed" ? "error" : "done",
         awaitingSlidesInput: payload.type === "waiting-input",
@@ -7609,9 +7707,7 @@ function App() {
       patchThread(context.threadId, {
         updatedAt: nowLabel(),
         lastActiveAt: runCompletedAt,
-        ...(payload.usage ? { lastUsage: payload.usage } : {}),
-        hasUnreadCompletion:
-          payload.type === "completed" && !isThreadActivelyVisible(context.threadId)
+        ...(payload.usage ? { lastUsage: payload.usage } : {})
       });
 
       addTimeline(context.threadId, {
@@ -7656,6 +7752,7 @@ function App() {
         // its next turn must be the user's answer to the clarification.
         pauseThreadQueueAfterTerminal({ ...context, queuedSubmission: undefined });
         releaseRun();
+        announceTaskResult(context.threadId, context.assistantMessageId, "waiting-input");
         return;
       }
       if (payload.type !== "completed") {
@@ -7664,17 +7761,24 @@ function App() {
         // or stopped item is restored at the head of the queue.
         pauseThreadQueueAfterTerminal(context);
         releaseRun();
+        announceTaskResult(context.threadId, context.assistantMessageId, payload.type);
         return;
       }
       settlingThreadIdsRef.current.add(context.threadId);
+      let outcome: TaskNotificationOutcome = "completed";
       void finalizeEntityBinding(context, payload.output || "")
+        .then((result) => { if (!result.ok) outcome = "failed"; })
         .catch((error) => {
+          outcome = "failed";
           workbench.reportRendererIssue({
             kind: "document-operation",
             message: `任务已完成，但实体归档结算失败：${error instanceof Error ? error.message : String(error)}`
           });
         })
-        .finally(releaseRun);
+        .finally(() => {
+          releaseRun();
+          announceTaskResult(context.threadId, context.assistantMessageId, outcome);
+        });
     }
   }
 
@@ -8319,7 +8423,7 @@ function App() {
         options.workflowContinuation ? undefined : workflow?.id
       );
     }
-    patchThread(targetThread.id, { timeline: [], lastUsage: null, hasUnreadCompletion: false });
+    patchThread(targetThread.id, { timeline: [], lastUsage: null });
     runContextRef.current.set(runId, {
       threadId: targetThread.id,
       assistantMessageId: assistantId,
@@ -8455,9 +8559,9 @@ function App() {
       });
       patchThread(targetThread.id, {
         updatedAt: nowLabel(),
-        lastActiveAt: runCompletedAt,
-        hasUnreadCompletion: !result.awaitingSlidesInput && !isThreadActivelyVisible(targetThread.id)
+        lastActiveAt: runCompletedAt
       });
+      let outcome: TaskNotificationOutcome = result.awaitingSlidesInput ? "waiting-input" : "completed";
       const context = runContextRef.current.get(runId);
       if (context) {
         const skillCreatorTask = context.workflowId === "skill-creator"
@@ -8476,9 +8580,11 @@ function App() {
           if (result.awaitingSlidesInput) {
             pauseThreadQueueAfterTerminal({ ...context, queuedSubmission: undefined });
           } else {
-            await finalizeEntityBinding(context, result.output);
+            const finalized = await finalizeEntityBinding(context, result.output);
+            if (!finalized.ok) outcome = "failed";
           }
         } catch (error) {
+          outcome = "failed";
           workbench.reportRendererIssue({
             kind: "document-operation",
             message: `任务已完成，但实体归档结算失败：${error instanceof Error ? error.message : String(error)}`
@@ -8494,6 +8600,7 @@ function App() {
         delete next[targetThread.id];
         return next;
       });
+      announceTaskResult(targetThread.id, assistantId, outcome);
     } else if (!result.ok) {
       patchMessage(assistantId, {
         content: result.error || "Codex 执行失败。",
@@ -8509,6 +8616,7 @@ function App() {
         return next;
       });
       runContextRef.current.delete(runId);
+      announceTaskResult(targetThread.id, assistantId, "failed");
     }
     return result;
   }
@@ -9132,24 +9240,25 @@ function App() {
     const selectionIsCurrent = () =>
       selectionIntent === threadSelectionIntentRef.current
       && threadsRef.current.some((thread) => thread.id === threadId);
-    if (!selectionIsCurrent()) return;
+    if (!selectionIsCurrent()) return false;
     if (threadId !== activeThreadIdRef.current && documentPreviewOriginRef.current) {
       if (markdownDocumentRef.current || markdownRequestLabel) {
         await closeMarkdown({ restoreOrigin: false });
-        if (!selectionIsCurrent()) return;
-        if (markdownDocumentRef.current) return;
+        if (!selectionIsCurrent()) return false;
+        if (markdownDocumentRef.current) return false;
       }
       if (pdfDocumentRef.current || pdfRequestLabel) closePdf({ restoreOrigin: false });
       documentPreviewOriginRef.current = null;
     }
-    if (!selectionIsCurrent()) return;
+    if (!selectionIsCurrent()) return false;
     rememberActiveChatScrollPosition();
-    if (!await navigateWorkspace("conversation")) return;
-    if (!selectionIsCurrent()) return;
-    if (!activateThreadNow(threadId, selectionIntent)) return;
+    if (!await navigateWorkspace("conversation")) return false;
+    if (!selectionIsCurrent()) return false;
+    if (!activateThreadNow(threadId, selectionIntent)) return false;
     setDocumentLibrarySidebarExpanded(false);
     setThreadMenuId(null);
     setComposerDragActive(false);
+    return true;
   }
 
   function startThreadRename(thread: Thread) {
@@ -13229,12 +13338,12 @@ function App() {
                             title="任务正在进行"
                           />
                         )}
-                        {!activeRunsByThread[thread.id] && thread.hasUnreadCompletion && (
+                        {thread.hasUnreadCompletion && (
                           <i
                             className="thread-state-indicator unread"
                             role="status"
-                            aria-label="任务已完成，结果未读"
-                            title="任务已完成，结果未读"
+                            aria-label="任务有未读结果"
+                            title="任务有未读结果"
                           />
                         )}
                         {thread.pinned && <Pin size={9} aria-hidden="true" />}

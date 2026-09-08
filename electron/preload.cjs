@@ -37,6 +37,13 @@ contextBridge.exposeInMainWorld("workbench", {
   openResource: (resource) => ipcRenderer.invoke("resource:open", resource),
   openMarkdownExternal: (resource) => ipcRenderer.invoke("markdown:open-external", resource),
   showNotification: (request) => ipcRenderer.invoke("app:notify", request),
+  onNotificationClicked: (callback) => {
+    const handler = (_event, target) => callback(target);
+    ipcRenderer.on("app:notification-clicked", handler);
+    return () => ipcRenderer.removeListener("app:notification-clicked", handler);
+  },
+  consumePendingNotification: () => ipcRenderer.invoke("app:consume-pending-notification"),
+  setUnreadTaskCount: (count) => ipcRenderer.invoke("app:set-unread-task-count", count),
   onPrepareClose: (callback) => {
     const handler = async (_event, request) => {
       let result;

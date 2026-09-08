@@ -70,6 +70,9 @@ declare global {
         application?: string;
       }>;
       showNotification: (request: DesktopNotificationRequest) => Promise<DesktopNotificationResult>;
+      onNotificationClicked: (callback: (target: DesktopNotificationTarget) => void) => () => void;
+      consumePendingNotification: () => Promise<DesktopNotificationTarget | null>;
+      setUnreadTaskCount: (count: number) => Promise<{ ok: boolean; error?: string }>;
       onPrepareClose?: (
         callback: (request: AppPrepareCloseRequest) => Promise<AppPrepareCloseResult>
       ) => () => void;
@@ -248,11 +251,19 @@ export type DesktopNotificationRequest = {
   title: string;
   body: string;
   silent?: boolean;
+  threadId?: string;
+  notificationId?: string;
+};
+
+export type DesktopNotificationTarget = {
+  threadId: string;
+  notificationId?: string;
 };
 
 export type DesktopNotificationResult = {
   ok: boolean;
   error?: string;
+  deduplicated?: boolean;
 };
 
 export type AppPrepareCloseRequest = {

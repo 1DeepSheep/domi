@@ -62,3 +62,6 @@ jobs:
 
       - name: Verify Skill Hub creation, import and sidebar layout
         run: npm run test:skill-hub-ui
+
+      - name: Verify task notifications, unread state and navigation
+        run: npm run test:task-notifications-ui
