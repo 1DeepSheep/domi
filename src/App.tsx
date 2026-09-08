@@ -9242,12 +9242,12 @@ function App() {
       && threadsRef.current.some((thread) => thread.id === threadId);
     if (!selectionIsCurrent()) return false;
     if (threadId !== activeThreadIdRef.current && documentPreviewOriginRef.current) {
-      if (markdownDocumentRef.current || markdownRequestLabel) {
-        await closeMarkdown({ restoreOrigin: false });
-        if (!selectionIsCurrent()) return false;
-        if (markdownDocumentRef.current) return false;
-      }
-      if (pdfDocumentRef.current || pdfRequestLabel) closePdf({ restoreOrigin: false });
+      // Also cancel in-flight reads: long-lived notification callbacks may have
+      // captured empty request labels before the document began loading.
+      await closeMarkdown({ restoreOrigin: false });
+      if (!selectionIsCurrent()) return false;
+      if (markdownDocumentRef.current) return false;
+      closePdf({ restoreOrigin: false });
       documentPreviewOriginRef.current = null;
     }
     if (!selectionIsCurrent()) return false;
