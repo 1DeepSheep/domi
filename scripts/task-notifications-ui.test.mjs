@@ -100,6 +100,22 @@ workbench.consumePendingNotification = async () => {
   write(":pending", null);
   return target;
 };
+workbench.readMarkdown = async request => {
+  state.markdownReads = [...(state.markdownReads || []), structuredClone(request)];
+  return new Promise(resolve => { state.releaseMarkdown = resolve; });
+};
+workbench.readPdf = async request => {
+  state.pdfReads = [...(state.pdfReads || []), structuredClone(request)];
+  return new Promise(resolve => { state.releasePdf = resolve; });
+};
+workbench.saveMarkdown = async request => {
+  state.markdownSaves = [...(state.markdownSaves || []), structuredClone(request)];
+  if (state.markdownSaveConflict) return { ok: false, conflict: true, error: "合成保存冲突，草稿必须保留" };
+  return { ok: true, document: {
+    path: request.path, name: "notification-old-task.md", content: request.content,
+    size: request.content.length, mtimeMs: request.expectedMtimeMs + 1
+  } };
+};
 workbench.runCodex = async () => { throw new Error("No model run is permitted in this fixture"); };
 workbench.reportRendererIssue = report => state.issues.push(report);
 const { default: App } = await import("/src/App");
@@ -156,7 +172,7 @@ try {
   await page.waitForFunction(() => window.__taskNotificationsTest.bound.length === 8);
   await select("visible");
   assert.equal(await page.evaluate(() => document.hasFocus()), true);
-  await emit("visible");
+  await emit("visible", "completed", "合成任务结果。\n\n[打开合成旧文档](/synthetic/notification-old-task.md)\n\n[打开合成旧 PDF](/synthetic/notification-old-task.pdf)");
   await completed("visible");
   await unread("visible", false);
   await dock(0);
@@ -296,8 +312,72 @@ try {
   }
   await dock(3);
   assert.equal(await page.evaluate(() => window.__taskNotificationsTest.notifications.length), 6, "An old failed turn without receipt metadata must not become a new notification on reload");
+
+  // The notification subscription was registered before this ordinary document
+  // link opened. A pending read from the old task must be invalidated even when
+  // the click callback still holds the subscription-time navigation closure.
+  await select("visible");
+  await page.getByRole("link", { name: "打开合成旧文档", exact: true }).click();
+  await page.waitForFunction(() => window.__taskNotificationsTest.markdownReads?.length === 1);
+  await page.locator(".markdown-panel-shell").waitFor();
+  await page.evaluate(() => window.__taskNotificationsTest.click({
+    threadId: "task-other", notificationId: "task-document-switch-regression"
+  }));
+  await page.waitForFunction(() => document.querySelector(".thread-item.active strong")?.textContent === "通知测试 other");
+  await page.evaluate(async () => {
+    window.__taskNotificationsTest.releaseMarkdown({ ok: true, document: {
+      path: "/synthetic/notification-old-task.md", name: "notification-old-task.md",
+      content: "旧任务的合成文档，不能显示在通知打开的另一任务里。", size: 96, mtimeMs: 1
+    } });
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  assert.equal(await page.locator(".markdown-title-button").filter({ hasText: "notification-old-task.md" }).count(), 0, "A delayed ordinary Markdown read from the previous task must not appear after notification navigation");
+  assert.equal(await page.locator(".markdown-panel-shell").count(), 0, "The previous task's pending document panel must close when a notification opens another task");
+
+  await select("visible");
+  await page.getByRole("link", { name: "打开合成旧 PDF", exact: true }).click();
+  await page.waitForFunction(() => window.__taskNotificationsTest.pdfReads?.length === 1);
+  await page.locator(".pdf-panel-shell").waitFor();
+  await page.evaluate(() => window.__taskNotificationsTest.click({
+    threadId: "task-other", notificationId: "task-pdf-switch-regression"
+  }));
+  await page.waitForFunction(() => document.querySelector(".thread-item.active strong")?.textContent === "通知测试 other");
+  await page.evaluate(async () => {
+    window.__taskNotificationsTest.releasePdf({ ok: true, document: {
+      path: "/synthetic/notification-old-task.pdf", name: "notification-old-task.pdf",
+      previewUrl: "about:blank", size: 96, mtimeMs: 1
+    } });
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  assert.equal(await page.locator(".pdf-panel-shell").count(), 0, "A delayed ordinary PDF read from the previous task must not appear after notification navigation");
+
+  await select("visible");
+  await page.getByRole("link", { name: "打开合成旧文档", exact: true }).click();
+  await page.waitForFunction(() => window.__taskNotificationsTest.markdownReads?.length === 2);
+  await page.evaluate(() => {
+    window.__taskNotificationsTest.markdownSaveConflict = true;
+    window.__taskNotificationsTest.releaseMarkdown({ ok: true, document: {
+      path: "/synthetic/notification-old-task.md", name: "notification-old-task.md",
+      content: "需要保留的合成草稿。", size: 30, mtimeMs: 1
+    } });
+  });
+  const editor = page.locator(".rich-markdown-content[contenteditable=true]");
+  await editor.waitFor();
+  await editor.fill("需要保留的合成草稿。新编辑内容必须保留。");
+  await page.locator(".markdown-save-state.dirty").waitFor();
+  const blockedTarget = { threadId: "task-waiting", notificationId: "task-dirty-document-switch-regression" };
+  await page.evaluate(target => window.__taskNotificationsTest.click(target), blockedTarget);
+  await page.locator(".markdown-error-banner").filter({ hasText: "合成保存冲突" }).waitFor();
+  assert.equal(await row("visible").getAttribute("class"), "thread-item active", "A notification must not navigate away when the current document cannot save");
+  assert.ok((await editor.innerText()).includes("新编辑内容必须保留"), "A blocked notification navigation must preserve the document draft");
+  await unread("waiting", true);
+  await page.evaluate(() => { window.__taskNotificationsTest.markdownSaveConflict = false; });
+  await page.evaluate(target => window.__taskNotificationsTest.click(target), blockedTarget);
+  await page.waitForFunction(() => document.querySelector(".thread-item.active strong")?.textContent === "通知测试 waiting");
+  await unread("waiting", false);
+  assert.equal(await page.locator(".markdown-panel-shell").count(), 0, "Retrying the same notification after saving must finish navigation and close the old document");
   assert.deepEqual(errors, [], "The real App must not throw during notification interactions");
-  console.log("Task notification UI passed: foreground suppression; other-task and background alerts; unread/Dock clear; failure vs stop and waiting; denied notification; duplicate terminal; reload persistence; live and startup click routing; delayed/failed finalization; legacy failure recovery; concurrent running/unread indicators.");
+  console.log("Task notification UI passed: foreground suppression; other-task and background alerts; unread/Dock clear; failure vs stop and waiting; denied notification; duplicate terminal; reload persistence; live and startup click routing; delayed/failed finalization; legacy failure recovery; concurrent running/unread indicators; delayed Markdown/PDF isolation; unsaved draft protection and notification retry.");
 } finally {
   await browser?.close();
   await server?.close();
