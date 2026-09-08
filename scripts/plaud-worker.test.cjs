@@ -222,3 +222,37 @@ module.exports = { PlaudClient };
   delete globalThis.__domiPlaudRateLimitInitCount;
   delete globalThis.__domiPlaudRateLimitReadCount;
 });
+
+test("PLAUD worker retries Failed to fetch and closed sockets without calling them a logout", () => {
+  for (const message of ["TypeError: Failed to fetch", "net::ERR_CONNECTION_CLOSED", "ECONNRESET"]) {
+    assert.equal(isRetryableReadError(new Error(message)), true);
+    assert.match(safeError(new Error(message)), /网络|超时/);
+    assert.doesNotMatch(safeError(new Error(message)), /登录已失效/);
+  }
+});
+
+test("PLAUD worker server read retry rebuilds sessions but never replays executed mutations", async (t) => {
+  const { runServerCommand, closeServerClient } = require("../electron/plaud-worker.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-server-test-"));
+  t.after(async () => { await closeServerClient(); fs.rmSync(root, { recursive: true, force: true }); delete globalThis.__plaudServerTest; });
+  const clientPath = path.join(root, "skills", "plaud", "vendor", "plaud-cli", "src", "plaud.js");
+  fs.mkdirSync(path.dirname(clientPath), { recursive: true });
+  fs.writeFileSync(clientPath, `module.exports.PlaudClient = class {
+    async init() { globalThis.__plaudServerTest.inits++; }
+    async close() { globalThis.__plaudServerTest.closes++; }
+    async listFiles() { const s = globalThis.__plaudServerTest; s.reads++; if (s.reads === 1) throw new Error('Failed to fetch'); return []; }
+    async api() { globalThis.__plaudServerTest.posts++; throw new Error('net::ERR_CONNECTION_CLOSED'); }
+    async downloadTranscript(id, out) { const s = globalThis.__plaudServerTest; s.downloads++; s.id = id; s.out = out; if(s.downloads === 1) throw new Error('Failed to fetch'); return {mdPath: out + '/full.md', rawPath: out + '/raw.json'}; }
+  };`);
+  globalThis.__plaudServerTest = { inits: 0, closes: 0, reads: 0, posts: 0, downloads: 0 };
+  const delays = [];
+  const options = { sleep: async ms => { delays.push(ms); } };
+  assert.equal((await runServerCommand(root, "connection", [], options)).connected, true);
+  assert.deepEqual(delays, [400]); assert.equal(globalThis.__plaudServerTest.inits, 2);
+  await assert.rejects(runServerCommand(root, "trash", ["recording-file-id"], options), /ERR_CONNECTION_CLOSED/);
+  assert.equal(globalThis.__plaudServerTest.posts, 1);
+  const recovered = await runServerCommand(root, "download", ["recording-file-id", root], options);
+  assert.equal(recovered.transcriptPath, path.join(root, "full.md"));
+  assert.equal(globalThis.__plaudServerTest.id, "recording-file-id");
+  assert.equal(globalThis.__plaudServerTest.downloads, 2); assert.equal(globalThis.__plaudServerTest.posts, 1);
+});

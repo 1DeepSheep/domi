@@ -20,6 +20,9 @@ const { localTaskReceipt } = require("./task-receipt.cjs");
 const { PodcastProgress } = require("./podcast-progress.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
 const { TaskQueue } = require("./service-coordinator.cjs");
+const { safeError: safePlaudWorkerError } = require("./plaud-worker.cjs");
+const { PLAUD_RECOVERY_STAGES, plaudRecordReady, plaudStageProtected, plaudRecoveryCandidate,
+  readablePlaudTranscript, normalizePlaudSyncItem, summarizePlaudSync } = require("./plaud-sync-state.cjs");
 const CANONICAL_PROJECT_TAXONOMY = require("../shared/investment-taxonomy.json");
 
 const execFileAsync = promisify(execFile);
@@ -299,7 +302,7 @@ function plaudFailureStatus(error) {
   if (/econnrefused|devtools|connectovercdp|browser.*(?:closed|launch)|executable|找不到.*浏览器|专用浏览器.*(?:本机连接|未能建立|启动)|not attached to an active page|target page, context or browser has been closed|execution context was destroyed|protocol error.*(?:page|target)|后台页面.*中断/.test(normalized)) {
     return "browser_unavailable";
   }
-  if (/plaud_network_timeout|enotfound|enetunreach|network|fetch failed|etimedout|timed?\s*out|timeout|超时|网络|err_(?:network_changed|timed_out|name_not_resolved)|socket hang up/.test(normalized)) {
+  if (/plaud_network_timeout|enotfound|enetunreach|econnreset|econnaborted|network|fetch failed|failed to fetch|etimedout|timed?\s*out|timeout|超时|网络|err_(?:connection_(?:closed|reset|refused|aborted)|network_changed|timed_out|name_not_resolved)|socket hang up/.test(normalized)) {
     return "network_error";
   }
   if (/(?:http|status)\s*5\d\d|service unavailable|bad gateway|gateway timeout|服务暂时不可用/.test(normalized)) {
@@ -336,6 +339,14 @@ function shouldRecoverPlaudSyncRead(snapshot) {
     && (snapshot.ok === false || snapshot.stale)
     && PLAUD_SYNC_PREFLIGHT_RECOVERY_STATUSES.has(String(snapshot.remoteStatus || ""))
   );
+}
+
+function safePlaudSyncError(error) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/Transcript not found|transcript.*not ready|PLAUD_TRANSCRIPT_PENDING/i.test(message)) {
+    return "PLAUD 文字稿尚未就绪，已保留任务，稍后继续检查。";
+  }
+  return safePlaudWorkerError(error).replace(/domi 未修改任何录音/g, "已保留既有任务和成果");
 }
 
 function classifyPlaudConnectionFailure(error, browser) {
@@ -1190,6 +1201,8 @@ class DomiIntegration {
     this.plaudChildProcesses = new Set();
     this.podcastProcessPromises = new Map();
     this.plaudShuttingDown = false;
+    this.plaudSyncPromise = null;
+    this.plaudSyncResumeOnly = false;
     this.plaudConfigFingerprint = "";
     this.plaudConfigGeneration = 0;
     this.taskDocumentSources = new Map();
@@ -1597,6 +1610,7 @@ class DomiIntegration {
       if (options.queue === "plaud" && this.plaudShuttingDown) {
         throw new Error("domi 正在退出，已取消尚未开始的 PLAUD 操作。");
       }
+      if (options.requirePlaudEnabled && !this.plaudEnabled()) throw new Error("PLAUD 已停用，已取消后续读取。");
       if (options.queue === "plaud" && options.releasePlaudSession) {
         // Keep Profile release and the CLI owner in the same queue operation.
         // A concurrent read must not restart the broker between these steps.
@@ -1604,6 +1618,7 @@ class DomiIntegration {
         if (this.plaudShuttingDown) {
           throw new Error("domi 正在退出，已取消尚未开始的 PLAUD 操作。");
         }
+        if (options.requirePlaudEnabled && !this.plaudEnabled()) throw new Error("PLAUD 已停用，已取消后续读取。");
       }
       let stdout;
       try {
@@ -1838,7 +1853,7 @@ class DomiIntegration {
     return [plugin.root, browser, this.plaudConfigGeneration].join("\u0000");
   }
 
-  async runPlaudWorker(command, args = [], pluginInput) {
+  async runPlaudWorker(command, args = [], pluginInput, options = {}) {
     if (!this.plaudEnabled()) {
       throw new Error("PLAUD 未启用。请先在 domi 设置的“录音转写”中开启。");
     }
@@ -1850,12 +1865,13 @@ class DomiIntegration {
       if (this.plaudShuttingDown) {
         throw new Error("domi 正在退出，已取消尚未开始的 PLAUD 操作。");
       }
+      if (!this.plaudEnabled()) throw new Error("PLAUD 已停用，已取消后续读取。");
       return this.plaudBroker.request(
         command,
         args,
         plugin.root,
         {
-          timeoutMs: 90_000,
+          timeoutMs: command === "download" ? Math.min(Math.max(Number(options.timeoutMs) || 30_000, 1000), 30_000) : 90_000,
           sessionKey
         }
       );
@@ -1870,7 +1886,8 @@ class DomiIntegration {
     const plaudQueue = this.plaudCommandQueue.snapshot();
     const larkQueue = this.larkCommandQueue.snapshot();
     const snapshot = {
-      plaud: plaudQueue.activeCount + plaudQueue.pendingCount + this.plaudChildProcesses.size,
+      plaud: plaudQueue.activeCount + plaudQueue.pendingCount + this.plaudChildProcesses.size
+        + (this.plaudSyncPromise ? 1 : 0),
       lark: larkQueue.activeCount
         + larkQueue.pendingCount
         + (this.feishuAppConfiguration && !this.feishuAppConfiguration.settled ? 1 : 0),
@@ -2098,18 +2115,37 @@ class DomiIntegration {
   }
 
   normalizePlaudQueueItem(item) {
+    const workflow = this.plaudWorkflowFields(item);
     return {
       fileId: String(item?.fileId || ""),
       fileName: String(item?.fileName || "未命名录音"),
       duration: Number(item?.duration) || null,
       createdAt: Number(item?.createdAt) || null,
       editedAt: Number(item?.editedAt) || null,
-      hasTranscript: Boolean(item?.transcriptPath),
+      hasTranscript: plaudRecordReady(item),
       hasSummary: false,
-      processing: ["generation_submitting", "generating"].includes(item?.stage),
-      queueStage: String(item?.stage || ""),
-      transcriptPath: String(item?.transcriptPath || ""),
-      error: String(item?.error || "")
+      processing: !plaudRecordReady(item) && ["generation_submitting", "generating"].includes(item?.stage),
+      ...workflow
+    };
+  }
+
+  plaudWorkflowFields(record) {
+    const stage = String(record?.stage || "");
+    const ready = plaudRecordReady(record);
+    const normalized = normalizePlaudSyncItem(record, {
+      source: "recovered", retryableError: isRetryablePlaudReadFailure(record?.error),
+      safeError: record?.error ? safePlaudSyncError(record.error) : ""
+    });
+    const hasOutcome = ready || record?.syncOutcome || plaudStageProtected(record) || (stage !== "uploaded" && PLAUD_RECOVERY_STAGES.has(stage));
+    return {
+      queueStage: stage,
+      transcriptPath: String(record?.transcriptPath || ""),
+      error: ready ? "" : String(normalized.error || ""),
+      ...(hasOutcome ? { syncOutcome: normalized.outcome, retryable: normalized.retryable,
+        errorCode: normalized.errorCode } : {}),
+      resumeEligible: plaudRecoveryCandidate(record),
+      ...(record?.generationRequestedAt ? { generationRequestedAt: String(record.generationRequestedAt) } : {}),
+      ...(record?.generationAcceptedAt ? { generationAcceptedAt: String(record.generationAcceptedAt) } : {})
     };
   }
 
@@ -2175,11 +2211,11 @@ class DomiIntegration {
       }
     }
     const stale = remoteResult.status === "rejected" && Boolean(cachedSnapshot);
-    const queueItems = this.loadActivePlaudWorkflowRecords();
-    const workflowById = new Map(
-      this.loadPlaudWorkflowRecords().map((item) => [String(item.fileId), item])
-    );
-    for (const item of queueItems) workflowById.set(String(item.fileId), item);
+    // One fresh local read avoids an older active-record copy overwriting a
+    // completion committed between two separate queue reads.
+    const workflowRecords = this.loadPlaudWorkflowRecords();
+    const queueItems = workflowRecords.filter((item) => !PLAUD_FINAL_WORKFLOW_STAGES.has(String(item.stage || "")));
+    const workflowById = new Map(workflowRecords.map((item) => [String(item.fileId), item]));
     const remoteFailure = remoteResult.status === "rejected"
       ? classifyPlaudConnectionFailure(
           remoteResult.reason,
@@ -2200,9 +2236,9 @@ class DomiIntegration {
         activeQueueById.delete(fileId);
         return {
           ...item,
-          queueStage: String(queued?.stage || ""),
-          transcriptPath: String(queued?.transcriptPath || ""),
-          error: String(queued?.error || "")
+          hasTranscript: Boolean(item.hasTranscript) || plaudRecordReady(queued),
+          processing: plaudRecordReady(queued) ? false : Boolean(item.processing),
+          ...this.plaudWorkflowFields(queued)
         };
       });
       if (includeWorkflowOnly) {
@@ -2274,89 +2310,253 @@ class DomiIntegration {
     // verify once more inside the same click. Generation and download commands
     // are deliberately outside this recovery block, so no mutation is ever
     // submitted twice.
-    await this.stopPlaudBackgroundSession("sync-read-recovery");
+    await this.plaudCommandQueue.run(() => this.stopPlaudBackgroundSession("sync-read-recovery"));
+    await this.sleep(500);
+    if (!this.plaudEnabled() || this.plaudShuttingDown) return snapshot;
     snapshot = await this.plaudQueue({ fresh: true });
     return snapshot;
   }
 
-  async syncPlaud() {
-    const current = await this.plaudQueueForSync();
-    if (!current.ok) return current;
-    if (current.stale) {
-      const recovery = current.remoteStatus === "auth_required"
-        ? "PLAUD 登录已失效，请在设置中重新登录并验证后再生成文字稿。"
-        : current.remoteStatus === "rate_limited"
-          ? "PLAUD 服务暂时限流，本轮未执行任何生成操作；请稍后重试，无需重新登录。"
-          : "PLAUD 本轮远端读取未完成，本轮未执行任何生成操作；已保留上次成功列表，请重新同步。";
-      return {
-        ok: false,
-        snapshot: current,
-        error: recovery
-      };
+  syncPlaud() {
+    return this.startPlaudSync(false);
+  }
+
+  resumePlaudTranscripts() {
+    return this.startPlaudSync(true);
+  }
+
+  startPlaudSync(resumeOnly) {
+    if (this.plaudSyncPromise) {
+      // A user sync must still submit new work after a read-only recovery ends.
+      if (!resumeOnly && this.plaudSyncResumeOnly) {
+        return this.plaudSyncPromise.then(() => this.startPlaudSync(false));
+      }
+      return this.plaudSyncPromise;
     }
-    // The plugin CLI uses the same dedicated Profile for generation/download.
-    // Release the long-lived headless reader first so one Profile never has two
-    // owners. The final snapshot lazily starts a fresh broker again.
-    await this.stopPlaudBackgroundSession("sync-workflow");
-    const { script } = this.plaudPaths();
-    const runName = new Date().toISOString().replace(/[:.]/g, "-");
-    const outputDir = path.join(this.plaudOutputDir, runName);
-    const recoverableItems = (current.items || []).filter((item) =>
-      item.hasTranscript
-      && item.queueStage
-      && !item.transcriptPath
-    );
-    const recoveryResults = [];
-    for (const item of recoverableItems) {
-      try {
-        await this.runJson(process.execPath, [script, "download", item.fileId, outputDir], {
-          timeout: 180000,
-          queue: "plaud",
-          env: this.plaudRuntimeEnv()
-        });
-        recoveryResults.push({ ok: true, fileId: item.fileId });
-      } catch (error) {
-        recoveryResults.push({
-          ok: false,
-          fileId: item.fileId,
-          error: error instanceof Error ? error.message : String(error)
-        });
+    this.plaudSyncResumeOnly = resumeOnly;
+    const pending = this.performPlaudSync(resumeOnly).finally(() => {
+      if (this.plaudSyncPromise === pending) this.plaudSyncPromise = null;
+    });
+    this.plaudSyncPromise = pending;
+    return pending;
+  }
+
+  normalizePlaudSyncResult(item, source) {
+    return normalizePlaudSyncItem(item, {
+      source,
+      retryableError: isRetryablePlaudReadFailure(item?.error),
+      safeError: item?.error ? safePlaudSyncError(item.error) : ""
+    });
+  }
+
+  async withPlaudReadRecovery(operation) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (!this.plaudEnabled() || this.plaudShuttingDown) throw new Error("PLAUD 已停用或 domi 正在退出，已保留现有任务。");
+      try { return await operation(); }
+      catch (error) {
+        if (attempt === 2 || !PLAUD_SYNC_PREFLIGHT_RECOVERY_STATUSES.has(plaudFailureStatus(error))) throw error;
+        await this.sleep(attempt === 0 ? 500 : 1500);
       }
     }
+  }
 
-    let generationResult = { results: [], manifestPath: "" };
-    if (current.pendingCount > 0) {
-      generationResult = await this.runJson(process.execPath, [
-        script,
-        "sync-pending",
-        String(current.pendingCount),
-        outputDir,
-        "900",
-        "8"
-      ], {
-        timeout: 930000,
-        queue: "plaud",
-        env: this.plaudRuntimeEnv()
+  async storePlaudRecovery(fileId, patch) {
+    return this.mutatePlaudQueue((state) => {
+      const current = state.records?.[fileId];
+      if (!current || plaudRecordReady(current) || plaudStageProtected(current)) return false;
+      // Merge into the record under its existing lock. In particular, retain
+      // generation submission/acceptance receipts and all later workflow data.
+      state.records[fileId] = { ...current, ...patch,
+        syncCheckedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      return true;
+    });
+  }
+
+  async recoverPlaudWithLegacyPlugin(records, outputDir) {
+    const results = [];
+    // Old runtimes have no bounded batch recovery. One oldest pending ID per
+    // round keeps the profile responsive; the worker owns its read retries.
+    const selected = [...records].sort((a, b) => String(a.syncCheckedAt || "").localeCompare(String(b.syncCheckedAt || ""))).slice(0, 1);
+    for (const candidate of selected) {
+      const latest = this.loadPlaudWorkflowRecords().find(item => item.fileId === candidate.fileId) || candidate;
+      if (plaudRecordReady(latest) || plaudStageProtected(latest)) {
+        results.push(this.normalizePlaudSyncResult({ ...latest, ok: true }, "recovered"));
+        continue;
+      }
+      let result;
+      try {
+        const downloaded = await this.runPlaudWorker("download", [candidate.fileId, outputDir], undefined, { timeoutMs: 30_000 });
+        if (!readablePlaudTranscript(downloaded.transcriptPath)) throw new Error("PLAUD_TRANSCRIPT_ARTIFACT_MISSING: 下载未返回可读取的文字稿文件。");
+        result = this.normalizePlaudSyncResult({ ...downloaded, stage: "transcript_ready", outcome: "ready" }, "recovered");
+        await this.storePlaudRecovery(candidate.fileId, {
+          ...downloaded, stage: "transcript_ready", syncOutcome: "ready", retryable: false, errorCode: "", error: ""
+        });
+      } catch (error) {
+        result = this.normalizePlaudSyncResult({ ...latest, ok: false, outcome: undefined,
+          syncOutcome: undefined, retryable: undefined, errorCode: undefined,
+          error: String(error?.message || error) }, "recovered");
+        await this.storePlaudRecovery(candidate.fileId, {
+          syncOutcome: result.outcome, retryable: result.retryable,
+          errorCode: result.errorCode, error: result.error
+        }).catch(() => undefined);
+      }
+      // Another workflow may have committed a later stage while a read failed.
+      const refreshed = this.loadPlaudWorkflowRecords().find(item => item.fileId === candidate.fileId);
+      results.push(plaudRecordReady(refreshed) || plaudStageProtected(refreshed)
+        ? this.normalizePlaudSyncResult({ ...refreshed, ok: true }, "recovered") : result);
+    }
+    return results;
+  }
+
+  retainPlaudSyncSnapshot(snapshot, previous, results) {
+    const fresh = snapshot?.ok && !snapshot.stale;
+    const base = fresh ? snapshot : snapshot?.lastSuccessfulSnapshot || (snapshot?.items?.length ? snapshot : previous) || {};
+    const byId = new Map((base.items || []).map(item => [item.fileId, item]));
+    const records = this.loadPlaudWorkflowRecords();
+    for (const record of records) {
+      if (!byId.has(record.fileId) && !plaudRecoveryCandidate(record) && !results.some(item => item.fileId === record.fileId)) continue;
+      const remote = byId.get(record.fileId) || this.normalizePlaudQueueItem(record);
+      byId.set(record.fileId, { ...remote, ...this.plaudWorkflowFields(record),
+        hasTranscript: Boolean(remote.hasTranscript) || plaudRecordReady(record),
+        processing: plaudRecordReady(record) ? false : remote.processing });
+    }
+    for (const result of results) {
+      const existing = byId.get(result.fileId);
+      if (existing && plaudRecordReady(existing)) continue;
+      byId.set(result.fileId, {
+        ...(existing || { fileId: result.fileId, fileName: result.fileName || "未命名录音" }),
+        queueStage: result.stage || existing?.queueStage || "",
+        ...(result.transcriptPath ? { transcriptPath: result.transcriptPath } : {}),
+        hasTranscript: result.outcome === "ready" || Boolean(existing?.hasTranscript),
+        processing: result.outcome === "ready" ? false : Boolean(existing?.processing),
+        syncOutcome: result.outcome, retryable: result.retryable, errorCode: result.errorCode,
+        error: result.error, resumeEligible: plaudRecoveryCandidate({ ...existing, ...result, syncOutcome: result.outcome })
       });
     }
-    const snapshot = await this.plaudQueueForSync();
-    const generationResults = generationResult.results || [];
-    return {
-      ok: snapshot.ok,
-      recoveredCount: recoveryResults.filter((item) => item.ok).length,
-      generatedCount: generationResults.filter((item) => item.ok).length,
-      failedCount:
-        recoveryResults.filter((item) => !item.ok).length
-        + generationResults.filter((item) => !item.ok).length,
-      manifestPath: generationResult.manifestPath || "",
-      snapshot,
-      error: snapshot.error || ""
-    };
+    return { ...base, ok: fresh || byId.size > 0, stale: !fresh,
+      syncedAt: base.syncedAt || Date.now(), pendingCount: base.pendingCount || 0,
+      queueCount: records.filter(item => !PLAUD_FINAL_WORKFLOW_STAGES.has(item.stage)).length,
+      items: [...byId.values()].sort(comparePlaudItems),
+      ...(fresh ? {} : { hasMore: false, nextOffset: 0,
+        remoteStatus: snapshot?.remoteStatus || "unknown", retryable: snapshot?.retryable === true,
+        warning: "本轮列表刷新未完成，已保留提交状态和已下载成果。" }) };
+  }
+
+  async plaudSupportsRecovery(script) {
+    let fingerprint;
+    try {
+      const stat = fs.statSync(script);
+      fingerprint = `${path.resolve(script)}:${stat.mtimeMs}:${stat.size}`;
+    } catch { return false; }
+    if (this.plaudCapabilitiesCache?.fingerprint === fingerprint) return this.plaudCapabilitiesCache.supported;
+    let supported = false;
+    try {
+      // This protocol command is local only; no browser Profile is acquired.
+      const value = await this.runJson(process.execPath, [script, "capabilities"], {
+        timeout: 10_000, requirePlaudEnabled: true, env: this.plaudRuntimeEnv()
+      });
+      supported = value?.schema === "domi.plaud-sync.v1"
+        && Array.isArray(value.commands) && value.commands.includes("sync-pending")
+        && value.commands.includes("recover-pending")
+        && Array.isArray(value.outcomes)
+        && ["ready", "waiting", "retryable", "failed"].every(outcome => value.outcomes.includes(outcome));
+    } catch { /* Older plugins have no capabilities command. Keep recovery read-only. */ }
+    this.plaudCapabilitiesCache = { fingerprint, supported };
+    return supported;
+  }
+
+  async performPlaudSync(resumeOnly) {
+    const empty = () => ({ ...summarizePlaudSync([]), manifestPath: "", resumePendingCount: 0, error: "" });
+    if (!this.plaudEnabled() || this.plaudShuttingDown) {
+      return { ...empty(), ok: false, status: "failed", disabled: true, error: "PLAUD 已停用或 domi 正在退出。" };
+    }
+    const baseline = this.loadPlaudWorkflowRecords();
+    const localPending = baseline.filter(plaudRecoveryCandidate);
+    // Startup discovery must not open a browser when there is nothing to resume.
+    if (resumeOnly && !localPending.length) return empty();
+    let current;
+    if (!resumeOnly) {
+      try { current = await this.plaudQueueForSync(); }
+      catch (error) { current = { ok: false, error: safePlaudSyncError(error) }; }
+      if (!current.ok || current.stale) return {
+        ...empty(), ok: false, status: "failed", snapshot: current,
+        resumePendingCount: localPending.length,
+        error: current.error || (current.remoteStatus === "auth_required"
+          ? "PLAUD 登录已失效，请在设置中重新登录并验证。"
+          : "PLAUD 本轮远端读取未完成，未提交新的生成请求；已保留上次列表，请稍后重试。")
+      };
+    }
+    const { script } = this.plaudPaths();
+    const supportsRecovery = await this.plaudSupportsRecovery(script);
+    const outputDir = path.join(this.plaudOutputDir, new Date().toISOString().replace(/[:.]/g, "-"));
+    let results = [];
+    let manifestPath = "";
+    let operationError = "";
+    try {
+      if (supportsRecovery) {
+        const count = Math.min(100, Math.max(Number(current?.pendingCount) || 0, localPending.length, 1));
+        if (resumeOnly || current.pendingCount > 0 || localPending.length) {
+          const execute = () => this.runJson(process.execPath, [script,
+            resumeOnly ? "recover-pending" : "sync-pending", String(count), outputDir,
+            resumeOnly ? "20" : "900", resumeOnly ? "3" : "8"], {
+            timeout: resumeOnly ? 60_000 : 930_000, queue: "plaud", requirePlaudEnabled: true,
+            releasePlaudSession: resumeOnly ? "resume-transcripts" : "sync-workflow", env: this.plaudRuntimeEnv()
+          });
+          // Whole sync-pending is never retried: it may already have sent POST.
+          const response = resumeOnly ? await this.withPlaudReadRecovery(execute) : await execute();
+          if (!Array.isArray(response.results)) throw new Error("PLAUD 同步结果不完整，已保留队列，请更新插件后重试。");
+          results = response.results.map(item => this.normalizePlaudSyncResult(item,
+            resumeOnly || baseline.some(record => record.fileId === item.fileId) ? "recovered" : "generated"));
+          manifestPath = response.manifestPath || "";
+        }
+      } else {
+        const candidates = new Map(localPending.map(item => [item.fileId, item]));
+        for (const item of current?.items || []) {
+          if (item.hasTranscript && item.queueStage && !plaudRecordReady(item) && !plaudStageProtected(item)) {
+            candidates.set(item.fileId, { ...item, stage: item.queueStage });
+          }
+        }
+        results = await this.recoverPlaudWithLegacyPlugin([...candidates.values()], outputDir);
+        if (!resumeOnly && current.pendingCount > 0) {
+          // Older batch commands cannot reliably exclude previous submissions,
+          // including inaccessible IDs outside the visible page. Never POST.
+          operationError = "旧版 PLAUD 插件不支持安全续接；已恢复可读成果，请更新插件后再生成其余录音。";
+        }
+      }
+    } catch (error) { operationError = safePlaudSyncError(error); }
+
+    let snapshot;
+    try { snapshot = await this.plaudQueueForSync(); }
+    catch (error) { snapshot = { ok: false, error: safePlaudSyncError(error) }; }
+    // Read local commits after the final remote read: a download may complete
+    // during that read, even if the CLI itself lost its response.
+    const latest = this.loadPlaudWorkflowRecords();
+    const latestById = new Map(latest.map(item => [item.fileId, item]));
+    const seen = new Set(results.map(item => item.fileId));
+    results = results.map(item => plaudRecordReady(latestById.get(item.fileId)) || plaudStageProtected(latestById.get(item.fileId))
+      ? this.normalizePlaudSyncResult({ ...latestById.get(item.fileId), ok: true, source: item.source }, item.source)
+      : this.normalizePlaudSyncResult(item, item.source));
+    for (const record of latest) {
+      if (seen.has(record.fileId)) continue;
+      const writtenHere = record.transcriptPath && path.resolve(record.transcriptPath).startsWith(`${path.resolve(outputDir)}${path.sep}`);
+      if (localPending.some(item => item.fileId === record.fileId) || writtenHere
+        || (plaudRecoveryCandidate(record) && !baseline.some(item => item.fileId === record.fileId))) {
+        results.push(this.normalizePlaudSyncResult({ ...record,
+          ...(operationError && !plaudRecordReady(record) ? { error: operationError } : {}) }, "recovered"));
+      }
+    }
+    const listRefreshFailed = !snapshot?.ok || snapshot.stale === true;
+    const summary = summarizePlaudSync(results, { listRefreshFailed, operationFailed: Boolean(operationError) });
+    const retained = this.retainPlaudSyncSnapshot(snapshot, current, summary.results);
+    return { ...summary, manifestPath, snapshot: retained,
+      resumePendingCount: this.loadPlaudWorkflowRecords().filter(plaudRecoveryCandidate).length,
+      warning: operationError || (listRefreshFailed ? retained.warning : ""),
+      error: operationError || (listRefreshFailed ? safePlaudSyncError(snapshot.error || snapshot.warning || "PLAUD 列表暂时不可用。") : "") };
   }
 
   async mutatePlaudQueue(mutator) {
-    const stateDir = path.join(os.homedir(), ".domi");
-    const statePath = path.join(stateDir, "plaud-workflow.json");
+    const statePath = this.plaudStateFile;
+    const stateDir = path.dirname(statePath);
     const lockPath = path.join(stateDir, "plaud-workflow.lock");
     if (!fs.existsSync(statePath)) return false;
     fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });

@@ -524,7 +524,13 @@ const browserFallback: Window["workbench"] = {
   }),
   syncPlaud: async () => ({
     ok: false,
+    status: "failed",
     error: "浏览器预览模式不能同步 PLAUD 队列。"
+  }),
+  resumePlaudTranscripts: async () => ({
+    ok: false,
+    status: "failed",
+    error: "浏览器预览模式不能补下载 PLAUD 文字稿。"
   }),
   renamePlaud: async () => ({
     ok: false,

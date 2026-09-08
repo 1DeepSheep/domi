@@ -4623,7 +4623,22 @@ ipcMain.handle("domi:plaud-sync", async () => {
     const result = await serviceCoordinator.run(
       "domi:plaud-sync",
       () => getDomiIntegration().syncPlaud(),
-      { force: true, allowStale: false, isSuccess: (value) => value?.ok !== false }
+      // A structured partial/failure result carries per-record progress. Keep
+      // it intact instead of reducing it to one thrown error and losing paths.
+      { force: true, allowStale: false, retries: 0 }
+    );
+    serviceCoordinator.invalidate("domi:plaud-list");
+    return result;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:plaud-resume", async () => {
+  try {
+    const result = await serviceCoordinator.run(
+      "domi:plaud-resume",
+      () => getDomiIntegration().resumePlaudTranscripts(),
+      { force: true, allowStale: false, retries: 0 }
     );
     serviceCoordinator.invalidate("domi:plaud-list");
     return result;
