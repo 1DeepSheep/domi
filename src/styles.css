@@ -5871,6 +5871,24 @@ body.panel-resizing .main-grid {
   line-height: 1.5;
 }
 
+.plaud-inline-notice.waiting {
+  border-color: #9e9a8d;
+  color: #6d695f;
+  background: #f5f4f0;
+}
+
+.plaud-inline-notice.partial {
+  border-color: #b99764;
+  color: #856638;
+  background: #faf6ed;
+}
+
+.plaud-inline-notice.failed {
+  border-color: #bd8576;
+  color: #925744;
+  background: #fff6f2;
+}
+
 .plaud-disabled-card {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr) auto;
@@ -6117,6 +6135,41 @@ body.panel-resizing .main-grid {
 }
 
 .plaud-item-status.attention {
+  color: #a15e47;
+}
+
+.plaud-item-status.waiting,
+.plaud-item-status.neutral {
+  color: var(--muted);
+}
+
+.plaud-item-progress {
+  display: flex;
+  margin-top: 4px;
+}
+
+.plaud-item-progress .plaud-item-status {
+  margin-left: 0;
+}
+
+.plaud-item-detail {
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: var(--font-cn);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.plaud-item-detail.attention {
+  color: #a15e47;
+}
+
+.domi-health-list strong.plaud-queue-health {
+  color: var(--muted);
+}
+
+.domi-health-list strong.plaud-queue-health.attention {
   color: #a15e47;
 }
 

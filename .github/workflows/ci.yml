@@ -65,3 +65,6 @@ jobs:
 
       - name: Verify task notifications, unread state and navigation
         run: npm run test:task-notifications-ui
+
+      - name: Verify PLAUD waiting, recovery and partial completion states
+        run: npm run test:plaud-status-ui
