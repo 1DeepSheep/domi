@@ -1586,8 +1586,8 @@ assert.match(
   "Important weekly news must be able to reach the native notification bridge."
 );
 assert.match(
-  app,
-  /item\.queueStage === "managed"\) return "已生成并入库"/,
+  read("src/plaud-status.ts"),
+  /item\.queueStage === "managed"\) return \{ label: "已生成并入库", tone: "complete"/,
   "Completed PLAUD project recordings must display their archived state."
 );
 assert.match(

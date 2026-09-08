@@ -105,6 +105,7 @@ contextBridge.exposeInMainWorld("workbench", {
   disconnectPlaud: (request) => ipcRenderer.invoke("domi:plaud-disconnect", request),
   listPlaud: (request) => ipcRenderer.invoke("domi:plaud-list", request),
   syncPlaud: (request) => ipcRenderer.invoke("domi:plaud-sync", request),
+  resumePlaudTranscripts: () => ipcRenderer.invoke("domi:plaud-resume"),
   renamePlaud: (request) => ipcRenderer.invoke("domi:plaud-rename", request),
   deletePlaud: (request) => ipcRenderer.invoke("domi:plaud-delete", request),
   loadDomiEntityWorkspace: (request) => ipcRenderer.invoke("domi:entity-workspace", request),

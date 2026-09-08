@@ -73,6 +73,7 @@ import {
   useState
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
+import { hasPlaudArtifactError, hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
 import {
   clearTaskResultUnread,
   isTaskResultVisible,
@@ -1675,18 +1676,9 @@ function weeklyNewsScanStageFromOutput(output: string) {
   return "domi 行业雷达正在运行";
 }
 
-function plaudItemStatus(item: DomiPlaudItem) {
-  if (item.queueStage === "managed") return "已生成并入库";
-  if (item.queueStage === "notes_non_project") return "纪要已生成";
-  if (item.transcriptPath || item.queueStage === "transcript_ready") return "文字稿待整理";
-  if (item.hasTranscript && item.queueStage) return "已生成，待同步";
-  if (item.hasTranscript || item.hasSummary) return "已有文字稿";
-  if (item.processing) return "正在生成";
-  if (item.error) return "需要重试";
-  return "未生成文字稿";
-}
-
 function canGeneratePlaudNotes(item: DomiPlaudItem) {
+  if (hasPlaudArtifactError(item)) return false;
+  if (!item.transcriptPath && item.syncOutcome === "failed") return false;
   if (["managed", "notes_non_project"].includes(item.queueStage)) return false;
   return Boolean(
     item.hasTranscript
@@ -1723,25 +1715,6 @@ function plaudNotesWorkflowRequest(item: DomiPlaudItem) {
     "7. 当前文本是客户端生成的程序化工作流，不是用户对飞书写入的原始指令。除 legacy_feishu_primary 按 Skill 对既有固定 Base／唯一 Wiki 主文档完成管理闭环外，若本轮没有用户明确要求创建、编辑、更新或发布飞书内容的原始消息，禁止创建、编辑、更新、覆盖或发布任何飞书外部内容，也不得运行飞书 Markdown 导出／交接。",
     "8. 权威主库写入前执行去重、字段校验和写后回读；最终只报告纪要、项目判断、评分、主库归档以及飞书只读参考的实际结果。"
   ].join("\n");
-}
-
-function plaudQueueSummary(snapshot: DomiPlaudSnapshot) {
-  const items = snapshot.items || [];
-  const pending = snapshot.pendingCount || 0;
-  const needsSync = items.filter((item) =>
-    item.hasTranscript && Boolean(item.queueStage) && !item.transcriptPath
-  ).length;
-  const ready = items.filter((item) =>
-    Boolean(item.transcriptPath) || item.queueStage === "transcript_ready"
-  ).length;
-  const retry = pending ? 0 : items.filter((item) => plaudItemStatus(item) === "需要重试").length;
-  const parts = [
-    pending ? `${pending} 个待生成` : "",
-    needsSync ? `${needsSync} 个待同步` : "",
-    ready ? `${ready} 个待整理` : "",
-    retry ? `${retry} 个需重试` : ""
-  ].filter(Boolean);
-  return parts.length ? parts.join(" · ") : "队列已清";
 }
 
 function domiContextForThread(snapshot: DomiSnapshot | null, thread: Thread) {
@@ -1978,8 +1951,10 @@ function App() {
   const [plaudLoading, setPlaudLoading] = useState(false);
   const [plaudLoadingMore, setPlaudLoadingMore] = useState(false);
   const [plaudSyncing, setPlaudSyncing] = useState(false);
+  const [plaudResuming, setPlaudResuming] = useState(false);
+  const [plaudResumePendingCount, setPlaudResumePendingCount] = useState<number | null>(null);
   const [plaudError, setPlaudError] = useState("");
-  const [plaudNotice, setPlaudNotice] = useState("");
+  const [plaudNotice, setPlaudNoticeState] = useState<PlaudFeedback | null>(null);
   const [editingPlaudId, setEditingPlaudId] = useState<string | null>(null);
   const [plaudTitleDraft, setPlaudTitleDraft] = useState("");
   const [renamingPlaudId, setRenamingPlaudId] = useState<string | null>(null);
@@ -2141,6 +2116,8 @@ function App() {
   const databaseGridSaveCountRef = useRef(0);
   const plaudListPromiseRef = useRef<Promise<DomiPlaudSnapshot | null> | null>(null);
   const plaudSyncPromiseRef = useRef<Promise<DomiPlaudSyncResult | null> | null>(null);
+  const plaudListOwnerRef = useRef<object | null>(null);
+  const plaudSyncOwnerRef = useRef<object | null>(null);
   const plaudSnapshotRevisionRef = useRef(0);
   const plaudMutationIdsRef = useRef(new Set<string>());
   const launchingPlaudIdsRef = useRef(new Set<string>());
@@ -3351,14 +3328,46 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!appSettings || plaudEnabled) return;
+    if (!appSettings) return;
+    // A different account/browser or disabled connection invalidates all old
+    // reads, including their catch/finally state updates.
+    plaudSnapshotRevisionRef.current += 1;
+    plaudListPromiseRef.current = null;
+    plaudSyncPromiseRef.current = null;
+    plaudListOwnerRef.current = null;
+    plaudSyncOwnerRef.current = null;
     setPlaudSnapshot(null);
     setPlaudError("");
     setPlaudNotice("");
     setPlaudLoading(false);
     setPlaudLoadingMore(false);
     setPlaudSyncing(false);
-  }, [plaudEnabled, appSettings]);
+    setPlaudResuming(false);
+    setPlaudResumePendingCount(null);
+  }, [appSettings?.plaudConnectionMode, appSettings?.plaudBrowser]);
+
+  useEffect(() => {
+    if (!plaudEnabled || !appSettings?.onboardingComplete) return;
+    // Resume checks the local queue first and never opens a remote session when
+    // it has no candidates. This also restores progress before the panel opens.
+    void syncPlaudQueue({ resumeOnly: true });
+  }, [plaudEnabled, appSettings?.onboardingComplete, appSettings?.plaudBrowser]);
+
+  const plaudNeedsRecovery = plaudEnabled
+    && (plaudResumePendingCount === null ? hasRecoverablePlaudItems(plaudSnapshot) : plaudResumePendingCount > 0)
+    && !["auth_required", "access_denied", "runtime_unavailable"]
+      .includes(plaudSnapshot?.remoteStatus || "");
+  useEffect(() => {
+    if (!plaudNeedsRecovery) return;
+    // This read/download-only operation never submits generation. Keep the
+    // interval independent of snapshot objects and panel visibility so normal
+    // renders or switching tasks cannot indefinitely postpone recovery.
+    const timer = window.setInterval(() => {
+      if (plaudListPromiseRef.current || plaudSyncPromiseRef.current || plaudMutationIdsRef.current.size) return;
+      void syncPlaudQueue({ resumeOnly: true });
+    }, 90_000);
+    return () => window.clearInterval(timer);
+  }, [plaudNeedsRecovery, appSettings?.plaudBrowser]);
 
   useEffect(() => {
     if (!selectedWorkflow?.requiresPlaud || plaudEnabled) return;
@@ -5806,17 +5815,29 @@ function App() {
     if (!result.ok) setWeeklyNewsError(result.error || "无法打开新闻原文。 ");
   }
 
+  function setPlaudNotice(text: string, tone: PlaudFeedbackTone = "complete") {
+    setPlaudNoticeState(text ? { text, tone } : null);
+  }
+
+  function currentPlaudRequest(revision: number) {
+    return revision === plaudSnapshotRevisionRef.current
+      && appSettingsRef.current?.plaudConnectionMode === "enabled";
+  }
+
   async function refreshPlaudQueue({ fresh = false }: { fresh?: boolean } = {}): Promise<DomiPlaudSnapshot | null> {
     if (appSettings?.plaudConnectionMode !== "enabled") return null;
     if (plaudListPromiseRef.current) return plaudListPromiseRef.current;
     if (plaudSyncPromiseRef.current || plaudMutationIdsRef.current.size > 0) return null;
-    const revision = plaudSnapshotRevisionRef.current;
+    const revision = ++plaudSnapshotRevisionRef.current;
+    const owner = {};
+    plaudListOwnerRef.current = owner;
     setPlaudLoading(true);
     setPlaudError("");
+    setPlaudNotice("");
     const request = (async (): Promise<DomiPlaudSnapshot | null> => {
       try {
-        const result = await workbench.listPlaud({ fresh, offset: 0, limit: 50 });
-        if (revision === plaudSnapshotRevisionRef.current) {
+        const result = await Promise.resolve().then(() => workbench.listPlaud({ fresh, offset: 0, limit: 50 }));
+        if (currentPlaudRequest(revision)) {
           setPlaudSnapshot((current) => {
             if (result.lastSuccessfulSnapshot) {
               return {
@@ -5839,27 +5860,31 @@ function App() {
             return result;
           });
           if (!result.ok) {
-            setPlaudError(result.error || result.warning || "PLAUD 队列同步失败。 ");
+            setPlaudError(plaudSafeError(result.error || result.warning, "PLAUD 队列暂时无法刷新。"));
             setPlaudNotice("");
           } else if (result.stale) {
-            setPlaudError(result.warning || "PLAUD 暂时无法刷新，已显示上次成功读取的录音。");
+            setPlaudError(plaudSafeError(result.warning, "PLAUD 暂时无法刷新，已显示上次成功读取的录音。"));
             setPlaudNotice("");
           } else {
             setPlaudError("");
-            setPlaudNotice((current) =>
-              current.startsWith("PLAUD 暂时无法刷新") ? "" : current
-            );
+            setPlaudNotice("");
+            // A fresh list may reveal submitted work after the last resume
+            // reported an empty queue. Derive eligibility from this snapshot.
+            setPlaudResumePendingCount(null);
           }
         }
         return result;
       } catch (error) {
-        if (revision === plaudSnapshotRevisionRef.current) {
-          setPlaudError(error instanceof Error ? error.message : String(error));
+        if (currentPlaudRequest(revision)) {
+          setPlaudError(plaudSafeError(error));
         }
         return null;
       } finally {
-        plaudListPromiseRef.current = null;
-        setPlaudLoading(false);
+        if (plaudListOwnerRef.current === owner) {
+          plaudListPromiseRef.current = null;
+          plaudListOwnerRef.current = null;
+          setPlaudLoading(false);
+        }
       }
     })();
     plaudListPromiseRef.current = request;
@@ -5871,15 +5896,17 @@ function App() {
     if (!plaudSnapshot?.ok || !plaudSnapshot.hasMore) return null;
     if (plaudListPromiseRef.current) return plaudListPromiseRef.current;
     if (plaudSyncPromiseRef.current || plaudMutationIdsRef.current.size > 0) return null;
-    const revision = plaudSnapshotRevisionRef.current;
+    const revision = ++plaudSnapshotRevisionRef.current;
+    const owner = {};
+    plaudListOwnerRef.current = owner;
     const offset = Number(plaudSnapshot.nextOffset)
       || Number(plaudSnapshot.pageOffset || 0) + Number(plaudSnapshot.pageSize || 50);
     setPlaudLoadingMore(true);
     setPlaudError("");
     const request = (async (): Promise<DomiPlaudSnapshot | null> => {
       try {
-        const result = await workbench.listPlaud({ offset, limit: 50 });
-        if (revision !== plaudSnapshotRevisionRef.current) return result;
+        const result = await Promise.resolve().then(() => workbench.listPlaud({ offset, limit: 50 }));
+        if (!currentPlaudRequest(revision)) return result;
         if (!result.ok || result.stale) {
           setPlaudSnapshot((current) => current
             ? {
@@ -5890,7 +5917,7 @@ function App() {
                 warning: result.warning || result.error
               }
             : current);
-          setPlaudError(result.error || result.warning || "更早的 PLAUD 录音读取失败。 ");
+          setPlaudError(plaudSafeError(result.error || result.warning, "更早的 PLAUD 录音暂时无法读取。"));
           return result;
         }
         setPlaudSnapshot((current) => {
@@ -5919,56 +5946,60 @@ function App() {
             items
           };
         });
+        setPlaudResumePendingCount(null);
         return result;
       } catch (error) {
-        if (revision === plaudSnapshotRevisionRef.current) {
-          setPlaudError(error instanceof Error ? error.message : String(error));
+        if (currentPlaudRequest(revision)) {
+          setPlaudError(plaudSafeError(error));
         }
         return null;
       } finally {
-        plaudListPromiseRef.current = null;
-        setPlaudLoadingMore(false);
+        if (plaudListOwnerRef.current === owner) {
+          plaudListPromiseRef.current = null;
+          plaudListOwnerRef.current = null;
+          setPlaudLoadingMore(false);
+        }
       }
     })();
     plaudListPromiseRef.current = request;
     return request;
   }
 
-  async function syncPlaudQueue(): Promise<DomiPlaudSyncResult | null> {
+  async function syncPlaudQueue({ resumeOnly = false }: { resumeOnly?: boolean } = {}): Promise<DomiPlaudSyncResult | null> {
     if (appSettings?.plaudConnectionMode !== "enabled") return null;
     if (plaudSyncPromiseRef.current) return plaudSyncPromiseRef.current;
     if (plaudListPromiseRef.current) return null;
     if (plaudMutationIdsRef.current.size > 0) return null;
-    plaudSnapshotRevisionRef.current += 1;
+    const revision = ++plaudSnapshotRevisionRef.current;
+    const owner = {};
+    plaudSyncOwnerRef.current = owner;
     setPlaudSyncing(true);
+    setPlaudResuming(resumeOnly);
     setPlaudError("");
     setPlaudNotice("");
     const request = (async (): Promise<DomiPlaudSyncResult | null> => {
       try {
-        const result = await workbench.syncPlaud();
+        const result = await Promise.resolve().then(() => resumeOnly ? workbench.resumePlaudTranscripts() : workbench.syncPlaud());
+        if (!currentPlaudRequest(revision)) return result;
         if (result.snapshot) setPlaudSnapshot(result.snapshot);
-        if (!result.ok) {
-          setPlaudError(result.error || "PLAUD 同步或文字稿生成失败。 ");
-          return result;
+        setPlaudResumePendingCount(typeof result.resumePendingCount === "number" ? Math.max(0, result.resumePendingCount) : null);
+        if (resumeOnly && result.ok && !result.snapshot && !(result.results?.length)
+          && !result.generatedCount && !result.recoveredCount && !result.waitingCount && !result.retryableCount && !result.failedCount) {
+          setPlaudNotice("");
+        } else {
+          setPlaudNoticeState(plaudSyncFeedback(result));
         }
-        const generated = result.generatedCount || 0;
-        const recovered = result.recoveredCount || 0;
-        const failed = result.failedCount || 0;
-        const completed: string[] = [];
-        if (recovered) completed.push(`同步 ${recovered} 份已生成文字稿`);
-        if (generated) completed.push(`生成 ${generated} 份文字稿`);
-        setPlaudNotice(completed.length
-          ? `已${completed.join("并")}${failed ? `，${failed} 份需要重试` : ""}`
-          : failed
-            ? `同步完成，${failed} 份文字稿仍需重试`
-            : "已同步到最新 PLAUD 队列");
         return result;
       } catch (error) {
-        setPlaudError(error instanceof Error ? error.message : String(error));
+        if (currentPlaudRequest(revision)) setPlaudError(plaudSafeError(error));
         return null;
       } finally {
-        plaudSyncPromiseRef.current = null;
-        setPlaudSyncing(false);
+        if (plaudSyncOwnerRef.current === owner) {
+          plaudSyncPromiseRef.current = null;
+          plaudSyncOwnerRef.current = null;
+          setPlaudSyncing(false);
+          setPlaudResuming(false);
+        }
       }
     })();
     plaudSyncPromiseRef.current = request;
@@ -6084,7 +6115,8 @@ function App() {
   }
 
   async function savePlaudTitle(item: DomiPlaudItem) {
-    if (plaudMutationIdsRef.current.has(item.fileId)) return;
+    if (plaudMutationIdsRef.current.size || appSettingsRef.current?.plaudConnectionMode !== "enabled") return;
+    const browser = appSettingsRef.current.plaudBrowser;
     const fileName = plaudTitleDraft.trim();
     if (!fileName) {
       setPlaudError("录音标题不能为空。 ");
@@ -6095,12 +6127,18 @@ function App() {
       return;
     }
     plaudMutationIdsRef.current.add(item.fileId);
-    plaudSnapshotRevisionRef.current += 1;
     setRenamingPlaudId(item.fileId);
     setPlaudError("");
     setPlaudNotice("");
+    let revision = plaudSnapshotRevisionRef.current;
     try {
+      // An automatic check can begin while the title editor is open. Reserve
+      // this mutation before waiting, then use the fresh snapshot it produces.
+      await Promise.all([plaudListPromiseRef.current, plaudSyncPromiseRef.current]);
+      if (appSettingsRef.current?.plaudConnectionMode !== "enabled" || appSettingsRef.current.plaudBrowser !== browser) return;
+      revision = ++plaudSnapshotRevisionRef.current;
       const result = await workbench.renamePlaud({ fileId: item.fileId, fileName });
+      if (!currentPlaudRequest(revision)) return;
       if (!result.ok || !result.fileName) {
         setPlaudError(result.error || "PLAUD 标题修改失败。 ");
         return;
@@ -6115,7 +6153,7 @@ function App() {
       setPlaudNotice("录音标题已同步到 PLAUD");
       cancelPlaudRename();
     } catch (error) {
-      setPlaudError(error instanceof Error ? error.message : String(error));
+      if (currentPlaudRequest(revision)) setPlaudError(plaudSafeError(error));
     } finally {
       plaudMutationIdsRef.current.delete(item.fileId);
       setRenamingPlaudId(null);
@@ -6129,6 +6167,7 @@ function App() {
       || plaudMutationIdsRef.current.size > 0
       || launchingPlaudIdsRef.current.has(item.fileId)
     ) return;
+    const browser = appSettingsRef.current?.plaudBrowser;
     const approved = await requestConfirmation({
       title: "将这条 PLAUD 录音移入回收站？",
       message: `“${item.fileName}”将从 PLAUD 最近录音列表中移除。`,
@@ -6136,16 +6175,24 @@ function App() {
       confirmLabel: "移入回收站",
       tone: "danger"
     });
-    if (!approved) return;
+    if (!approved || plaudMutationIdsRef.current.size
+      || appSettingsRef.current?.plaudConnectionMode !== "enabled"
+      || appSettingsRef.current.plaudBrowser !== browser) return;
 
     plaudMutationIdsRef.current.add(item.fileId);
-    plaudSnapshotRevisionRef.current += 1;
     setDeletingPlaudId(item.fileId);
     setPlaudError("");
     setPlaudNotice("");
     if (editingPlaudId === item.fileId) cancelPlaudRename();
+    let revision = plaudSnapshotRevisionRef.current;
     try {
+      // The confirmation can remain open across a 90-second recovery tick.
+      // Wait for that read while holding the mutation lock; do not supersede it.
+      await Promise.all([plaudListPromiseRef.current, plaudSyncPromiseRef.current]);
+      if (appSettingsRef.current?.plaudConnectionMode !== "enabled" || appSettingsRef.current.plaudBrowser !== browser) return;
+      revision = ++plaudSnapshotRevisionRef.current;
       const result = await workbench.deletePlaud({ fileId: item.fileId });
+      if (!currentPlaudRequest(revision)) return;
       if (!result.ok || !result.trashed) {
         setPlaudError(result.error || "PLAUD 录音删除失败。 ");
         return;
@@ -6162,7 +6209,7 @@ function App() {
       } : current);
       setPlaudNotice(`已将“${item.fileName}”移入 PLAUD 回收站`);
     } catch (error) {
-      setPlaudError(error instanceof Error ? error.message : String(error));
+      if (currentPlaudRequest(revision)) setPlaudError(plaudSafeError(error));
     } finally {
       plaudMutationIdsRef.current.delete(item.fileId);
       setDeletingPlaudId(null);
@@ -13782,7 +13829,7 @@ function App() {
                         </button>
                       </div>
                     )}
-                    {plaudNotice && <div className="plaud-inline-notice">{plaudNotice}</div>}
+                    {plaudNotice && <div className={`plaud-inline-notice ${plaudNotice.tone}`} role="status">{plaudNotice.text}</div>}
                     <div className="plaud-queue-header">
                       <strong>最近录音</strong>
                       <span>
@@ -13832,7 +13879,7 @@ function App() {
                       notesThread && activeRunsByThread[notesThread.id]
                     );
                     const deleting = deletingPlaudId === item.fileId;
-                    const status = plaudItemStatus(item);
+                    const status = plaudItemPresentation(item);
                     const showNotesAction = canGeneratePlaudNotes(item);
                     const notesComplete = ["managed", "notes_non_project"].includes(item.queueStage);
                     return (
@@ -13900,9 +13947,9 @@ function App() {
                               <span>{launchingNotes ? "正在启动" : notesRunning ? "正在执行" : "生成纪要并入库"}</span>
                             </button>
                           ) : (
-                            <span className={`plaud-item-status ${notesComplete ? "complete" : ""} ${status === "未生成文字稿" || status === "需要重试" ? "attention" : ""}`}>
-                              {notesComplete && <CheckCircle2 size={12} />}
-                              {status}
+                            <span className={`plaud-item-status ${status.tone}`}>
+                              {notesComplete && status.tone === "complete" && <CheckCircle2 size={12} />}
+                              {status.label}
                             </span>
                           )}
                           {item.transcriptPath && (
@@ -13929,6 +13976,10 @@ function App() {
                               : <Trash2 size={12} />}
                           </button>
                         </div>
+                        {showNotesAction && status.tone !== "neutral" && (
+                          <div className="plaud-item-progress"><span className={`plaud-item-status ${status.tone}`}>{status.label}</span></div>
+                        )}
+                        {status.detail && <div className={`plaud-item-detail ${status.tone}`}>{status.detail}</div>}
                       </div>
                     );
                       })}
@@ -13949,7 +14000,7 @@ function App() {
                       disabled={plaudSyncing || plaudLoading || plaudLoadingMore || Boolean(renamingPlaudId) || Boolean(deletingPlaudId)}
                     >
                       <RefreshCw className={plaudSyncing || plaudLoading || plaudLoadingMore ? "spinning" : ""} size={14} />
-                      {plaudSyncing ? "正在同步并生成文字稿" : "同步 PLAUD 并生成文字稿"}
+                      {plaudSyncing ? plaudResuming ? "正在检查并补下载文字稿" : "正在同步并生成文字稿" : "同步 PLAUD 并生成文字稿"}
                     </button>
                   </>
                 ) : (
@@ -13983,7 +14034,7 @@ function App() {
                   {plaudEnabled && (
                     <div>
                       <span>PLAUD 队列</span>
-                      <strong>
+                      <strong className={`plaud-queue-health ${(plaudSnapshot?.items || []).some(item => plaudItemPresentation(item).tone === "attention") ? "attention" : ""}`}>
                         {plaudSnapshot?.ok
                           ? plaudQueueSummary(plaudSnapshot)
                           : domiSnapshot?.health.plaud.ok

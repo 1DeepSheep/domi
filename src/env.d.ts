@@ -149,6 +149,7 @@ declare global {
       ) => Promise<DomiPlaudConnectionResult>;
       listPlaud: (request?: DomiPlaudListRequest) => Promise<DomiPlaudSnapshot>;
       syncPlaud: () => Promise<DomiPlaudSyncResult>;
+      resumePlaudTranscripts: () => Promise<DomiPlaudSyncResult>;
       renamePlaud: (request: DomiPlaudRenameRequest) => Promise<DomiPlaudRenameResult>;
       deletePlaud: (request: DomiPlaudDeleteRequest) => Promise<DomiPlaudDeleteResult>;
       loadDomiEntityWorkspace: (
@@ -1245,6 +1246,12 @@ export type DomiPlaudItem = {
   queueStage: string;
   transcriptPath: string;
   error: string;
+  syncOutcome?: "ready" | "waiting" | "retryable" | "failed";
+  retryable?: boolean;
+  errorCode?: string;
+  generationAcceptedAt?: string;
+  generationRequestedAt?: string;
+  resumeEligible?: boolean;
 };
 
 export type DomiPlaudConnectionRequest = {
@@ -1304,9 +1311,25 @@ export type DomiPlaudSnapshot = {
 
 export type DomiPlaudSyncResult = {
   ok: boolean;
+  status?: "complete" | "partial" | "waiting" | "failed";
   generatedCount?: number;
   recoveredCount?: number;
   failedCount?: number;
+  waitingCount?: number;
+  retryableCount?: number;
+  resumePendingCount?: number;
+  results?: Array<{
+    fileId: string;
+    ok: boolean;
+    outcome: "ready" | "waiting" | "retryable" | "failed";
+    stage?: string;
+    transcriptPath?: string;
+    retryable?: boolean;
+    errorCode?: string;
+    error?: string;
+  }>;
+  warning?: string;
+  listRefreshFailed?: boolean;
   manifestPath?: string;
   snapshot?: DomiPlaudSnapshot;
   error?: string;
