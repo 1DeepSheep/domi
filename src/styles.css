@@ -848,8 +848,8 @@ body.panel-resizing .main-grid {
 .thread-state-indicator.unread {
   width: 7px;
   height: 7px;
-  background: #2f80ed;
-  box-shadow: 0 0 0 2px rgba(47, 128, 237, 0.1);
+  background: #d64a40;
+  box-shadow: 0 0 0 2px rgba(214, 74, 64, 0.1);
 }
 
 .thread-more {

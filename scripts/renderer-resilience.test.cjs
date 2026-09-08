@@ -1156,8 +1156,8 @@ assert.doesNotMatch(
 );
 assert.match(
   app,
-  /settlingThreadIdsRef[\s\S]*?finalizeEntityBinding[\s\S]*?\.finally\(releaseRun\)/,
-  "A completed run must retain its per-thread lock until entity binding and attachment settlement finish."
+  /settlingThreadIdsRef\.current\.add\(context\.threadId\)[\s\S]*?finalizeEntityBinding\(context,[\s\S]*?\.finally\(\(\) => \{\s*releaseRun\(\);\s*announceTaskResult\(context\.threadId, context\.assistantMessageId, outcome\)/,
+  "A completed run must retain its per-thread lock until entity settlement finishes, then release and announce the settled outcome."
 );
 assert.match(
   app,
@@ -1677,7 +1677,7 @@ assert.match(
 );
 assert.match(
   app,
-  /isThreadActivelyVisible[\s\S]*?workspaceViewRef\.current === "conversation"[\s\S]*?documentPanelFocusedRef/,
+  /function isThreadActivelyVisible[\s\S]*?return isTaskResultVisible\(\{[\s\S]*?workspaceView: workspaceViewRef\.current[\s\S]*?windowFocused: windowFocusedRef\.current && document\.hasFocus\(\)[\s\S]*?visibilityState: document\.visibilityState[\s\S]*?documentPanelFocused: documentPanelFocusedRef\.current[\s\S]*?function clearVisibleThreadCompletion[\s\S]*?if \(!isThreadActivelyVisible\(threadId\)\) return/,
   "Task completion may be marked read only while its conversation is actually visible and focused."
 );
 assert.match(
@@ -1707,7 +1707,7 @@ assert.match(
 );
 assert.match(
   app,
-  /reboundRunId = result\.runId[\s\S]*?runContextRef\.current\.set\(reboundRunId[\s\S]*?await workbench\.bindCodexRun\(reboundRunId\)[\s\S]*?recoverCodexThread\(recoveryThreadId(?:, recoveryRequest)?\)/,
+  /const recoveredRunId = result\.runId[\s\S]*?reboundRunId = recoveredRunId[\s\S]*?runContextRef\.current\.set\(recoveredRunId[\s\S]*?setActiveRunsByThread\(\(current\) => \(\{ \.\.\.current, \[thread\.id\]: recoveredRunId \}\)\)[\s\S]*?await workbench\.bindCodexRun\(recoveredRunId\)[\s\S]*?recoverCodexThread\(recoveryThreadId(?:, recoveryRequest)?\)/,
   "The renderer must register recovery context before binding live events and reconcile a bind race."
 );
 assert.match(
@@ -1829,7 +1829,7 @@ assert.match(
 );
 assert.match(
   selectThreadBody,
-  /await closeMarkdown\([\s\S]*?if \(!selectionIsCurrent\(\)\) return;[\s\S]*?await navigateWorkspace\("conversation"\)[\s\S]*?if \(!selectionIsCurrent\(\)\) return;[\s\S]*?activateThreadNow\(threadId, selectionIntent\)/,
+  /await closeMarkdown\([\s\S]*?if \(!selectionIsCurrent\(\)\) return false;[\s\S]*?await navigateWorkspace\("conversation"\)[\s\S]*?if \(!selectionIsCurrent\(\)\) return false;[\s\S]*?activateThreadNow\(threadId, selectionIntent\)/,
   "Every asynchronous selection boundary must reject stale B→C completions before activating a task."
 );
 assert.match(

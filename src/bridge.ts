@@ -1,6 +1,10 @@
-import { CodexRunRequest } from "./env";
+import { CodexRunRequest, DesktopNotificationTarget } from "./env";
 
 const nativeWorkbench = (window as unknown as { workbench?: Window["workbench"] }).workbench;
+const browserNotificationListeners = new Set<(target: DesktopNotificationTarget) => void>();
+const browserNotificationIds = new Set<string>();
+const browserNotifications = new Set<Notification>();
+let pendingBrowserNotification: DesktopNotificationTarget | null = null;
 
 function browserWebResource(resource: string) {
   let candidate = String(resource || "").trim().replace(/\u200b/g, "");
@@ -280,13 +284,45 @@ const browserFallback: Window["workbench"] = {
     error: "请在 Electron 窗口中使用外部编辑器打开本地 Markdown 文件。",
     target: resource
   }),
-  showNotification: async ({ title, body, silent }) => {
+  showNotification: async ({ title, body, silent, threadId, notificationId }) => {
+    if (notificationId && browserNotificationIds.has(notificationId)) return { ok: true, deduplicated: true };
     if (typeof Notification === "undefined" || Notification.permission !== "granted") {
       return { ok: false, error: "当前浏览器未授权桌面通知。" };
     }
-    new Notification(title, { body, silent });
-    return { ok: true };
+    try {
+      const notification = new Notification(title, { body, silent });
+      browserNotifications.add(notification);
+      if (notificationId) {
+        browserNotificationIds.add(notificationId);
+        if (browserNotificationIds.size > 256) browserNotificationIds.delete(browserNotificationIds.values().next().value!);
+      }
+      notification.onclose = () => { browserNotifications.delete(notification); };
+      notification.onerror = () => {
+        browserNotifications.delete(notification);
+        if (notificationId) browserNotificationIds.delete(notificationId);
+      };
+      notification.onclick = () => {
+        window.focus();
+        if (!threadId) return;
+        const target = { threadId, ...(notificationId ? { notificationId } : {}) };
+        pendingBrowserNotification = target;
+        for (const listener of browserNotificationListeners) listener({ ...target });
+      };
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "浏览器未能显示通知。" };
+    }
   },
+  onNotificationClicked: (callback) => {
+    browserNotificationListeners.add(callback);
+    return () => { browserNotificationListeners.delete(callback); };
+  },
+  consumePendingNotification: async () => {
+    const target = pendingBrowserNotification;
+    pendingBrowserNotification = null;
+    return target;
+  },
+  setUnreadTaskCount: async (count) => ({ ok: Number.isSafeInteger(count) && count >= 0 && count <= 1_000_000 }),
   listDocumentLibrary: async (_request) => ({
     ok: false,
     rootPath: "",

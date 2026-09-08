@@ -22,6 +22,7 @@ const {
 } = require("./codex-connection-test.cjs");
 const { CodexRuntimeManager } = require("./codex-runtime.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
+const { DesktopNotificationService } = require("./desktop-notifications.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
 const { resolveLarkCliForChild } = require("./lark-runtime.cjs");
 const { resolveEntityWorkspaceWithRecovery } = require("./entity-workspace-recovery.cjs");
@@ -209,6 +210,7 @@ const appIconPath = path.join(rootDir, "public", "domi-dock-icon.png");
 let codexClient = null;
 let codexRuntimeReadinessPromise = null;
 let stateStore = null;
+let desktopNotifications = null;
 let domiIntegration = null;
 let domiPluginManager = null;
 let domiPluginActivationGate = null;
@@ -292,6 +294,40 @@ function getDomiIntegration() {
     });
   }
   return domiIntegration;
+}
+
+function getDesktopNotifications() {
+  if (!desktopNotifications) {
+    desktopNotifications = new DesktopNotificationService({
+      Notification,
+      // Keep cache initialization inside the service's error boundary so a
+      // damaged/unavailable database cannot prevent the main window opening.
+      stateStore: {
+        loadCache: (key) => getStateStore().loadCache(key),
+        saveCache: (key, value) => getStateStore().saveCache(key, value)
+      },
+      iconProvider: () => nativeImage.createFromPath(appIconPath),
+      focusWindow: () => {
+        let win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
+        if (!win) { createWindow(); win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed()); }
+        if (!win) return;
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+      },
+      publishClick: (target) => {
+        const win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
+        // The persisted pending target survives startup/reload until the
+        // renderer explicitly consumes it after its thread list is available.
+        if (win && !win.webContents.isDestroyed() && !win.webContents.isLoadingMainFrame()) {
+          win.webContents.send("app:notification-clicked", target);
+        }
+      },
+      setBadge: (value) => { if (process.platform === "darwin") app.dock?.setBadge(value); },
+      onError: (stage) => appendRuntimeLog("desktop-notification-error", { stage })
+    });
+  }
+  return desktopNotifications;
 }
 
 function getDomiPluginManager() {
@@ -3974,6 +4010,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   if (process.platform === "darwin") {
     app.dock.setIcon(nativeImage.createFromPath(appIconPath));
   }
+  getDesktopNotifications().restoreBadge();
   createWindow();
   getUpdateService().start();
   void ensureCodexRuntimeReady().catch((error) => {
@@ -4098,28 +4135,9 @@ ipcMain.on("app:renderer-report", (_event, payload) => {
   });
 });
 
-ipcMain.handle("app:notify", (_event, request = {}) => {
-  if (!Notification.isSupported()) {
-    return { ok: false, error: "当前系统不支持桌面通知。" };
-  }
-  const title = boundedRuntimeText(request.title || "domi 行业动态", 120);
-  const body = boundedRuntimeText(request.body || "发现新的重要行业动态", 500);
-  const notification = new Notification({
-    title,
-    body,
-    silent: Boolean(request.silent),
-    icon: nativeImage.createFromPath(appIconPath)
-  });
-  notification.on("click", () => {
-    const win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
-    if (!win) return;
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
-  });
-  notification.show();
-  return { ok: true };
-});
+ipcMain.handle("app:notify", (_event, request = {}) => getDesktopNotifications().notify(request));
+ipcMain.handle("app:consume-pending-notification", () => getDesktopNotifications().consumePendingNotification());
+ipcMain.handle("app:set-unread-task-count", (_event, count) => getDesktopNotifications().setUnreadTaskCount(count));
 
 ipcMain.handle("codex:check", runCodexCheckCached);
 ipcMain.handle("codex:run", (event, payload) => runCodex(event.sender, payload));
