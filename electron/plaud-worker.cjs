@@ -42,7 +42,7 @@ function safeError(error) {
   if (/(?:HTTP|status)\s*5\d\d|service unavailable|bad gateway|gateway timeout/i.test(message)) {
     return "PLAUD 服务暂时不可用。domi 未修改任何录音，请稍后重新同步。";
   }
-  if (/PLAUD_NETWORK_TIMEOUT|PLAUD (?:API|接口).*timed?\s*out|接口读取超时|ERR_(?:NETWORK_CHANGED|TIMED_OUT|NAME_NOT_RESOLVED)|ENOTFOUND|ENETUNREACH|fetch failed|socket hang up/i.test(message)) {
+  if (/PLAUD_NETWORK_TIMEOUT|PLAUD (?:API|接口).*timed?\s*out|接口读取超时|ERR_(?:CONNECTION_(?:CLOSED|RESET|REFUSED|ABORTED)|NETWORK_CHANGED|TIMED_OUT|NAME_NOT_RESOLVED)|ECONNRESET|ECONNABORTED|ETIMEDOUT|ENOTFOUND|ENETUNREACH|fetch failed|Failed to fetch|socket hang up/i.test(message)) {
     return "网络或 PLAUD 服务响应超时。domi 未修改任何录音，已保留上次成功列表，请稍后重新同步。";
   }
   return message
@@ -71,7 +71,7 @@ function safeRemoteFile(file) {
 }
 
 function isTransientNavigationError(error) {
-  return /page\.(?:goto|reload)|connectOverCDP|WebSocket error|Protocol error.*(?:Page|Target)|Not attached to an active page|Target page, context or browser has been closed|Execution context was destroyed|ECONNREFUSED|ECONNRESET|ERR_CONNECTION_(?:CLOSED|RESET|REFUSED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|socket hang up/i
+  return /page\.(?:goto|reload)|connectOverCDP|WebSocket error|Protocol error.*(?:Page|Target)|Not attached to an active page|Target page, context or browser has been closed|Execution context was destroyed|ECONNREFUSED|ECONNRESET|ECONNABORTED|ETIMEDOUT|ERR_CONNECTION_(?:CLOSED|RESET|REFUSED|ABORTED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|socket hang up/i
     .test(error instanceof Error ? error.message : String(error));
 }
 
@@ -87,7 +87,7 @@ function isRetryableReadError(error) {
     return false;
   }
   return isTransientNavigationError(error)
-    || /PLAUD_SESSION_PROBE_INCOMPLETE|authorization request was not observed|PLAUD (?:API|接口).*timed?\s*out|接口读取超时|ENOTFOUND|ENETUNREACH|fetch failed|(?:HTTP|status)\s*5\d\d|service unavailable|bad gateway|gateway timeout/i.test(message);
+    || /PLAUD_SESSION_PROBE_INCOMPLETE|authorization request was not observed|PLAUD (?:API|接口).*timed?\s*out|接口读取超时|ENOTFOUND|ENETUNREACH|fetch failed|Failed to fetch|(?:HTTP|status)\s*5\d\d|service unavailable|bad gateway|gateway timeout/i.test(message);
 }
 
 function wait(delayMs) {
@@ -180,6 +180,22 @@ async function list(pluginRoot, requestedLimit, requestedOffset) {
   );
 }
 
+async function downloadWithClient(client, fileId, outputDir) {
+  const id = String(fileId || "").trim();
+  if (!/^[A-Za-z0-9_-]{12,80}$/.test(id)) throw new Error("无效的 PLAUD 文件标识。");
+  if (!path.isAbsolute(String(outputDir || ""))) throw new Error("PLAUD 下载目录必须是绝对路径。");
+  // The vendor download method only reads an exact file ID and writes local
+  // transcript artifacts. Queue transitions belong to the caller's fresh lock.
+  const transcript = await client.downloadTranscript(id, outputDir);
+  return {
+    ok: true,
+    fileId: id,
+    fileName: String(transcript.fileName || ""),
+    transcriptPath: String(transcript.mdPath || ""),
+    transcriptRawPath: String(transcript.rawPath || "")
+  };
+}
+
 async function renameWithClient(client, fileId, requestedTitle) {
   const id = String(fileId || "").trim();
   const title = String(requestedTitle || "").trim();
@@ -259,9 +275,11 @@ async function ensureServerClient(pluginRoot) {
   }
 }
 
-async function runServerCommand(pluginRoot, command, args = []) {
+async function runServerCommand(pluginRoot, command, args = [], options = {}) {
+  let operationStarted = false;
   const execute = async () => {
     const client = await ensureServerClient(pluginRoot);
+    operationStarted = true;
     if (command === "connection") {
       await client.listFiles({ limit: 1, skip: 0 });
       return {
@@ -271,20 +289,24 @@ async function runServerCommand(pluginRoot, command, args = []) {
       };
     }
     if (command === "list") return listWithClient(client, args[0], args[1]);
+    if (command === "download") return downloadWithClient(client, args[0], args[1]);
     if (command === "rename") return renameWithClient(client, args[0], args[1]);
     if (command === "trash") return moveToTrashWithClient(client, args[0]);
     throw new Error(`未知的 PLAUD worker 命令：${command || "(空)"}`);
   };
 
-  try {
-    return await execute();
-  } catch (error) {
-    // Recreate only detached/transient browser sessions. Authentication,
-    // access denial and rate limits remain single-attempt and actionable.
-    if (!isRetryableReadError(error)) throw error;
-    await closeServerClient();
-    await wait(500);
-    return execute();
+  const pause = options.sleep || wait;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    operationStarted = false;
+    try {
+      return await execute();
+    } catch (error) {
+      const readOnly = ["connection", "list", "download"].includes(command);
+      // Never replay an executed PATCH/POST after an uncertain response.
+      if (!isRetryableReadError(error) || (operationStarted && !readOnly) || attempt === 2) throw error;
+      await closeServerClient();
+      await pause(attempt === 0 ? 400 : 1200);
+    }
   }
 }
 
@@ -341,6 +363,7 @@ if (require.main === module) {
 
 module.exports = {
   closeServerClient,
+  downloadWithClient,
   isRetryableReadError,
   isTransientNavigationError,
   list,

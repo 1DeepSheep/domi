@@ -3,6 +3,17 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+
+// Every default integration instance must be isolated even when npm check is
+// launched without test environment variables, or with a real state directory.
+const previousPlaudStateDir = process.env.DOMI_PLAUD_STATE_DIR;
+const defaultPlaudTestStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "domi-integration-plaud-state-"));
+process.env.DOMI_PLAUD_STATE_DIR = defaultPlaudTestStateDir;
+test.after(() => {
+  fs.rmSync(defaultPlaudTestStateDir, { recursive: true, force: true });
+  if (previousPlaudStateDir === undefined) delete process.env.DOMI_PLAUD_STATE_DIR;
+  else process.env.DOMI_PLAUD_STATE_DIR = previousPlaudStateDir;
+});
 const { EventEmitter } = require("node:events");
 const { PassThrough } = require("node:stream");
 const {
@@ -3608,7 +3619,8 @@ test("PLAUD sync never submits generation from a stale cached list", async () =>
   assert.match(result.error, /远端读取/);
 });
 
-test("PLAUD sync recovers a cold authorization refresh within the same click", async () => {
+test("PLAUD sync recovers a cold authorization refresh within the same click", async (t) => {
+  const { artifact } = plaudSyncFixture(t);
   const integration = new DomiIntegration({
     stateStore: {
       loadCache: () => null,
@@ -3636,12 +3648,16 @@ test("PLAUD sync recovers a cold authorization refresh within the same click", a
   const stoppedReasons = [];
   integration.stopPlaudBackgroundSession = async (reason) => stoppedReasons.push(reason);
   integration.plaudPaths = () => ({ script: "/tmp/plaud.js" });
+  integration.plaudSupportsRecovery = async () => true;
   let generationCalls = 0;
-  integration.runJson = async (_command, args) => {
+  integration.runJson = async (_command, args, options) => {
     generationCalls += 1;
+    assert.equal(options.queue, "plaud");
+    assert.equal(options.releasePlaudSession, "sync-workflow");
+    stoppedReasons.push(options.releasePlaudSession);
     assert.deepEqual(args.slice(0, 3), ["/tmp/plaud.js", "sync-pending", "1"]);
     return {
-      results: [{ ok: true, fileId: "new-recording" }],
+      results: [{ ok: true, fileId: "new-recording", transcriptPath: artifact() }],
       manifestPath: "/tmp/domi-test/manifest.json"
     };
   };
@@ -3655,7 +3671,8 @@ test("PLAUD sync recovers a cold authorization refresh within the same click", a
   assert.deepEqual(stoppedReasons, ["sync-read-recovery", "sync-workflow"]);
 });
 
-test("PLAUD sync retries only the final read and never repeats a completed generation", async () => {
+test("PLAUD sync retries only the final read and never repeats a completed generation", async (t) => {
+  const { artifact } = plaudSyncFixture(t);
   const integration = new DomiIntegration({
     stateStore: {
       loadCache: () => null,
@@ -3684,11 +3701,15 @@ test("PLAUD sync retries only the final read and never repeats a completed gener
   const stoppedReasons = [];
   integration.stopPlaudBackgroundSession = async (reason) => stoppedReasons.push(reason);
   integration.plaudPaths = () => ({ script: "/tmp/plaud.js" });
+  integration.plaudSupportsRecovery = async () => true;
   let generationCalls = 0;
-  integration.runJson = async () => {
+  integration.runJson = async (_command, _args, options) => {
     generationCalls += 1;
+    assert.equal(options.queue, "plaud");
+    assert.equal(options.releasePlaudSession, "sync-workflow");
+    stoppedReasons.push(options.releasePlaudSession);
     return {
-      results: [{ ok: true, fileId: "new-recording" }],
+      results: [{ ok: true, fileId: "new-recording", transcriptPath: artifact() }],
       manifestPath: "/tmp/domi-test/manifest.json"
     };
   };
@@ -3737,7 +3758,8 @@ test("PLAUD sync never auto-retries confirmed logout, access denial or rate limi
   }
 });
 
-test("PLAUD sync directly processes every pending recording without a count confirmation threshold", async () => {
+test("PLAUD sync directly processes every pending recording without a count confirmation threshold", async (t) => {
+  const { artifact } = plaudSyncFixture(t);
   const integration = new DomiIntegration({
     stateStore: {
       loadCache: () => null,
@@ -3754,13 +3776,15 @@ test("PLAUD sync directly processes every pending recording without a count conf
   };
   integration.stopPlaudBackgroundSession = async () => undefined;
   integration.plaudPaths = () => ({ script: "/tmp/plaud.js" });
+  integration.plaudSupportsRecovery = async () => true;
   let syncArgs = null;
   integration.runJson = async (_command, args) => {
     syncArgs = args;
     return {
       results: Array.from({ length: 11 }, (_unused, index) => ({
         ok: true,
-        fileId: `recording-${index + 1}`
+        fileId: `recording-${index + 1}`,
+        transcriptPath: artifact(`transcript-${index}.md`)
       })),
       manifestPath: "/tmp/domi-test/manifest.json"
     };
@@ -4235,4 +4259,236 @@ test("PLAUD connection distinguishes a locked private browser profile", async ()
   assert.equal(result.browserLabel, "Tabbit");
   assert.match(result.error, /另一个 domi 实例/);
   assert.equal(typeof result.checkedAt, "number");
+});
+
+// Synthetic state only: these tests exercise the production sync coordinator
+// without a browser, the user's workflow file, or any vendor request.
+function plaudSyncFixture(t, records = []) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-resume-test-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const integration = new DomiIntegration({ stateStore: { loadCache: () => null, saveCache: () => {} },
+    plaudStateDir: dir, plaudOutputDir: path.join(dir, "output"), configProvider: () => ({ plaudConnectionMode: "enabled" }) });
+  const write = (next) => fs.writeFileSync(integration.plaudStateFile, JSON.stringify({ records: Object.fromEntries(next.map(record => [record.fileId, record])) }));
+  write(records);
+  integration.plaudPaths = () => ({ script: path.join(dir, "plaud.js"), plugin: { root: dir } });
+  integration.plaudSupportsRecovery = async () => true;
+  integration.plaudQueue = async () => ({ ok: true, stale: false, pendingCount: 0, items: [] });
+  integration.sleep = async () => {};
+  const artifact = (name = "transcript.md") => {
+    const file = path.join(dir, name); fs.writeFileSync(file, "# Recording\n\nFull transcript survives.\n"); return file;
+  };
+  return { integration, dir, write, artifact };
+}
+
+test("PLAUD sync summarizes mixed outcomes once per ID and respects missing artifacts", (t) => {
+  const { artifact } = plaudSyncFixture(t);
+  const { normalizePlaudSyncItem: normalize, summarizePlaudSync, plaudRecoveryCandidate } = require("../electron/plaud-sync-state.cjs");
+  const path = artifact();
+  const ready = normalize({ fileId: "ready", outcome: "ready", transcriptPath: path, source: "generated" });
+  const result = summarizePlaudSync([ready,
+    normalize({ fileId: "ready", outcome: "retryable", error: "Failed to fetch" }),
+    normalize({ fileId: "wait", outcome: "waiting", stage: "generating" }),
+    normalize({ fileId: "retry", outcome: "retryable", error: "Failed to fetch" }),
+    normalize({ fileId: "missing", stage: "managed", outcome: "failed", errorCode: "PLAUD_TRANSCRIPT_ARTIFACT_MISSING" })]);
+  assert.equal(result.status, "partial");
+  assert.deepEqual([result.generatedCount, result.recoveredCount, result.waitingCount, result.retryableCount, result.failedCount], [1, 0, 1, 1, 1]);
+  assert.equal(normalize({ fileId: "ready", stage: "managed", transcriptPath: path, syncOutcome: "failed" }).outcome, "ready");
+  assert.equal(normalize({ fileId: "generated", ok: true, reused: false, transcriptPath: path }, { source: "recovered" }).source, "generated");
+  assert.equal(normalize({ fileId: "recovered", ok: true, reused: true, transcriptPath: path }).source, "recovered");
+  assert.equal(plaudRecoveryCandidate({ fileId: "missing", stage: "managed" }), false);
+  assert.equal(plaudRecoveryCandidate({ fileId: "rejected", stage: "generating", generationAttemptId: "known", generationRejection: { attemptId: "known" }, errorCode: "PLAUD_READ_TRANSIENT" }), false);
+  assert.equal(plaudRecoveryCandidate({ fileId: "new", stage: "uploaded" }), false);
+  assert.equal(plaudRecoveryCandidate({ fileId: "new", stage: "uploaded", syncOutcome: "retryable", errorCode: "PLAUD_READ_TRANSIENT" }), true);
+  assert.equal(plaudRecoveryCandidate({ fileId: "new", stage: "uploaded", syncOutcome: "waiting", errorCode: "PLAUD_GENERATION_NOT_SUBMITTED" }), false);
+});
+
+test("PLAUD resume startup with no candidates or disabled mode does not acquire a browser", async (t) => {
+  const { integration } = plaudSyncFixture(t, [{ fileId: "uploaded", stage: "uploaded" }]);
+  integration.plaudQueue = integration.runJson = integration.runPlaudWorker = async () => { throw new Error("must not acquire browser"); };
+  assert.equal((await integration.resumePlaudTranscripts()).status, "complete");
+  integration.configProvider = () => ({ plaudConnectionMode: "disabled" });
+  assert.equal((await integration.resumePlaudTranscripts()).disabled, true);
+});
+
+test("PLAUD resume recovers an exact old ID, retries transient reads, and preserves accepted receipts", async (t) => {
+  const record = { fileId: "outside-latest-hundred", stage: "generating", generationAcceptedAt: "2026-01-01T00:00:00Z", generationAttemptId: "attempt" };
+  const { integration, artifact, write } = plaudSyncFixture(t, [record]);
+  const calls = [];
+  integration.runJson = async (_binary, args, options) => {
+    calls.push(args[1]);
+    assert.equal(args[1], "recover-pending");
+    assert.equal(options.queue, "plaud");
+    assert.equal(options.releasePlaudSession, "resume-transcripts");
+    assert.equal(options.requirePlaudEnabled, true);
+    if (calls.length === 1) throw new Error("TypeError: Failed to fetch");
+    const next = { ...record, transcriptPath: artifact(), stage: "transcript_ready", syncOutcome: "ready" };
+    write([next]); return { results: [{ ...next, outcome: "ready", source: "recovered" }] };
+  };
+  const result = await integration.resumePlaudTranscripts();
+  assert.deepEqual(calls, ["recover-pending", "recover-pending"]);
+  assert.equal(result.recoveredCount, 1);
+  assert.equal(result.status, "complete");
+  assert.equal(result.resumePendingCount, 0);
+  assert.equal(integration.loadPlaudWorkflowRecords()[0].generationAttemptId, "attempt");
+});
+
+test("PLAUD sync never replays POST-capable sync after an uncertain response and retains committed artifacts", async (t) => {
+  const { integration, write } = plaudSyncFixture(t);
+  let reads = 0, commands = 0;
+  integration.plaudQueue = async () => ++reads === 1
+    ? { ok: true, pendingCount: 1, items: [] }
+    : { ok: false, remoteStatus: "network_error", retryable: true, error: "Failed to fetch", items: [] };
+  integration.stopPlaudBackgroundSession = async () => {};
+  integration.runJson = async (_binary, args) => {
+    commands += 1;
+    assert.equal(args[1], "sync-pending");
+    fs.mkdirSync(args[3], { recursive: true });
+    const transcriptPath = path.join(args[3], "committed.md");
+    fs.writeFileSync(transcriptPath, "Full original transcript.");
+    write([{ fileId: "committed-record", stage: "transcript_ready", transcriptPath, generationAcceptedAt: "accepted" }]);
+    throw new Error("Failed to fetch");
+  };
+  const result = await integration.syncPlaud();
+  assert.equal(commands, 1);
+  assert.equal(result.status, "partial");
+  assert.equal(result.recoveredCount, 1);
+  assert.equal(result.listRefreshFailed, true);
+  assert.equal(result.snapshot.items[0].hasTranscript, true);
+  assert.equal(fs.readFileSync(result.snapshot.items[0].transcriptPath, "utf8"), "Full original transcript.");
+  assert.doesNotMatch(result.error, /未修改任何录音/);
+});
+
+test("PLAUD final read reconciles a newer local success over the earlier retryable result", async (t) => {
+  const record = { fileId: "newest-recording", stage: "generating", syncOutcome: "waiting" };
+  const { integration, artifact, write } = plaudSyncFixture(t, [record]);
+  integration.runJson = async () => ({ results: [{ ...record, outcome: "retryable", error: "Failed to fetch" }] });
+  integration.plaudQueue = async () => {
+    write([{ ...record, stage: "managed", transcriptPath: artifact(), syncOutcome: "ready" }]);
+    return { ok: true, pendingCount: 0, items: [] };
+  };
+  const result = await integration.resumePlaudTranscripts();
+  assert.equal(result.recoveredCount, 1);
+  assert.equal(result.retryableCount, 0);
+  assert.equal(result.snapshot.items[0].queueStage, "managed");
+});
+
+test("PLAUD old plugin recovery is download-only and atomic queue writes never downgrade a concurrent final stage", async (t) => {
+  const record = { fileId: "legacy-record-id", stage: "generation_timeout", generationAttemptId: "legacy-attempt", generationAcceptedAt: "accepted" };
+  const { integration, artifact, write } = plaudSyncFixture(t, [record]);
+  integration.plaudSupportsRecovery = async () => false;
+  integration.runJson = async () => { throw new Error("old sync-pending must not run"); };
+  let downloads = 0;
+  integration.runPlaudWorker = async (command, args) => {
+    downloads += 1;
+    assert.equal(command, "download"); assert.equal(args[0], record.fileId);
+    const transcriptPath = artifact();
+    write([{ ...record, stage: "managed", transcriptPath, notesPath: "retained-notes", syncOutcome: "ready" }]);
+    return { fileId: record.fileId, transcriptPath };
+  };
+  const result = await integration.resumePlaudTranscripts();
+  const stored = integration.loadPlaudWorkflowRecords()[0];
+  assert.equal(downloads, 1); assert.equal(result.recoveredCount, 1);
+  assert.equal(stored.stage, "managed"); assert.equal(stored.notesPath, "retained-notes");
+  assert.equal(stored.generationAttemptId, "legacy-attempt");
+});
+
+test("PLAUD legacy transient download persists classification while retaining generation receipts", async (t) => {
+  const record = { fileId: "legacy-retry-id", stage: "generating", syncOutcome: "waiting", generationAcceptedAt: "accepted" };
+  const { integration } = plaudSyncFixture(t, [record]);
+  integration.plaudSupportsRecovery = async () => false;
+  let reads = 0;
+  integration.runPlaudWorker = async () => { reads += 1; throw new Error("net::ERR_CONNECTION_CLOSED"); };
+  const result = await integration.resumePlaudTranscripts();
+  const stored = integration.loadPlaudWorkflowRecords()[0];
+  assert.equal(reads, 1); assert.equal(result.status, "waiting"); assert.equal(result.retryableCount, 1);
+  assert.equal(stored.syncOutcome, "retryable"); assert.equal(stored.stage, "generating");
+  assert.equal(stored.generationAcceptedAt, "accepted"); assert.equal(stored.errorCode, "PLAUD_READ_TRANSIENT");
+});
+
+test("PLAUD background recovery is single flight and manual sync remains queued after it", async (t) => {
+  const { integration } = plaudSyncFixture(t);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const calls = [];
+  integration.performPlaudSync = async resumeOnly => { calls.push(resumeOnly); if (resumeOnly) await gate; return { ok: true }; };
+  const background = integration.resumePlaudTranscripts();
+  assert.equal(integration.resumePlaudTranscripts(), background);
+  const manual = integration.syncPlaud();
+  assert.deepEqual(calls, [true]);
+  release(); await Promise.all([background, manual]);
+  assert.deepEqual(calls, [true, false]); assert.equal(integration.plaudSyncPromise, null);
+});
+
+test("PLAUD disabling during recovery backoff prevents the next remote read", async (t) => {
+  const { integration } = plaudSyncFixture(t, [{ fileId: "cancel-pending-id", stage: "generating" }]);
+  let reads = 0;
+  integration.runJson = async () => { reads += 1; throw new Error("Failed to fetch"); };
+  integration.sleep = async () => { integration.configProvider = () => ({ plaudConnectionMode: "disabled" }); };
+  await integration.resumePlaudTranscripts();
+  assert.equal(reads, 1);
+});
+
+test("PLAUD capabilities uses a strict local protocol and invalidates when the plugin changes", async (t) => {
+  const { integration, dir } = plaudSyncFixture(t);
+  delete integration.plaudSupportsRecovery;
+  const script = path.join(dir, "plaud.js"); fs.writeFileSync(script, "local capability fixture");
+  let calls = 0;
+  integration.runJson = async (_binary, args, options) => {
+    calls += 1; assert.deepEqual(args, [script, "capabilities"]);
+    assert.equal(options.releasePlaudSession, undefined); assert.equal(options.queue, undefined);
+    return { schema: "domi.plaud-sync.v1", commands: ["sync-pending", "recover-pending"], outcomes: ["ready", "waiting", "retryable", "failed"] };
+  };
+  assert.equal(await integration.plaudSupportsRecovery(script), true);
+  assert.equal(await integration.plaudSupportsRecovery(script), true); assert.equal(calls, 1);
+  fs.appendFileSync(script, "changed");
+  integration.runJson = async () => { calls += 1; return { schema: "wrong", commands: ["recover-pending"] }; };
+  assert.equal(await integration.plaudSupportsRecovery(script), false); assert.equal(calls, 2);
+});
+
+test("PLAUD connection classifies closed sockets and Failed to fetch as recoverable network failures", () => {
+  for (const message of ["net::ERR_CONNECTION_CLOSED", "TypeError: Failed to fetch", "ECONNRESET"] ) {
+    const result = classifyPlaudConnectionFailure(new Error(message), "chrome");
+    assert.equal(result.status, "network_error"); assert.doesNotMatch(result.error, /登录已失效/);
+    assert.equal(isRetryablePlaudReadFailure(new Error(message)), true);
+  }
+});
+
+test("PLAUD ready assertions without readable artifacts remain failed, including legacy success booleans", () => {
+  const { normalizePlaudSyncItem } = require("../electron/plaud-sync-state.cjs");
+  for (const item of [{ fileId: "one", ok: true }, { fileId: "two", outcome: "ready", stage: "managed", transcriptPath: "/nonexistent/domi-transcript.md" }]) {
+    const result = normalizePlaudSyncItem(item);
+    assert.equal(result.outcome, "failed"); assert.equal(result.errorCode, "PLAUD_TRANSCRIPT_ARTIFACT_MISSING");
+  }
+});
+
+test("PLAUD legacy sync never POSTs even if accepted tasks are excluded from automatic retry", async (t) => {
+  const { integration } = plaudSyncFixture(t, [{ fileId: "accepted-auth-error", stage: "generating", generationAcceptedAt: "accepted", errorCode: "PLAUD_AUTH_REQUIRED" }]);
+  integration.plaudSupportsRecovery = async () => false;
+  integration.plaudQueue = async () => ({ ok: true, pendingCount: 1, items: [{ fileId: "accepted-auth-error", processing: false, hasTranscript: false }] });
+  integration.runJson = integration.runPlaudWorker = async () => { throw new Error("no POST or read is allowed for this legacy/auth case"); };
+  const result = await integration.syncPlaud();
+  assert.equal(result.ok, false); assert.match(result.error, /更新插件/);
+  assert.equal(integration.loadPlaudWorkflowRecords()[0].generationAcceptedAt, "accepted");
+});
+
+test("PLAUD legacy recovery never downloads a missing artifact into a protected workflow", async (t) => {
+  const record = { fileId: "missing-managed-id", stage: "managed", transcriptPath: "/nonexistent/missing.md" };
+  const { integration } = plaudSyncFixture(t, [record]);
+  integration.runPlaudWorker = async () => { throw new Error("protected workflow must not download"); };
+  const results = await integration.recoverPlaudWithLegacyPlugin([record], "/tmp/not-used");
+  assert.equal(results[0].outcome, "failed");
+  assert.equal(results[0].errorCode, "PLAUD_TRANSCRIPT_ARTIFACT_MISSING");
+  assert.equal(integration.loadPlaudWorkflowRecords()[0].stage, "managed");
+});
+
+test("PLAUD legacy recovery has one 30 second read budget per round and fairly rotates failures", async (t) => {
+  const { integration } = plaudSyncFixture(t, ["first-record-id", "second-record-id"].map(fileId => ({ fileId, stage: "generating" })));
+  integration.plaudSupportsRecovery = async () => false;
+  const ids = [];
+  integration.runPlaudWorker = async (command, args, _plugin, options) => {
+    assert.equal(command, "download"); assert.equal(options.timeoutMs, 30_000);
+    ids.push(args[0]); throw new Error("Failed to fetch");
+  };
+  await integration.resumePlaudTranscripts(); assert.deepEqual(ids, ["first-record-id"]);
+  await integration.resumePlaudTranscripts(); assert.deepEqual(ids, ["first-record-id", "second-record-id"]);
 });
