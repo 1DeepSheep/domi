@@ -27,6 +27,8 @@ import {
 import { workbench } from "./bridge";
 import { prepareMarkdownForEditor, restoreMarkdownFromEditor } from "./markdownDialect";
 import { PortableMarkdownClipboard } from "./markdown-clipboard";
+import { PortableUnderline } from "./PortableUnderline";
+import { serializePortableMarkdown } from "./portable-markdown";
 import "./RichMarkdownEditor.css";
 
 type RichMarkdownEditorProps = {
@@ -555,7 +557,7 @@ export default function RichMarkdownEditor({
     }
     try {
       onChangeRef.current(
-        `${frontmatter}${restoreMarkdownFromEditor(current.getMarkdown())}`
+        `${frontmatter}${restoreMarkdownFromEditor(serializePortableMarkdown(current))}`
       );
     } catch (error) {
       reportEditorOperation("序列化 Markdown", error);
@@ -662,11 +664,10 @@ export default function RichMarkdownEditor({
           autolink: true,
           protocols: ["domi-wiki", "domi-callout", "domi-folder"]
         },
-        underline: {
-          HTMLAttributes: {
-            style: "text-decoration: underline;"
-          }
-        }
+        underline: false
+      }),
+      PortableUnderline.configure({
+        HTMLAttributes: { style: "text-decoration: underline;" }
       }),
       TableKit.configure({
         table: { resizable: false, renderWrapper: true }

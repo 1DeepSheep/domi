@@ -68,8 +68,8 @@ assert.match(
 );
 assert.match(
   editor,
-  /underline:\s*\{[\s\S]*?HTMLAttributes:\s*\{[\s\S]*?style:\s*"text-decoration: underline;"/,
-  "Selected rich Markdown text must copy underline as portable HTML instead of a domi-only visual style."
+  /underline:\s*false[\s\S]*?PortableUnderline\.configure\([\s\S]*?style:\s*"text-decoration: underline;"/,
+  "The editor must use portable Markdown underline serialization and copy its inline HTML style."
 );
 assert.match(
   messageContent,
