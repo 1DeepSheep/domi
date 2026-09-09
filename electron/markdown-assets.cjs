@@ -3,6 +3,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { fileURLToPath } = require("node:url");
 const { Marked, Renderer } = require("marked");
+const { fromMarkdown } = require("mdast-util-from-markdown");
+const { gfmFromMarkdown } = require("mdast-util-gfm");
+const { gfm } = require("micromark-extension-gfm");
+const { findLegacyUnderline, mapLegacyUnderline, legacyUnderlineOpaqueRanges } = require("../shared/legacy-underline.mjs");
 
 const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_CLIPBOARD_IMAGE_BYTES = 40 * 1024 * 1024;
@@ -242,50 +246,137 @@ function splitFrontmatter(markdown) {
   return match ? String(markdown).slice(match[1].length) : String(markdown || "");
 }
 
-function transformMarkdownTextOutsideCode(markdown, transform) {
+function applyMarkdownEdits(source, edits) {
+  const pieces = [];
+  let cursor = 0;
+  for (const edit of [...edits].sort((a, b) => a.start - b.start)) {
+    if (edit.start < cursor || edit.end < edit.start) throw new Error("Markdown 格式转换范围发生重叠。");
+    pieces.push(source.slice(cursor, edit.start), edit.value);
+    cursor = edit.end;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function portableMarkdownEdits(markdown, { plainText = false } = {}) {
   const source = String(markdown || "");
-  const eol = source.includes("\r\n") ? "\r\n" : "\n";
-  const lines = source.split(/\r?\n/);
-  let fenceCharacter = "";
-  let fenceLength = 0;
-
-  return lines.map((line) => {
-    const fence = line.match(/^\s{0,3}(`{3,}|~{3,})/);
-    if (fence) {
-      const marker = fence[1];
-      if (!fenceCharacter) {
-        fenceCharacter = marker[0];
-        fenceLength = marker.length;
-      } else if (marker[0] === fenceCharacter && marker.length >= fenceLength) {
-        fenceCharacter = "";
-        fenceLength = 0;
-      }
-      return line;
+  const body = splitFrontmatter(source);
+  const bodyOffset = source.length - body.length;
+  const root = fromMarkdown(body, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
+  const protectedRanges = [];
+  const inlineContainers = [];
+  const openUnderlineTags = [];
+  const edits = [];
+  const emphasisHeadingRanges = [];
+  const protect = (start, end) => protectedRanges.push({ start: start + bodyOffset, end: end + bodyOffset });
+  if (bodyOffset) protectedRanges.push({ start: 0, end: bodyOffset });
+  const visit = (node) => {
+    const start = node.position?.start?.offset;
+    const end = node.position?.end?.offset;
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return;
+    if (["link", "linkReference", "strong", "emphasis", "delete"].includes(node.type)) {
+      inlineContainers.push({ start: start + bodyOffset, end: end + bodyOffset });
     }
-    if (fenceCharacter) return line;
-
-    let result = "";
-    let cursor = 0;
-    while (cursor < line.length) {
-      const tickStart = line.indexOf("`", cursor);
-      if (tickStart < 0) {
-        result += transform(line.slice(cursor));
-        break;
-      }
-      result += transform(line.slice(cursor, tickStart));
-      let tickEnd = tickStart + 1;
-      while (line[tickEnd] === "`") tickEnd += 1;
-      const marker = line.slice(tickStart, tickEnd);
-      const closingTick = line.indexOf(marker, tickEnd);
-      if (closingTick < 0) {
-        result += transform(line.slice(tickStart));
-        break;
-      }
-      result += line.slice(tickStart, closingTick + marker.length);
-      cursor = closingTick + marker.length;
+    if (["code", "inlineCode", "definition", "image", "imageReference", "footnoteReference"].includes(node.type)) {
+      protect(start, end);
+      return;
     }
-    return result;
-  }).join(eol);
+    if (node.type === "footnoteDefinition") {
+      protect(start, node.children?.[0]?.position?.start?.offset ?? end);
+    }
+    if (["link", "linkReference"].includes(node.type)) {
+      if ((node.type === "linkReference" && node.referenceType !== "full") || !body.slice(start, end).startsWith("[")) {
+        // Autolinks are URLs; shortcut/collapsed labels also identify their
+        // reference target. Editing either would change the link itself.
+        protect(start, end);
+        return;
+      }
+      const children = node.children || [];
+      // Preserve destination/title/reference bytes, including literal ++.
+      protect(start, children[0]?.position?.start?.offset ?? end);
+      protect(children.at(-1)?.position?.end?.offset ?? start, end);
+    }
+    if (node.type === "html") {
+      const raw = body.slice(start, end);
+      protect(start, end);
+      if (/^<u(?:\s+[^<>]*)?>$/i.test(raw)) openUnderlineTags.push(start + bodyOffset);
+      else if (/^<\/u\s*>$/i.test(raw) && openUnderlineTags.length) {
+        inlineContainers.push({ start: openUnderlineTags.pop(), end: end + bodyOffset });
+      }
+      if (plainText && /^<\/?u(?:\s+[^<>]*)?>$/i.test(raw)) {
+        edits.push({ start: start + bodyOffset, end: end + bodyOffset, value: "", kind: "html" });
+      } else if (plainText && /^<br\s*\/?\s*>$/i.test(raw)) {
+        edits.push({ start: start + bodyOffset, end: end + bodyOffset, value: "\n", kind: "html" });
+      } else {
+        const block = raw.match(/^(<u(?:\s+[^<>]*)?>)([\s\S]*?)(<\/u\s*>)(\r?\n)?$/i);
+        if (block) {
+          // Parse only the allowed underline body; arbitrary HTML remains literal.
+          const inner = block[2];
+          const innerOffset = start + bodyOffset + block[1].length;
+          const innerEdits = portableMarkdownEdits(inner, { plainText });
+          edits.push(...innerEdits.map(edit => ({ ...edit, start: edit.start + innerOffset, end: edit.end + innerOffset })));
+          if (plainText) {
+            edits.push({ start: start + bodyOffset, end: innerOffset, value: "", kind: "html" });
+            edits.push({ start: innerOffset + inner.length, end: innerOffset + inner.length + block[3].length, value: "", kind: "html" });
+          }
+        }
+      }
+      return;
+    }
+    if (plainText && node.type === "heading" && node.depth <= 3) {
+      const raw = body.slice(start, end);
+      const heading = raw.match(/^(\s{0,3})#{1,3}\s+([^\r\n]*?)\s*#*\s*$/);
+      const emphasis = heading ? underlineEmphasisContent(heading[2]) : null;
+      if (heading && emphasis?.matched) {
+        const range = { start: start + bodyOffset, end: end + bodyOffset };
+        emphasisHeadingRanges.push(range);
+        edits.push({ ...range, value: markdownClipboardPlainText(emphasis.content) });
+        protect(start, end);
+        return;
+      }
+    }
+    for (const child of node.children || []) visit(child);
+  };
+  visit(root);
+  for (const start of openUnderlineTags) inlineContainers.push({ start, end: source.length });
+  // Keep UTF-16 offsets stable while hiding code, HTML and link destinations
+  // from the shared delimiter scanner. Only delimiters are edited, never bodies.
+  const maskedCharacters = source.split("");
+  for (const range of protectedRanges) {
+    for (let index = range.start; index < range.end; index += 1) {
+      if (maskedCharacters[index] !== "\r" && maskedCharacters[index] !== "\n") maskedCharacters[index] = "\ufffc";
+    }
+  }
+  const masked = maskedCharacters.join("");
+  mapLegacyUnderline(masked, (match) => {
+    // A mark may contain a whole link/strong node, or live wholly inside it.
+    // Crossing just one edge would produce misnested HTML and change styling.
+    const crossesContainer = inlineContainers.some(container =>
+      (match.start >= container.start && match.start < container.end)
+        !== (match.contentEnd >= container.start && match.contentEnd < container.end));
+    if (crossesContainer) return masked.slice(match.start, match.end);
+    edits.push({ start: match.start, end: match.contentStart, value: plainText ? "" : "<u>" });
+    edits.push({ start: match.contentEnd, end: match.end, value: plainText ? "" : "</u>" });
+    return masked.slice(match.start, match.end);
+  });
+  const opaque = legacyUnderlineOpaqueRanges(masked);
+  const overlapsOpaque = (edit) => {
+    let left = 0, right = opaque.length;
+    while (left < right) {
+      const middle = Math.floor((left + right) / 2);
+      if (opaque[middle].end <= edit.start) left = middle + 1;
+      else right = middle;
+    }
+    return opaque[left]?.start < edit.end;
+  };
+  return edits.filter(edit => !(edit.kind === "html" && overlapsOpaque(edit))
+    && !emphasisHeadingRanges.some(range => edit.start > range.start && edit.end <= range.end));
+}
+
+// Pure, source-preserving conversion. It never reads or writes user documents.
+function normalizeLegacyUnderlineMarkdown(markdown) {
+  const source = String(markdown || "");
+  return applyMarkdownEdits(source, portableMarkdownEdits(source));
 }
 
 function unwrapStrongMarkdown(value) {
@@ -298,9 +389,9 @@ function unwrapStrongMarkdown(value) {
 
 function underlineEmphasisContent(value) {
   const source = unwrapStrongMarkdown(value);
-  const domiUnderline = source.match(/^\+\+([\s\S]*?)\+\+$/);
-  if (domiUnderline) {
-    return { matched: true, content: unwrapStrongMarkdown(domiUnderline[1]) };
+  const domiUnderline = findLegacyUnderline(source);
+  if (domiUnderline?.start === 0 && domiUnderline.end === source.length) {
+    return { matched: true, content: unwrapStrongMarkdown(domiUnderline.content) };
   }
   const htmlUnderline = source.match(/^<u(?:\s+[^<>]*)?>\s*([\s\S]*?)\s*<\/u\s*>$/i);
   if (htmlUnderline) {
@@ -310,22 +401,13 @@ function underlineEmphasisContent(value) {
 }
 
 function markdownClipboardPlainText(markdown) {
-  return transformMarkdownTextOutsideCode(markdown, (value) => {
-    const heading = value.match(/^(\s{0,3})#{1,6}\s+([\s\S]*?)\s*#*\s*$/);
-    const emphasis = heading ? underlineEmphasisContent(heading[2]) : null;
-    const normalized = heading && emphasis?.matched
-      ? `${heading[1]}${emphasis.content}`
-      : value;
-    return normalized
-      .replace(/<br\s*\/?\s*>/gi, "\n")
-      .replace(/<\/?u(?:\s+[^<>]*)?>/gi, "")
-      .replace(/\+\+([\s\S]+?)\+\+/g, "$1");
-  });
+  const source = String(markdown || "");
+  return applyMarkdownEdits(source, portableMarkdownEdits(source, { plainText: true }));
 }
 
 const CLIPBOARD_UNDERLINE_STYLE = "text-decoration:underline;text-underline-offset:2px;";
 
-function renderSafeMarkdownHtml(text) {
+function renderSafeMarkdownHtml(text, parseInline) {
   const source = String(text || "");
   if (/^<br\s*\/?\s*>$/i.test(source)) return "<br>";
   if (/^<u(?:\s+[^<>]*)?>$/i.test(source)) {
@@ -335,15 +417,14 @@ function renderSafeMarkdownHtml(text) {
 
   const underlineBlock = source.match(/^<u(?:\s+[^<>]*)?>\s*([\s\S]*?)\s*<\/u\s*>$/i);
   if (underlineBlock) {
-    const content = escapeHtml(underlineBlock[1])
-      .replace(/&lt;br\s*\/?\s*&gt;/gi, "<br>")
-      .replace(/\r?\n/g, "<br>");
+    const content = parseInline(underlineBlock[1]);
     return `<u style="${CLIPBOARD_UNDERLINE_STYLE}">${content}</u>`;
   }
   return `<pre>${escapeHtml(source)}</pre>`;
 }
 
 function isUnderlineEmphasisHeading(token) {
+  if (Number(token?.depth) > 3) return false;
   const tokens = Array.isArray(token?.tokens) ? token.tokens : [];
   if (tokens.length === 1) {
     let child = tokens[0];
@@ -357,36 +438,17 @@ function isUnderlineEmphasisHeading(token) {
 
 function markdownClipboardParser(renderer) {
   const parser = new Marked();
-  parser.use({
-    extensions: [{
-      name: "underline",
-      level: "inline",
-      start(source) {
-        return source.indexOf("++");
-      },
-      tokenizer(source) {
-        const match = /^(\+\+)([\s\S]+?)(\+\+)/.exec(source);
-        if (!match) return undefined;
-        const text = match[2].trim();
-        return {
-          type: "underline",
-          raw: match[0],
-          text,
-          tokens: this.lexer.inlineTokens(text)
-        };
-      },
-      renderer(token) {
-        return `<u style="text-decoration:underline;text-underline-offset:2px;">${this.parser.parseInline(token.tokens || [])}</u>`;
-      }
-    }]
-  });
-  parser.setOptions({
-    async: false,
-    breaks: false,
-    gfm: true,
-    renderer
-  });
+  parser.setOptions({ async: false, breaks: false, gfm: true, renderer });
   return parser;
+}
+
+function safeClipboardLink(href) {
+  const source = String(href || "").trim();
+  if (!source) return "";
+  try {
+    const resolved = new URL(source, "https://domi.invalid/");
+    return ["http:", "https:", "mailto:", "tel:"].includes(resolved.protocol) ? source : "";
+  } catch { return ""; }
 }
 
 function buildMarkdownClipboardPayload(request) {
@@ -402,7 +464,15 @@ function buildMarkdownClipboardPayload(request) {
   const budget = { count: 0, bytes: 0 };
   let missingImageCount = 0;
   const renderer = new Renderer();
-  renderer.html = ({ text }) => renderSafeMarkdownHtml(text);
+  const parser = markdownClipboardParser(renderer);
+  renderer.html = ({ text }) => renderSafeMarkdownHtml(text, (value) => parser.parseInline(value));
+  renderer.link = function renderClipboardLink(token) {
+    const label = this.parser.parseInline(token.tokens || []);
+    const href = safeClipboardLink(token.href);
+    if (!href) return label;
+    const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+    return `<a href="${escapeHtml(href)}"${title}>${label}</a>`;
+  };
   renderer.heading = function renderClipboardHeading(token) {
     const inline = this.parser.parseInline(token.tokens || []);
     if (isUnderlineEmphasisHeading(token)) {
@@ -426,8 +496,8 @@ function buildMarkdownClipboardPayload(request) {
     }
   };
 
-  const body = splitFrontmatter(markdown);
-  const rendered = markdownClipboardParser(renderer).parse(body)
+  const body = splitFrontmatter(normalizeLegacyUnderlineMarkdown(markdown));
+  const rendered = parser.parse(body)
     .replace(/<table>/g, '<table style="border-collapse:collapse">')
     .replace(/<(th|td)(\s[^>]*)?>/g, '<$1$2 style="border:1px solid #ddd;padding:6px 9px;vertical-align:top">');
   const html = [
@@ -455,6 +525,7 @@ module.exports = {
   buildMarkdownClipboardPayload,
   detectImageMime,
   makeAssetFileName,
+  normalizeLegacyUnderlineMarkdown,
   markdownAssetDirectory,
   resolveMarkdownImagePath,
   savePastedMarkdownImage
