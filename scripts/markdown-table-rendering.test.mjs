@@ -99,7 +99,7 @@ try {
         "react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime",
         "react-markdown", "remark-gfm", "lucide-react", "@tiptap/core", "@tiptap/react",
         "@tiptap/starter-kit", "@tiptap/markdown", "@tiptap/extension-table", "@tiptap/pm/model", "@tiptap/pm/state",
-        "@tiptap/extension-image", "@tiptap/extension-task-item", "@tiptap/extension-task-list"
+        "@tiptap/extension-image", "@tiptap/extension-task-item", "@tiptap/extension-task-list", "@tiptap/extension-underline"
       ]
     },
     server: { host: "127.0.0.1", port: 0, hmr: false },
@@ -314,6 +314,82 @@ try {
   assert.equal(portableCopy.breakCount, 2, "Copied table br markup must remain real line breaks");
   assert.match(portableCopy.html, /<code>&lt;u&gt;代码示例&lt;\/u&gt;&lt;br&gt;<\/code>/, "Code examples must remain literal instead of becoming formatting");
   assert.equal(portableCopy.before, portableCopy.after, "Copying table and heading selections must leave source content unchanged");
+
+  // Saving is a separate contract from rich clipboard output. Both existing
+  // HTML and legacy ++ underline must survive a real edit and reopen in a
+  // portable form, including marks that overlap a link or bold text.
+  for (const dialect of ["html", "legacy"]) {
+    const u = text => dialect === "html" ? `<u>${text}</u>` : `++${text}++`;
+    const underlineMarkdown = [
+      `#### ${u("合成纪要标题")}`, "", `##### ${u("产品与技术")}`, "",
+      `- ${u("列表重点")}`,
+      `  - **${u("完整加粗重点")}**`,
+      `- ${u("范围内含**局部加粗**及[来源链接](https://example.invalid/source)")}。`, "",
+      "| 字段 | 内容 |", "| --- | --- |",
+      `| 说明 | ${u("表格重点")}<br />第二行 |`, "",
+      "正文 C++ 与 x++；`++代码标记++`；`<u>HTML代码</u>`。", "",
+      "数学 $a++b++c$ 与 $$++保留公式++$$，转义 \\+\\+字面标记\\+\\+。", "",
+      "转义跨格式 \\+\\+含**加粗字面**和[字面链接](https://example.invalid/literal)\\+\\+。", "",
+      "字面反引号 \\`\\+\\+反引号字面\\+\\+\\`。", "",
+      "碰撞保留 \uE000domi-literal-plus\uE001。", "",
+      "[保留目标](https://example.invalid/a++b++c?q=++d++)", "",
+      "https://example.invalid/++segment++", "",
+      "[https://example.invalid/++label++](https://example.invalid/++label++)", "",
+      "```cpp", "value++; ++value;", "// ++代码块标记++ <u>原样代码</u>", "```", "",
+      "保存测试尾段。"
+    ].join("\n");
+    await render("chat", streamingFixture);
+    await render("editor", streamingFixture, underlineMarkdown);
+    await page.evaluate(() => { window.__domiTableTest.lastMarkdown = null; });
+    await page.locator(".rich-markdown-content > p").last().click();
+    await page.keyboard.press("End");
+    await page.keyboard.insertText(` ${dialect}-saved`);
+    await page.waitForFunction(dialect => window.__domiTableTest.lastMarkdown?.includes(`${dialect}-saved`), dialect);
+    const savedUnderline = await page.evaluate(() => window.__domiTableTest.lastMarkdown);
+    assert.match(savedUnderline, /<u>列表重点<\/u>/, `${dialect}: saved underline must use portable HTML`);
+    assert.doesNotMatch(savedUnderline, /\+\+(?:列表重点|完整加粗重点|范围内含|表格重点)/, `${dialect}: legacy underline must not be emitted on save`);
+    assert.match(savedUnderline, /#### <u>合成纪要标题<\/u>\n/);
+    assert.match(savedUnderline, /##### <u>产品与技术<\/u>\n/);
+    assert.match(savedUnderline, /`\+\+代码标记\+\+`/);
+    assert.match(savedUnderline, /`<u>HTML代码<\/u>`/);
+    assert.match(savedUnderline, /\$a\+\+b\+\+c\$ 与 \$\$\+\+保留公式\+\+\$\$/);
+    assert.ok(savedUnderline.includes("https://example.invalid/a++b++c?q=++d++"));
+    assert.match(savedUnderline, /```cpp\nvalue\+\+; \+\+value;\n\/\/ \+\+代码块标记\+\+ <u>原样代码<\/u>\n```/);
+    const beforeReopen = await page.locator(".rich-markdown-content").evaluate(element => element.editor.getJSON());
+    await render("chat", streamingFixture);
+    await render("editor", streamingFixture, savedUnderline);
+    const reopened = await page.locator(".rich-markdown-content").evaluate(element => {
+      const editor = element.editor;
+      editor.commands.selectAll();
+      const copy = editor.view.serializeForClipboard(editor.state.selection.content());
+      return { json: editor.getJSON(), html: copy.dom.innerHTML, text: element.textContent,
+        partialBold: [...element.querySelectorAll("u strong, strong u")].map(node => node.textContent),
+        links: [...element.querySelectorAll("u a, a u")].map(node => ({ text: node.textContent, href: node.closest("a")?.getAttribute("href") || node.getAttribute("href") })) };
+    });
+    assert.deepEqual(reopened.json, beforeReopen, `${dialect}: reopening saved Markdown must retain all block and inline semantics`);
+    assert.ok(reopened.partialBold.includes("局部加粗"), `${dialect}: bold nested within underline must remain bold`);
+    assert.ok(reopened.links.some(link => link.text === "来源链接" && link.href === "https://example.invalid/source"), `${dialect}: an underlined link must retain its target`);
+    assert.match(reopened.html, /<h4[^>]*><u[^>]*>合成纪要标题<\/u><\/h4>/);
+    assert.match(reopened.html, /<h5[^>]*><u[^>]*>产品与技术<\/u><\/h5>/);
+    assert.match(reopened.html, /<table[^>]*style="[^"]*border-collapse: ?collapse/);
+    assert.match(reopened.html, /<u[^>]*style="[^"]*text-decoration: ?underline[^"]*"[^>]*>表格重点<\/u>/);
+    assert.match(reopened.text, /正文 C\+\+ 与 x\+\+/);
+    assert.match(reopened.text, /\+\+代码标记\+\+/);
+    assert.match(reopened.text, /\$a\+\+b\+\+c\$ 与 \$\$\+\+保留公式\+\+\$\$/);
+    assert.match(reopened.text, /转义 \+\+字面标记\+\+/);
+    assert.match(reopened.text, /转义跨格式 \+\+含加粗字面和字面链接\+\+/);
+    assert.match(reopened.text, /字面反引号 `\+\+反引号字面\+\+`/);
+    assert.ok(reopened.text.includes("碰撞保留 \uE000domi-literal-plus\uE001。"));
+    assert.equal(await page.locator('.rich-markdown-content a').filter({ hasText: "保留目标" }).getAttribute("href"), "https://example.invalid/a++b++c?q=++d++");
+    for (const segment of ["segment", "label"]) {
+      const url = `https://example.invalid/++${segment}++`;
+      const link = page.locator(".rich-markdown-content a").filter({ hasText: url });
+      assert.equal(await link.innerText(), url);
+      assert.equal(await link.getAttribute("href"), url);
+      assert.equal(await link.locator("u").count(), 0, "URL display text must never interpret ++ path segments as underline");
+    }
+    assert.doesNotMatch(reopened.text, /\*\*局部加粗\*\*|\[来源链接\]/, `${dialect}: formatting markup must not become visible text`);
+  }
   assert.deepEqual(browserErrors, [], "Table rendering must not produce browser runtime errors");
   await render("chat", streamingFixture, "## <u>重点判断</u>\n\n## 正常标题\n\n**<u>加粗下划线</u>**\n\n| 工作经历 |\n| --- |\n| IBM<br />Dell<br>科技 |\n\n`<u>代码</u><br>`\n\n<script>window.injected=true</script>");
   const chatCopy = await page.locator(".message-markdown").evaluate((element) => {
@@ -337,7 +413,7 @@ try {
   assert.equal(chatCopy.br, 2);
   assert.equal(chatCopy.injected, undefined);
   assert.deepEqual(failures, [], `Rendered table regressions:\n${failures.join("\n")}`);
-  console.log(`Markdown table DOM regression passed: ${tested} real component/viewport fixtures, streamed header transitions, editor Markdown round-trip and ordinary selection clipboard fidelity.`);
+  console.log(`Markdown table DOM regression passed: ${tested} real component/viewport fixtures, streamed header transitions, portable HTML/legacy underline edit-save-reopen, nested marks and literal/code/math/URL fidelity, H4/H5 headings and ordinary selection clipboard fidelity.`);
   if (artifactDirectory) console.log(`Synthetic visual QA screenshots: ${artifactDirectory}`);
 } finally {
   await browser?.close();

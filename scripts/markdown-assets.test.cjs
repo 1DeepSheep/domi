@@ -5,6 +5,7 @@ const path = require("node:path");
 const {
   buildMarkdownClipboardPayload,
   detectImageMime,
+  normalizeLegacyUnderlineMarkdown,
   resolveMarkdownImagePath,
   savePastedMarkdownImage
 } = require("../electron/markdown-assets.cjs");
@@ -252,6 +253,113 @@ async function main() {
     assert.equal(missing.imageCount, 0);
     assert.equal(missing.missingImageCount, 1);
     assert.match(missing.html, /未找到/);
+
+    const portableDocument = [
+      "#### ++主标题++",
+      "",
+      "正文 **粗体** 和 [普通链接](https://example.test/report)。",
+      "",
+      "---",
+      "",
+      "##### <u>子标题</u>",
+      "",
+      "- ++保留 **粗体** 与 [链接](https://example.test/C++/D++) 的判断++",
+      "  - 第二层列表",
+      "",
+      "1. 顺序事项",
+      "2. 后续事项",
+      "",
+      "| 指标 | 内容 |",
+      "| --- | --- |",
+      "| **数据** | <u>重点</u><br>第二行 |"
+    ].join("\n");
+    const portable = buildMarkdownClipboardPayload({ documentPath, markdown: portableDocument });
+    assert.match(portable.html, /<h4><u[^>]*>主标题<\/u><\/h4>/);
+    assert.match(portable.html, /<h5><u[^>]*>子标题<\/u><\/h5>/);
+    assert.match(portable.html, /<hr>/);
+    assert.match(portable.html, /<strong>粗体<\/strong>/);
+    assert.match(portable.html, /<a href="https:\/\/example\.test\/C\+\+\/D\+\+">链接<\/a>/);
+    assert.equal((portable.html.match(/<ul>/g) || []).length, 2);
+    assert.match(portable.html, /<ol>/);
+    assert.match(portable.html, /<table[^>]*>/);
+    assert.match(portable.html, /<td[^>]*><u[^>]*>重点<\/u><br>第二行<\/td>/);
+    assert.match(portable.text, /^#### 主标题/m);
+    assert.match(portable.text, /^##### 子标题/m);
+    assert.match(portable.text, /https:\/\/example\.test\/C\+\+\/D\+\+/);
+
+    const literalCases = [
+      "C++ 与 C++ 的比较；x++；a++b++c",
+      "\\+\\+转义文字\\+\\+",
+      "`++inline++` and ``a ` ++code++``",
+      "`code\n++multiline++`",
+      "    ++indented code++\n    <u>literal</u><br>",
+      "```text\n++fenced++\n<u>literal</u><br>\n```",
+      "~~~text\n++tilde fenced++\n~~~",
+      "> ```text\n> ++quoted code++\n> ```",
+      "- 条目\n\n      ++nested indented code++",
+      "$a++b++c$ and $$x++y++z$$",
+      "$$\na++b++c\n$$",
+      "[链接](https://example.test/++segment++ \"++title++\")",
+      "https://example.test/++segment++",
+      "![++alt++](https://example.test/++image++.png)",
+      "[id]: https://example.test/++segment++ \"++title++\""
+    ];
+    for (const literal of literalCases) {
+      assert.equal(normalizeLegacyUnderlineMarkdown(literal), literal, `normalization must preserve literal ${literal}`);
+      const payload = buildMarkdownClipboardPayload({ documentPath, markdown: literal });
+      assert.equal(payload.text, literal, `plain clipboard must preserve literal ${literal}`);
+      assert.doesNotMatch(payload.html, /<u\b/, `rich clipboard must not invent underline for ${literal}`);
+    }
+    const frontmatterLiteral = "---\r\nlabel: ++literal++\r\n---\r\n\r\n😀++中文重点++后文";
+    const normalizedLiteral = normalizeLegacyUnderlineMarkdown(frontmatterLiteral);
+    assert.equal(normalizedLiteral, "---\r\nlabel: ++literal++\r\n---\r\n\r\n😀<u>中文重点</u>后文");
+    assert.equal(normalizeLegacyUnderlineMarkdown(normalizedLiteral), normalizedLiteral, "canonical conversion is idempotent");
+    for (const reference of ["[++label++]\n\n[++label++]: https://example.test", "[++label++][]\n\n[++label++]: https://example.test", "[标签][++ref++]\n\n[++ref++]: https://example.test"]) {
+      assert.equal(normalizeLegacyUnderlineMarkdown(reference), reference, "reference IDs must remain byte-for-byte stable");
+    }
+    assert.equal(normalizeLegacyUnderlineMarkdown("正文[^++note++]\n\n[^++note++]: ++重点++"),
+      "正文[^++note++]\n\n[^++note++]: <u>重点</u>", "footnote labels are identifiers, only their body may change");
+    for (const math of ["$a<br>b$", "$<u>literal</u>$", "\\(a<br>b\\)", "$$\na<br>b\n$$"]) {
+      assert.equal(buildMarkdownClipboardPayload({ documentPath, markdown: math }).text, math,
+        "HTML-like literal text inside math must not be stripped or converted to newlines");
+    }
+    const mathAndEmphasis = "$a++b++c$ 与 ++真正重点++。";
+    assert.equal(normalizeLegacyUnderlineMarkdown(mathAndEmphasis), "$a++b++c$ 与 <u>真正重点</u>。");
+    const outerLink = "++[资料](https://example.test/++segment++) 与 `++literal++`++";
+    assert.equal(normalizeLegacyUnderlineMarkdown(outerLink), "<u>[资料](https://example.test/++segment++) 与 `++literal++`</u>");
+    assert.match(buildMarkdownClipboardPayload({ documentPath, markdown: outerLink }).html,
+      /<u[^>]*><a href="https:\/\/example\.test\/\+\+segment\+\+">资料<\/a> 与 <code>\+\+literal\+\+<\/code><\/u>/);
+
+    for (const straddle of [
+      "[label ++](https://example.test) word++",
+      "++before [label++](https://example.test)",
+      "**bold ++end** outside++",
+      "++outside *inside++*",
+      "~~deleted ++inside~~ outside++",
+      "<u>++inside</u> outside++"
+    ]) {
+      assert.equal(normalizeLegacyUnderlineMarkdown(straddle), straddle, "underline delimiters must share the same inline container stack");
+    }
+    for (const nested of ["[label ++inside++](https://example.test)", "**bold ++inside++**", "++before **bold** after++"]) {
+      const html = buildMarkdownClipboardPayload({ documentPath, markdown: nested }).html;
+      assert.match(html, /<u style=/, "properly nested underline remains supported");
+    }
+
+    const underlineBlock = buildMarkdownClipboardPayload({ documentPath,
+      markdown: "<u>\n**粗体内容** 和 [资料链接](https://example.test)\n</u>" });
+    assert.match(underlineBlock.html, /<u[^>]*><strong>粗体内容<\/strong> 和 <a href="https:\/\/example\.test">资料链接<\/a><\/u>/);
+    for (const destination of ["javascript:alert%281%29", "data:text/html;base64,PHNjcmlwdD4=", "vbscript:msgbox%281%29", "file:///private/secret", "java\nscript:alert%281%29"]) {
+      const payload = buildMarkdownClipboardPayload({ documentPath, markdown: `[可见标签](<${destination}>)` });
+      assert.doesNotMatch(payload.html, /<a\b/, `unsafe scheme must not be copied as a live link: ${destination}`);
+      assert.match(payload.html, /可见标签/);
+    }
+    for (const destination of ["https://example.test", "mailto:example@example.com", "#section", "./relative.md"]) {
+      const payload = buildMarkdownClipboardPayload({ documentPath, markdown: `[可见标签](${destination})` });
+      assert.match(payload.html, /<a href=/, `safe links stay interactive: ${destination}`);
+    }
+    const unsafeUnderline = buildMarkdownClipboardPayload({ documentPath, markdown: '<u onclick="alert(1)" style="color:red">安全内容</u>' });
+    assert.doesNotMatch(unsafeUnderline.html, /onclick|color:red/);
+    assert.match(unsafeUnderline.html, /<u style="text-decoration:underline;text-underline-offset:2px;">安全内容<\/u>/);
 
     console.log("markdown assets tests passed");
   } finally {

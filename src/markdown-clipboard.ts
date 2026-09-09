@@ -4,7 +4,7 @@ import type { DOMOutputSpec, Node as ProseMirrorNode, Schema } from "@tiptap/pm/
 import { Plugin } from "@tiptap/pm/state";
 
 function isUnderlinedEmphasis(node: ProseMirrorNode) {
-  if (node.type.name !== "heading") return false;
+  if (node.type.name !== "heading" || Number(node.attrs.level) > 3) return false;
   let hasText = false;
   let fullyUnderlined = true;
   node.forEach((child) => {
