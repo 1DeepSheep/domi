@@ -66,8 +66,10 @@ export class CodexReadinessController {
   }) {
     this.check = options.check;
     this.publish = options.publish;
-    this.schedule = options.schedule || setTimeout;
-    this.cancel = options.cancel || clearTimeout;
+    // Browser timer functions require their Window receiver. Calling an
+    // unbound native timer as this.schedule() gives it the controller instead.
+    this.schedule = options.schedule || ((callback, delay) => setTimeout(callback, delay));
+    this.cancel = options.cancel || ((timer) => clearTimeout(timer));
   }
 
   private update(patch: Partial<CodexReadinessSnapshot>) {
