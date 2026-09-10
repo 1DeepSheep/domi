@@ -1,4 +1,5 @@
 import { newsDiscoveryContext } from "./news-discovery-context";
+import { CodexReadinessController, codexConnectionReady, codexConnectionSettingsChanged, codexReadinessPresentation, codexTaskReady, type CodexReadinessSnapshot } from "./codex-readiness";
 import { podcastAutomationJob, podcastProgressRequests, podcastWorkflowContract } from "./podcast-progress";
 import { canSkipTodoSync, nextTodoEvaluationAt, parseTodoReceipt, todoInputFingerprint, TODO_RULE_VERSION, verifiedTodoReceipt, type TodoSyncCheckpoint } from "./todo-sync-policy";
 import { indexBy, indexConversation, latestAssistant } from "./render-indexes";
@@ -1082,6 +1083,7 @@ function readPausedQueuedSubmissionIds() {
 }
 
 type RunContext = {
+  connectionGeneration?: number;
   threadId: string;
   assistantMessageId: string;
   userMessageId?: string;
@@ -1850,7 +1852,19 @@ function App() {
   const selectedWorkflowId = activeComposerDraft.selectedWorkflowId;
   const [composerDragActive, setComposerDragActive] = useState(false);
   const [attachmentImportCount, setAttachmentImportCount] = useState(0);
-  const [codexStatus, setCodexStatus] = useState<CodexCheckResult | null>(null);
+  const [codexReadiness, setCodexReadiness] = useState<CodexReadinessSnapshot>({ status: null, checking: false, checkFailed: false });
+  const codexReadinessRef = useRef<CodexReadinessController | null>(null);
+  if (!codexReadinessRef.current) codexReadinessRef.current = new CodexReadinessController({
+    check: (options) => workbench.checkCodex(options),
+    publish: setCodexReadiness
+  });
+  const codexReadinessController = codexReadinessRef.current;
+  const settingsSaveRevisionRef = useRef(0);
+  const settingsSavePromiseRef = useRef<Promise<AppSettingsSaveResult> | null>(null);
+  const connectionAttemptRevisionRef = useRef(0);
+  const codexStatus = codexReadiness.status;
+  const codexConnected = codexConnectionReady(codexStatus);
+  const codexPresentation = codexReadinessPresentation(codexReadiness, hasNativeWorkbench);
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<"connection" | "data" | "plaud" | "updates" | "diagnostics">("connection");
@@ -3202,9 +3216,15 @@ function App() {
   }, [hasConversation, input]);
 
   useEffect(() => {
+    codexReadinessController.activate();
+    return () => codexReadinessController.dispose();
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
+    const settingsRevision = settingsSaveRevisionRef.current;
     workbench.loadSettings().then((result) => {
-      if (cancelled || !result.ok || !result.settings) return;
+      if (cancelled || settingsRevision !== settingsSaveRevisionRef.current || !result.ok || !result.settings) return;
       setAppSettings(result.settings);
       if (!result.settings.onboardingComplete) setSettingsOpen(true);
     });
@@ -3274,23 +3294,13 @@ function App() {
         // Repository-backed views do not depend on Codex. Refresh them while
         // the runtime/plugin check is in flight so startup stays useful even
         // when the network is slow.
-        const statusPromise = workbench.checkCodex().then((status) => {
-          if (!cancelled) setCodexStatus(status);
-          return status;
-        });
+        const statusPromise = codexReadinessController.refresh();
         const dataRefreshPromise = Promise.allSettled([
           refreshDomi(),
           refreshDomiTaskBoard({ silent: Boolean(cachedTasks.tasks.length) }),
           refreshWeeklyNews(0, { silent: hasCachedNews, preserveView: true })
         ]);
-        const [status] = await Promise.all([statusPromise, dataRefreshPromise]);
-        if (!status.pluginSetup?.ok) {
-          const pluginError = status.pluginSetup?.error
-            || "domi 插件尚未准备完成，请在 Codex 连接中重新检测。";
-          setDomiError(pluginError);
-          setDomiTaskError(pluginError);
-          setWeeklyNewsError(pluginError);
-        }
+        await Promise.all([statusPromise, dataRefreshPromise]);
       } finally {
         if (!cancelled) setWeeklyNewsAutomationReady(true);
       }
@@ -3600,6 +3610,7 @@ function App() {
       return;
     }
     codexRecoveryStartedRef.current = true;
+    const recoveryConnectionGeneration = codexReadinessController.generation;
 
     const allLocalThreads = threadsRef.current;
     const candidates = allLocalThreads.filter((thread) => {
@@ -3714,6 +3725,7 @@ function App() {
             const recoveredRunId = result.runId;
             reboundRunId = recoveredRunId;
             runContextRef.current.set(recoveredRunId, {
+              connectionGeneration: recoveryConnectionGeneration,
               threadId: thread.id,
               assistantMessageId: latestAssistant.id,
               entityFinalizationMode: latestAssistant.entityFinalizationMode,
@@ -3727,6 +3739,7 @@ function App() {
             });
             const bound = await workbench.bindCodexRun(recoveredRunId);
             if (bound.ok) {
+              codexReadinessController.observeRuntimeEvent(recoveryConnectionGeneration);
               reboundRunId = "";
               continue;
             }
@@ -3897,6 +3910,10 @@ function App() {
       // drop the user's selected Skill and produce the wrong deliverable.
       if (queuedUserSkill && !skillHubReady) continue;
       const workflow = indexBy(allWorkflows, "id").get(queued.workflowId || "");
+      // A probe can finish after persisted queues have loaded. Leave the item
+      // pending; readiness changes wake this effect without pausing user work.
+      if (hasNativeWorkbench && !codexTaskReady(codexStatus,
+        queued.useDomiPlugin && workflow?.source !== "user" && workflow?.source !== "system")) continue;
       if (queuedUserSkill && !workflow) {
         setThreadAttachmentError(
           threadId,
@@ -3966,7 +3983,8 @@ function App() {
           }
           setPausedQueuedSubmissionIds((current) => new Set(current).add(acceptedSubmission.id));
         }
-      }).catch(() => {
+      }).catch((error) => {
+        if (!accepted && error?.code === "DOMI_CODEX_READINESS_PENDING") return;
         if (accepted) {
           setQueuedSubmissionsByThread((current) => {
             const retryThreadId = acceptedSubmission.threadId;
@@ -3988,10 +4006,12 @@ function App() {
     allWorkflows,
     appSettings,
     codexRecoveryReady,
+    codexStatus,
     pausedQueuedSubmissionIds,
     queuedSubmissionsByThread,
     skillHubReady,
     storageReady,
+    submissionBusyThreadIds,
     threads
   ]);
 
@@ -6249,10 +6269,28 @@ function App() {
         error: "当前仍有任务正在发送、运行或归档。请等待任务完成后再修改资料连接。"
       };
     }
-    const result = await workbench.saveSettings(request);
+    const settingsRevision = ++settingsSaveRevisionRef.current;
+    const connectionChanged = codexConnectionSettingsChanged(appSettingsRef.current, request);
+    const readinessRevision = codexReadinessController.beginSave(connectionChanged);
+    const savePromise = workbench.saveSettings(request);
+    settingsSavePromiseRef.current = savePromise;
+    let result: AppSettingsSaveResult;
+    try {
+      result = await savePromise;
+    } catch (error) {
+      codexReadinessController.failSave(readinessRevision);
+      throw error;
+    } finally {
+      if (settingsSavePromiseRef.current === savePromise) settingsSavePromiseRef.current = null;
+    }
+    if (settingsRevision !== settingsSaveRevisionRef.current) return result;
     if (result.ok && result.settings) {
+      appSettingsRef.current = result.settings;
       setAppSettings(result.settings);
-      if (result.codex) setCodexStatus(result.codex);
+      const statusAccepted = codexReadinessController.acceptSaved(readinessRevision, result.codex);
+      if (!statusAccepted || (!result.codex && (connectionChanged || !codexReadinessController.snapshot.status))) {
+        void codexReadinessController.refresh(undefined, { readOnly: true, force: true });
+      }
       const documentLibraryLocationChanged = [
         "storageBackend",
         "localLibraryDir",
@@ -6274,7 +6312,7 @@ function App() {
         setDomiSnapshot(null);
         void refreshAfterDataConnectionSave(result.settings);
       }
-    }
+    } else codexReadinessController.failSave(readinessRevision);
     return result;
   }
 
@@ -6299,12 +6337,31 @@ function App() {
   }
 
   async function startChatGPTLogin(): Promise<ChatGPTLoginResult> {
+    codexReadinessController.invalidate(true);
     return workbench.startChatGPTLogin();
   }
 
   async function refreshCodex(verifiedStatus?: CodexCheckResult) {
-    const status = verifiedStatus || await workbench.checkCodex();
-    setCodexStatus(status);
+    await codexReadinessController.refresh(verifiedStatus, { readOnly: false, force: true });
+  }
+
+  async function refreshSavedCodexConnection(attemptRevision?: number) {
+    if (attemptRevision !== connectionAttemptRevisionRef.current) return;
+    // Reconcile a cancelled relay operation with persisted settings, without
+    // superseding a real settings transaction that the user has since begun.
+    await settingsSavePromiseRef.current?.catch(() => undefined);
+    if (settingsSavePromiseRef.current || attemptRevision !== connectionAttemptRevisionRef.current) return;
+    const settingsRevision = settingsSaveRevisionRef.current;
+    try {
+      const saved = await workbench.loadSettings();
+      if (settingsRevision !== settingsSaveRevisionRef.current || attemptRevision !== connectionAttemptRevisionRef.current) return;
+      if (saved.ok && saved.settings) {
+        appSettingsRef.current = saved.settings;
+        setAppSettings(saved.settings);
+      }
+    } finally {
+      if (settingsRevision === settingsSaveRevisionRef.current && attemptRevision === connectionAttemptRevisionRef.current) await refreshCodex();
+    }
   }
 
   async function chooseWorkflow(workflow: Workflow) {
@@ -7551,6 +7608,13 @@ function App() {
       return;
     }
 
+    if (context.connectionGeneration !== undefined && (
+      payload.type === "reconnected" || payload.type === "completed" || payload.type === "user-input-request"
+      || (payload.type === "assistant-delta" && Boolean(payload.text || payload.output))
+    )) {
+      codexReadinessController.observeRuntimeEvent(context.connectionGeneration);
+    }
+
     if (payload.type === "user-input-request" && payload.request) {
       const interactionKey = `${payload.runId}:${typeof payload.request.requestId}:${String(payload.request.requestId)}`;
       setAssistantInteractions((current) => {
@@ -8220,6 +8284,12 @@ function App() {
     const sourceThread = options.thread || activeThread;
     let targetThread = sourceThread;
     const useDomiPlugin = options.useDomiPlugin ?? domiPluginEnabled;
+    if (hasNativeWorkbench && !codexTaskReady(codexReadinessController.snapshot.status,
+      useDomiPlugin && workflow?.source !== "user" && workflow?.source !== "system")) {
+      throw Object.assign(new Error(codexConnectionReady(codexReadinessController.snapshot.status)
+        ? "Codex 已连接；domi 插件尚未通过检查，请在连接设置中重新检查。当前输入已保留。"
+        : "Codex 连接尚未通过检查，请在连接设置中重新检查。当前输入已保留。"), { code: "DOMI_CODEX_READINESS_PENDING" });
+    }
     const submittedInput = overrideInput ?? input;
     const submittedComposerInput = options.workflowContinuation
       ? options.displayText || submittedInput
@@ -8472,6 +8542,7 @@ function App() {
     }
     patchThread(targetThread.id, { timeline: [], lastUsage: null });
     runContextRef.current.set(runId, {
+      connectionGeneration: codexReadinessController.generation,
       threadId: targetThread.id,
       assistantMessageId: assistantId,
       userMessageId: userMessage.id,
@@ -12831,7 +12902,7 @@ function App() {
                   onClick={() => setModelMenuOpen((open) => !open)}
                   aria-label="选择模型、推理强度和速度"
                   aria-expanded={modelMenuOpen}
-                  disabled={!codexStatus?.ok}
+                  disabled={!codexConnected}
                 >
                   <Zap className="model-picker-zap" size={14} />
                   <span>{selectedModel?.name.replace("GPT-5.6-", "") || "推荐模型"}</span>
@@ -12839,7 +12910,7 @@ function App() {
                   <ChevronDown size={14} />
                 </button>
 
-                {modelMenuOpen && codexStatus?.ok && (
+                {modelMenuOpen && codexConnected && codexStatus && (
                   <div className="model-picker-menu">
                     <div className="model-menu-heading">
                       <strong>运行设置</strong>
@@ -12921,7 +12992,7 @@ function App() {
                 title={isRunning ? "加入当前对话的待执行队列" : "发送给 Codex"}
                 disabled={
                   attachmentImportCount > 0
-                  || !codexStatus?.ok
+                  || !codexTaskReady(codexStatus, domiPluginEnabled && selectedWorkflow?.source !== "user" && selectedWorkflow?.source !== "system")
                   || (!input.trim() && attachments.length === 0)
                 }
               >
@@ -13468,10 +13539,10 @@ function App() {
           setSettingsInitialTab("connection");
           setSettingsOpen(true);
         }} title="打开 Codex 设置">
-          <div className={`status-dot ${codexStatus?.ok ? "ok" : "bad"}`} />
+          <div className={`status-dot ${codexPresentation.tone}`} />
           <div>
-            <strong>{codexStatus?.ok ? "Codex 已就绪" : hasNativeWorkbench ? "Codex 未就绪" : "浏览器预览"}</strong>
-            {!codexStatus?.ok && <span>{codexStatus?.error || "检测中"}</span>}
+            <strong>{codexPresentation.title}</strong>
+            {codexPresentation.detail && <span>{codexPresentation.detail}</span>}
           </div>
           <Settings size={14} />
         </button>
@@ -14110,6 +14181,12 @@ function App() {
           initialTab={settingsInitialTab}
           settings={appSettings}
           codexStatus={codexStatus}
+          codexChecking={codexReadiness.checking}
+          onConnectionAttempt={(invalidate) => {
+            codexReadinessController.beginSave(invalidate);
+            return ++connectionAttemptRevisionRef.current;
+          }}
+          onConnectionSettled={refreshSavedCodexConnection}
           required={!appSettings.onboardingComplete}
           onClose={() => setSettingsOpen(false)}
           onDirtyChange={(dirty) => {

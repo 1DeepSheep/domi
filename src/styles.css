@@ -1125,6 +1125,31 @@ body.panel-resizing .main-grid {
   box-shadow: 0 0 0 3px rgba(100, 128, 109, 0.09);
 }
 
+.status-dot.neutral::before {
+  background: var(--faint);
+  box-shadow: 0 0 0 3px rgba(120, 119, 110, 0.08);
+}
+
+.status-dot.warning::before {
+  background: #a48046;
+  box-shadow: 0 0 0 3px rgba(164, 128, 70, 0.09);
+}
+
+.codex-readiness-note {
+  margin: 8px 18px 14px;
+  font-size: var(--text-caption);
+  line-height: 1.6;
+  color: var(--faint);
+}
+
+.codex-readiness-note button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .codex-card strong,
 .codex-card span {
   display: block;

@@ -954,7 +954,7 @@ assert.match(
 );
 assert.match(
   `${setupCenter}\n${app}`,
-  /onRefresh\(result\.codex\)[\s\S]*?refreshCodex\(verifiedStatus\?: CodexCheckResult\)[\s\S]*?verifiedStatus \|\| await workbench\.checkCodex\(\)/,
+  /onRefresh\(result\.codex\)[\s\S]*?refreshCodex\(verifiedStatus\?: CodexCheckResult\)[\s\S]*?codexReadinessController\.refresh\(verifiedStatus,/,
   "A successful full connection test must publish its verified status without running the same health check twice."
 );
 assert.match(
@@ -1191,7 +1191,7 @@ assert.match(
 );
 assert.match(
   main,
-  /runCodexCheckCached[\s\S]*?CODEX_CHECK_CACHE_TTL_MS[\s\S]*?ipcMain\.handle\("codex:check", runCodexCheckCached\)/,
+  /runCodexCheckCached[\s\S]*?CODEX_CHECK_CACHE_TTL_MS[\s\S]*?ipcMain\.handle\("codex:check", \(_event, request\) => runCodexCheckCached\(request\)\)/,
   "Repeated renderer status checks must share the cached Codex health result."
 );
 assert.match(
@@ -1315,7 +1315,7 @@ assert.match(
 );
 assert.match(
   app,
-  /const statusPromise = workbench\.checkCodex\(\)\.then[\s\S]*?const dataRefreshPromise = Promise\.allSettled\(\[[\s\S]*?refreshDomi\(\)[\s\S]*?refreshDomiTaskBoard[\s\S]*?refreshWeeklyNews[\s\S]*?Promise\.all\(\[statusPromise, dataRefreshPromise\]\)[\s\S]*?if \(!status\.pluginSetup\?\.ok\)/,
+  /const statusPromise = codexReadinessController\.refresh\(\)[\s\S]*?const dataRefreshPromise = Promise\.allSettled\(\[[\s\S]*?refreshDomi\(\)[\s\S]*?refreshDomiTaskBoard[\s\S]*?refreshWeeklyNews[\s\S]*?Promise\.all\(\[statusPromise, dataRefreshPromise\]\)/,
   "Initial integration sync must refresh independent data, todo and news sources alongside Codex readiness."
 );
 assert.match(
