@@ -3,7 +3,7 @@ export {};
 declare global {
   interface Window {
     workbench: {
-      checkCodex: () => Promise<CodexCheckResult>;
+      checkCodex: (request?: { readOnly?: boolean; force?: boolean }) => Promise<CodexCheckResult>;
       loadSettings: () => Promise<AppSettingsResult>;
       saveSettings: (request: AppSettingsSaveRequest) => Promise<AppSettingsSaveResult>;
       selectDirectory: (currentPath?: string) => Promise<DirectorySelectionResult>;
@@ -1398,6 +1398,8 @@ export type DomiEntityMaterialsResult = {
 
 export type CodexCheckResult = {
   ok: boolean;
+  connectionOk?: boolean;
+  diagnosticWarnings?: string[];
   path: string;
   version: string;
   transport: "app-server" | "browser";
@@ -1413,6 +1415,8 @@ export type CodexCheckResult = {
   configuredServiceTier: string;
   pluginSetup?: {
     ok: boolean;
+    status?: "ready" | "deferred" | "missing" | "check-failed";
+    reason?: string;
     updated?: boolean;
     skipped?: boolean;
     pluginId?: string;

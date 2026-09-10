@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { EventEmitter } = require("node:events");
+const { spawnSync } = require("node:child_process");
 const { parse } = require("smol-toml");
 const {
   DOMI_KEYCHAIN_ACCOUNT,
@@ -21,6 +22,36 @@ const {
 function createRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-bootstrap-"));
 }
+
+test("incomplete TOML comments are rejected without hanging connection setup", () => {
+  const root = createRoot();
+  try {
+    // GHSA-7w5x-hrqm-74c2: keep the production parser in a bounded child so a
+    // dependency regression cannot hang the test runner or access real config.
+    const child = spawnSync(process.execPath, ["-e", `
+      const assert = require("node:assert/strict");
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const { CodexBootstrapService } = require("./electron/codex-bootstrap.cjs");
+      const service = new CodexBootstrapService({ homeDir: process.argv[1] });
+      const target = service.configPath();
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      for (const text of ["a=[1 #", "a={b=1 #"]) {
+        fs.writeFileSync(target, text);
+        assert.throws(() => service.readConfig());
+        assert.equal(fs.readFileSync(target, "utf8"), text);
+      }
+      fs.writeFileSync(target, 'model = "fixture"\\n');
+      assert.equal(service.readConfig().model, "fixture");
+    `, root], {
+      cwd: path.resolve(__dirname, ".."), timeout: 2_000, encoding: "utf8"
+    });
+    assert.equal(child.error, undefined, "Malformed config must return before the timeout");
+    assert.equal(child.status, 0, child.stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("relay URL policy requires HTTPS except for loopback development", () => {
   assert.equal(normalizeRelayBaseUrl("https://relay.example.com/v1/"), "https://relay.example.com/v1");
