@@ -109,13 +109,13 @@ try {
   await server.listen();
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ headless: true, ...(process.env.DOMI_TABLE_TEST_BROWSER ? { executablePath: process.env.DOMI_TABLE_TEST_BROWSER } : {}) });
-  async function open(mode = "default") {
+  async function open(mode = "default", { nativeTimers = false } = {}) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     contexts.push(context);
     await context.route("**/*", route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     const page = await context.newPage();
     page.setDefaultTimeout(12_000);
-    await page.clock.install();
+    if (!nativeTimers) await page.clock.install();
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
     await page.goto(`${origin}/?mode=${mode}`, { waitUntil: "networkidle" });
@@ -139,6 +139,23 @@ try {
   const pluginFailure = { ok: false, connectionOk: true,
     pluginSetup: { ok: false, status: "check-failed", error: "Command failed: /private/synthetic/codex plugin list --json" },
     error: "Command failed: /private/synthetic/codex plugin list --json" };
+
+  // Run the actual browser timer path once, without Playwright's clock. A
+  // fake timer accepts arbitrary receivers and cannot catch Window timer APIs
+  // accidentally invoked as methods of the readiness controller.
+  {
+    const ui = await open("default", { nativeTimers: true });
+    await ui.plan({ hold: true });
+    await ui.release(pluginFailure);
+    await ui.waitCount("check", 2);
+    assert.match(await ui.status.innerText(), /Codex 已连接/);
+    await ui.release({});
+    await ui.status.getByText("Codex 已就绪", { exact: true }).waitFor();
+    assert.equal(await ui.count("run"), 0);
+    assert.equal(await ui.count("full-test"), 0);
+    assert.deepEqual(ui.errors, [], "Native browser timer recovery must not throw Illegal invocation");
+    await ui.context.close();
+  }
 
   // Initial pending is neutral, and a plugin failure does not disable models
   // or falsely advertise a disconnected Codex connection.
@@ -276,7 +293,7 @@ try {
     assert.deepEqual(ui.errors, []);
     await ui.context.close();
   }
-  console.log("Codex readiness UI passed: neutral startup, separate plugin warnings, model availability, plugin-aware submission, unknown/optimistic-event isolation, verified live-event recovery, manual model-free recovery, bounded read-only single-flight retries, recovery stops retries, startup queue waits and resumes.");
+  console.log("Codex readiness UI passed: native browser timers, neutral startup, separate plugin warnings, model availability, plugin-aware submission, unknown/optimistic-event isolation, verified live-event recovery, manual model-free recovery, bounded read-only single-flight retries, recovery stops retries, startup queue waits and resumes.");
 } finally {
   await Promise.allSettled(contexts.map(context => context.close()));
   await browser?.close();
