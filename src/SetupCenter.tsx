@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { workbench } from "./bridge";
+import { codexConnectionReady, codexReadinessPresentation } from "./codex-readiness";
 import { useAppConfirm } from "./AppConfirmDialog";
 import {
   CODEX_CONNECTION_TEST_UI_TIMEOUT_MS,
@@ -50,6 +51,9 @@ type SetupCenterProps = {
   initialTab?: "connection" | "data" | "plaud" | "updates" | "diagnostics";
   settings: AppSettings;
   codexStatus: CodexCheckResult | null;
+  codexChecking?: boolean;
+  onConnectionAttempt?: (invalidateConnection: boolean) => number;
+  onConnectionSettled?: (attemptRevision?: number) => Promise<void>;
   required: boolean;
   onClose: () => void;
   onDirtyChange?: (dirty: boolean) => void;
@@ -161,6 +165,9 @@ export default function SetupCenter({
   initialTab = "connection",
   settings,
   codexStatus,
+  codexChecking = false,
+  onConnectionAttempt,
+  onConnectionSettled,
   required,
   onClose,
   onDirtyChange,
@@ -180,6 +187,7 @@ export default function SetupCenter({
   const [connectionTestBusy, setConnectionTestBusy] = useState(false);
   const [connectionVerified, setConnectionVerified] = useState(false);
   const connectionTestSequenceRef = useRef(0);
+  const latestConnectionAttemptRef = useRef("");
   const connectionTestAttemptRef = useRef<{
     requestId: string;
     controller: AbortController;
@@ -358,7 +366,7 @@ export default function SetupCenter({
   }
 
   async function assistFeishuConnection() {
-    if (!codexStatus?.ok) {
+    if (!codexConnectionReady(codexStatus)) {
       setError("Codex 尚未就绪，请先完成 Codex 连接。");
       return;
     }
@@ -408,7 +416,7 @@ export default function SetupCenter({
         privateOutput: true,
         webSearch: false,
         workflowId: "connection-guidance",
-        workspacePath: codexStatus.workspacePath
+        workspacePath: codexStatus?.workspacePath
       });
       if (!result.ok) {
         setError(result.error || "Codex 暂时无法给出连接建议，请重试。");
@@ -860,7 +868,10 @@ export default function SetupCenter({
       setError(pathBlockReason);
       return;
     }
+    const attemptRevision = onConnectionAttempt?.(true);
     const requestId = `relay-${Date.now()}-${connectionTestSequenceRef.current += 1}`;
+    latestConnectionAttemptRef.current = requestId;
+    let publishedVerifiedConnection = false;
     const attempt = {
       requestId,
       controller: new AbortController(),
@@ -947,11 +958,15 @@ export default function SetupCenter({
       }
       setConnectionVerified(true);
       setNotice(result.verification?.detail || "中转站模型响应与工具调用均已通过。");
+      publishedVerifiedConnection = true;
       void onRefresh(result.codex).catch(() => undefined);
     } catch (relayError) {
       if (connectionTestAttemptRef.current !== attempt) return;
       setError(relayError instanceof Error ? relayError.message : String(relayError));
     } finally {
+      if (!publishedVerifiedConnection && latestConnectionAttemptRef.current === requestId) {
+        await (onConnectionSettled ? onConnectionSettled(attemptRevision) : onRefresh()).catch(() => undefined);
+      }
       if (connectionTestAttemptRef.current === attempt) {
         connectionTestAttemptRef.current = null;
         setRelayBusy(false);
@@ -973,7 +988,10 @@ export default function SetupCenter({
       setError(blockReason);
       return false;
     }
+    const attemptRevision = onConnectionAttempt?.(true);
     const requestId = `setup-${Date.now()}-${connectionTestSequenceRef.current += 1}`;
+    latestConnectionAttemptRef.current = requestId;
+    let publishedVerifiedConnection = false;
     const attempt = {
       requestId,
       controller: new AbortController(),
@@ -1036,6 +1054,7 @@ export default function SetupCenter({
       }
       setConnectionVerified(true);
       setNotice(result.verification?.detail || "模型响应与 Shell 工具调用均已通过。");
+      publishedVerifiedConnection = true;
       void onRefresh(result.codex).catch(() => undefined);
       return true;
     } catch (testError) {
@@ -1043,6 +1062,9 @@ export default function SetupCenter({
       setError(testError instanceof Error ? testError.message : String(testError));
       return false;
     } finally {
+      if (!publishedVerifiedConnection && latestConnectionAttemptRef.current === requestId) {
+        await (onConnectionSettled ? onConnectionSettled(attemptRevision) : onRefresh()).catch(() => undefined);
+      }
       if (connectionTestAttemptRef.current === attempt) {
         connectionTestAttemptRef.current = null;
         setConnectionTestBusy(false);
@@ -1222,15 +1244,15 @@ export default function SetupCenter({
     && draft.apiModel.trim() === codexStatus?.configuredModel
   );
   const selectedConnectionReady = Boolean(
-    codexStatus?.ok
-    && codexStatus.authMode === draft.authMode
+    codexConnectionReady(codexStatus)
+    && codexStatus?.authMode === draft.authMode
     && relayDraftMatchesRuntime
   );
   const connectionDetail = selectedConnectionReady
     ? draft.authMode === "relay"
       ? [codexStatus?.configuredModel, codexStatus?.apiBaseUrl, codexStatus?.version].filter(Boolean).join(" · ")
       : [codexStatus?.account?.email, codexStatus?.account?.planType, codexStatus?.version].filter(Boolean).join(" · ")
-    : codexStatus?.error || (draft.authMode === "relay"
+    : (codexChecking ? "正在检查本机连接状态" : codexStatus ? codexReadinessPresentation({ status: codexStatus, checking: false, checkFailed: false }).detail : "") || (draft.authMode === "relay"
       ? "请填写中转站信息并保存测试"
       : "请登录 ChatGPT 后重新测试");
   const installStepState = codexInstalled
@@ -1467,7 +1489,7 @@ export default function SetupCenter({
                     <small>{draft.authMode === "relay" ? "Responses 中转站" : "ChatGPT / Codex"}</small>
                     <strong>{selectedConnectionReady
                       ? draft.authMode === "relay" ? "中转站配置已就绪" : "ChatGPT 身份已就绪"
-                      : "尚未检测到可用连接"}</strong>
+                      : codexChecking ? "正在检查 Codex 连接" : "连接待检查"}</strong>
                     <span>{connectionDetail}</span>
                   </div>
                   <b className="connection-status-badge">
@@ -1479,6 +1501,10 @@ export default function SetupCenter({
                   </b>
                 </div>
                 <div className="setup-inline-actions">
+                  <button type="button" onClick={() => void onRefresh()} disabled={codexChecking || connectionOperationBusy || saving}>
+                    <RefreshCw className={codexChecking ? "spinning" : ""} size={15} />
+                    {codexChecking ? "正在检查" : "重新检查连接"}
+                  </button>
                   {draft.authMode === "chatgpt" && (
                     <button type="button" onClick={startLogin} disabled={connectionOperationBusy || loginBusy || !codexInstalled}>
                       {loginBusy ? <LoaderCircle className="spinning" size={16} /> : <LogIn size={16} />}
@@ -1500,6 +1526,12 @@ export default function SetupCenter({
                     </button>
                   )}
                 </div>
+                {selectedConnectionReady && codexStatus?.pluginSetup?.ok !== true && (
+                  <p className="codex-readiness-note" role="status">Codex 已连接，domi 插件尚待检查；插件任务准备完成后即可继续。</p>
+                )}
+                {!!codexStatus?.diagnosticWarnings?.length && (
+                  <p className="codex-readiness-note">{selectedConnectionReady ? "连接正常，部分辅助检查未完成。" : "部分辅助检查未完成。"}<button type="button" onClick={() => setTab("diagnostics")}>查看系统诊断</button></p>
+                )}
                 {connectionOperationBusy && (
                   <div className="connection-test-progress" role="status">
                     <LoaderCircle className="spinning" size={14} />
@@ -1615,7 +1647,7 @@ export default function SetupCenter({
                       连接飞书
                     </button>
                   )}
-                  {codexStatus?.ok
+                  {codexConnectionReady(codexStatus)
                     && (Boolean(feishuAssistIssue) || Boolean(feishuStatus && !feishuStatus.connected)) ? (
                     <button
                       type="button"

@@ -136,7 +136,7 @@ test("real SQLite saves unread threads, dedupe and pending target through reopen
 
 test("main-process navigation restores a minimized window and defers targets for a loading renderer", () => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  const start = source.indexOf("function getDesktopNotifications()"), end = source.indexOf("function getDomiPluginManager()", start);
+  const start = source.indexOf("function getDesktopNotifications()"), end = source.indexOf("function getDomiPluginManager(", start);
   assert.ok(start >= 0 && end > start);
   const f = fixture(), actions = [];
   let windows = [], loading = true, storeUnavailable = true;

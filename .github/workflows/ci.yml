@@ -68,3 +68,6 @@ jobs:
 
       - name: Verify PLAUD waiting, recovery and partial completion states
         run: npm run test:plaud-status-ui
+
+      - name: Verify Codex readiness and queued task recovery
+        run: npm run test:codex-readiness-ui
