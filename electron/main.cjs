@@ -32,7 +32,9 @@ const {
   feishuMarkdownSourceCandidates,
   safeFeishuExportContext
 } = require("./feishu-document-intent.cjs");
-const { DomiPluginActivationGate, DomiPluginManager } = require("./domi-plugin-manager.cjs");
+const {
+  DomiPluginActivationGate, DomiPluginManager, codexCheckFailureDetails, pluginCheckFailure
+} = require("./domi-plugin-manager.cjs");
 const {
   AppSettingsService,
   parseCalendarRecipients
@@ -208,6 +210,7 @@ const projectsDir = path.join(demoWorkspace, "projects");
 const appIconPath = path.join(rootDir, "public", "domi-dock-icon.png");
 
 let codexClient = null;
+let codexCheckGeneration = 0;
 let codexRuntimeReadinessPromise = null;
 let stateStore = null;
 let desktopNotifications = null;
@@ -330,7 +333,7 @@ function getDesktopNotifications() {
   return desktopNotifications;
 }
 
-function getDomiPluginManager() {
+function getDomiPluginManager({ readOnly = false } = {}) {
   if (!domiPluginManager) {
     const bundledRoot = app.isPackaged
       ? path.join(process.resourcesPath, "domi-plugin")
@@ -343,6 +346,7 @@ function getDomiPluginManager() {
       bundledPluginRoot: bundledRoot,
       bundledLockPath,
       clientVersion: app.getVersion(),
+      recoverTransactions: !readOnly,
       remoteUpdateEnabled: process.env.DOMI_PLUGIN_AUTO_UPDATE !== "0"
     });
   }
@@ -2418,7 +2422,7 @@ async function completeRunThroughSlidesDeliveryGate(run) {
 
 function prepareCodexConnectionMaintenance(blockedError) {
   const { background, foreground } = partitionCodexRuns(activeRuns.values());
-  if (foreground.length > 0) {
+  if (foreground.length > 0 || startingCodexRunIds.size > 0) {
     return {
       ok: false,
       error: blockedError
@@ -2613,6 +2617,7 @@ function getCodexClient() {
 }
 
 function resetCodexClient() {
+  codexCheckGeneration += 1;
   codexClient?.close();
   codexClient = null;
   liveCodexThreads.clear();
@@ -2653,16 +2658,33 @@ function codexCheckTimeout(deadlineAt, maximumMs) {
   return Math.max(1, Math.min(maximumMs, deadlineAt - Date.now()));
 }
 
-async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } = {}) {
+function codexCheckRuntimeKey(runtime = getCodexRuntime()) {
+  return crypto.createHash("sha256").update(JSON.stringify([
+    runtime.codexPath, runtime.authMode, runtime.apiBaseUrl, runtime.defaultModel, runtime.args, runtime.hasApiKey
+  ])).digest("hex").slice(0, 24);
+}
+
+async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY, readOnly = false, readLease = false } = {}) {
+  if (readOnly && !readLease) {
+    return getDomiPluginActivationGate().withStableClient(
+      () => runCodexCheck({ signal, deadlineAt, readOnly: true, readLease: true }),
+      { allowFailedActivation: true }
+    );
+  }
   const startedAt = Date.now();
   throwIfCodexCheckAborted(signal);
-  ensureDemoWorkspace();
-  await ensureCodexRuntimeReady();
+  if (!readOnly) {
+    ensureDemoWorkspace();
+    await ensureCodexRuntimeReady();
+  }
   throwIfCodexCheckAborted(signal);
   const runtimeReadyAt = Date.now();
   const loaded = getAppSettings().load();
   let detectedPath = "";
   let detectedVersion = "";
+  let checkStage = "runtime/resolve";
+  let pluginSetup = null;
+  const diagnosticWarnings = [];
   let runtime = {
     authMode: "chatgpt",
     providerLabel: "个人 ChatGPT",
@@ -2673,17 +2695,19 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
   };
   try {
     runtime = getCodexRuntime();
+    const runtimeKey = codexCheckRuntimeKey(runtime);
     const binary = resolveCodexBinary(runtime.codexPath);
     detectedPath = binary;
     const environment = codexEnvironment(runtime.env);
-    const pluginSetupPromise = getDomiPluginActivationGate().ensureWhenIdle({
-        binary,
-        env: environment,
-        enabled: app.isPackaged || process.env.DOMI_INSTALL_BUNDLED_PLUGIN === "1"
-      }).catch((error) => ({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error)
-      }));
+    const pluginRequest = {
+      binary,
+      env: environment,
+      enabled: app.isPackaged || process.env.DOMI_INSTALL_BUNDLED_PLUGIN === "1"
+    };
+    const pluginSetupPromise = (readOnly
+      ? Promise.resolve().then(() => getDomiPluginManager({ readOnly: true }).checkInstalled(pluginRequest))
+      : getDomiPluginActivationGate().ensureWhenIdle(pluginRequest))
+      .catch(pluginCheckFailure);
     const [versionSettlement, pluginSettlement] = await Promise.allSettled([
       execFileAsync(binary, ["--version"], {
         env: environment,
@@ -2696,14 +2720,49 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
     // connection-test single-flight slot until every already-started check has
     // drained, so no detached plugin operation can race the next attempt.
     throwIfCodexCheckAborted(signal);
-    if (versionSettlement.status === "rejected") throw versionSettlement.reason;
-    if (pluginSettlement.status === "rejected") throw pluginSettlement.reason;
-    const versionResult = versionSettlement.value;
-    const pluginSetup = pluginSettlement.value;
-    detectedVersion = String(versionResult.stdout || "").trim();
+    if (versionSettlement.status === "rejected") {
+      diagnosticWarnings.push("Codex 版本信息暂未读取到。");
+      appendRuntimeLog("codex-check-diagnostic", {
+        ...codexCheckFailureDetails(versionSettlement.reason, "runtime/version"), readOnly
+      });
+    } else {
+      detectedVersion = String(versionSettlement.value.stdout || "").trim();
+    }
+    pluginSetup = pluginSettlement.status === "fulfilled"
+      ? pluginSettlement.value : pluginCheckFailure(pluginSettlement.reason);
+    if (pluginSetup.deferred && pluginSetup.ok) {
+      // A source manifest on disk does not prove Codex enabled the plugin.
+      // Busy/manual checks verify the registry without activating or resetting.
+      const verified = await getDomiPluginActivationGate().withStableClient(
+        () => getDomiPluginManager({ readOnly: true }).checkInstalled(pluginRequest),
+        { allowFailedActivation: true }
+      ).catch(pluginCheckFailure);
+      pluginSetup = verified.ok
+        ? { ...verified, deferred: true, status: "deferred", reason: "active-tasks" }
+        : verified;
+    }
+    if (pluginSetup.ok === false) {
+      if (!pluginSetup.status) pluginSetup.status = "missing";
+      diagnosticWarnings.push(pluginSetup.error || "domi 插件状态暂未确认。");
+      if (pluginSetup.diagnostic) appendRuntimeLog("codex-check-diagnostic", {
+        ...pluginSetup.diagnostic, readOnly
+      });
+    }
     const pluginReadyAt = Date.now();
     throwIfCodexCheckAborted(signal);
-    const client = getCodexClient();
+    if (runtimeKey !== codexCheckRuntimeKey()) {
+      const error = new Error("连接配置已变更，请重新检查。");
+      error.code = "DOMI_CODEX_CHECK_SUPERSEDED";
+      throw error;
+    }
+    checkStage = "app-server/health";
+    const healthGeneration = codexCheckGeneration;
+    const client = readOnly ? codexClient : getCodexClient();
+    if (readOnly && (!client?.initialized || !client.child || client.child.killed || client.intentionalClose)) {
+      const error = new Error("尚无可供只读复查的 Codex 连接。");
+      error.code = "DOMI_CODEX_NO_LIVE_CONNECTION";
+      throw error;
+    }
     const healthTimeoutMs = codexCheckTimeout(deadlineAt, CODEX_HEALTH_REQUEST_TIMEOUT_MS);
     const healthSettlements = await Promise.allSettled([
       runtime.authMode === "chatgpt"
@@ -2721,8 +2780,19 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
       })
     ]);
     throwIfCodexCheckAborted(signal);
-    const rejectedHealthCheck = healthSettlements.find((result) => result.status === "rejected");
-    if (rejectedHealthCheck) throw rejectedHealthCheck.reason;
+    if (healthGeneration !== codexCheckGeneration || runtimeKey !== codexCheckRuntimeKey()) {
+      const error = new Error("连接配置已变更，请重新检查。");
+      error.code = "DOMI_CODEX_CHECK_SUPERSEDED";
+      throw error;
+    }
+    const rejectedHealthIndex = healthSettlements.findIndex((result) => result.status === "rejected");
+    if (rejectedHealthIndex >= 0) {
+      const error = healthSettlements[rejectedHealthIndex].reason;
+      if (error && typeof error === "object") {
+        error.domiCheckStage = ["account/read", "model/list", "config/read"][rejectedHealthIndex];
+      }
+      throw error;
+    }
     const [accountResult, modelResult, configResult] = healthSettlements.map((result) => result.value);
     const account = accountResult?.account || null;
     const config = configResult?.config || {};
@@ -2737,6 +2807,8 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
 
     const result = {
       ok: authenticated && pluginSetup.ok !== false,
+      connectionOk: authenticated,
+      diagnosticWarnings,
       path: binary,
       version: detectedVersion,
       transport: "app-server",
@@ -2767,16 +2839,19 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
           description: tier.description || ""
         }))
       })),
-      error: pluginSetup.ok === false
-        ? pluginSetup.error || "domi 插件尚未就绪，请重新检查连接。"
-        : authenticated
-        ? ""
-        : runtime.authMode === "relay"
+      error: !authenticated
+        ? runtime.authMode === "relay"
           ? "中转站凭据未就绪，请重新保存配置并测试；无需登录 ChatGPT。"
           : "请先登录 ChatGPT Codex。"
+        : pluginSetup.ok === false
+          ? pluginSetup.error || "domi 插件尚未就绪，请重新检查连接。"
+          : ""
     };
     appendRuntimeLog("codex-check-performance", {
       outcome: result.ok ? "ready" : "not-ready",
+      connectionOk: authenticated,
+      pluginStatus: pluginSetup.status || (pluginSetup.ok ? "ready" : "check-failed"),
+      readOnly,
       runtimeMs: runtimeReadyAt - startedAt,
       pluginMs: pluginReadyAt - runtimeReadyAt,
       appServerMs: Date.now() - pluginReadyAt,
@@ -2789,10 +2864,13 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
       outcome: "failed",
       runtimeMs: runtimeReadyAt - startedAt,
       totalMs: Date.now() - startedAt,
-      error: error instanceof Error ? error.message : String(error)
+      readOnly,
+      ...codexCheckFailureDetails(error, checkStage)
     });
     return {
       ok: false,
+      connectionOk: false,
+      diagnosticWarnings,
       path: detectedPath,
       version: detectedVersion,
       transport: "app-server",
@@ -2801,27 +2879,34 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY } =
       authMode: runtime.authMode,
       providerLabel: runtime.providerLabel,
       apiBaseUrl: runtime.apiBaseUrl,
-      credentialStored: false,
-      requiresOpenaiAuth: true,
+      credentialStored: Boolean(runtime.hasApiKey),
+      requiresOpenaiAuth: false,
       configuredModel: "",
       configuredReasoningEffort: "medium",
       configuredServiceTier: "standard",
-      pluginSetup: null,
+      pluginSetup,
       models: [],
-      error: error instanceof Error ? error.message : String(error)
+      error: error?.code === "DOMI_CODEX_CHECK_SUPERSEDED"
+        ? "连接配置已变更，请重新检查。"
+        : checkStage === "app-server/health"
+          ? "暂时无法确认 Codex 连接，请稍后重试。"
+          : "Codex Runtime 暂未就绪，请在设置中检查运行环境。"
     };
   }
 }
 
-function runCodexCheckCached() {
+function runCodexCheckCached(request = {}) {
+  const readOnly = request?.readOnly === true;
+  const key = `codex:check:${readOnly ? "read-only" : "setup"}:${codexCheckGeneration}:${codexCheckRuntimeKey()}`;
   return serviceCoordinator.run(
-    "codex:check",
-    runCodexCheck,
+    key,
+    () => runCodexCheck({ readOnly }),
     {
       ttlMs: CODEX_CHECK_CACHE_TTL_MS,
       ttlForValue: (value) => value?.ok ? CODEX_CHECK_CACHE_TTL_MS : 5_000,
       retries: 0,
-      allowStale: true
+      force: request?.force === true,
+      allowStale: false
     }
   );
 }
@@ -4139,7 +4224,7 @@ ipcMain.handle("app:notify", (_event, request = {}) => getDesktopNotifications()
 ipcMain.handle("app:consume-pending-notification", () => getDesktopNotifications().consumePendingNotification());
 ipcMain.handle("app:set-unread-task-count", (_event, count) => getDesktopNotifications().setUnreadTaskCount(count));
 
-ipcMain.handle("codex:check", runCodexCheckCached);
+ipcMain.handle("codex:check", (_event, request) => runCodexCheckCached(request));
 ipcMain.handle("codex:run", (event, payload) => runCodex(event.sender, payload));
 ipcMain.handle("codex:stop", (_event, runId) => stopCodex(runId));
 ipcMain.handle("codex:recover-thread", (_event, threadId, request) => recoverCodexThread(threadId, request));

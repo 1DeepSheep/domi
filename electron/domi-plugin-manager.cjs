@@ -14,6 +14,40 @@ const PLUGIN_ID = `domi@${MARKETPLACE_NAME}`;
 const DEFAULT_REMOTE_STARTUP_BUDGET_MS = 1_500;
 const DEFAULT_CODEX_PLUGIN_COMMAND_TIMEOUT_MS = 20_000;
 
+function codexCheckFailureDetails(error, stage) {
+  const message = String(error?.message || "").split(/\r?\n/)[0]
+    .replace(/Command failed:.*$/i, "子进程执行失败")
+    .replace(/(?:\/Users\/|\/private\/|\/var\/|\/Applications\/)\S+/g, "[本机路径]")
+    .replace(/Bearer\s+\S+/gi, "Bearer [已隐藏]")
+    .replace(/((?:token|api[_-]?key|authorization|password)\s*[=:]\s*)\S+/gi, "$1[已隐藏]")
+    .slice(0, 240);
+  return {
+    stage: String(error?.domiCheckStage || stage || "unknown"),
+    exitCode: Number.isInteger(error?.code) ? error.code : null,
+    code: typeof error?.code === "string" ? error.code : "",
+    signal: typeof error?.signal === "string" ? error.signal : "",
+    killed: error?.killed === true,
+    errorClass: String(error?.name || "Error").slice(0, 40),
+    message,
+    timeout: error?.code === "ETIMEDOUT" || (error?.killed === true
+      && ["SIGTERM", "SIGKILL"].includes(error?.signal))
+  };
+}
+
+function pluginCheckFailure(error) {
+  const diagnostic = codexCheckFailureDetails(error, "plugin/check");
+  return {
+    ok: false,
+    updated: false,
+    status: "check-failed",
+    reason: diagnostic.timeout ? "plugin-check-timeout" : "plugin-check-failed",
+    diagnostic,
+    error: diagnostic.timeout
+      ? "domi 插件状态检查超时，请稍后重试。"
+      : "domi 插件状态暂未确认，请稍后重试。"
+  };
+}
+
 async function checkRemoteWithinBudget(updater, budgetMs = DEFAULT_REMOTE_STARTUP_BUDGET_MS) {
   const timeoutMs = Math.max(0, Number(budgetMs) || 0);
   const checkPromise = Promise.resolve().then(() => updater.check());
@@ -117,6 +151,7 @@ class DomiPluginActivationGate {
         ok: Boolean(current),
         updated: false,
         deferred: true,
+        status: current ? "deferred" : "missing",
         reason: "active-tasks",
         version: current?.manifest?.version || "",
         error: current ? "" : "当前仍有任务正在准备或执行，尚未安装 domi 插件；请等待任务结束后重新检查连接。"
@@ -143,12 +178,18 @@ class DomiPluginActivationGate {
     }
   }
 
-  async withStableClient(operation) {
+  async withStableClient(operation, { allowFailedActivation = false } = {}) {
     // Claim the read lease before yielding. If activation already owns the
     // slot, wait for it; otherwise new activations defer until this read ends.
     this.readers += 1;
     try {
-      await this.waitForActivation();
+      if (allowFailedActivation) {
+        // A diagnostic reader waits for rollback/reset to drain, then checks
+        // the actual installed state even when activation itself failed.
+        await this.waitForActivation().catch(() => undefined);
+      } else {
+        await this.waitForActivation();
+      }
       return await operation();
     } finally {
       this.readers -= 1;
@@ -165,7 +206,8 @@ class DomiPluginManager {
     remoteUpdater = null,
     remoteUpdateEnabled = true,
     remoteStartupBudgetMs = DEFAULT_REMOTE_STARTUP_BUDGET_MS,
-    codexCommandTimeoutMs = DEFAULT_CODEX_PLUGIN_COMMAND_TIMEOUT_MS
+    codexCommandTimeoutMs = DEFAULT_CODEX_PLUGIN_COMMAND_TIMEOUT_MS,
+    recoverTransactions = true
   }) {
     this.userDataPath = userDataPath;
     this.bundledPluginRoot = bundledPluginRoot;
@@ -185,7 +227,7 @@ class DomiPluginManager {
       marketplaceRoot: this.marketplaceRoot,
       clientVersion
     });
-    this.recoverInterruptedTransaction();
+    if (recoverTransactions) this.recoverInterruptedTransaction();
     this.ensurePromise = null;
     this.lastResult = null;
   }
@@ -242,11 +284,19 @@ class DomiPluginManager {
   }
 
   async runCodex(binary, args, env) {
-    const { stdout } = await execFileAsync(binary, args, {
-      env,
-      timeout: this.codexCommandTimeoutMs,
-      maxBuffer: 16 * 1024 * 1024
-    });
+    let stdout;
+    try {
+      ({ stdout } = await execFileAsync(binary, args, {
+        env,
+        timeout: this.codexCommandTimeoutMs,
+        maxBuffer: 16 * 1024 * 1024
+      }));
+    } catch (error) {
+      // Store only the command category, never the executable/user path, for
+      // structured diagnostics. The caller supplies a concise UI message.
+      error.domiCheckStage = args.slice(0, args[1] === "marketplace" ? 3 : 2).join("/");
+      throw error;
+    }
     if (!stdout.trim()) return {};
     try {
       return JSON.parse(stdout);
@@ -349,6 +399,7 @@ class DomiPluginManager {
     if (!enabled) return { ok: true, skipped: true, reason: "development" };
     if (this.ensurePromise) return this.ensurePromise;
     this.ensurePromise = this.#ensure({ binary, env })
+      .catch(pluginCheckFailure)
       .then((result) => {
         this.lastResult = result;
         return result;
@@ -359,9 +410,58 @@ class DomiPluginManager {
     return this.ensurePromise;
   }
 
+  async checkInstalled({ binary, env, enabled = true }) {
+    if (!enabled) return { ok: true, updated: false, skipped: true, status: "ready", reason: "development" };
+    try {
+      // This path must remain read-only: no remote update, marketplace writes,
+      // installation, removal, transaction recovery or app-server reset.
+      if (fs.existsSync(this.transactionStatePath)) return {
+        ok: false, updated: false, status: "check-failed", reason: "activation-incomplete",
+        error: "domi 插件安装尚未完成，请在任务结束后检查插件安装。"
+      };
+      const listing = await this.runCodex(binary, ["plugin", "list", "--json"], env);
+      if (!Array.isArray(listing?.installed)) {
+        return pluginCheckFailure({ domiCheckStage: "plugin/list", code: "INVALID_PLUGIN_LIST" });
+      }
+      const bundledVersion = this.bundledInfo()?.manifest?.version || "";
+      const currentVersion = this.installedInfo()?.manifest?.version || bundledVersion;
+      const requiredVersion = compareVersions(currentVersion, bundledVersion) > 0 ? currentVersion : bundledVersion;
+      const installed = listing.installed.filter((item) => item.name === "domi"
+        && item.enabled === true
+        && typeof item.pluginId === "string" && /^domi@[^\s]+$/.test(item.pluginId)
+        && /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.+-]+)?$/.test(String(item.version || "")))
+        .sort((left, right) => compareVersions(right.version, left.version)
+          || Number(right.pluginId === PLUGIN_ID) - Number(left.pluginId === PLUGIN_ID))[0];
+      if (!installed) return {
+        ok: false, updated: false, status: "missing", reason: "plugin-missing",
+        error: "尚未找到已启用的 domi 插件，请在任务结束后检查插件安装。"
+      };
+      if (requiredVersion && compareVersions(installed.version, requiredVersion) < 0) return {
+        ok: false, updated: false, status: "missing", reason: "plugin-outdated",
+        pluginId: installed.pluginId, version: installed.version, bundledVersion,
+        error: "domi 插件版本需要更新，请在任务结束后检查插件安装。"
+      };
+      if (installed.pluginId !== PLUGIN_ID
+        && compareVersions(installed.version, requiredVersion || "0") <= 0) return {
+        ok: false, updated: false, status: "missing", reason: "plugin-unmanaged",
+        error: "尚未确认当前 domi 插件已启用，请在任务结束后检查插件安装。"
+      };
+      return {
+        ok: true, updated: false, status: "ready", reason: "installed-verified",
+        pluginId: installed.pluginId, version: installed.version, bundledVersion
+      };
+    } catch (error) {
+      return pluginCheckFailure(error);
+    }
+  }
+
   async #ensure({ binary, env }) {
+    this.recoverInterruptedTransaction();
     const bundledInfo = this.bundledInfo();
-    if (!bundledInfo) return { ok: false, skipped: true, error: "安装包未包含 domi 插件。" };
+    if (!bundledInfo) return {
+      ok: false, skipped: true, status: "missing", reason: "plugin-bundle-missing",
+      error: "安装包未包含 domi 插件。"
+    };
     const installedInfo = this.installedInfo();
     const remoteResult = this.remoteUpdateEnabled
       ? await checkRemoteWithinBudget(this.remoteUpdater, this.remoteStartupBudgetMs)
@@ -466,5 +566,7 @@ module.exports = {
   PLUGIN_ID,
   checkRemoteWithinBudget,
   compareVersions,
-  selectPreferredCandidate
+  selectPreferredCandidate,
+  codexCheckFailureDetails,
+  pluginCheckFailure
 };
