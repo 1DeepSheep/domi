@@ -241,8 +241,56 @@ try {
   await waitCalls("resume", 2);
   await assertTone("complete");
   assert.equal(await calls("sync"), 0, "Freshly discovered submitted work must resume without generating again");
+
+  // The vendor may keep wait_pull set after both artifacts are ready. A
+  // recording outside the local queue can offer notes without claiming that
+  // remote generation is unfinished or silently starting a recovery task.
+  const remoteReady = item("remote-ready", { hasTranscript: true, hasSummary: true, processing: true,
+    queueStage: "", resumeEligible: false });
+  await setSnapshot(snapshot([remoteReady]));
+  await refresh.click();
+  await row("remote-ready").waitFor();
+  assert.equal(await row("remote-ready").getByRole("button", { name: "生成纪要并入库", exact: true }).count(), 1);
+  assert.doesNotMatch(await row("remote-ready").innerText(), /等待远端生成|仍在处理|自动下载|自动补下载/);
+  assert.equal(await calls("resume"), 2, "Remote-ready items with no local queue must not create recovery work");
+  assert.equal(await calls("sync"), 0);
+
+  // A refresh that confirms an existing local task's transcript is ready must
+  // start download-only recovery now, without waiting for the 90-second tick.
+  const localReady = { ...remoteReady, fileId: "local-ready", fileName: "合成录音 local-ready",
+    queueStage: "generating", syncOutcome: "waiting", resumeEligible: true };
+  await setSnapshot(snapshot([localReady]));
+  await plan("resume", { hold: true });
+  await refresh.click();
+  await waitCalls("resume", 3);
+  await row("local-ready").waitFor();
+  assert.match(await row("local-ready").innerText(), /待自动补下载/);
+  assert.doesNotMatch(await row("local-ready").innerText(), /等待远端生成|仍在处理/);
+  await page.clock.fastForward(180_001);
+  assert.equal(await calls("resume"), 3, "Immediate recovery and polling must share the same single-flight lock");
+  assert.equal(await calls("sync"), 0, "Refresh recovery must never submit a generation request");
+  await release("resume", { ...readyResult, snapshot: snapshot([
+    { ...localReady, transcriptPath: "/synthetic/local-ready.md", queueStage: "transcript_ready", syncOutcome: "ready", resumeEligible: false }
+  ]) });
+  await assertTone("complete");
+  await page.waitForFunction(() => !document.querySelector('[aria-label="刷新 PLAUD 最近录音"]').disabled);
+
+  for (const patch of [{ stale: true }, { remoteStatus: "auth_required" }, { remoteStatus: "access_denied" }]) {
+    await setSnapshot(snapshot([localReady], patch));
+    await refresh.click();
+    await page.waitForFunction(() => !document.querySelector('[aria-label="刷新 PLAUD 最近录音"]').disabled);
+    assert.equal(await calls("resume"), 3, "A stale or unauthorized list must not immediately recover remote-ready rows");
+  }
+  const permanent = { ...localReady, errorCode: "PLAUD_ACCESS_DENIED", error: "PLAUD_ACCESS_DENIED: synthetic refusal" };
+  await setSnapshot(snapshot([permanent]));
+  await refresh.click();
+  await page.waitForFunction(() => !document.querySelector('[aria-label="刷新 PLAUD 最近录音"]').disabled);
+  assert.match(await row("local-ready").innerText(), /需要处理|权限/);
+  assert.equal(await row("local-ready").getByRole("button", { name: "生成纪要并入库", exact: true }).count(), 0);
+  await page.clock.fastForward(180_001);
+  assert.equal(await calls("resume"), 3, "A permanent per-record refusal must block immediate and periodic recovery");
   assert.deepEqual(errors, [], "The real App must not throw during PLAUD recovery and mutation races");
-  console.log("PLAUD UI passed: startup resume; uncertain generation; background single-flight recovery; completion; partial/all failures; refresh clears old counts and restarts discovered work; rename/delete serialization; stale results and finally isolation.");
+  console.log("PLAUD UI passed: startup resume; uncertain generation; background single-flight recovery; completion; partial/all failures; refresh clears old counts and restarts discovered work; rename/delete serialization; stale results and finally isolation; remote readiness overrides stale processing; immediate download-only recovery; unqueued, stale and unauthorized recovery guards.");
 } finally {
   await browser?.close();
   await server?.close();
