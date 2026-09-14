@@ -34,7 +34,7 @@ test("Skill reload waits for both preflight and active tasks", () => {
 test("Skill reload coordination guards the real task preflight and its cleanup", () => {
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   assert.match(main, /startingCodexRunIds\.add\(runId\);[\s\S]*?try\s*\{[\s\S]*?await ensureCodexRuntimeReady/);
-  assert.match(main, /finally\s*\{\s*startingCodexRunIds\.delete\(runId\);\s*schedulePendingSkillHubCodexReload\(\)/);
+  assert.match(main, /finally\s*\{[\s\S]*?startingCodexRunIds\.delete\(runId\);\s*schedulePendingSkillHubCodexReload\(\)/);
   assert.match(main, /if \(activeRuns\.has\(runId\) \|\| startingCodexRunIds\.has\(runId\)\)/);
   assert.match(main, /function activateImportedSkillsWhenSafe\(\)[\s\S]*?codexClientIdleForSkillReload\(activeRuns, startingCodexRunIds\)/);
   assert.match(main, /startsWith\("user-skill:"\) && skillHubCodexReloadPending/);
@@ -52,6 +52,14 @@ function mainRunHarness(overrides = {}) {
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const calls = [];
   const events = [];
+  const plaudOwners = new Set();
+  const plaudIntegration = {
+    plaudWorkflowPlan: payload => ({ requiresBrowser: payload.plaudAccess?.kind === "remote"
+      || payload.workflowId === "domi-router" || payload.workflowId === "plaud-connection-assist",
+      runtimeContext: payload.plaudAccess?.kind === "local_transcript" ? "verified local transcript execution context" : "" }),
+    reservePlaudForWorkflow: async runId => { plaudOwners.add(runId); },
+    releasePlaudWorkflow: runId => { plaudOwners.delete(runId); }
+  };
   const context = {
     path, process, setTimeout, clearTimeout,
     activeRuns: new Map(), startingCodexRunIds: new Set(), cancelledCodexRunIds: new Set(),
@@ -63,7 +71,7 @@ function mainRunHarness(overrides = {}) {
     ensureCodexRuntimeReady: async () => {}, needsLarkAccess: () => false,
     confirmExternalDomiRun: async () => ({ allowed: true, sandbox: "workspace-write" }),
     getDomiPluginActivationGate: () => ({ waitForActivation: async () => {}, withStableClient: callback => callback() }),
-    getDomiIntegration: () => ({ stopPlaudBackgroundSession: async () => {} }),
+    getDomiIntegration: () => plaudIntegration, plaudOwners, codexClient: null,
     projectResearchCacheScope: () => ({ allowed: false, workspacePath: "" }),
     prepareProjectResearchCache: async () => ({}), preparedProjectResearchCacheContext: () => ({}),
     markProjectMaterialIndexInjected() {},
@@ -76,12 +84,7 @@ function mainRunHarness(overrides = {}) {
     normalizeCodexRoutingParams, requestCodexTurn, resolveCodexActiveRun,
     classifyCodexTurnStatus: require("../electron/codex-turn-status.cjs").classifyCodexTurnStatus,
     publishCodexEvent: (_sender, _runId, event) => events.push(event),
-    finishRun(run, type, details = {}) {
-      run.finished = true;
-      clearTimeout(run.reconcileTimer);
-      context.activeRuns.delete(run.runId);
-      run.resolve({ ok: type === "completed" || type === "stopped", stopped: type === "stopped", output: run.output, ...details });
-    },
+    queueRunPostProcessing() {},
     completeRunThroughSlidesDeliveryGate(run) {
       calls.push({ method: "quality-gate" });
       context.finishRun(run, "completed");
@@ -100,7 +103,7 @@ function mainRunHarness(overrides = {}) {
     }
   });
   vm.createContext(context);
-  for (const name of ["domiOutputRuntimeContext", "codexThreadRuntimeKey", "resolveThread", "assertCodexRunNotCancelled", "markRunMaterialIndexInjected", "reconcileCodexTurnStart", "runCodex", "stopCodex", "handleCodexNotification", "recoverCodexThread"]) {
+  for (const name of ["finishRun", "domiOutputRuntimeContext", "codexThreadRuntimeKey", "resolveThread", "assertCodexRunNotCancelled", "markRunMaterialIndexInjected", "reconcileCodexTurnStart", "runCodex", "stopCodex", "handleCodexNotification", "recoverCodexThread"]) {
     const implementation = main.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n\\}\\n`));
     assert.ok(implementation, `missing real function ${name}`);
     vm.runInContext(implementation[0], context);
@@ -171,6 +174,107 @@ test("resume failures preserve the original thread without creating a blank repl
     await assert.rejects(context.resolveThread(client, { threadId: "original", model: "chosen" }, "/synthetic/workspace", "read-only"), /原对话已保留/);
     assert.deepEqual(calls.map(call => call.method), ["thread/resume"]);
   }
+});
+
+test("PLAUD reservations outlive turn acceptance and release only at a terminal task outcome", async () => {
+  for (const outcome of ["completed", "failed", "stopped", "waiting-input"]) {
+    const { context } = mainRunHarness();
+    const running = context.runCodex({}, { runId: outcome, prompt: "synthetic", workflowId: "domi-router" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(context.startingCodexRunIds.has(outcome), false, "runCodex outer finally has executed");
+    assert.equal(context.plaudOwners.has(outcome), true, "returning completion must retain the profile owner");
+    const run = context.activeRuns.get(outcome);
+    assert.equal(run.plaudWorkflowReserved, true);
+    context.finishRun(run, outcome);
+    assert.equal((await running).ok, outcome !== "failed");
+    assert.equal(context.plaudOwners.size, 0);
+    context.finishRun(run, outcome);
+    assert.equal(context.plaudOwners.size, 0, "duplicate finish remains idempotent");
+  }
+});
+
+test("PLAUD preflight failures and cancellation release reservations without submitting a turn", async () => {
+  for (const outcome of ["failed", "cancelled"]) {
+    const entered = deferred();
+    const pending = deferred();
+    const { context, calls } = mainRunHarness();
+    const client = context.getCodexClient();
+    context.getCodexClient = () => ({ ...client, start: async () => { entered.resolve(); await pending.promise; } });
+    const running = context.runCodex({}, { runId: outcome, prompt: "synthetic", plaudAccess: { kind: "remote" } });
+    await entered.promise;
+    assert.equal(context.plaudOwners.has(outcome), true);
+    if (outcome === "cancelled") {
+      await context.stopCodex(outcome);
+      assert.equal(context.plaudOwners.size, 0);
+      pending.resolve();
+    } else pending.reject(new Error("synthetic startup failure"));
+    const result = await running;
+    assert.equal(result.ok, outcome === "cancelled");
+    assert.equal(context.plaudOwners.size, 0);
+    assert.equal(calls.some(call => call.method === "turn/start"), false);
+  }
+});
+
+test("an explicitly rejected PLAUD turn start releases its reservation", async () => {
+  const { context } = mainRunHarness();
+  const client = context.getCodexClient();
+  context.getCodexClient = () => ({ ...client, request: (method, params) => {
+    if (method === "turn/start") throw Object.assign(new Error("rejected"), { responseReceived: true });
+    return client.request(method, params);
+  } });
+  const result = await context.runCodex({}, { runId: "rejected", prompt: "synthetic", plaudAccess: { kind: "remote" } });
+  assert.equal(result.ok, false);
+  assert.equal(context.plaudOwners.size, 0);
+  assert.equal(context.activeRuns.size, 0);
+});
+
+test("verified local PLAUD execution context reaches the model without reserving a browser", async () => {
+  const { context, calls } = mainRunHarness();
+  const running = context.runCodex({}, { runId: "local-transcript", prompt: "synthetic",
+    plaudAccess: { kind: "local_transcript", transcriptPath: "/synthetic/transcript.md" } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.plaudOwners.size, 0);
+  const turn = calls.find(call => call.method === "turn/start");
+  assert.match(turn.params.additionalContext["domi-runtime"].value, /verified local transcript execution context/);
+  context.finishRun(context.activeRuns.get("local-transcript"), "completed");
+  assert.equal((await running).ok, true);
+});
+
+test("a PLAUD interrupt acknowledgement without a terminal turn keeps the profile reserved", async () => {
+  for (const terminal of [false, true]) {
+    const { context } = mainRunHarness({ setTimeout: callback => setImmediate(callback) });
+    const client = context.getCodexClient();
+    context.getCodexClient = () => ({ ...client, request: (method, params) => {
+      if (method === "turn/interrupt") return Promise.resolve({});
+      if (method === "thread/read") return Promise.resolve({ thread: { turns: [{ id: "new-turn", status: terminal ? "interrupted" : "inProgress" }] } });
+      return client.request(method, params);
+    } });
+    const running = context.runCodex({}, { runId: "stopping", prompt: "synthetic", plaudAccess: { kind: "remote" } });
+    await new Promise(resolve => setImmediate(resolve));
+    const result = await context.stopCodex("stopping");
+    assert.equal(result.ok, terminal);
+    assert.equal(context.plaudOwners.has("stopping"), !terminal);
+    if (!terminal) context.finishRun(context.activeRuns.get("stopping"), "stopped");
+    await running;
+  }
+});
+
+test("idle timeout retains an uncertain PLAUD task instead of locally declaring it finished", async () => {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const implementation = main.match(/function armRunIdleTimeout\([^]*?\n\}\n/)[0];
+  let timeoutCallback, finishCalls = 0, stopCalls = 0;
+  const run = { runId: "idle", plaudWorkflowReserved: true, turnId: "original-turn" };
+  const context = { activeRuns: new Map([[run.runId, run]]), clearTimeout() {},
+    setTimeout(callback) { timeoutCallback = callback; return { unref() {} }; },
+    CODEX_RUN_IDLE_TIMEOUT_MS: 1000, finishRun() { finishCalls++; }, publishCodexEvent() {},
+    stopCodex: async () => { stopCalls++; return { ok: false }; } };
+  vm.createContext(context); vm.runInContext(implementation, context);
+  context.armRunIdleTimeout(run);
+  timeoutCallback(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopCalls, 1);
+  assert.equal(finishCalls, 0);
+  assert.equal(context.activeRuns.get(run.runId), run);
+  assert.equal(run.plaudWorkflowReserved, true);
 });
 
 test("resume refuses an active remote turn and preserves model settings for a completed thread", async () => {
@@ -248,7 +352,7 @@ test("an unknown submission keeps its owner and blocks a different run id on the
       return { thread: { turns: [{ id: "old", status: "completed", items: [{ type: "agentMessage", text: "Old result" }] }] } };
     }
   }) });
-  const running = context.runCodex({}, { runId: "original-run", threadId: "original", prompt: "new request" });
+  const running = context.runCodex({}, { runId: "original-run", threadId: "original", prompt: "new request", plaudAccess: { kind: "remote" } });
   await read.promise;
   const retry = await context.runCodex({}, { runId: "different-run", threadId: "original", prompt: "new request" });
   assert.equal(retry.ok, false);
@@ -257,12 +361,14 @@ test("an unknown submission keeps its owner and blocks a different run id on the
   assert.ok(run);
   assert.equal(run.output, "");
   assert.equal(run.startOutcomeUnknown, true);
+  assert.equal(context.plaudOwners.has("original-run"), true, "uncertain submissions must retain their PLAUD owner");
   const recovered = await context.recoverCodexThread("original");
   assert.equal(recovered.status, "running");
   assert.equal(recovered.output, "", "reopening the renderer must not show the previous answer as this submission");
   assert.equal(recovered.turnId, "");
   context.handleCodexNotification("turn/completed", { threadId: "original", turnId: "late-turn", turn: { id: "late-turn", status: "completed" } });
   assert.equal((await running).ok, true);
+  assert.equal(context.plaudOwners.size, 0);
 });
 
 test("a stop requested before the turn id arrives interrupts that same turn when it becomes known", async () => {
@@ -280,14 +386,16 @@ test("a stop requested before the turn id arrives interrupts that same turn when
       return {};
     }
   }) });
-  const running = context.runCodex({}, { runId: "cancel-sent", prompt: "synthetic" });
+  const running = context.runCodex({}, { runId: "cancel-sent", prompt: "synthetic", plaudAccess: { kind: "remote" } });
   await sent.promise;
   const stopping = context.stopCodex("cancel-sent");
   assert.equal(context.activeRuns.get("cancel-sent").stopRequested, true);
+  assert.equal(context.plaudOwners.has("cancel-sent"), true);
   response.resolve({ turn: { id: "late" } });
   assert.equal((await running).stopped, true);
   assert.equal((await stopping).ok, true);
   assert.deepEqual(interrupts, ["late"]);
+  assert.equal(context.plaudOwners.size, 0);
 });
 
 test("safe app updates wait for a task in preflight without counting it twice once active", () => {

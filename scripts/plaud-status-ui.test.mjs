@@ -17,13 +17,16 @@ const resolvedFixture = path.join(root, fixture.slice(1));
 const source = `
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { workbench } from "/src/bridge";
 import "/src/styles.css";
 import "/src/appearance/index.css";
 import "@fontsource-variable/instrument-sans/wght.css";
 import "@fontsource-variable/newsreader/standard.css";
 const state = window.__plaudStatusTest = { calls: [], plans: { list: [], sync: [], resume: [] }, pending: {}, issues: [], settings: null };
+state.readerListeners = [];
 const startup = window.__plaudStartupConfig || {};
+const fallback = (await import("/src/bridge?plaud-status-fallback")).workbench;
+if (startup.allowRun) window.workbench = { ...fallback };
+const { workbench } = await import("/src/bridge");
 const baseSettings = (await workbench.loadSettings()).settings;
 state.settings = { ...baseSettings, onboardingComplete: true, plaudConnectionMode: "enabled", ...startup.settings };
 state.snapshot = startup.snapshot || { ok: true, syncedAt: Date.now(), items: [], pendingCount: 0, queueCount: 0, hasMore: false, remoteStatus: "connected" };
@@ -42,6 +45,12 @@ workbench.loadSettings = async () => {
   if (startup.holdSettings) await new Promise(resolve => { state.pending.settings = resolve; });
   return { ok: true, settings: structuredClone(state.settings), updatedAt: Date.now() };
 };
+if (startup.allowRun) workbench.checkCodex = async () => ({
+  ok: true, connectionOk: true, workspacePath: "/synthetic", path: "/synthetic/codex",
+  pluginSetup: { ok: true, status: "ready", version: "7.0.9" },
+  models: startup.models || [{ id: "gpt-5.6-sol", name: "Synthetic model", supportedReasoningEfforts: [{ id: "max" }], serviceTiers: [{ id: "priority" }] }]
+});
+if (startup.allowRun) workbench.syncDomi = async () => ({ ok: true });
 workbench.saveSettings = async request => {
   state.calls.push({ kind: "settings", payload: request });
   Object.assign(state.settings, structuredClone(request));
@@ -56,6 +65,14 @@ workbench.loadState = async defaults => ({ ok: true, state: { ...defaults, threa
 workbench.listPlaud = request => invoke("list", request);
 workbench.syncPlaud = () => invoke("sync");
 workbench.resumePlaudTranscripts = () => invoke("resume");
+workbench.onPlaudReaderAvailability = callback => {
+  state.readerListeners.push(callback);
+  return () => { state.readerListeners = state.readerListeners.filter(listener => listener !== callback); };
+};
+workbench.plaudWorkflowCompletion = async ({ fileId }) => {
+  state.calls.push({ kind: "completion", payload: { fileId } });
+  return { ok: false, fileId, stage: "", ...startup.completion };
+};
 workbench.loginPlaud = async () => { throw new Error("Automatic login is forbidden in this fixture"); };
 workbench.checkPlaudConnection = async ({ browser }) => ({ ok: true, connected: true, browser, status: "connected", checkedAt: Date.now() });
 workbench.renamePlaud = async request => {
@@ -66,8 +83,24 @@ workbench.deletePlaud = async request => {
   state.calls.push({ kind: "delete", payload: request });
   return { ok: true, fileId: request.fileId, trashed: true };
 };
-workbench.runCodex = async () => { throw new Error("Model calls are forbidden in this fixture"); };
-workbench.showNotification = async () => { throw new Error("OS alerts are forbidden in this fixture"); };
+workbench.runCodex = async request => {
+  if (!startup.allowRun) throw new Error("Model calls are forbidden in this fixture");
+  state.calls.push({ kind: "run", payload: request });
+  return new Promise(resolve => { state.pending.run = result => {
+    for (const listener of state.codexListeners || []) listener({ type: "completed", runId: request.runId, output: result.output });
+    resolve(result);
+  }; });
+};
+state.codexListeners = [];
+if (startup.allowRun) workbench.onCodexEvent = callback => {
+  state.codexListeners.push(callback);
+  return () => { state.codexListeners = state.codexListeners.filter(listener => listener !== callback); };
+};
+workbench.showNotification = async request => {
+  if (!startup.allowRun) throw new Error("OS alerts are forbidden in this fixture");
+  state.calls.push({ kind: "notification", payload: request });
+  return { ok: true };
+};
 workbench.reportRendererIssue = issue => state.issues.push(issue);
 const { default: App } = await import("/src/App");
 createRoot(document.getElementById("root")).render(startup.strictMode ? <React.StrictMode><App /></React.StrictMode> : <App />);
@@ -306,6 +339,7 @@ try {
     await isolated.route("**/*", route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await isolated.addInitScript(config => { window.__plaudStartupConfig = config; }, { strictMode: true, ...config });
     const startupPage = await isolated.newPage();
+    await startupPage.clock.install();
     startupPage.setDefaultTimeout(10_000);
     const startupErrors = [];
     startupPage.on("pageerror", error => startupErrors.push(error.message));
@@ -317,6 +351,13 @@ try {
       await verify({ page: startupPage, count, wait, release });
       assert.equal(await count("sync"), 0, "Startup must never call generating sync");
       assert.deepEqual(startupErrors, []);
+    } catch (error) {
+      console.error("Synthetic startup scenario failed", JSON.stringify(config), await startupPage.evaluate(() => ({
+        calls: window.__plaudStatusTest.calls.map(call => call.kind), issues: window.__plaudStatusTest.issues,
+        rowErrors: [...document.querySelectorAll('.plaud-item-detail')].map(node => node.textContent),
+        dialogs: [...document.querySelectorAll('[role="dialog"]')].map(node => node.textContent?.slice(-1000))
+      })));
+      throw error;
     } finally { await isolated.close(); }
   };
   const startupReady = item("startup-ready", { hasTranscript: true, queueStage: "", resumeEligible: false });
@@ -353,6 +394,25 @@ try {
     await page.getByText("合成录音 a", { exact: true }).waitFor();
     assert.equal(await count("resume"), 1);
     assert.equal(await count("list"), 0, "Existing recovery already returns the recent snapshot");
+  });
+  const supersededSnapshot = snapshot([item("superseded")], { superseded: true, paused: true,
+    stale: true, retryable: true, remoteStatus: "verification_pending" });
+  await startupScenario({ snapshot: snapshot([startupReady]), resume: { result: {
+    ok: true, superseded: true, snapshot: supersededSnapshot
+  } } }, async ({ page, count, wait }) => {
+    await wait("list", 1);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+    assert.equal(await page.getByText("合成录音 superseded", { exact: true }).count(), 0);
+    await page.evaluate(result => { window.__plaudStatusTest.plans.list.push({ result }); }, supersededSnapshot);
+    await page.getByRole("button", { name: "刷新 PLAUD 最近录音", exact: true }).click();
+    await wait("list", 2);
+    await page.waitForFunction(() => !document.querySelector('[aria-label="刷新 PLAUD 最近录音"]').disabled);
+    assert.equal(await page.getByText("合成录音 startup-ready", { exact: true }).count(), 1,
+      "A superseded response must preserve trusted rows instead of accepting a new empty or paused snapshot");
+    assert.equal(await page.locator(".domi-inline-error").count(), 0);
+    assert.equal(await page.getByText("任务正在使用 PLAUD，完成后会自动更新最近录音。", { exact: true }).count(), 0);
+    await page.clock.fastForward(90_001);
+    assert.equal(await count("list"), 2, "Discarding an obsolete scope result must not schedule connection retries");
   });
   for (const remoteStatus of ["network_error", "auth_required"]) {
     const oldCache = snapshot([item("unverified-cache")]);
@@ -403,7 +463,115 @@ try {
     assert.equal(await page.getByText("合成录音 old-browser", { exact: true }).count(), 0, "Neither the old response nor its global cache may populate the new scope");
     assert.equal(await page.evaluate(() => window.__plaudStatusTest.calls.filter(call => call.kind === "list").every(call => call.payload.fresh)), true);
   });
-  console.log("PLAUD UI passed: startup without resume snapshot; StrictMode; delayed/disabled settings; existing queue; slow list and panel reopen; cancellation; browser handoff; unverified cache rejection; offline/auth recovery; no automatic generation; existing recovery/mutation/status regressions.");
+  const emitAvailability = (page, available, activeOwners, generation) => page.evaluate(status => {
+    for (const listener of window.__plaudStatusTest.readerListeners) listener(status);
+  }, { available, activeOwners, generation, browser: "chrome" });
+  const pausedSnapshot = { ok: true, paused: true, stale: true, remoteStatus: "workflow_in_use", items: [], error: "", warning: "" };
+  await startupScenario({ snapshot: snapshot([startupReady]) }, async ({ page, count, wait }) => {
+    await wait("list", 1);
+    await emitAvailability(page, false, 2, 1);
+    await page.getByText("任务正在使用 PLAUD，完成后会自动更新最近录音。", { exact: true }).waitFor();
+    assert.equal(await page.locator(".domi-inline-error").count(), 0);
+    assert.match(await page.locator(".plaud-queue-header").innerText(), /上次成功/);
+    await page.clock.fastForward(180_001);
+    assert.equal(await count("list"), 1);
+    assert.equal(await count("resume"), 1);
+    await emitAvailability(page, false, 1, 2);
+    await page.clock.fastForward(180_001);
+    assert.equal(await count("list"), 1, "One remaining owner must keep background reads paused");
+    await emitAvailability(page, true, 0, 3);
+    await wait("list", 2);
+    await page.getByRole("button", { name: "同步 PLAUD 并生成文字稿", exact: true }).waitFor();
+    await emitAvailability(page, true, 0, 3);
+    assert.equal(await count("list"), 2, "Duplicate release events cannot cause repeated refreshes");
+  });
+  await startupScenario({ list: { hold: true } }, async ({ page, count, wait, release }) => {
+    await wait("list", 1);
+    await emitAvailability(page, false, 1, 1);
+    await emitAvailability(page, true, 0, 2);
+    await page.evaluate(value => { window.__plaudStatusTest.snapshot = value; }, snapshot([startupReady]));
+    await release("list", pausedSnapshot);
+    await wait("list", 2);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+    assert.equal(await page.getByText("任务正在使用 PLAUD，完成后会自动更新最近录音。", { exact: true }).count(), 0,
+      "A delayed paused response cannot override the newer available event");
+    assert.equal(await page.locator(".domi-inline-error").count(), 0);
+    assert.equal(await count("resume"), 1);
+  });
+  const transient = snapshot([], { ok: false, retryable: true, remoteStatus: "network_error", error: "Failed to fetch" });
+  await startupScenario({ snapshot: transient }, async ({ page, count, wait }) => {
+    await wait("list", 1);
+    await page.getByText(/正在自动恢复最近录音/).waitFor();
+    await page.evaluate(value => { window.__plaudStatusTest.snapshot = value; }, snapshot([startupReady]));
+    await page.clock.fastForward(2_001);
+    await wait("list", 2);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+    assert.equal(await page.locator(".domi-inline-error").count(), 0);
+    await page.clock.fastForward(180_001);
+    assert.equal(await count("list"), 2, "Successful recovery must cancel its remaining retry budget");
+  });
+  await startupScenario({ snapshot: transient }, async ({ page, count, wait }) => {
+    await wait("list", 1);
+    for (const [attempt, delay] of [2001, 5001, 15001].entries()) {
+      await page.getByText(/正在自动恢复最近录音/).waitFor();
+      await page.clock.fastForward(delay);
+      await wait("list", attempt + 2);
+    }
+    await page.getByRole("button", { name: "重试", exact: true }).waitFor();
+    await page.clock.fastForward(180_001);
+    assert.equal(await count("list"), 4, "Automatic list recovery must stop after three retries");
+  });
+  await startupScenario({ snapshot: transient }, async ({ page, count, wait }) => {
+    await wait("list", 1);
+    await page.getByTitle("打开 Codex 设置", { exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "domi 设置", exact: true });
+    await settings.getByRole("button", { name: "录音转写", exact: true }).click();
+    await settings.getByRole("radio").filter({ hasText: "暂时不用" }).click();
+    await settings.getByRole("button", { name: "保存 PLAUD 设置", exact: true }).click();
+    await page.clock.fastForward(180_001);
+    assert.equal(await count("list"), 1, "Disabling PLAUD must cancel an already scheduled list retry");
+  });
+  await startupScenario({ allowRun: true, models: [], snapshot: snapshot([startupReady]) }, async ({ page, count, wait }) => {
+    await wait("list", 1);
+    await page.getByRole("button", { name: "生成纪要并入库", exact: true }).click();
+    await page.locator(".plaud-item-detail.attention").filter({ hasText: "model/list" }).waitFor();
+    assert.equal(await count("run"), 0);
+    assert.equal(await page.locator(".domi-inline-error").count(), 0, "A notes preflight failure belongs to the recording, not the connection banner");
+    await page.getByRole("button", { name: "刷新 PLAUD 最近录音", exact: true }).click();
+    await page.locator(".plaud-item-detail.attention").filter({ hasText: "model/list" }).waitFor();
+    assert.equal(await page.locator(".domi-inline-error").count(), 0);
+  });
+  for (const completion of [
+    { ok: true, fileId: "startup-ready", stage: "context_pending", outcome: "waiting-input" },
+    { ok: true, fileId: "startup-ready", stage: "notes_non_project", outcome: "completed" },
+    { ok: false, fileId: "startup-ready", stage: "notes_non_project", errorCode: "NOT_VERIFIED" },
+    { ok: true, fileId: "wrong-id", stage: "context_pending", outcome: "waiting-input" }
+  ]) {
+    await startupScenario({ allowRun: true, snapshot: snapshot([startupReady]), completion }, async ({ page, wait, release }) => {
+      await wait("list", 1);
+      await page.getByRole("button", { name: "生成纪要并入库", exact: true }).click();
+      await wait("run", 1);
+      await page.getByRole("button", { name: "正在执行", exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "正在启动", exact: true }).count(), 0, "Accepted tasks must not remain labelled starting for their entire run");
+      const payload = await page.evaluate(() => window.__plaudStatusTest.calls.find(call => call.kind === "run").payload);
+      assert.equal(payload.plaudAccess.kind, "recording");
+      assert.equal(payload.plaudAccess.fileId, "startup-ready");
+      await page.evaluate(() => {
+        Object.defineProperty(document, "hasFocus", { configurable: true, value: () => false });
+        window.dispatchEvent(new Event("blur"));
+      });
+      await release("run", { ok: true, output: "合成交流结果", runId: payload.runId, workspacePath: "/synthetic" });
+      await wait("completion", 1);
+      await page.waitForFunction(() => window.__plaudStatusTest.calls.some(call => call.kind === "notification"));
+      const issues = await page.evaluate(() => window.__plaudStatusTest.issues);
+      const valid = completion.ok && completion.fileId === "startup-ready";
+      assert.equal(issues.some(issue => /DOMI_ENTITY_RESULT_V1|本地工作流结果未通过核验/.test(issue.message)), !valid,
+        "Only a verifier-approved exact recording may finish without an entity receipt");
+      if (valid && completion.outcome === "waiting-input") await page.getByText("等待补充会议背景", { exact: true }).waitFor();
+      assert.equal(await page.locator(".domi-inline-error").count(), 0, "Notes finalization errors must not be rendered as a PLAUD connection failure");
+    });
+  }
+  console.log("PLAUD UI passed: startup and browser isolation; reserved profile and last-owner release; paused-response race; finite list retry and cancellation; accepted notes status; verified clarification/non-project completion; no receipt bypass; original recovery/mutation/status regressions.");
 } finally {
   await browser?.close();
   await server?.close();
