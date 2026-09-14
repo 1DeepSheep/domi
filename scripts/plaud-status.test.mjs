@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback } from "../src/plaud-status.ts";
+import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback } from "../src/plaud-status.ts";
 import { restorePlaudOnStartup } from "../src/plaud-startup.ts";
 
 const item = (patch = {}) => ({ fileId: "synthetic", fileName: "合成录音", duration: 60, createdAt: 1,
@@ -266,4 +266,45 @@ test("an unverified startup/browser scope cannot display the global fallback cac
   assert.match(hidden.error, /登录/);
   assert.equal(plaudSnapshotForScope(failed, true), failed, "A verified current scope may retain its existing fallback");
   assert.equal(plaudSnapshotForScope(cached, false), cached, "A successful fresh read establishes the current scope");
+});
+
+test("expected profile use is neutral and never schedules a retry that competes with its owner", () => {
+  const snapshot = { ok: true, paused: true, stale: true, remoteStatus: "workflow_in_use", retryable: true, items: [item()] };
+  assert.equal(plaudReadRetryDelay(snapshot, 0), null);
+  assert.equal(plaudSnapshotForScope(snapshot, false).error, "");
+  assert.deepEqual(plaudSnapshotForScope(snapshot, false).items, []);
+  assert.equal(plaudSyncFeedback({ ok: true, paused: true, status: "paused" }).tone, "waiting");
+});
+
+test("transient recent-list errors retry with a finite budget, independently of transcript recovery", () => {
+  const snapshot = { ok: false, retryable: true, remoteStatus: "network_error", items: [] };
+  assert.deepEqual([0, 1, 2, 3, 4].map(attempt => plaudReadRetryDelay(snapshot, attempt)), [2000, 5000, 15000, null, null]);
+  for (const remoteStatus of ["auth_required", "access_denied", "unknown", "runtime_unavailable", "workflow_in_use"]) {
+    assert.equal(plaudReadRetryDelay({ ...snapshot, remoteStatus }, 0), null);
+  }
+  assert.equal(plaudReadRetryDelay({ ...snapshot, retryable: false }, 0), null);
+  assert.equal(plaudReadRetryDelay({ ...snapshot, ok: true }, 0), null);
+  assert.equal(plaudReadRetryDelay({ ...snapshot, remoteStatus: "rate_limited" }, 0), 30000);
+});
+
+test("completion keeps the turn's frozen recording identity when its conversation changes", () => {
+  assert.equal(plaudCompletionFileId({ projectId: "other-entity", plaudFileId: "new-recording" }, { plaudFileId: "original-recording" }), "original-recording");
+  assert.equal(plaudCompletionFileId({ projectId: "plaud-original", plaudFileId: "original" }, {}), "original");
+  assert.equal(plaudCompletionFileId({ projectId: "other-entity", plaudFileId: "original" }, {}), undefined);
+  assert.equal(plaudCompletionFileId({ projectId: "plaud-other", plaudFileId: "original" }, {}), undefined);
+});
+
+test("explicit user remote actions take precedence over a recording's local transcript", () => {
+  for (const request of ["请同步 PLAUD", "重新同步 PLAUD 录音", "请刷新 PLAUD 连接", "诊断 PLAUD 连接", "请为 PLAUD 录音生成文字稿"]) {
+    assert.deepEqual(plaudAccessForRequest(request), { kind: "remote" }, request);
+    assert.deepEqual(plaudAccessForRequest(request, "a", "/local/a.md"), { kind: "remote" }, request);
+  }
+  for (const request of ["重命名这条录音", "删除该录音", "下载这条录音的文字稿"]) {
+    assert.deepEqual(plaudAccessForRequest(request, "a", "/local/a.md"), { kind: "remote" });
+    assert.equal(plaudAccessForRequest(request), undefined, "An unrelated task's recording need not be PLAUD");
+  }
+  for (const request of ["", "根据 PLAUD 文字稿写纪要", "研究 PLAUD 的转录技术", "不要重新同步 PLAUD，使用本地文字稿更新纪要", "重命名纪要文件"]) {
+    assert.deepEqual(plaudAccessForRequest(request, "a", "/local/a.md"), { kind: "recording", fileId: "a", transcriptPath: "/local/a.md" });
+    assert.equal(plaudAccessForRequest(request), undefined);
+  }
 });

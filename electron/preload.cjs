@@ -106,6 +106,12 @@ contextBridge.exposeInMainWorld("workbench", {
   listPlaud: (request) => ipcRenderer.invoke("domi:plaud-list", request),
   syncPlaud: (request) => ipcRenderer.invoke("domi:plaud-sync", request),
   resumePlaudTranscripts: () => ipcRenderer.invoke("domi:plaud-resume"),
+  onPlaudReaderAvailability: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("domi:plaud-reader-availability", handler);
+    return () => ipcRenderer.removeListener("domi:plaud-reader-availability", handler);
+  },
+  plaudWorkflowCompletion: (request) => ipcRenderer.invoke("domi:plaud-workflow-completion", request),
   renamePlaud: (request) => ipcRenderer.invoke("domi:plaud-rename", request),
   deletePlaud: (request) => ipcRenderer.invoke("domi:plaud-delete", request),
   loadDomiEntityWorkspace: (request) => ipcRenderer.invoke("domi:entity-workspace", request),

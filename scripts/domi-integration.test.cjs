@@ -59,6 +59,279 @@ test("critical operation snapshot accounts for queues that must finish before an
   assert.equal(busy.total, 4);
 });
 
+function plaudDeferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function plaudReservationFixture() {
+  const events = [];
+  const cache = new Map();
+  const settings = { plaudConnectionMode: "enabled", plaudBrowser: "chrome" };
+  const integration = new DomiIntegration({
+    stateStore: { loadCache: key => cache.get(key), saveCache: (key, value) => cache.set(key, { value }) },
+    configProvider: () => settings,
+    onPlaudReaderAvailability: state => events.push({ kind: "availability", ...state }),
+    plaudBroker: {
+      request: async () => { events.push({ kind: "read" }); return { ok: true, items: [] }; },
+      stop: async reason => events.push({ kind: "stop", reason })
+    }
+  });
+  integration.findPlugin = () => ({ root: "/synthetic/plaud" });
+  integration.loadPlaudWorkflowRecords = () => [];
+  return { integration, settings, events, cache };
+}
+
+test("PLAUD workflow reservations drain a pending list and share one profile handoff", async () => {
+  const { integration, events } = plaudReservationFixture();
+  const started = plaudDeferred(), response = plaudDeferred();
+  integration.plaudBroker.request = async () => { started.resolve(); return response.promise; };
+  const list = integration.plaudQueue({ fresh: true });
+  await started.promise;
+  const first = integration.reservePlaudForWorkflow("task-a");
+  let secondGranted = false;
+  const second = integration.reservePlaudForWorkflow("task-b").then(() => { secondGranted = true; });
+  assert.equal(events.filter(event => event.kind === "stop").length, 0, "Never stop an active read");
+  const paused = await integration.plaudQueue({ fresh: true });
+  assert.equal(paused.paused, true);
+  assert.equal(paused.remoteStatus, "workflow_in_use");
+  assert.deepEqual(paused.items, []);
+  assert.equal((await integration.resumePlaudTranscripts()).paused, true);
+  response.resolve({ ok: true, items: [{ fileId: "current", fileName: "Synthetic" }] });
+  assert.equal((await list).ok, true, "The earlier list completes normally instead of surfacing an error");
+  await first;
+  assert.equal(secondGranted, false, "remote workflows are granted one at a time");
+  assert.equal(integration.plaudActiveWorkflowOwner, "task-a");
+  assert.equal(events.filter(event => event.kind === "stop").length, 1);
+  assert.equal((await integration.plaudQueue()).items[0].fileId, "current");
+  integration.releasePlaudWorkflow("task-a");
+  await second;
+  assert.equal(integration.plaudActiveWorkflowOwner, "task-b");
+  assert.equal(integration.plaudReaderPaused(), true);
+  assert.equal(events.filter(event => event.available).length, 0);
+  integration.releasePlaudWorkflow("task-b");
+  integration.releasePlaudWorkflow("task-b");
+  assert.equal(integration.plaudReaderPaused(), false);
+  assert.equal(events.filter(event => event.available).length, 1, "Only the final owner resumes the reader");
+});
+
+test("a started PLAUD sync finishes every internal read and CLI phase before workflow handoff", async () => {
+  const { integration, events } = plaudReservationFixture();
+  const entered = plaudDeferred(), proceed = plaudDeferred();
+  integration.execTrackedPlaudFile = async () => {
+    events.push({ kind: "cli" }); return { stdout: JSON.stringify({ ok: true }) };
+  };
+  integration.performPlaudSync = async () => {
+    entered.resolve(); await proceed.promise;
+    await integration.runJson("/synthetic/cli", ["recover-pending"], { queue: "plaud", releasePlaudSession: "resume-transcripts" });
+    const snapshot = await integration.plaudQueue({ fresh: true });
+    events.push({ kind: "sync-complete" });
+    return { ok: true, snapshot };
+  };
+  const sync = integration.resumePlaudTranscripts();
+  await entered.promise;
+  const reserve = integration.reservePlaudForWorkflow("task-a");
+  assert.equal((await integration.plaudQueue()).paused, true);
+  proceed.resolve();
+  const result = await sync;
+  assert.equal(result.snapshot.stale, false);
+  await reserve;
+  const sequence = events.filter(event => event.kind !== "availability");
+  assert.deepEqual(sequence.map(event => event.kind), ["stop", "cli", "read", "sync-complete", "stop"]);
+  assert.equal(sequence.at(-1).reason, "codex-plaud-workflow");
+  assert.equal((await integration.syncPlaud()).paused, true, "Reservation never submits a new generation");
+  integration.releasePlaudWorkflow("task-a");
+});
+
+test("queued PLAUD operations preserve caller drain rights in both context directions", async () => {
+  for (const [firstContext, nextContext] of [[false, true], [true, false]]) {
+    const { integration } = plaudReservationFixture();
+    const entered = plaudDeferred(), release = plaudDeferred();
+    const first = integration.plaudDrainContext.run(firstContext, () => integration.enqueuePlaudOperation(async () => {
+      entered.resolve(); await release.promise;
+    }));
+    await entered.promise;
+    const next = integration.plaudDrainContext.run(nextContext, () => integration.enqueuePlaudOperation(() => {
+      assert.equal(Boolean(integration.plaudDrainContext.getStore()), nextContext);
+      assert.equal(integration.plaudReaderPaused(), !nextContext);
+    }));
+    integration.plaudWorkflowOwners.add("synthetic-owner");
+    release.resolve();
+    await Promise.all([first, next]);
+  }
+});
+
+test("cancelling a queued remote task cannot release or overlap the active profile owner", async () => {
+  const { integration, events } = plaudReservationFixture();
+  await integration.reservePlaudForWorkflow("active");
+  const cancelled = integration.reservePlaudForWorkflow("cancelled");
+  let nextGranted = false;
+  const next = integration.reservePlaudForWorkflow("next").then(() => { nextGranted = true; });
+  integration.releasePlaudWorkflow("cancelled");
+  await assert.rejects(cancelled, { code: "DOMI_CODEX_RUN_CANCELLED" });
+  assert.equal(integration.plaudActiveWorkflowOwner, "active");
+  assert.equal(nextGranted, false);
+  integration.releasePlaudWorkflow("active");
+  await next;
+  assert.equal(integration.plaudActiveWorkflowOwner, "next");
+  assert.equal(events.filter(event => event.kind === "stop").length, 1);
+  assert.equal(events.filter(event => event.available).length, 0);
+  integration.releasePlaudWorkflow("next");
+  assert.equal(events.filter(event => event.available).length, 1);
+});
+
+test("cancelled and failed PLAUD handoffs release their owners without premature reader access", async () => {
+  const { integration, events } = plaudReservationFixture();
+  const drain = plaudDeferred();
+  integration.plaudSyncPromise = drain.promise;
+  const reserve = integration.reservePlaudForWorkflow("cancelled");
+  integration.releasePlaudWorkflow("cancelled");
+  assert.equal(integration.plaudReaderPaused(), true, "Reader stays paused until the old queue has drained");
+  assert.equal(events.filter(event => event.available).length, 0);
+  await assert.rejects(reserve, { code: "DOMI_CODEX_RUN_CANCELLED" });
+  drain.resolve(); await integration.plaudWorkflowHandoffPromise;
+  assert.equal(integration.plaudReaderPaused(), false);
+  assert.equal(events.filter(event => event.available).length, 1);
+  integration.plaudSyncPromise = null;
+  integration.plaudBroker.stop = async () => { throw new Error("synthetic stop failure"); };
+  await assert.rejects(integration.reservePlaudForWorkflow("failed"), /synthetic stop failure/);
+  assert.equal(integration.plaudWorkflowOwners.size, 0);
+  assert.equal(integration.plaudReaderPaused(), false);
+});
+
+test("paused PLAUD reads never import another browser's global cache or late response", async () => {
+  const { integration, settings, cache } = plaudReservationFixture();
+  cache.set("plaud:list:v1", { value: { items: [{ fileId: "old-cache" }], syncedAt: 123 } });
+  await integration.reservePlaudForWorkflow("first");
+  assert.deepEqual((await integration.plaudQueue()).items, []);
+  integration.releasePlaudWorkflow("first");
+  const started = plaudDeferred(), response = plaudDeferred();
+  integration.plaudBroker.request = async () => { started.resolve(); return response.promise; };
+  const oldRead = integration.plaudQueue(); await started.promise;
+  settings.plaudBrowser = "tabbit";
+  response.resolve({ ok: true, items: [{ fileId: "old-browser" }] });
+  const oldResult = await oldRead;
+  assert.equal(oldResult.superseded, true);
+  assert.deepEqual(oldResult.items, []);
+  assert.equal(integration.plaudRemoteHealth, null);
+  assert.equal(cache.get("plaud:list:v1").value.items[0].fileId, "old-cache");
+  await integration.reservePlaudForWorkflow("second");
+  assert.deepEqual((await integration.plaudQueue()).items, []);
+  integration.releasePlaudWorkflow("second");
+});
+
+test("browser ownership is based on structured PLAUD work and verified local transcripts", t => {
+  const { integration } = plaudReservationFixture();
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-local-owner-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const transcriptPath = path.join(directory, "transcript.md");
+  fs.writeFileSync(transcriptPath, "Synthetic transcript\n");
+  integration.loadPlaudWorkflowRecords = () => [{ fileId: "ready", stage: "transcript_ready", transcriptPath }];
+  assert.equal(integration.plaudWorkflowNeedsBrowser({ workflowId: "domi-analyst", prompt: "PLAUD appears in generic instructions" }), false);
+  assert.equal(integration.plaudWorkflowNeedsBrowser({ workflowId: "domi-router" }), true);
+  assert.equal(integration.plaudWorkflowNeedsBrowser({ workflowId: "plaud-connection-assist" }), true);
+  assert.equal(integration.plaudWorkflowNeedsBrowser({ workflowId: "domi-router", plaudAccess: { kind: "recording", fileId: "ready" } }), false);
+  assert.equal(integration.plaudWorkflowNeedsBrowser({ plaudAccess: { kind: "recording", fileId: "not-ready", transcriptPath } }), true, "Unbound client paths do not establish a recording receipt");
+  assert.equal(integration.plaudWorkflowNeedsBrowser({ plaudAccess: { kind: "local_transcript", transcriptPath } }), false);
+  const plan = integration.plaudWorkflowPlan({ plaudAccess: { kind: "recording", fileId: "ready", transcriptPath: "/untrusted/client-path" } });
+  assert.ok(plan.runtimeContext.includes(transcriptPath));
+  assert.ok(plan.runtimeContext.includes('"fileId":"ready"'));
+  assert.doesNotMatch(plan.runtimeContext, /untrusted/);
+  assert.match(plan.runtimeContext, /禁止打开 PLAUD 浏览器/);
+  assert.match(plan.runtimeContext, /不能自行转为远端/);
+  fs.unlinkSync(transcriptPath);
+  assert.equal(integration.plaudWorkflowNeedsBrowser({ plaudAccess: { kind: "recording", fileId: "ready" } }), true);
+});
+
+test("PLAUD persistent fallbacks remain scoped after switching browsers away and back", async () => {
+  const { integration, settings } = plaudReservationFixture();
+  let offline = false;
+  integration.plaudBroker.request = async () => {
+    if (offline) throw new Error("PLAUD_NETWORK_TIMEOUT: synthetic offline read");
+    return { ok: true, items: [{ fileId: settings.plaudBrowser, fileName: "Synthetic" }] };
+  };
+  assert.equal((await integration.plaudQueue()).items[0].fileId, "chrome");
+  settings.plaudBrowser = "tabbit";
+  assert.equal((await integration.plaudQueue()).items[0].fileId, "tabbit");
+  settings.plaudBrowser = "chrome";
+  offline = true;
+  const fallback = await integration.plaudQueue();
+  assert.equal(fallback.stale, true);
+  assert.deepEqual(fallback.items.map(item => item.fileId), ["chrome"]);
+  const fresh = await integration.plaudQueue({ fresh: true });
+  assert.deepEqual(fresh.lastSuccessfulSnapshot.items.map(item => item.fileId), ["chrome"]);
+});
+
+test("a first failed PLAUD read never imports legacy unscoped rows or another browser cache", async () => {
+  const { integration, settings, cache } = plaudReservationFixture();
+  cache.set("plaud:list:v1", { value: { items: [{ fileId: "legacy-other-browser" }], syncedAt: 123 } });
+  settings.plaudBrowser = "tabbit";
+  integration.plaudBroker.request = async () => ({ ok: true, items: [{ fileId: "tabbit" }] });
+  await integration.plaudQueue();
+  settings.plaudBrowser = "chrome";
+  integration.plaudBroker.request = async () => { throw new Error("PLAUD_NETWORK_TIMEOUT: synthetic offline read"); };
+  for (const fresh of [false, true]) {
+    const result = await integration.plaudQueue({ fresh });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.items, []);
+    assert.equal(result.lastSuccessfulSnapshot, undefined);
+  }
+});
+
+test("unexpected broker exits are recoverable reader failures while intentional ownership is neutral", () => {
+  const exited = classifyPlaudConnectionFailure("PLAUD_WORKER_EXITED: PLAUD 后台会话已结束（SIGTERM）。", "chrome");
+  assert.equal(exited.status, "browser_unavailable");
+  assert.equal(isRetryablePlaudReadFailure("PLAUD_WORKER_EXITED: synthetic exit"), true);
+  const reserved = classifyPlaudConnectionFailure("PLAUD_WORKFLOW_IN_USE", "chrome");
+  assert.equal(reserved.status, "workflow_in_use");
+  assert.doesNotMatch(reserved.error, /重新检测|登录|失败/);
+  assert.equal(isRetryablePlaudReadFailure("PLAUD_WORKFLOW_IN_USE"), false);
+});
+
+test("a superseded PLAUD sync never submits generation or returns old-scope rows", async () => {
+  const { integration, settings } = plaudReservationFixture();
+  const entered = plaudDeferred(), response = plaudDeferred();
+  integration.plaudQueueForSync = async () => { entered.resolve(); return response.promise; };
+  integration.runJson = async () => { throw new Error("superseded sync must not invoke the CLI"); };
+  const running = integration.syncPlaud();
+  await entered.promise;
+  settings.plaudBrowser = "tabbit";
+  response.resolve({ ok: true, pendingCount: 1, items: [{ fileId: "old-scope" }] });
+  const result = await running;
+  assert.equal(result.superseded, true);
+  assert.equal(result.snapshot.superseded, true);
+  assert.deepEqual(result.snapshot.items, []);
+  assert.deepEqual(result.results, []);
+});
+
+test("PLAUD completion verification stays local while a remote workflow owns the profile", async t => {
+  const { integration } = plaudReservationFixture();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-local-completion-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const transcriptPath = path.join(root, "transcript.md"), notesPath = path.join(root, "notes.md");
+  fs.writeFileSync(transcriptPath, "synthetic transcript"); fs.writeFileSync(notesPath, "synthetic notes");
+  integration.plaudStateFile = path.join(root, "workflow.json");
+  fs.writeFileSync(integration.plaudStateFile, JSON.stringify({ records: {
+    exact: { fileId: "exact", stage: "notes_non_project", transcriptPath, notesPath }
+  } }));
+  let calls = 0;
+  integration.runJson = async (executable, args, options) => {
+    calls++;
+    assert.equal(executable, process.execPath);
+    assert.deepEqual(args.slice(1), ["verify", "exact"]);
+    assert.equal(options.queue, undefined);
+    assert.equal(options.releasePlaudSession, undefined);
+    return { ok: true, fileId: "exact", stage: "notes_non_project", checks: { notesAudit: "passed" } };
+  };
+  await integration.reservePlaudForWorkflow("remote-task");
+  const result = await integration.plaudWorkflowCompletion({ fileId: "exact" });
+  assert.equal(result.outcome, "completed");
+  assert.equal(calls, 1);
+  assert.equal(integration.plaudReaderPaused(), true);
+  integration.releasePlaudWorkflow("remote-task");
+});
+
 test("PLAUD connection errors request login only for confirmed authentication failures", () => {
   const busy = classifyPlaudConnectionFailure(
     new Error("PLAUD 专用浏览器正在被另一个任务使用，请稍后重试。"),
@@ -125,7 +398,7 @@ test("PLAUD list IPC leaves retry ownership to the worker and forwards fresh rea
   const end = mainSource.indexOf('ipcMain.handle("domi:plaud-sync"', start);
   const handler = mainSource.slice(start, end);
 
-  assert.match(handler, /domi:plaud-list:\$\{fresh \? "fresh" : "cached"\}/);
+  assert.match(handler, /domi:plaud-list:\$\{readerScope\}:\$\{fresh \? "fresh" : "cached"\}/);
   assert.match(handler, /plaudQueue\(\{ offset, limit, fresh \}\)/);
   assert.match(handler, /retries:\s*0/);
   assert.match(handler, /allowStale:\s*false/);
@@ -4045,7 +4318,7 @@ test("PLAUD workers receive the app Playwright runtime through NODE_PATH", async
   });
 });
 
-for (const command of ["login", "logout"]) {
+for (const command of ["login", "logout", "podcast-transcription"]) {
   test(`PLAUD ${command} releases the reader inside its queued profile operation`, async () => {
     const integration = Object.create(DomiIntegration.prototype);
     let brokerRunning = false;
@@ -4082,7 +4355,9 @@ for (const command of ["login", "logout"]) {
     // A refresh can arrive while stopping the old reader is awaiting completion.
     // It must not acquire the Profile between release and the queued CLI command.
     const results = await Promise.allSettled([
-      integration.runPlaudConnectionCommand(command, "chrome"),
+      command === "podcast-transcription"
+        ? integration.runJson("/synthetic/cli", ["transcribe-local"], { queue: "plaud", releasePlaudSession: command })
+        : integration.runPlaudConnectionCommand(command, "chrome"),
       integration.runPlaudWorker("list", ["50", "0"])
     ]);
 
