@@ -4492,3 +4492,279 @@ test("PLAUD legacy recovery has one 30 second read budget per round and fairly r
   await integration.resumePlaudTranscripts(); assert.deepEqual(ids, ["first-record-id"]);
   await integration.resumePlaudTranscripts(); assert.deepEqual(ids, ["first-record-id", "second-record-id"]);
 });
+
+function projectBrandFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-project-brand-"));
+  const databasePath = path.join(root, "repository.sqlite3");
+  const libraryDir = path.join(root, "library");
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  t.after(() => { repository.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  function seed(id, name, { legalName = "", aliases = [], directoryName = name } = {}) {
+    const page = path.join(libraryDir, "3.项目库", "AI", "Agent", directoryName, "项目主页.md");
+    fs.mkdirSync(path.dirname(page), { recursive: true });
+    fs.writeFileSync(page, `<!-- domi:managed:start -->\n---\nentity_type: "project"\nproject_id: ${JSON.stringify(id)}\ncompany_name: ${JSON.stringify(name)}\n---\n# ${name}\n<!-- domi:managed:end -->\n\n用户原文必须保留。\n`);
+    const { normalizedProjectName } = require("../electron/project-name-policy.cjs");
+    repository.database.prepare(`INSERT INTO projects
+      (id, name, normalized_name, legal_name, aliases_json, domain, subdomains_json,
+       notes, document_path, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'AI', '["Agent"]', '原有摘要', ?, 1000, 1000)`)
+      .run(id, name, normalizedProjectName(name), legalName, JSON.stringify(aliases), page);
+    return page;
+  }
+  function patch(id, changes, extra = {}) {
+    const result = repository.updateDatabaseRecordPatch({
+      entityType: "project", recordId: id,
+      expectedUpdatedAt: repository.databasePatchRecord("project", id).record.updatedAt,
+      mutationId: `brand-${require("node:crypto").randomUUID()}`, changes, ...extra
+    });
+    repository.materializeDatabaseRecord("project", id);
+    return result.record;
+  }
+  return { repository, seed, patch, databasePath, libraryDir };
+}
+
+test("brand policy migrates schema 6 identity columns without changing old project data", (t) => {
+  const { repository, seed, databasePath, libraryDir } = projectBrandFixture(t);
+  const page = seed("migration", "云帆科技有限公司");
+  repository.database.exec("ALTER TABLE projects DROP COLUMN legal_name; ALTER TABLE projects DROP COLUMN aliases_json;");
+  repository.database.prepare("UPDATE repository_meta SET value = '6' WHERE key = 'schema_version'").run();
+  const reopened = new LocalDomiRepository({ databasePath, libraryDir });
+  try {
+    const record = reopened.listProjects()[0];
+    assert.equal(reopened.health().schemaVersion, 7);
+    assert.equal(record.name, "云帆科技有限公司");
+    assert.equal(record.legalName, "");
+    assert.deepEqual(record.aliases, []);
+    assert.equal(record.updatedAt, 1000);
+    assert.match(fs.readFileSync(page, "utf8"), /用户原文必须保留/);
+  } finally { reopened.close(); }
+});
+
+test("brand correction keeps the legal entity, old names, record ID, material and searchable snapshot", (t) => {
+  const { repository, seed, patch } = projectBrandFixture(t);
+  const oldPage = seed("brand", "示例品牌科技有限公司", { aliases: ["ExampleBrand AI"] });
+  fs.writeFileSync(path.join(path.dirname(oldPage), "BP.pdf"), "fixture material");
+  const corrected = patch("brand", { name: "示例品牌", legalName: "示例品牌科技有限公司" });
+  assert.equal(corrected.recordId, "brand");
+  assert.equal(corrected.legalName, "示例品牌科技有限公司");
+  assert.deepEqual(corrected.aliases, ["ExampleBrand AI", "示例品牌科技有限公司"]);
+  const current = patch("brand", { notes: "修改摘要", aliases: [] });
+  assert.equal(current.name, "示例品牌");
+  assert.equal(current.legalName, corrected.legalName);
+  assert.deepEqual(current.aliases, corrected.aliases);
+  assert.deepEqual(repository.listProjects()[0].aliases, corrected.aliases);
+  const page = require("node:url").fileURLToPath(current.link);
+  assert.equal(fs.readFileSync(path.join(path.dirname(page), "BP.pdf"), "utf8"), "fixture material");
+  assert.match(fs.readFileSync(page, "utf8"), /工商主体.*示例品牌科技有限公司/);
+  assert.match(fs.readFileSync(page, "utf8"), /别名.*ExampleBrand AI/);
+  assert.match(fs.readFileSync(page, "utf8"), /用户原文必须保留/);
+  const swappedEntity = patch("brand", { legalName: "示例智能有限责任公司" });
+  assert.ok(swappedEntity.aliases.includes("示例品牌科技有限公司"));
+});
+
+test("new legal-form display names require confirmation while unchanged legal records remain editable", (t) => {
+  const { repository, seed, patch } = projectBrandFixture(t);
+  seed("legacy", "云帆科技有限公司");
+  let current = patch("legacy", { notes: "旧名记录仍可更新" });
+  assert.equal(current.notes, "旧名记录仍可更新");
+  const fullUpdate = (name, extra = {}) => {
+    const { legalName, aliases, ...visibleFields } = current;
+    return repository.updateProject({ ...visibleFields,
+      expectedUpdatedAt: current.updatedAt, name, ...extra });
+  };
+  for (const name of ["云帆智能有限公司", "Example Labs, Inc."]) {
+    assert.throws(() => fullUpdate(name), (error) => error.code === "DOMI_PROJECT_NAME_REVIEW_REQUIRED");
+    assert.throws(() => patch("legacy", { name }), (error) => error.code === "DOMI_PROJECT_NAME_REVIEW_REQUIRED");
+  }
+  assert.equal(repository.listProjects()[0].name, "云帆科技有限公司");
+  current = fullUpdate("云帆科技有限公司", { notes: "完整编辑可用" });
+  assert.equal(current.notes, "完整编辑可用");
+  current = fullUpdate("云帆科技");
+  assert.equal(current.name, "云帆科技");
+  assert.equal(current.legalName, "");
+  assert.ok(current.aliases.includes("云帆科技有限公司"));
+  current = patch("legacy", { name: "Example Labs, Inc." }, { allowLegalName: true });
+  assert.equal(current.name, "Example Labs, Inc.");
+});
+
+test("cross-project aliases and legal names reject collisions before files or records change", (t) => {
+  const { repository, seed, patch } = projectBrandFixture(t);
+  seed("one", "星河", { legalName: "星河信息有限公司", aliases: ["Sky Flow"] });
+  const page = seed("two", "银河");
+  const before = fs.readFileSync(page, "utf8");
+  const current = repository.databasePatchRecord("project", "two").record;
+  assert.throws(() => repository.updateProject({ ...current, expectedUpdatedAt: current.updatedAt,
+    aliases: ["ＳＫＹ－ＦＬＯＷ"] }), (error) => error.code === "DOMI_PROJECT_NAME_CONFLICT");
+  assert.equal(fs.readFileSync(page, "utf8"), before);
+  for (const changes of [{ name: "skyflow" }, { aliases: ["星河信息有限公司"] }, { legalName: "星河" }]) {
+    assert.throws(() => patch("two", changes), (error) => error.code === "DOMI_PROJECT_NAME_CONFLICT");
+  }
+  assert.equal(repository.databasePatchRecord("project", "two").record.updatedAt, 1000);
+  assert.equal(repository.listPendingMaterializations().length, 0);
+});
+
+test("folder intake reviews unfamiliar legal names without mechanically truncating technology brands", (t) => {
+  const { repository, libraryDir } = projectBrandFixture(t);
+  for (const name of ["上海远航科技有限公司", "匿名示例科技", "Example Labs Ltd."]) {
+    const directory = path.join(libraryDir, "3.项目库", "AI", "Agent", name);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "材料.md"), "fixture");
+  }
+  const result = repository.reindexWorkspace();
+  assert.equal(result.projects.needsNameReview, 2);
+  assert.equal(result.projects.created, 1);
+  assert.deepEqual(repository.listProjects().map((project) => project.name), ["匿名示例科技"]);
+  assert.equal(repository.reindexWorkspace().projects.created, 0);
+});
+
+test("known identity and exact old alias never let an old directory revert the canonical brand", (t) => {
+  const { repository, seed, libraryDir } = projectBrandFixture(t);
+  const page = seed("brand", "示例品牌", {
+    legalName: "示例品牌科技有限公司", aliases: ["ExampleBrand AI"], directoryName: "旧物理目录"
+  });
+  fs.writeFileSync(page, fs.readFileSync(page, "utf8").replace('company_name: "示例品牌"',
+    'company_name: "示例品牌科技有限公司"'));
+  const aliasDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "ｅｘａｍｐｌｅｂｒａｎｄ－ａｉ");
+  fs.mkdirSync(aliasDirectory, { recursive: true });
+  fs.writeFileSync(path.join(aliasDirectory, "材料.md"), "fixture");
+  const result = repository.reindexWorkspace();
+  assert.equal(result.projects.created, 0);
+  assert.equal(result.projects.needsNameReview, 0);
+  assert.equal(repository.listProjects().length, 1);
+  assert.equal(repository.listProjects()[0].name, "示例品牌");
+  assert.equal(repository.databasePatchRecord("project", "brand").row.document_path, page);
+});
+
+test("ambiguous legacy aliases require review for new intake but never block unrelated notes", (t) => {
+  const { repository, seed, patch, libraryDir } = projectBrandFixture(t);
+  seed("one", "甲品牌", { aliases: ["Shared Brand"] });
+  seed("two", "乙品牌有限公司", { aliases: ["Shared Brand"] });
+  const directory = path.join(libraryDir, "3.项目库", "AI", "Agent", "Shared-Brand");
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, "材料.md"), "fixture");
+  const result = repository.reindexWorkspace();
+  assert.equal(result.projects.created, 0);
+  assert.equal(result.projects.needsNameReview, 1);
+  const updated = patch("two", { notes: "只改摘要" });
+  assert.equal(updated.name, "乙品牌有限公司");
+  assert.equal(updated.notes, "只改摘要");
+  assert.deepEqual(updated.aliases, ["Shared Brand"]);
+});
+
+test("folder intake uses verified frontmatter brand and keeps its legal-name metadata", (t) => {
+  const { repository, libraryDir } = projectBrandFixture(t);
+  const page = path.join(libraryDir, "3.项目库", "AI", "Agent", "上海示例产品科技有限公司", "项目主页.md");
+  fs.mkdirSync(path.dirname(page), { recursive: true });
+  fs.writeFileSync(page, `---
+entity_type: "project"
+project_id: "frontmatter-brand"
+company_name: "ExampleProduct"
+legal_name: "上海示例产品科技有限公司"
+aliases: ["示例产品"]
+---
+# ExampleProduct
+`);
+  const result = repository.reindexWorkspace();
+  assert.equal(result.projects.created, 1);
+  assert.equal(result.projects.needsNameReview, 0);
+  const record = repository.listProjects()[0];
+  assert.equal(record.name, "ExampleProduct");
+  assert.equal(record.legalName, "上海示例产品科技有限公司");
+  assert.deepEqual(record.aliases, ["示例产品"]);
+  assert.equal(repository.databasePatchRecord("project", record.recordId).row.document_path, page);
+  assert.equal(repository.reindexWorkspace().projects.created, 0);
+});
+
+test("full project edits preserve a stable legacy directory after a plugin brand correction", (t) => {
+  const { repository, seed } = projectBrandFixture(t);
+  const page = seed("stable-brand", "示例品牌", { directoryName: "示例品牌科技有限公司" });
+  const material = path.join(path.dirname(page), "原始材料", "BP.pdf");
+  fs.mkdirSync(path.dirname(material), { recursive: true });
+  fs.writeFileSync(material, "stable material");
+  repository.database.prepare(`INSERT INTO documents
+    (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES ('stable-bp', 'project', 'stable-brand', 'BP', 'BP', ?, 1000, 1000)`).run(material);
+  const before = repository.databasePatchRecord("project", "stable-brand").record;
+  const after = repository.updateProject({ ...before, expectedUpdatedAt: before.updatedAt,
+    notes: "完整编辑只更新摘要", subdomains: ["Agent", "AI基础设施"] });
+  assert.equal(require("node:url").fileURLToPath(after.link), page);
+  assert.equal(repository.database.prepare("SELECT path FROM documents WHERE id = 'stable-bp'").get().path, material);
+  assert.equal(fs.readFileSync(material, "utf8"), "stable material");
+  assert.match(fs.readFileSync(page, "utf8"), /完整编辑只更新摘要/);
+  assert.equal(fs.existsSync(path.join(path.dirname(path.dirname(page)), "示例品牌")), false);
+});
+
+test("explicit project relocation updates owned document paths in the same transaction", (t) => {
+  const { repository, seed } = projectBrandFixture(t);
+  const page = seed("relocate-brand", "示例品牌", { directoryName: "旧归档目录" });
+  const oldDirectory = path.dirname(page);
+  const material = path.join(oldDirectory, "原始材料", "BP.pdf");
+  fs.mkdirSync(path.dirname(material), { recursive: true });
+  fs.writeFileSync(material, "indexed material");
+  const insertDocument = repository.database.prepare(`INSERT INTO documents
+    (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES (?, 'project', 'relocate-brand', 'BP', 'BP', ?, 1000, 1000)`);
+  insertDocument.run("relocate-page", page);
+  insertDocument.run("relocate-bp", material);
+  const before = repository.databasePatchRecord("project", "relocate-brand").record;
+  const after = repository.updateProject({ ...before, expectedUpdatedAt: before.updatedAt,
+    subdomains: ["AI基础设施"] });
+  const target = path.dirname(require("node:url").fileURLToPath(after.link));
+  assert.notEqual(target, oldDirectory);
+  assert.equal(fs.existsSync(oldDirectory), false);
+  assert.equal(repository.database.prepare("SELECT path FROM documents WHERE id = 'relocate-page'").get().path,
+    path.join(target, "项目主页.md"));
+  assert.equal(repository.database.prepare("SELECT path FROM documents WHERE id = 'relocate-bp'").get().path,
+    path.join(target, "原始材料", "BP.pdf"));
+  assert.equal(fs.readFileSync(path.join(target, "原始材料", "BP.pdf"), "utf8"), "indexed material");
+});
+
+test("document-index failure rolls project relocation and files back together", (t) => {
+  const { repository, seed } = projectBrandFixture(t);
+  const page = seed("rollback-brand", "归档品牌", { directoryName: "旧归档目录" });
+  const oldDirectory = path.dirname(page);
+  const originalPage = fs.readFileSync(page, "utf8");
+  const material = path.join(oldDirectory, "BP.pdf");
+  fs.writeFileSync(material, "rollback material");
+  repository.database.prepare(`INSERT INTO documents
+    (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
+    VALUES ('rollback-bp', 'project', 'rollback-brand', 'BP', 'BP', ?, 1000, 1000)`).run(material);
+  repository.database.exec(`CREATE TRIGGER simulate_document_index_failure
+    BEFORE UPDATE OF path ON documents BEGIN SELECT RAISE(ABORT, 'test index failure'); END;`);
+  const before = repository.databasePatchRecord("project", "rollback-brand").record;
+  const requested = { ...before, expectedUpdatedAt: before.updatedAt, subdomains: ["AI基础设施"], notes: "不得保留" };
+  const target = repository.projectDirectory(requested);
+  assert.throws(() => repository.updateProject(requested), /test index failure/);
+  assert.equal(fs.existsSync(target), false);
+  assert.equal(fs.readFileSync(page, "utf8"), originalPage);
+  assert.equal(fs.readFileSync(material, "utf8"), "rollback material");
+  assert.equal(repository.database.prepare("SELECT path FROM documents WHERE id = 'rollback-bp'").get().path, material);
+  assert.deepEqual(repository.databasePatchRecord("project", "rollback-brand").record, before);
+});
+
+test("conflicting new folder aliases enter review without rolling back unrelated intake", (t) => {
+  const { repository, libraryDir } = projectBrandFixture(t);
+  const pages = [];
+  for (const [id, name, aliases] of [
+    ["intake-a", "甲品牌", ["Shared Brand"]],
+    ["intake-b", "乙品牌", ["ＳＨＡＲＥＤ－ＢＲＡＮＤ"]],
+    ["intake-c", "独立品牌", []]
+  ]) {
+    const page = path.join(libraryDir, "3.项目库", "AI", "Agent", name, "项目主页.md");
+    fs.mkdirSync(path.dirname(page), { recursive: true });
+    fs.writeFileSync(page, `---\nentity_type: "project"\nproject_id: ${JSON.stringify(id)}\ncompany_name: ${JSON.stringify(name)}\naliases: ${JSON.stringify(aliases)}\n---\n# ${name}\n`);
+    pages.push(page);
+  }
+  const first = repository.reindexWorkspace();
+  assert.equal(first.projects.created, 1);
+  assert.equal(first.projects.needsNameReview, 2);
+  assert.deepEqual(repository.listProjects().map((record) => record.name), ["独立品牌"]);
+  const second = repository.reindexWorkspace();
+  assert.equal(second.projects.created, 0);
+  assert.equal(second.projects.needsNameReview, 2);
+  fs.writeFileSync(pages[0], fs.readFileSync(pages[0], "utf8").replace('aliases: ["Shared Brand"]', 'aliases: []'));
+  const resolved = repository.reindexWorkspace();
+  assert.equal(resolved.projects.created, 2);
+  assert.equal(resolved.projects.needsNameReview, 0);
+  assert.equal(repository.listProjects().length, 3);
+});
