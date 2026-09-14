@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSyncFeedback } from "../src/plaud-status.ts";
+import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback } from "../src/plaud-status.ts";
+import { restorePlaudOnStartup } from "../src/plaud-startup.ts";
 
 const item = (patch = {}) => ({ fileId: "synthetic", fileName: "合成录音", duration: 60, createdAt: 1,
   editedAt: 1, hasTranscript: false, hasSummary: false, processing: false,
@@ -164,4 +165,105 @@ test("a transient authorization renewal or browser network failure does not dema
   assert.doesNotMatch(plaudSafeError("PLAUD_UNAUTHORIZED: synthetic renewal"), /重新登录|失效/);
   assert.match(plaudSafeError("PLAUD_AUTH_REQUIRED: synthetic login"), /重新登录/);
   for (const error of ["Failed to fetch", "net::ERR_CONNECTION_CLOSED"]) assert.match(plaudSafeError(error), /暂时中断/);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+function startupFixture(patch = {}) {
+  const calls = [];
+  const operations = {
+    isCurrent: () => true,
+    pendingList: () => null,
+    pendingSync: () => null,
+    pendingMutation: () => null,
+    resume: async () => { calls.push("resume"); return { ok: true, resumePendingCount: 0 }; },
+    list: async () => { calls.push("list"); return { ok: true, items: [] }; },
+    ...patch
+  };
+  return { calls, operations };
+}
+
+test("startup reads the recent list after a genuinely empty local resume", async () => {
+  const { calls, operations } = startupFixture();
+  await restorePlaudOnStartup(operations);
+  assert.deepEqual(calls, ["resume", "list"]);
+});
+
+test("startup reuses a recovery snapshot including offline/auth results without extra remote reads", async () => {
+  for (const snapshot of [
+    { ok: true, items: [item({ transcriptPath: "/synthetic/ready.md" })] },
+    { ok: false, remoteStatus: "auth_required" },
+    { ok: false, remoteStatus: "network_error" }
+  ]) {
+    const { calls, operations } = startupFixture({ resume: async () => ({ ok: snapshot.ok, snapshot }) });
+    await restorePlaudOnStartup(operations);
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("startup joins manual reads and syncs without another generation or list", async () => {
+  for (const kind of ["pendingList", "pendingSync"]) {
+    const active = deferred();
+    const { calls, operations } = startupFixture({ [kind]: () => active.promise });
+    const restore = restorePlaudOnStartup(operations);
+    assert.deepEqual(calls, []);
+    const snapshot = { ok: true, items: [item()] };
+    active.resolve(kind === "pendingList" ? snapshot : { ok: true, snapshot });
+    await restore;
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("startup continues after a busy empty recovery or title mutation releases its lock", async () => {
+  for (const kind of ["pendingSync", "pendingMutation"]) {
+    const active = deferred();
+    let busy = true;
+    const { calls, operations } = startupFixture({ [kind]: () => busy ? active.promise : null });
+    const restore = restorePlaudOnStartup(operations);
+    assert.deepEqual(calls, []);
+    busy = false;
+    active.resolve(kind === "pendingSync" ? { ok: true, resumePendingCount: 0 } : undefined);
+    await restore;
+    assert.deepEqual(calls, kind === "pendingSync" ? ["list"] : ["resume", "list"]);
+  }
+});
+
+test("disabled, cancelled and superseded startup scopes never launch a later read", async () => {
+  const disabled = startupFixture({ isCurrent: () => false });
+  await restorePlaudOnStartup(disabled.operations);
+  assert.deepEqual(disabled.calls, []);
+  for (const kind of ["resume", "pendingList", "pendingSync", "pendingMutation"]) {
+    const active = deferred();
+    let current = true;
+    const { calls, operations } = startupFixture({ isCurrent: () => current, [kind]: () => active.promise });
+    const restore = restorePlaudOnStartup(operations);
+    current = false;
+    active.resolve(kind === "pendingList" || kind === "pendingMutation" ? null : { ok: true });
+    await restore;
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("a failed startup probe is followed by at most one list attempt", async () => {
+  const { calls, operations } = startupFixture({ resume: async () => null,
+    list: async () => { calls.push("list"); return null; } });
+  await restorePlaudOnStartup(operations);
+  assert.deepEqual(calls, ["list"]);
+});
+
+test("an unverified startup/browser scope cannot display the global fallback cache", () => {
+  const cached = { ok: true, items: [item()], syncedAt: 123 };
+  const failed = { ...cached, ok: false, stale: true, remoteStatus: "auth_required", lastSuccessfulSnapshot: cached };
+  const hidden = plaudSnapshotForScope(failed, false);
+  assert.deepEqual(hidden.items, []);
+  assert.equal(hidden.lastSuccessfulSnapshot, undefined);
+  assert.equal(hidden.syncedAt, undefined);
+  assert.equal(hidden.remoteStatus, "auth_required");
+  assert.match(hidden.error, /登录/);
+  assert.equal(plaudSnapshotForScope(failed, true), failed, "A verified current scope may retain its existing fallback");
+  assert.equal(plaudSnapshotForScope(cached, false), cached, "A successful fresh read establishes the current scope");
 });
