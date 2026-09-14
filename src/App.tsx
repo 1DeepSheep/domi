@@ -2856,7 +2856,7 @@ function App() {
     const projectCandidates = domiSnapshot.projects
       .filter((project) => ["S", "A"].includes(project.rating) && !/Miss|已投/i.test(project.status))
       .map((project) => {
-        const haystack = [project.name, project.domain, ...project.subdomains, project.notes || ""]
+        const haystack = [project.name, project.legalName || "", ...(project.aliases || []), project.domain, ...project.subdomains, project.notes || ""]
           .join(" ")
           .toLocaleLowerCase("zh-CN");
         const focusMatched = executionFocus.label !== "当前重点"
@@ -3090,6 +3090,8 @@ function App() {
       .filter((project) =>
         [
           project.name,
+          project.legalName || "",
+          ...(project.aliases || []),
           project.domain,
           project.status,
           project.notes || "",
@@ -5507,8 +5509,10 @@ function App() {
         .toLocaleLowerCase("zh-CN")
         .replace(/\s+/g, "");
       const matchedProjects = (domiSnapshotRef.current?.projects || []).filter((project) => {
-        const normalizedName = project.name.toLocaleLowerCase("zh-CN").replace(/\s+/g, "");
-        return normalizedName.length >= 2 && normalizedEpisodeText.includes(normalizedName);
+        return [project.name, project.legalName || "", ...(project.aliases || [])].some((name) => {
+          const normalizedName = name.toLocaleLowerCase("zh-CN").replace(/\s+/g, "");
+          return normalizedName.length >= 2 && normalizedEpisodeText.includes(normalizedName);
+        });
       });
       const projectHint = matchedProjects.length === 1 ? matchedProjects[0] : null;
       const primaryArchiveHint = projectHint ? "project_dominant" : "industry_dominant";
@@ -11435,6 +11439,8 @@ function App() {
       const searchText = databaseEntityType === "project"
         ? [
             (record as DomiProject).name,
+            (record as DomiProject).legalName || "",
+            ...((record as DomiProject).aliases || []),
             (record as DomiProject).domain,
             ...(record as DomiProject).subdomains,
             (record as DomiProject).status,

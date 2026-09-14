@@ -24,11 +24,8 @@ for (const firstFailure of ["rejected", "timeout"]) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-codex-init-retry-"));
     const binary = path.join(root, "fake-codex");
     writeFakeCodex(binary, `#!/usr/bin/env node
-const fs = require("node:fs");
 const readline = require("node:readline");
-const counter = ${JSON.stringify(path.join(root, "attempts"))};
-const generation = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0) + 1;
-fs.writeFileSync(counter, String(generation));
+const generation = Number(process.env.DOMI_TEST_CODEX_GENERATION);
 let ready = false;
 readline.createInterface({ input: process.stdin }).on("line", line => {
   const m = JSON.parse(line);
@@ -43,10 +40,20 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
   if (m.method === "ping") process.stdout.write(JSON.stringify({ id: m.id, result: { ready, generation } }) + "\\n");
 });
 `);
-    const server = new CodexAppServer({ cwd: root, version: "test", requestTimeoutMs: 1_000,
-      runtimeProvider: () => ({ codexPath: binary }) });
+    // Allocate attempts before spawn: a slow first child may be retired before
+    // running any fixture code, and must not make the retry act like attempt 1.
+    let generation = 0;
+    const server = new CodexAppServer({ cwd: root, version: "test",
+      requestTimeoutMs: firstFailure === "timeout" ? 1_000 : 5_000,
+      runtimeProvider: () => ({
+        codexPath: binary,
+        env: { DOMI_TEST_CODEX_GENERATION: String(++generation) }
+      }) });
     try {
-      await assert.rejects(server.start(), /initialization failure|initialize/);
+      await assert.rejects(server.start(), error => firstFailure === "rejected"
+        ? error.code === -32002 && error.responseReceived === true && /synthetic initialization failure/.test(error.message)
+        : error.code === "DOMI_CODEX_REQUEST_TIMEOUT" && /initialize/.test(error.message));
+      server.requestTimeoutMs = 5_000;
       assert.deepEqual(await server.request("ping"), { ready: true, generation: 2 });
       await new Promise(resolve => setTimeout(resolve, 200));
       assert.deepEqual(await server.request("ping"), { ready: true, generation: 2 });
