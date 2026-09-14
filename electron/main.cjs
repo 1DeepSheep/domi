@@ -294,7 +294,19 @@ function getDomiIntegration() {
       configProvider: () => getAppSettings().load().settings,
       domiConfigPath: path.join(app.getPath("userData"), "domi-plugin-config.json"),
       plaudOutputDir: path.join(demoWorkspace, "work", "domi", "plaud"),
-      podcastCacheDir: path.join(app.getPath("userData"), "Cache", "podcasts")
+      podcastCacheDir: path.join(app.getPath("userData"), "Cache", "podcasts"),
+      onPlaudDiagnostic: (diagnostic) => appendRuntimeLog("plaud-browser-lifecycle", diagnostic),
+      onPlaudReaderAvailability: (state) => {
+        serviceCoordinator.invalidate("domi:plaud-list");
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+            win.webContents.send("domi:plaud-reader-availability", state);
+          }
+        }
+        appendRuntimeLog("plaud-reader-availability", {
+          available: state.available, activeOwners: state.activeOwners, generation: state.generation
+        });
+      }
     });
   }
   return domiIntegration;
@@ -2166,6 +2178,18 @@ function armRunIdleTimeout(run) {
       void reconcileCodexTurnStart(run);
       return;
     }
+    if (run.plaudWorkflowReserved) {
+      // A failed/accepted interrupt RPC does not prove the remote CLI stopped.
+      // Keep ownership until a terminal notification/read confirms completion.
+      const retainUntilConfirmed = () => {
+        if (run.finished || activeRuns.get(run.runId) !== run) return;
+        publishCodexEvent(run.sender, run.runId, { type: "reconnecting", threadId: run.threadId,
+          turnId: run.turnId, summary: "正在确认录音任务是否已停止；确认前保留 PLAUD 会话，避免重复占用" });
+        armRunIdleTimeout(run);
+      };
+      void stopCodex(run.runId).then(retainUntilConfirmed, retainUntilConfirmed);
+      return;
+    }
     const error = "Codex 任务长时间没有返回事件，已停止等待。可以在当前对话中继续执行。";
     const interrupt = run.turnId
       ? getCodexClient().request("turn/interrupt", {
@@ -2257,6 +2281,10 @@ function finishRun(run, type, details = {}) {
   }
   run.pendingUserInputs.clear();
   activeRuns.delete(run.runId);
+  if (run.plaudWorkflowReserved) {
+    run.plaudWorkflowReserved = false;
+    getDomiIntegration().releasePlaudWorkflow(run.runId);
+  }
   if (!liveCodexThreads.has(run.threadId)) codexThreadTurnIds.delete(run.threadId);
 
   const stopped = type === "stopped";
@@ -3674,6 +3702,7 @@ async function runCodex(sender, payload) {
 
   startingCodexRunIds.add(runId);
   if (requestedThreadId) startingCodexThreadIds.add(requestedThreadId);
+  let plaudWorkflowReserved = false;
   try {
     const entityWorkspaceResolution = localEntityRequest
       ? await resolveCanonicalEntityWorkspace(localEntityRequest, { repairMissing: true })
@@ -3703,13 +3732,12 @@ async function runCodex(sender, payload) {
         workspacePath
       };
     }
-    if (
-      ["domi-router", "plaud-connection-assist"].includes(String(payload?.workflowId || ""))
-      || /\bPLAUD\b/i.test(prompt)
-    ) {
-      // Codex PLAUD skills own the same private Profile. Release the renderer's
-      // hidden read session first so the task never sees a false profile lock.
-      await getDomiIntegration().stopPlaudBackgroundSession("codex-plaud-workflow");
+    const plaudWorkflowPlan = getDomiIntegration().plaudWorkflowPlan(payload);
+    if (plaudWorkflowPlan.requiresBrowser) {
+      // Reserve before draining the reader. A second recording task joins the
+      // FIFO reservation instead of stopping another task's browser session.
+      plaudWorkflowReserved = true;
+      await getDomiIntegration().reservePlaudForWorkflow(runId);
       assertCodexRunNotCancelled(runId);
     }
     // Imports/updates that claimed an idle activation slot before this task
@@ -3754,7 +3782,7 @@ async function runCodex(sender, payload) {
       threadId
     );
     const researchCache = { ...preparedResearchCache, ...actualCacheContext };
-    const runtimeContext = [domiOutputRuntimeContext(), repositoryContext, larkContext, feishuWriteContext, researchCache.materialContext, researchCache.context]
+    const runtimeContext = [domiOutputRuntimeContext(), plaudWorkflowPlan.runtimeContext, repositoryContext, larkContext, feishuWriteContext, researchCache.materialContext, researchCache.context]
       .filter(Boolean)
       .join("\n\n");
     const threadReadyAt = Date.now();
@@ -3784,6 +3812,7 @@ async function runCodex(sender, payload) {
         externalType: payload?.externalType || "",
         externalRecordId: payload?.externalRecordId || "",
         workflowId: payload?.workflowId || "",
+        plaudWorkflowReserved,
         useDomiPlugin: payload?.useDomiPlugin === true,
         slidesDeliveryPolicy: normalizedSlidesDeliveryPolicy(payload?.slidesDeliveryPolicy),
         slidesDeliveryCorrectionAttempts: 0,
@@ -3870,6 +3899,11 @@ async function runCodex(sender, payload) {
       workspacePath
     };
   } finally {
+    // Returning `completion` enters this finally before the model task ends.
+    // Active/uncertain starts release in finishRun; failed preflights release here.
+    if (plaudWorkflowReserved && !activeRuns.has(runId)) {
+      getDomiIntegration().releasePlaudWorkflow(runId);
+    }
     startingCodexRunIds.delete(runId);
     schedulePendingSkillHubCodexReload();
     cancelledCodexRunIds.delete(runId);
@@ -3882,6 +3916,7 @@ async function stopCodex(runId) {
   if (!run) {
     if (startingCodexRunIds.has(runId)) {
       cancelledCodexRunIds.add(runId);
+      getDomiIntegration().releasePlaudWorkflow(runId);
       return { ok: true };
     }
     return { ok: false, error: "没有找到正在执行的任务。" };
@@ -3915,6 +3950,13 @@ async function stopCodex(runId) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       const unfinished = activeRuns.get(runId);
+      if (unfinished?.plaudWorkflowReserved) {
+        const snapshot = await getCodexClient().request("thread/read", { threadId: unfinished.threadId, includeTurns: true });
+        const turn = snapshot?.thread?.turns?.find(item => item.id === unfinished.turnId);
+        if (!turn || !["completed", "failed", "stopped"].includes(classifyCodexTurnStatus(turn.status))) {
+          return { ok: false, error: "停止请求已发送，正在确认原录音任务的状态；确认结束前会保留 PLAUD 会话。" };
+        }
+      }
       if (unfinished) finishRun(unfinished, "stopped");
       return { ok: true };
     } catch (error) {
@@ -4704,12 +4746,16 @@ ipcMain.handle("domi:plaud-disconnect", async (_event, request) => {
 });
 ipcMain.handle("domi:plaud-list", async (_event, request) => {
   try {
+    const integration = getDomiIntegration();
+    if (integration.plaudReaderPaused()) return integration.pausedPlaudSnapshot();
+    const readerSettings = getAppSettings().load().settings;
+    const readerScope = `${readerSettings.plaudConnectionMode}:${integration.normalizePlaudBrowser(readerSettings.plaudBrowser)}`;
     const fresh = request?.fresh === true;
     const limit = Math.min(Math.max(Number(request?.limit) || 50, 1), 100);
     const offset = Math.min(Math.max(Number(request?.offset) || 0, 0), 10_000);
     return await serviceCoordinator.run(
-      `domi:plaud-list:${fresh ? "fresh" : "cached"}:${offset}:${limit}`,
-      () => getDomiIntegration().plaudQueue({ offset, limit, fresh }),
+      `domi:plaud-list:${readerScope}:${fresh ? "fresh" : "cached"}:${offset}:${limit}`,
+      () => integration.plaudQueue({ offset, limit, fresh }),
       {
         ttlMs: 15_000,
         retries: 0,
@@ -4720,6 +4766,14 @@ ipcMain.handle("domi:plaud-list", async (_event, request) => {
     );
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:plaud-workflow-completion", async (_event, request) => {
+  try {
+    return await getDomiIntegration().plaudWorkflowCompletion(request);
+  } catch {
+    return { ok: false, fileId: String(request?.fileId || ""),
+      errorCode: "PLAUD_WORKFLOW_STATE_UNAVAILABLE", error: "无法核验本地录音工作流状态。" };
   }
 });
 ipcMain.handle("domi:plaud-sync", async () => {
