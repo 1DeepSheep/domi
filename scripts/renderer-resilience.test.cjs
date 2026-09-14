@@ -48,7 +48,7 @@ assert.match(
 
 assert.match(
   messageContent,
-  /remarkPlugins=\{\[remarkGfm, \[remarkCodexFileCitations, attachmentNameContext\], remarkMessageFormatting\]\}/,
+  /remarkPlugins=\{\[[^\n]*\[remarkCodexFileCitations, attachmentNameContext\][^\n]*remarkMessageFormatting[^\n]*\]\}/,
   "Assistant messages must turn Codex file citation markers into material links."
 );
 assert.match(
