@@ -150,6 +150,8 @@ declare global {
       listPlaud: (request?: DomiPlaudListRequest) => Promise<DomiPlaudSnapshot>;
       syncPlaud: () => Promise<DomiPlaudSyncResult>;
       resumePlaudTranscripts: () => Promise<DomiPlaudSyncResult>;
+      onPlaudReaderAvailability?: (callback: (status: DomiPlaudReaderAvailability) => void) => () => void;
+      plaudWorkflowCompletion: (request: { fileId: string }) => Promise<DomiPlaudWorkflowCompletion>;
       renamePlaud: (request: DomiPlaudRenameRequest) => Promise<DomiPlaudRenameResult>;
       deletePlaud: (request: DomiPlaudDeleteRequest) => Promise<DomiPlaudDeleteResult>;
       loadDomiEntityWorkspace: (
@@ -937,6 +939,7 @@ export type PodcastProcessRequest = {
 
 export type PodcastProcessResult = {
   ok: boolean;
+  paused?: boolean;
   reused?: boolean;
   job?: PodcastJob;
   transcriptPath?: string;
@@ -1272,6 +1275,7 @@ export type DomiPlaudConnectionRequest = {
 
 export type DomiPlaudRemoteStatus =
   | "connected"
+  | "workflow_in_use"
   | "auth_required"
   | "authorization_pending"
   | "access_denied"
@@ -1302,8 +1306,26 @@ export type DomiPlaudListRequest = {
   limit?: number;
 };
 
+export type DomiPlaudReaderAvailability = {
+  available: boolean;
+  activeOwners: number;
+  browser: "chrome" | "tabbit";
+  generation: number;
+};
+
+export type DomiPlaudWorkflowCompletion = {
+  ok: boolean;
+  fileId: string;
+  stage: string;
+  outcome?: "waiting-input" | "completed";
+  errorCode?: string;
+  error?: string;
+};
+
 export type DomiPlaudSnapshot = {
   ok: boolean;
+  paused?: boolean;
+  superseded?: boolean;
   stale?: boolean;
   syncedAt?: number;
   lastSuccessfulAt?: number;
@@ -1323,7 +1345,9 @@ export type DomiPlaudSnapshot = {
 
 export type DomiPlaudSyncResult = {
   ok: boolean;
-  status?: "complete" | "partial" | "waiting" | "failed";
+  paused?: boolean;
+  superseded?: boolean;
+  status?: "complete" | "partial" | "waiting" | "failed" | "paused";
   generatedCount?: number;
   recoveredCount?: number;
   failedCount?: number;
@@ -1677,6 +1701,9 @@ export type CodexModel = {
 
 export type CodexRunRequest = {
   runId: string;
+  plaudAccess?: { kind: "recording"; fileId: string; transcriptPath?: string }
+    | { kind: "local_transcript"; transcriptPath: string }
+    | { kind: "remote" };
   prompt: string;
   requestText?: string;
   /**

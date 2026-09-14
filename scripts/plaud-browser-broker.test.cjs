@@ -112,3 +112,26 @@ test("PLAUD broker releases its hidden browser after an idle result and reconnec
     .filter((event) => event === "init" || event === "close");
   assert.deepEqual(lifecycle, ["init", "close", "init", "close"]);
 });
+
+test("unexpected worker exits have a recoverable code and diagnostics contain no request details", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-exit-"));
+  const workerPath = path.join(root, "synthetic-worker.cjs");
+  fs.writeFileSync(workerPath, `
+require("node:readline").createInterface({ input: process.stdin }).on("line", line => {
+  const request = JSON.parse(line);
+  if (request.args[0] === "crash") process.exit(9);
+  process.stdout.write(JSON.stringify({id:request.id,ok:true,result:{ok:true,items:[]}}) + "\\n");
+});
+`);
+  const diagnostics = [];
+  const broker = new PlaudSessionBroker({ executable: process.execPath, workerPath,
+    requestTimeoutMs: 5_000, shutdownTimeoutMs: 2_000, onDiagnostic: event => diagnostics.push(event) });
+  t.after(async () => { await broker.stop("test-cleanup"); fs.rmSync(root, { recursive: true, force: true }); });
+  await assert.rejects(broker.request("list", ["crash", "private-recording-name"], root), /PLAUD_WORKER_EXITED/);
+  assert.deepEqual(diagnostics, [{ operation: "worker-exit", reason: "unexpected-exit", code: "9", pendingCount: 1 }]);
+  assert.equal(broker.isRunning(), false);
+  assert.equal((await broker.request("list", ["ok"], root)).ok, true, "the next explicit read can create a fresh worker");
+  await broker.stop("test-finished");
+  assert.deepEqual(diagnostics.at(-1), { operation: "worker-exit", reason: "test-finished", code: "SIGTERM", pendingCount: 0 });
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private-recording|synthetic-worker|domi-plaud-exit/);
+});

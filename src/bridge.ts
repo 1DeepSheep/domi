@@ -533,6 +533,8 @@ const browserFallback: Window["workbench"] = {
     status: "failed",
     error: "浏览器预览模式不能补下载 PLAUD 文字稿。"
   }),
+  onPlaudReaderAvailability: () => () => undefined,
+  plaudWorkflowCompletion: async ({ fileId }) => ({ ok: false, fileId, stage: "", error: "浏览器预览模式不能核验本地 PLAUD 工作流。" }),
   renamePlaud: async () => ({
     ok: false,
     error: "浏览器预览模式不能修改 PLAUD 录音标题。"

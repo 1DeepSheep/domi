@@ -1,10 +1,35 @@
-import type { DomiPlaudItem, DomiPlaudSnapshot, DomiPlaudSyncResult } from "./env";
+import type { CodexRunRequest, DomiPlaudItem, DomiPlaudSnapshot, DomiPlaudSyncResult } from "./env";
 
 export type PlaudFeedbackTone = "complete" | "partial" | "waiting" | "failed";
 export type PlaudFeedback = { text: string; tone: PlaudFeedbackTone };
 export type PlaudItemPresentation = { label: string; tone: "complete" | "attention" | "waiting" | "neutral"; detail: string };
 
+export function plaudCompletionFileId(thread: { projectId: string; plaudFileId?: string }, message: { plaudFileId?: string }) {
+  if (message.plaudFileId) return message.plaudFileId;
+  // Older turns have no per-message identity. Only their dedicated recording
+  // workspace can establish a unique fallback; an entity-bound thread cannot.
+  return thread.plaudFileId && thread.projectId === `plaud-${thread.plaudFileId}` ? thread.plaudFileId : undefined;
+}
+
+export function plaudAccessForRequest(userInstructionText: string, fileId?: string, transcriptPath?: string): CodexRunRequest["plaudAccess"] {
+  // Only inspect this turn's actual user instruction. Workflow templates and
+  // transcript contents must not turn a local notes task into remote access.
+  const target = fileId ? "PLAUD|(?:这|该|本)条?录音|录音(?:标题|名称|连接)" : "PLAUD";
+  const action = "同步|下载|上传|刷新|检测|诊断|修复连接|登录|重命名|删除|生成文字稿|生成转写|重新转写";
+  const remoteAction = new RegExp(`(?:${action})[^。！？!?;；\\n]{0,24}(?:${target})|(?:${target})[^。！？!?;；\\n]{0,24}(?:${action})`, "i");
+  const explicitRemote = userInstructionText.split(/[。！？!?;；\n]/).some((sentence) => {
+    // A request to use an existing transcript, or to discuss the product,
+    // does not authorize the denied remote action in the same clause.
+    const clauses = sentence.split(/[，,]/).filter((clause) => !/(?:不要|不用|无需|不需要|禁止)[^。]{0,12}(?:同步|下载|上传|刷新|检测|诊断|登录|重命名|删除|生成|转写)/.test(clause));
+    return clauses.some((clause) => remoteAction.test(clause));
+  });
+  if (explicitRemote) return { kind: "remote" };
+  return fileId ? { kind: "recording", fileId, ...(transcriptPath ? { transcriptPath } : {}) } : undefined;
+}
+
 export function plaudSnapshotForScope(snapshot: DomiPlaudSnapshot, scopeVerified: boolean): DomiPlaudSnapshot {
+  if (snapshot.paused) return { ...snapshot, items: scopeVerified ? snapshot.items : [],
+    syncedAt: scopeVerified ? snapshot.syncedAt : undefined, lastSuccessfulSnapshot: undefined, warning: "", error: "" };
   if (scopeVerified || (!snapshot.stale && !snapshot.lastSuccessfulSnapshot)) return snapshot;
   // The persistent fallback predates this browser/startup scope and does not
   // carry a verified account identity. Retain the actual failure, not its rows.
@@ -15,6 +40,14 @@ export function plaudSnapshotForScope(snapshot: DomiPlaudSnapshot, scopeVerified
       ? "PLAUD 登录已失效，请在设置中重新登录。"
       : "PLAUD 最近录音暂时无法读取，请稍后重试。")
   };
+}
+
+export function plaudReadRetryDelay(snapshot: DomiPlaudSnapshot | null, attempt: number) {
+  const delays = [2_000, 5_000, 15_000];
+  if (!snapshot || snapshot.paused || !snapshot.retryable || (snapshot.ok && !snapshot.stale)
+    || !["verification_pending", "authorization_pending", "profile_locked", "browser_unavailable", "network_error", "rate_limited", "service_unavailable"].includes(snapshot.remoteStatus || "")
+    || attempt < 0 || attempt >= delays.length) return null;
+  return snapshot.remoteStatus === "rate_limited" ? Math.max(30_000, delays[attempt]) : delays[attempt];
 }
 
 export function plaudSafeError(error: unknown, fallback = "暂时无法连接 PLAUD，请稍后刷新。") {
@@ -146,6 +179,7 @@ export function plaudQueueSummary(snapshot: DomiPlaudSnapshot) {
 }
 
 export function plaudSyncFeedback(result: DomiPlaudSyncResult): PlaudFeedback {
+  if (result.paused || result.status === "paused") return { tone: "waiting", text: "任务正在使用 PLAUD，完成后会自动更新最近录音。" };
   const count = (value: number | undefined) => Number.isFinite(value) ? Math.max(0, Math.floor(value!)) : 0;
   const generated = count(result.generatedCount);
   const recovered = count(result.recoveredCount);

@@ -20,7 +20,8 @@ class PlaudSessionBroker {
     spawnImpl = spawn,
     requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
     shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
-    idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
+    idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+    onDiagnostic = () => {}
   }) {
     this.executable = executable;
     this.workerPath = workerPath;
@@ -37,6 +38,8 @@ class PlaudSessionBroker {
     this.sequence = 0;
     this.stopPromise = null;
     this.idleTimer = null;
+    this.onDiagnostic = onDiagnostic;
+    this.stopReason = "";
   }
 
   isRunning() {
@@ -80,6 +83,7 @@ class PlaudSessionBroker {
     this.child = child;
     this.pluginRoot = normalizedRoot;
     this.sessionKey = String(sessionKey || normalizedRoot);
+    this.stopReason = "";
     this.stdoutBuffer = "";
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => this.consumeStdout(chunk));
@@ -89,7 +93,11 @@ class PlaudSessionBroker {
     child.once("close", (code, signal) => {
       if (this.child !== child) return;
       const suffix = signal ? `（${signal}）` : Number.isInteger(code) ? `（${code}）` : "";
-      this.handleExit(new Error(`PLAUD 后台会话已结束${suffix}。`));
+      try {
+        this.onDiagnostic({ operation: "worker-exit", reason: this.stopReason || "unexpected-exit",
+          code: signal || String(code ?? "unknown"), pendingCount: this.pending.size });
+      } catch { /* Diagnostics must not delay reader cleanup. */ }
+      this.handleExit(new Error(`PLAUD_WORKER_EXITED: PLAUD 后台会话已结束${suffix}。`));
     });
   }
 
@@ -178,6 +186,7 @@ class PlaudSessionBroker {
       this.handleExit(new Error("PLAUD 后台会话已关闭。"));
       return;
     }
+    this.stopReason = String(reason || "shutdown");
     this.stopPromise = new Promise((resolve) => {
       let settled = false;
       const finish = () => {
