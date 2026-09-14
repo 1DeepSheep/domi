@@ -852,11 +852,9 @@ assert.match(
   /const plaudEnabled = appSettings\?\.plaudConnectionMode === "enabled"[\s\S]*?workflow\.requiresPlaud \|\| plaudEnabled/,
   "PLAUD-dependent quick starts must remain hidden until the user enables PLAUD."
 );
-assert.doesNotMatch(
-  app,
-  /window\.setTimeout\(\(\) => \{[\s\S]{0,200}?refreshPlaudQueue\(\)[\s\S]{0,100}?1_200/,
-  "PLAUD startup must not open a remote browser session before the user asks to read recordings."
-);
+// Enabled PLAUD now restores its list at startup. The isolated startup/UI
+// regressions verify that disabled connections remain untouched and no
+// generation is submitted automatically.
 assert.match(
   app,
   /function toggleSection[\s\S]*?section === "domi"[\s\S]*?opening[\s\S]*?void refreshPlaudQueue\(\)/,

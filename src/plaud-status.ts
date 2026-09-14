@@ -4,6 +4,19 @@ export type PlaudFeedbackTone = "complete" | "partial" | "waiting" | "failed";
 export type PlaudFeedback = { text: string; tone: PlaudFeedbackTone };
 export type PlaudItemPresentation = { label: string; tone: "complete" | "attention" | "waiting" | "neutral"; detail: string };
 
+export function plaudSnapshotForScope(snapshot: DomiPlaudSnapshot, scopeVerified: boolean): DomiPlaudSnapshot {
+  if (scopeVerified || (!snapshot.stale && !snapshot.lastSuccessfulSnapshot)) return snapshot;
+  // The persistent fallback predates this browser/startup scope and does not
+  // carry a verified account identity. Retain the actual failure, not its rows.
+  return {
+    ok: false, stale: true, items: [], pendingCount: 0, queueCount: 0,
+    remoteStatus: snapshot.remoteStatus, retryable: snapshot.retryable,
+    error: plaudSafeError(snapshot.error, snapshot.remoteStatus === "auth_required"
+      ? "PLAUD 登录已失效，请在设置中重新登录。"
+      : "PLAUD 最近录音暂时无法读取，请稍后重试。")
+  };
+}
+
 export function plaudSafeError(error: unknown, fallback = "暂时无法连接 PLAUD，请稍后刷新。") {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   if (/PLAUD_TRANSCRIPT_ARTIFACT_MISSING/.test(message)) return "本地原始文字稿文件缺失，请恢复原文件；不会重新生成。";
