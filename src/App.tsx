@@ -76,7 +76,8 @@ import {
   useState
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
-import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
+import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
+import { restorePlaudOnStartup } from "./plaud-startup";
 import {
   clearTaskResultUnread,
   isTaskResultVisible,
@@ -1945,6 +1946,7 @@ function App() {
   const [documentLibraryCreating, setDocumentLibraryCreating] = useState(false);
   const [documentLibraryCreateError, setDocumentLibraryCreateError] = useState("");
   const [plaudSnapshot, setPlaudSnapshot] = useState<DomiPlaudSnapshot | null>(null);
+  const [plaudInitializing, setPlaudInitializing] = useState(false);
   const [plaudLoading, setPlaudLoading] = useState(false);
   const [plaudLoadingMore, setPlaudLoadingMore] = useState(false);
   const [plaudSyncing, setPlaudSyncing] = useState(false);
@@ -2113,6 +2115,9 @@ function App() {
   const databaseGridSaveCountRef = useRef(0);
   const plaudListPromiseRef = useRef<Promise<DomiPlaudSnapshot | null> | null>(null);
   const plaudSyncPromiseRef = useRef<Promise<DomiPlaudSyncResult | null> | null>(null);
+  const plaudMutationPromiseRef = useRef<Promise<void> | null>(null);
+  const plaudScopeHandoffRef = useRef<Promise<void> | null>(null);
+  const plaudNeedsFreshListRef = useRef(true);
   const plaudListOwnerRef = useRef<object | null>(null);
   const plaudSyncOwnerRef = useRef<object | null>(null);
   const plaudSnapshotRevisionRef = useRef(0);
@@ -3358,12 +3363,25 @@ function App() {
     if (!appSettings) return;
     // A different account/browser or disabled connection invalidates all old
     // reads, including their catch/finally state updates.
+    const previousOperations = [plaudScopeHandoffRef.current, plaudListPromiseRef.current, plaudSyncPromiseRef.current]
+      .filter((operation) => operation !== null);
+    if (previousOperations.length) {
+      // The backend shares one browser worker. Wait for the old operation to
+      // settle before a new scope can join that worker; discard its result.
+      const handoff = Promise.allSettled(previousOperations).then(() => undefined);
+      plaudScopeHandoffRef.current = handoff;
+      void handoff.then(() => {
+        if (plaudScopeHandoffRef.current === handoff) plaudScopeHandoffRef.current = null;
+      });
+    }
     plaudSnapshotRevisionRef.current += 1;
+    plaudNeedsFreshListRef.current = true;
     plaudListPromiseRef.current = null;
     plaudSyncPromiseRef.current = null;
     plaudListOwnerRef.current = null;
     plaudSyncOwnerRef.current = null;
     setPlaudSnapshot(null);
+    setPlaudInitializing(false);
     setPlaudError("");
     setPlaudNotice("");
     setPlaudLoading(false);
@@ -3371,13 +3389,36 @@ function App() {
     setPlaudSyncing(false);
     setPlaudResuming(false);
     setPlaudResumePendingCount(null);
-  }, [appSettings?.plaudConnectionMode, appSettings?.plaudBrowser]);
+  }, [appSettings?.plaudConnectionMode, appSettings?.plaudBrowser, appSettings?.onboardingComplete]);
 
   useEffect(() => {
     if (!plaudEnabled || !appSettings?.onboardingComplete) return;
-    // Resume checks the local queue first and never opens a remote session when
-    // it has no candidates. This also restores progress before the panel opens.
-    void syncPlaudQueue({ resumeOnly: true });
+    let cancelled = false;
+    const browser = appSettings.plaudBrowser;
+    const isCurrent = () => !cancelled
+      && appSettingsRef.current?.plaudConnectionMode === "enabled"
+      && appSettingsRef.current?.plaudBrowser === browser
+      && appSettingsRef.current?.onboardingComplete === true;
+    setPlaudInitializing(true);
+    // Resume first checks existing local work. An empty queue does not return
+    // a snapshot, so finish startup with a read-only list in that case.
+    // Let effect cleanup cancel a superseded/StrictMode setup before any IPC.
+    void Promise.resolve().then(async () => {
+      await plaudScopeHandoffRef.current;
+      await restorePlaudOnStartup({
+        isCurrent,
+        pendingList: () => plaudListPromiseRef.current,
+        pendingSync: () => plaudSyncPromiseRef.current,
+        pendingMutation: () => plaudMutationPromiseRef.current,
+        resume: () => syncPlaudQueue({ resumeOnly: true }),
+        list: () => refreshPlaudQueue({ fresh: true })
+      });
+    }).catch((error) => {
+      if (isCurrent()) setPlaudError(plaudSafeError(error));
+    }).finally(() => {
+      if (isCurrent()) setPlaudInitializing(false);
+    });
+    return () => { cancelled = true; };
   }, [plaudEnabled, appSettings?.onboardingComplete, appSettings?.plaudBrowser]);
 
   const plaudNeedsRecovery = plaudEnabled
@@ -5858,13 +5899,22 @@ function App() {
     setPlaudNoticeState(text ? { text, tone } : null);
   }
 
+  function currentPlaudScope() {
+    return appSettingsRef.current?.plaudConnectionMode === "enabled"
+      && appSettingsRef.current?.plaudBrowser === appSettings?.plaudBrowser
+      && appSettingsRef.current?.onboardingComplete === appSettings?.onboardingComplete;
+  }
+
   function currentPlaudRequest(revision: number) {
-    return revision === plaudSnapshotRevisionRef.current
-      && appSettingsRef.current?.plaudConnectionMode === "enabled";
+    return revision === plaudSnapshotRevisionRef.current && currentPlaudScope();
   }
 
   async function refreshPlaudQueue({ fresh = false }: { fresh?: boolean } = {}): Promise<DomiPlaudSnapshot | null> {
-    if (appSettings?.plaudConnectionMode !== "enabled") return null;
+    if (plaudScopeHandoffRef.current) await plaudScopeHandoffRef.current;
+    if (!currentPlaudScope()) return null;
+    // A newly selected browser must not reuse the prior scope's IPC TTL cache,
+    // including a panel-open read racing with startup restoration.
+    fresh ||= plaudNeedsFreshListRef.current;
     if (plaudListPromiseRef.current) return plaudListPromiseRef.current;
     if (plaudSyncPromiseRef.current || plaudMutationIdsRef.current.size > 0) return null;
     const revision = ++plaudSnapshotRevisionRef.current;
@@ -5876,7 +5926,8 @@ function App() {
     let refreshedSnapshot: DomiPlaudSnapshot | null = null;
     const request = (async (): Promise<DomiPlaudSnapshot | null> => {
       try {
-        const result = await Promise.resolve().then(() => workbench.listPlaud({ fresh, offset: 0, limit: 50 }));
+        const response = await Promise.resolve().then(() => workbench.listPlaud({ fresh, offset: 0, limit: 50 }));
+        const result = plaudSnapshotForScope(response, !plaudNeedsFreshListRef.current);
         if (currentPlaudRequest(revision)) {
           setPlaudSnapshot((current) => {
             if (result.lastSuccessfulSnapshot) {
@@ -5906,6 +5957,7 @@ function App() {
             setPlaudError(plaudSafeError(result.warning, "PLAUD 暂时无法刷新，已显示上次成功读取的录音。"));
             setPlaudNotice("");
           } else {
+            plaudNeedsFreshListRef.current = false;
             setPlaudError("");
             setPlaudNotice("");
             // A fresh list may reveal submitted work after the last resume
@@ -5938,7 +5990,8 @@ function App() {
   }
 
   async function loadMorePlaudQueue(): Promise<DomiPlaudSnapshot | null> {
-    if (appSettings?.plaudConnectionMode !== "enabled") return null;
+    if (plaudScopeHandoffRef.current) await plaudScopeHandoffRef.current;
+    if (!currentPlaudScope()) return null;
     if (!plaudSnapshot?.ok || !plaudSnapshot.hasMore) return null;
     if (plaudListPromiseRef.current) return plaudListPromiseRef.current;
     if (plaudSyncPromiseRef.current || plaudMutationIdsRef.current.size > 0) return null;
@@ -6012,7 +6065,8 @@ function App() {
   }
 
   async function syncPlaudQueue({ resumeOnly = false }: { resumeOnly?: boolean } = {}): Promise<DomiPlaudSyncResult | null> {
-    if (appSettings?.plaudConnectionMode !== "enabled") return null;
+    if (plaudScopeHandoffRef.current) await plaudScopeHandoffRef.current;
+    if (!currentPlaudScope()) return null;
     if (plaudSyncPromiseRef.current) return plaudSyncPromiseRef.current;
     if (plaudListPromiseRef.current) return null;
     if (plaudMutationIdsRef.current.size > 0) return null;
@@ -6027,7 +6081,11 @@ function App() {
       try {
         const result = await Promise.resolve().then(() => resumeOnly ? workbench.resumePlaudTranscripts() : workbench.syncPlaud());
         if (!currentPlaudRequest(revision)) return result;
-        if (result.snapshot) setPlaudSnapshot(result.snapshot);
+        if (result.snapshot) {
+          const snapshot = plaudSnapshotForScope(result.snapshot, !plaudNeedsFreshListRef.current);
+          setPlaudSnapshot(snapshot);
+          if (snapshot.ok && !snapshot.stale) plaudNeedsFreshListRef.current = false;
+        }
         setPlaudResumePendingCount(typeof result.resumePendingCount === "number" ? Math.max(0, result.resumePendingCount) : null);
         if (resumeOnly && result.ok && !result.snapshot && !(result.results?.length)
           && !result.generatedCount && !result.recoveredCount && !result.waitingCount && !result.retryableCount && !result.failedCount) {
@@ -6173,6 +6231,9 @@ function App() {
       return;
     }
     plaudMutationIdsRef.current.add(item.fileId);
+    let finishMutation!: () => void;
+    const mutation = new Promise<void>((resolve) => { finishMutation = resolve; });
+    plaudMutationPromiseRef.current = mutation;
     setRenamingPlaudId(item.fileId);
     setPlaudError("");
     setPlaudNotice("");
@@ -6202,6 +6263,8 @@ function App() {
       if (currentPlaudRequest(revision)) setPlaudError(plaudSafeError(error));
     } finally {
       plaudMutationIdsRef.current.delete(item.fileId);
+      if (plaudMutationPromiseRef.current === mutation) plaudMutationPromiseRef.current = null;
+      finishMutation();
       setRenamingPlaudId(null);
     }
   }
@@ -6226,6 +6289,9 @@ function App() {
       || appSettingsRef.current.plaudBrowser !== browser) return;
 
     plaudMutationIdsRef.current.add(item.fileId);
+    let finishMutation!: () => void;
+    const mutation = new Promise<void>((resolve) => { finishMutation = resolve; });
+    plaudMutationPromiseRef.current = mutation;
     setDeletingPlaudId(item.fileId);
     setPlaudError("");
     setPlaudNotice("");
@@ -6258,6 +6324,8 @@ function App() {
       if (currentPlaudRequest(revision)) setPlaudError(plaudSafeError(error));
     } finally {
       plaudMutationIdsRef.current.delete(item.fileId);
+      if (plaudMutationPromiseRef.current === mutation) plaudMutationPromiseRef.current = null;
+      finishMutation();
       setDeletingPlaudId(null);
     }
   }
@@ -13920,7 +13988,7 @@ function App() {
                             }
                             void refreshPlaudQueue({ fresh: true });
                           }}
-                          disabled={plaudLoading || plaudLoadingMore || plaudSyncing}
+                          disabled={plaudInitializing || plaudLoading || plaudLoadingMore || plaudSyncing}
                         >
                           {plaudSnapshot?.remoteStatus === "auth_required" ? "重新登录" : "重试"}
                         </button>
@@ -13933,15 +14001,17 @@ function App() {
                         <small>
                           {plaudLoading
                             ? "正在读取"
+                            : plaudInitializing || plaudResuming
+                              ? "正在检查"
                             : plaudSnapshot?.syncedAt
                               ? new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(plaudSnapshot.syncedAt)
-                              : "按刷新读取"}
+                              : "尚未读取"}
                         </small>
                         <button
                           type="button"
                           title="刷新 PLAUD 最近录音"
                           aria-label="刷新 PLAUD 最近录音"
-                          disabled={plaudLoading || plaudLoadingMore || plaudSyncing}
+                          disabled={plaudInitializing || plaudLoading || plaudLoadingMore || plaudSyncing}
                           onClick={() => void refreshPlaudQueue({ fresh: true })}
                         >
                           <RefreshCw className={plaudLoading ? "spinning" : ""} size={13} />
@@ -13961,8 +14031,8 @@ function App() {
                         }
                       }}
                     >
-                      {plaudLoading && !plaudSnapshot && (
-                        <div className="empty-state">正在读取 PLAUD 最近录音</div>
+                      {(plaudLoading || plaudInitializing || plaudResuming) && !plaudSnapshot && (
+                        <div className="empty-state">{plaudLoading ? "正在读取 PLAUD 最近录音" : "正在检查 PLAUD 最近录音"}</div>
                       )}
                       {!plaudLoading && plaudSnapshot?.ok && !(plaudSnapshot.items || []).length && (
                         <div className="empty-state">PLAUD 中暂无录音</div>
@@ -14094,10 +14164,12 @@ function App() {
                       className="domi-run-button"
                       type="button"
                       onClick={() => void syncPlaudQueue()}
-                      disabled={plaudSyncing || plaudLoading || plaudLoadingMore || Boolean(renamingPlaudId) || Boolean(deletingPlaudId)}
+                      disabled={plaudInitializing || plaudSyncing || plaudLoading || plaudLoadingMore || Boolean(renamingPlaudId) || Boolean(deletingPlaudId)}
                     >
-                      <RefreshCw className={plaudSyncing || plaudLoading || plaudLoadingMore ? "spinning" : ""} size={14} />
-                      {plaudSyncing ? plaudResuming ? "正在检查并补下载文字稿" : "正在同步并生成文字稿" : "同步 PLAUD 并生成文字稿"}
+                      <RefreshCw className={plaudInitializing || plaudSyncing || plaudLoading || plaudLoadingMore ? "spinning" : ""} size={14} />
+                      {plaudSyncing ? plaudResuming ? "正在检查并补下载文字稿" : "正在同步并生成文字稿"
+                        : plaudLoading || plaudLoadingMore ? "正在读取最近录音"
+                          : plaudInitializing ? "正在检查最近录音" : "同步 PLAUD 并生成文字稿"}
                     </button>
                   </>
                 ) : (
@@ -14134,9 +14206,13 @@ function App() {
                       <strong className={`plaud-queue-health ${(plaudSnapshot?.items || []).some(item => plaudItemPresentation(item).tone === "attention") ? "attention" : ""}`}>
                         {plaudSnapshot?.ok
                           ? plaudQueueSummary(plaudSnapshot)
+                          : plaudLoading ? "正在读取"
+                            : plaudInitializing || plaudResuming ? "正在检查"
+                            : plaudSnapshot?.remoteStatus === "auth_required" ? "需要登录"
+                              : plaudSnapshot ? "连接待检查"
                           : domiSnapshot?.health.plaud.ok
                             ? `${domiSnapshot.health.plaud.queueCount} 个待恢复`
-                            : "未就绪"}
+                            : "尚未读取"}
                       </strong>
                     </div>
                   )}
