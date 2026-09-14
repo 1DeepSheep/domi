@@ -301,6 +301,8 @@ export type ClipboardAttachmentPayload = {
 export type MarkdownDocument = {
   path: string;
   name: string;
+  /** User-facing name; name and path retain the actual filesystem identity. */
+  displayName?: string;
   content: string;
   size: number;
   mtimeMs: number;
@@ -309,6 +311,8 @@ export type MarkdownDocument = {
 export type DocumentLibraryNode = {
   kind: "folder" | "markdown" | "pdf";
   name: string;
+  /** User-facing name; name and path retain the actual filesystem identity. */
+  displayName?: string;
   path: string;
   relativePath: string;
   size: number;
@@ -342,6 +346,8 @@ export type DocumentLibrarySearchRequest = {
 export type DocumentLibrarySearchMatch = {
   path: string;
   name: string;
+  /** User-facing name; name and path retain the actual filesystem identity. */
+  displayName?: string;
   relativePath: string;
   kind: "markdown" | "pdf";
   size: number;
@@ -459,6 +465,8 @@ export type MarkdownCopyResult = {
 export type PdfDocument = {
   path: string;
   name: string;
+  /** User-facing name; name and path retain the actual filesystem identity. */
+  displayName?: string;
   previewUrl: string;
   size: number;
   mtimeMs: number;

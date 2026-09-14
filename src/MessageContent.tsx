@@ -2,6 +2,7 @@ import { memo } from "react";
 import { FileText } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { AttachmentNameContext } from "../shared/attachment-names.mjs";
 import { remarkMessageFormatting, copyMessageSelection } from "./message-formatting";
 import { workbench } from "./bridge";
 import { isLocalMarkdownResource, isLocalPdfResource } from "./document-resources";
@@ -27,10 +28,12 @@ function humanizeMessageStates(content: string) {
 
 const MessageContent = memo(function MessageContent({
   message,
-  onOpenDocument
+  onOpenDocument,
+  attachmentNameContext
 }: {
   message: MessageContentMessage;
   onOpenDocument: (resource: string) => void;
+  attachmentNameContext?: AttachmentNameContext;
 }) {
   if (message.role !== "assistant") {
     return <div className="message-text">{message.content}</div>;
@@ -43,7 +46,7 @@ const MessageContent = memo(function MessageContent({
   return (
     <div className="message-text message-markdown" onCopy={copyMessageSelection}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkCodexFileCitations, remarkMessageFormatting]}
+        remarkPlugins={[remarkGfm, [remarkCodexFileCitations, attachmentNameContext], remarkMessageFormatting]}
         urlTransform={(url, key, node) => {
           if (key === "href" && codexFileCitationPath(url)) return url;
           if (
@@ -92,6 +95,10 @@ const MessageContent = memo(function MessageContent({
       </ReactMarkdown>
     </div>
   );
-}, (previous, next) => previous.message === next.message);
+}, (previous, next) => (
+  previous.message === next.message
+  && previous.attachmentNameContext === next.attachmentNameContext
+  && previous.onOpenDocument === next.onOpenDocument
+));
 
 export default MessageContent;

@@ -109,6 +109,36 @@ test("document library creates Markdown files and folders without escaping its r
   }
 });
 
+test("managed attachment labels preserve filenames, paths, and date prefixes", () => {
+  const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "domi-document-labels-"));
+  try {
+    const storedName = "1700000000000-0-【BP】示例公司.pdf";
+    const dateName = "20260914-0-融资材料.pdf";
+    for (const directory of ["原始材料", "attachments", "其他材料"]) {
+      const directoryPath = path.join(rootPath, directory);
+      fs.mkdirSync(directoryPath);
+      fs.writeFileSync(path.join(directoryPath, storedName), "%PDF-1.4\n");
+      fs.writeFileSync(path.join(directoryPath, dateName), "%PDF-1.4\n");
+    }
+
+    const snapshot = listDocumentLibrary(rootPath);
+    for (const folder of snapshot.nodes) {
+      assert.equal(folder.kind, "folder");
+      assert.equal(folder.displayName, undefined);
+      const attachment = folder.children.find((node) => node.name === storedName);
+      assert.ok(attachment);
+      assert.equal(attachment.displayName, folder.name === "其他材料" ? storedName : "【BP】示例公司.pdf");
+      assert.equal(attachment.name, storedName);
+      assert.equal(attachment.path, path.join(rootPath, folder.name, storedName));
+      assert.equal(attachment.relativePath, path.join(folder.name, storedName));
+      assert.equal(fs.readFileSync(attachment.path, "utf8"), "%PDF-1.4\n");
+      assert.equal(folder.children.find((node) => node.name === dateName).displayName, dateName);
+    }
+  } finally {
+    fs.rmSync(rootPath, { recursive: true, force: true });
+  }
+});
+
 test("document library prefers the configured repository root", () => {
   assert.deepEqual(
     documentLibraryLocation({
