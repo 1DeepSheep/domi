@@ -76,7 +76,7 @@ import {
   useState
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
-import { hasPlaudArtifactError, hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
+import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
 import {
   clearTaskResultUnread,
   isTaskResultVisible,
@@ -1678,25 +1678,6 @@ function weeklyNewsScanStageFromOutput(output: string) {
     return "正在读取重点对象与行业分类";
   }
   return "domi 行业雷达正在运行";
-}
-
-function canGeneratePlaudNotes(item: DomiPlaudItem) {
-  if (hasPlaudArtifactError(item)) return false;
-  if (!item.transcriptPath && item.syncOutcome === "failed") return false;
-  if (["managed", "notes_non_project"].includes(item.queueStage)) return false;
-  return Boolean(
-    item.hasTranscript
-    || item.hasSummary
-    || item.transcriptPath
-    || [
-      "transcript_ready",
-      "context_pending",
-      "context_ready",
-      "notes_project",
-      "reviewed",
-      "documented"
-    ].includes(item.queueStage)
-  );
 }
 
 function plaudNotesWorkflowRequest(item: DomiPlaudItem) {
@@ -5877,6 +5858,7 @@ function App() {
     setPlaudLoading(true);
     setPlaudError("");
     setPlaudNotice("");
+    let refreshedSnapshot: DomiPlaudSnapshot | null = null;
     const request = (async (): Promise<DomiPlaudSnapshot | null> => {
       try {
         const result = await Promise.resolve().then(() => workbench.listPlaud({ fresh, offset: 0, limit: 50 }));
@@ -5914,6 +5896,7 @@ function App() {
             // A fresh list may reveal submitted work after the last resume
             // reported an empty queue. Derive eligibility from this snapshot.
             setPlaudResumePendingCount(null);
+            refreshedSnapshot = result;
           }
         }
         return result;
@@ -5927,6 +5910,11 @@ function App() {
           plaudListPromiseRef.current = null;
           plaudListOwnerRef.current = null;
           setPlaudLoading(false);
+          // Release the list lock before handing off a confirmed remote
+          // transcript to the existing read/download-only recovery operation.
+          if (currentPlaudRequest(revision) && hasImmediatelyRecoverablePlaudItems(refreshedSnapshot)) {
+            void syncPlaudQueue({ resumeOnly: true });
+          }
         }
       }
     })();
