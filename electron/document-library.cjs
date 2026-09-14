@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { attachmentDisplayName } = require("../shared/attachment-names.mjs");
 
 const DOMI_WORKSPACE_DIRECTORY = "domi工作区";
 const LOCAL_TODO_DOCUMENT_NAME = "0.待办事项.md";
@@ -110,6 +111,9 @@ function documentNode(rootPath, filePath, name, stat, kind, children) {
   return {
     kind,
     name,
+    ...(kind !== "folder" ? {
+      displayName: attachmentDisplayName(filePath, { managedRoots: [rootPath] })
+    } : {}),
     path: filePath,
     relativePath: path.relative(rootPath, filePath),
     size: kind === "folder" ? 0 : Number(stat.size) || 0,

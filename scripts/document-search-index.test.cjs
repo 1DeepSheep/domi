@@ -85,6 +85,51 @@ test("short names and hydrated cloud files become searchable without an mtime ch
   } finally { db.close(); sample.close(); }
 });
 
+test("cached attachment results have clean display names without rewriting index identities", () => {
+  const sample = fixture();
+  const storedName = "1700000000000-0-【BP】示例公司.pdf";
+  const materialsPath = path.join(sample.rootPath, "3.项目库", "AI", "示例项目", "原始材料");
+  const attachmentPath = path.join(materialsPath, storedName);
+  const datePath = path.join(materialsPath, "20260914-0-示例公司.pdf");
+  const ordinaryPath = path.join(sample.rootPath, storedName);
+  const outsidePath = path.join(sample.directory, "attachments", storedName);
+  fs.mkdirSync(path.dirname(outsidePath));
+  for (const filePath of [attachmentPath, datePath, ordinaryPath, outsidePath]) {
+    fs.writeFileSync(filePath, "%PDF-1.4\n");
+  }
+  let database = openDocumentSearchIndex(sample.databasePath);
+  try {
+    indexFiles(database, sample.rootPath, [attachmentPath, datePath, ordinaryPath], "existing-cache");
+    assert.equal(upsertIndexedDocument(database, sample.rootPath, outsidePath, fs.statSync(outsidePath), "outside"), false);
+    const before = database.prepare("SELECT * FROM search_documents ORDER BY path").all();
+    const ftsBefore = database.prepare("SELECT * FROM search_documents_fts ORDER BY path").all();
+    const shortBefore = database.prepare("SELECT * FROM search_documents_short ORDER BY path").all();
+    database.close();
+    database = openDocumentSearchIndex(sample.databasePath);
+
+    // No scan/upsert after reopening: an existing cache must show the new label.
+    const matches = searchIndexedDocuments(database, { query: "示例公司", limit: 10 });
+    assert.equal(matches.length, 3);
+    const attachment = matches.find((result) => result.path === attachmentPath);
+    assert.equal(attachment.displayName, "【BP】示例公司.pdf");
+    assert.equal(attachment.name, storedName);
+    assert.equal(attachment.relativePath, path.relative(sample.rootPath, attachmentPath));
+    assert.equal(matches.find((result) => result.path === datePath).displayName, path.basename(datePath));
+    assert.equal(matches.find((result) => result.path === ordinaryPath).displayName, storedName);
+    for (const query of ["【BP】示例公司.pdf", storedName, "示例"]) {
+      assert.ok(searchIndexedDocuments(database, { query }).some((result) => result.path === attachmentPath), query);
+    }
+    assert.deepEqual(database.prepare("SELECT * FROM search_documents ORDER BY path").all(), before);
+    assert.deepEqual(database.prepare("SELECT * FROM search_documents_fts ORDER BY path").all(), ftsBefore);
+    assert.deepEqual(database.prepare("SELECT * FROM search_documents_short ORDER BY path").all(), shortBefore);
+    assert.equal(fs.existsSync(attachmentPath), true);
+    assert.equal(fs.existsSync(path.join(materialsPath, "【BP】示例公司.pdf")), false);
+  } finally {
+    database.close();
+    sample.close();
+  }
+});
+
 test("updates changed files, removes deleted files, and hides raw transcripts by default", () => {
   const sample = fixture();
   const notePath = path.join(sample.rootPath, "3.项目库", "AI", "示例项目", "纪要", "会议.md");

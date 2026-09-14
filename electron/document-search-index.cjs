@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
+const { attachmentDisplayName } = require("../shared/attachment-names.mjs");
 
 const SEARCHABLE_EXTENSIONS = new Set([".md", ".markdown", ".pdf"]);
 const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);
@@ -268,9 +269,13 @@ function searchIndexedDocuments(database, request = {}) {
       LIMIT ?
     `).all(shortToken([...normalized]), includeTranscripts ? 1 : 0, normalized, limit);
   }
+  // Derive presentation labels when reading so existing caches take effect
+  // immediately, while their stored names and document identities stay intact.
+  const managedRoots = rows.length ? [currentRoot(database)] : [];
   return rows.map((row) => ({
     path: row.path,
     name: row.name,
+    displayName: attachmentDisplayName(row.path, { managedRoots }),
     relativePath: row.relative_path,
     kind: row.kind,
     size: row.size,

@@ -1,3 +1,4 @@
+const { attachmentDisplayName } = require("../shared/attachment-names.mjs");
 const { app, autoUpdater: nativeAutoUpdater, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, Notification, protocol, safeStorage, session, shell } = require("electron");
 const { execFile } = require("node:child_process");
 const crypto = require("node:crypto");
@@ -1136,6 +1137,12 @@ function resolvePdfPath(resource, basePath) {
   return resolved;
 }
 
+function localAttachmentDisplayName(filePath) {
+  return attachmentDisplayName(filePath, {
+    managedRoots: [demoWorkspace, projectsDir, currentDocumentLibraryLocation().rootPath]
+  });
+}
+
 function pdfPreviewUrl(filePath) {
   const token = Buffer.from(filePath, "utf8").toString("base64url");
   return `${pdfProtocol}://local/${token}`;
@@ -1170,6 +1177,7 @@ async function readPdfDocument(request) {
       document: {
         path: resolved,
         name: path.basename(resolved),
+        displayName: localAttachmentDisplayName(resolved),
         previewUrl: pdfPreviewUrl(resolved),
         size: stat.size,
         mtimeMs: stat.mtimeMs
@@ -1242,6 +1250,7 @@ async function readMarkdownDocument(request) {
       document: {
         path: resolved,
         name: path.basename(resolved),
+        displayName: localAttachmentDisplayName(resolved),
         content,
         size: stat.size,
         mtimeMs: stat.mtimeMs
@@ -1301,6 +1310,7 @@ async function saveMarkdownDocument(request) {
       document: {
         path: resolved,
         name: path.basename(resolved),
+        displayName: localAttachmentDisplayName(resolved),
         content: request.content,
         size: nextStat.size,
         mtimeMs: nextStat.mtimeMs

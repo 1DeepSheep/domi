@@ -71,3 +71,6 @@ jobs:
 
       - name: Verify Codex readiness and queued task recovery
         run: npm run test:codex-readiness-ui
+
+      - name: Verify attachment names, historical links and document previews
+        run: npm run test:attachment-names-ui

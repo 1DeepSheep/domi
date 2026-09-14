@@ -1,3 +1,4 @@
+import { attachmentDisplayName, attachmentPrompt, type AttachmentNameContext } from "../shared/attachment-names.mjs";
 import { newsDiscoveryContext } from "./news-discovery-context";
 import { CodexReadinessController, codexConnectionReady, codexConnectionSettingsChanged, codexReadinessPresentation, codexTaskReady, type CodexReadinessSnapshot } from "./codex-readiness";
 import { podcastAutomationJob, podcastProgressRequests, podcastWorkflowContract } from "./podcast-progress";
@@ -66,6 +67,7 @@ import {
   SyntheticEvent,
   Suspense,
   lazy,
+  useCallback,
   useDeferredValue,
   useEffect,
   useLayoutEffect,
@@ -2626,6 +2628,23 @@ function App() {
   const activeThread = useMemo(
     () => indexBy(threads, "id").get(activeThreadId) || threads[0] || initialThreads[0],
     [activeThreadId, threads]
+  );
+  // Keep this context stable while streamed message text changes so completed
+  // messages do not rerender for every incoming token.
+  const attachmentNameContextKey = JSON.stringify({
+    managedRoots: [appSettings?.localRepositoryDir, documentLibrary?.rootPath, codexStatus?.workspacePath, activeThread.workspacePath].filter(Boolean),
+    basePath: activeThread.workspacePath || codexStatus?.workspacePath,
+    attachments: activeThread.messages.flatMap((message) => message.attachments || [])
+  });
+  const attachmentNameContext = useMemo<AttachmentNameContext>(
+    () => JSON.parse(attachmentNameContextKey),
+    [attachmentNameContextKey]
+  );
+  const openDocumentFromMessageRef = useRef(openDocument);
+  openDocumentFromMessageRef.current = openDocument;
+  const openDocumentFromMessage = useCallback(
+    (resource: string) => openDocumentFromMessageRef.current(resource),
+    []
   );
   activeThreadIdRef.current = activeThreadId;
   const activeRunId = activeRunsByThread[activeThread.id] || null;
@@ -8589,9 +8608,7 @@ function App() {
       awaitingSlidesInput
     );
     const prompt = selectedAttachments.length
-      ? `${basePrompt}\n\n本次任务附带以下本地材料，请直接读取并使用：\n${selectedAttachments
-          .map((file) => `- ${JSON.stringify(file.path)}`)
-          .join("\n")}`
+      ? `${basePrompt}\n\n${attachmentPrompt(selectedAttachments)}`
       : basePrompt;
     let result: Awaited<ReturnType<typeof workbench.runCodex>>;
     try {
@@ -10151,9 +10168,9 @@ function App() {
                   onClick={beginMarkdownTitleEdit}
                   disabled={markdownSaving || markdownRenaming}
                   title="点击修改文件名"
-                  aria-label={`修改文件名：${markdownDocument.name}`}
+                  aria-label={`修改文件名：${attachmentDisplayName(markdownDocument.path, attachmentNameContext)}`}
                 >
-                  <strong>{markdownDocument.name}</strong>
+                  <strong>{attachmentDisplayName(markdownDocument.path, attachmentNameContext)}</strong>
                   <Pencil size={12} aria-hidden="true" />
                 </button>
               ) : (
@@ -10260,7 +10277,7 @@ function App() {
           <div className="markdown-file-title">
             <FileType2 size={17} />
             <span>
-              <strong>{pdfDocument?.name || "PDF"}</strong>
+              <strong>{pdfDocument ? attachmentDisplayName(pdfDocument.path, attachmentNameContext) : "PDF"}</strong>
               <small title={pdfDocument?.path || pdfRequestLabel}>
                 {pdfDocument?.path || pdfRequestLabel}
               </small>
@@ -10306,7 +10323,7 @@ function App() {
                 key={`${pdfDocument.path}:${pdfDocument.mtimeMs}`}
                 className="pdf-preview-frame"
                 src={previewSrc}
-                title={`${pdfDocument.name} PDF 预览`}
+                title={`${attachmentDisplayName(pdfDocument.path, attachmentNameContext)} PDF 预览`}
                 onLoad={() => setPdfFrameLoading(false)}
               />
               {pdfFrameLoading && (
@@ -10364,7 +10381,7 @@ function App() {
               ? expanded ? <FolderOpen size={16} /> : <Folder size={16} />
               : node.kind === "pdf" ? <FileType2 size={16} /> : <FileText size={16} />}
           </span>
-          <span className="document-library-node-name">{node.name}</span>
+          <span className="document-library-node-name">{node.displayName || node.name}</span>
           {node.kind !== "folder" && (
             <small>{formatFileSize(node.size)}</small>
           )}
@@ -13208,7 +13225,7 @@ function App() {
                         onClick={() => void openDomiDocumentSearchResult(document)}
                         title={document.relativePath}
                       >
-                        <strong>{document.name}</strong>
+                        <strong>{document.displayName || document.name}</strong>
                         <small className="domi-document-result-snippet">{document.snippet}</small>
                         <small className="domi-document-result-path">
                           {[document.kind === "pdf" ? "PDF" : "Markdown", document.line ? `第 ${document.line} 行` : "", document.relativePath]
@@ -13772,7 +13789,7 @@ function App() {
                                     description="任务仍在执行，后续内容到达后会自动恢复。"
                                   >
                                     <Suspense fallback={<div className="message-text">{message.content}</div>}>
-                                      <MessageContent message={message} onOpenDocument={openDocument} />
+                                      <MessageContent message={message} onOpenDocument={openDocumentFromMessage} attachmentNameContext={attachmentNameContext} />
                                     </Suspense>
                                   </SectionErrorBoundary>
                                 )}
@@ -13794,7 +13811,7 @@ function App() {
                                 description="消息原文仍保存在本地，可以重试渲染。"
                               >
                                 <Suspense fallback={<div className="message-text">{message.content}</div>}>
-                                  <MessageContent message={message} onOpenDocument={openDocument} />
+                                  <MessageContent message={message} onOpenDocument={openDocumentFromMessage} attachmentNameContext={attachmentNameContext} />
                                 </Suspense>
                               </SectionErrorBoundary>
                             )}
