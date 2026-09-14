@@ -20,11 +20,30 @@ const projects = [
   { recordId: "project-c", name: "ExampleTrust AI" }
 ];
 
+test("verified aliases route to the canonical project while ambiguous aliases stay neutral", () => {
+  const renamed = { recordId: "brand-a", name: "星澜科技", legalName: "上海星澜科技有限公司", aliases: ["StarWave"] };
+  assert.equal(automaticallyRoutedProject(projectMentionMatches([renamed], "研究 StarWave")), renamed);
+  assert.equal(automaticallyRoutedProject(projectMentionMatches([renamed], "上海星澜科技有限公司的资料")), renamed);
+  assert.equal(projectMentionMatches([renamed], "星澜科技与 StarWave 是同一项目").length, 1);
+  const collision = { recordId: "brand-b", name: "StarWave" };
+  assert.equal(automaticallyRoutedProject(projectMentionMatches([renamed, collision], "研究 StarWave")), undefined);
+});
+
 test("project matching returns every explicit candidate instead of silently picking one", () => {
   assert.deepEqual(
     mentionedProjectCandidates(projects, "比较示例数据科技和 ExampleTrust AI"),
     [projects[1], projects[2]]
   );
+});
+
+test("legal names and aliases match whole identities without routing generic fragments", () => {
+  const project = { recordId: "brand", name: "星澜科技", legalName: "Star Wave Technology Limited", aliases: ["StarWave AI", "上海星澜科技有限公司"] };
+  for (const prompt of ["Summarize technology industry trends", "Explain limited memory AI", "Research Wave adoption", "比较 AI 公司"]) {
+    assert.deepEqual(projectMentionMatches([project], prompt), [], prompt);
+  }
+  for (const prompt of ["研究 Star Wave Technology Limited", "研究 StarWave AI", "上海星澜科技有限公司的资料"]) {
+    assert.equal(automaticallyRoutedProject(projectMentionMatches([project], prompt)), project, prompt);
+  }
 });
 
 test("project matching normalizes punctuation and case", () => {

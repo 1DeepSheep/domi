@@ -535,6 +535,8 @@ export type DomiHealth = {
 export type DomiProject = {
   recordId: string;
   name: string;
+  legalName?: string;
+  aliases?: string[];
   domain: string;
   subdomains: string[];
   status: string;
@@ -1038,6 +1040,8 @@ export type DomiProjectDatabaseUpdate = {
   recordId: string;
   expectedUpdatedAt: number;
   name: string;
+  legalName?: string;
+  aliases?: string[];
   domain: string;
   subdomains: string[];
   status: string;

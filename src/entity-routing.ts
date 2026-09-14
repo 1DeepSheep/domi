@@ -1,6 +1,8 @@
 export type EntityRoutingProject = {
   recordId: string;
   name: string;
+  legalName?: string;
+  aliases?: string[];
 };
 
 export type DomiEntityResult = {
@@ -46,12 +48,12 @@ const GENERIC_ENTITY_TOKENS = new Set([
   "人工智能", "ai", "有限责任公司", "有限公司"
 ]);
 
-function entityMentionKeys(value: string): Array<{
+function entityMentionKeys(value: string, splitName = true): Array<{
   key: string;
   confidence: ProjectMentionConfidence;
 }> {
   const raw = String(value || "").normalize("NFKC");
-  const parts = raw.split(/[\s()（）[\]【】·—–\-_/]+/).map(normalizedEntityMention);
+  const parts = splitName ? raw.split(/[\s()（）[\]【】·—–\-_/]+/).map(normalizedEntityMention) : [];
   return [...new Set([normalizedEntityMention(raw), ...parts])]
     .filter((key) => !GENERIC_ENTITY_TOKENS.has(key))
     .filter((key) => !/^\d+$/.test(key))
@@ -85,7 +87,13 @@ export function projectMentionMatches<T extends EntityRoutingProject>(
   if (!haystacks.length) return [];
   return [...new Map(
     projects.flatMap((project) => {
-      const matches = entityMentionKeys(project.name)
+      // Legal names and aliases identify the whole name. Splitting them would
+      // turn common words such as "Technology" or "Limited" into project cues.
+      const matches = [
+        ...entityMentionKeys(project.name),
+        ...[project.legalName || "", ...(project.aliases || [])]
+          .flatMap((name) => entityMentionKeys(name, false))
+      ]
         .filter(({ key }) => haystacks.some((haystack) => haystack.includes(key)))
         .sort((left, right) => {
           if (left.confidence !== right.confidence) return left.confidence === "high" ? -1 : 1;
