@@ -26,6 +26,18 @@ export function hasPlaudArtifactError(item: DomiPlaudItem) {
     || /PLAUD_TRANSCRIPT_ARTIFACT_MISSING/.test(item.error);
 }
 
+function hasPlaudPermanentError(item: DomiPlaudItem) {
+  return /\bPLAUD_(?:AUTH_REQUIRED|ACCESS_DENIED|GENERATION_REJECTED|TRANSCRIPT_INVALID)\b/.test(`${item.errorCode || ""} ${item.error || ""}`);
+}
+
+export function canGeneratePlaudNotes(item: DomiPlaudItem) {
+  if (hasPlaudArtifactError(item)) return false;
+  if (!item.transcriptPath && ((item.syncOutcome === "failed" && item.errorCode !== "PLAUD_GENERATION_NOT_SUBMITTED") || hasPlaudPermanentError(item))) return false;
+  if (["managed", "notes_non_project"].includes(item.queueStage)) return false;
+  return Boolean(item.hasTranscript || item.hasSummary || item.transcriptPath
+    || ["transcript_ready", "context_pending", "context_ready", "notes_project", "reviewed", "documented"].includes(item.queueStage));
+}
+
 export function plaudItemPresentation(item: DomiPlaudItem): PlaudItemPresentation {
   if (hasPlaudArtifactError(item)) return {
     label: ["managed", "notes_non_project"].includes(item.queueStage) ? "纪要已生成 · 原文需处理" : "原文文件需处理",
@@ -37,13 +49,29 @@ export function plaudItemPresentation(item: DomiPlaudItem): PlaudItemPresentatio
   if (item.transcriptPath || ["transcript_ready", "context_pending", "context_ready", "notes_project", "reviewed", "documented"].includes(item.queueStage)) {
     return { label: "文字稿待整理", tone: "neutral", detail: "" };
   }
+  if ((item.syncOutcome === "failed" && item.errorCode !== "PLAUD_GENERATION_NOT_SUBMITTED") || hasPlaudPermanentError(item)) {
+    return { label: "需要处理", tone: "attention", detail: plaudSafeError(item.error || item.errorCode, "这条录音暂时无法处理，请检查 PLAUD 中的录音状态。") };
+  }
+  // PLAUD can leave wait_pull set after a transcript is available. Existing
+  // remote content wins over that flag and an older local generation stage,
+  // but only an explicit local recovery candidate promises automatic download.
+  if (item.hasTranscript || item.hasSummary) {
+    const automatic = Boolean(item.queueStage) && item.resumeEligible === true
+      && item.errorCode !== "PLAUD_GENERATION_NOT_SUBMITTED";
+    const retry = item.syncOutcome === "retryable" || item.retryable;
+    return {
+      label: item.hasTranscript ? automatic ? "待自动补下载" : "文字稿已就绪" : "远端已有内容，待同步",
+      tone: automatic ? "waiting" : "neutral",
+      detail: automatic ? [
+        retry ? plaudSafeError(item.error || item.errorCode, "PLAUD 暂时未能返回文字稿。") : "",
+        item.hasTranscript ? "domi 会同步已有文字稿，不会重复生成。" : "domi 会继续检查并同步可用文字稿，不会重复生成。"
+      ].filter(Boolean).join(" ") : ""
+    };
+  }
   if (item.errorCode === "PLAUD_GENERATION_NOT_SUBMITTED") return {
     label: "待生成", tone: "neutral",
     detail: "本轮尚未提交生成，请点击“同步 PLAUD 并生成文字稿”继续处理。"
   };
-  if (item.syncOutcome === "failed") {
-    return { label: "需要处理", tone: "attention", detail: plaudSafeError(item.error || item.errorCode, "这条录音暂时无法处理，请检查 PLAUD 中的录音状态。") };
-  }
   if (item.syncOutcome === "retryable" || item.retryable) {
     if (item.queueStage === "uploaded") return {
       label: item.generationRequestedAt ? "等待提交确认" : "等待连接恢复", tone: "waiting",
@@ -61,25 +89,31 @@ export function plaudItemPresentation(item: DomiPlaudItem): PlaudItemPresentatio
   };
   if (item.syncOutcome === "waiting" || item.processing || ["generation_submitting", "generation_unknown", "generating"].includes(item.queueStage)) {
     const unconfirmed = ["generation_submitting", "generation_unknown"].includes(item.queueStage) && !item.generationAcceptedAt;
+    const automatic = Boolean(item.queueStage) && item.resumeEligible === true;
     return {
       label: unconfirmed ? "等待提交确认" : "等待远端生成",
       tone: "waiting",
       detail: unconfirmed
-        ? "正在确认 PLAUD 是否已接收请求，不会重复提交。"
-        : "PLAUD 仍在处理，domi 会继续检查并自动下载文字稿。"
+        ? automatic ? "正在确认 PLAUD 是否已接收请求，不会重复提交。" : "PLAUD 尚未确认是否已接收请求，请稍后刷新查看状态。"
+        : automatic ? "PLAUD 仍在处理，domi 会继续检查并自动下载文字稿。" : "PLAUD 仍在处理，可稍后刷新查看生成结果。"
     };
   }
   if (item.error) return { label: "需要处理", tone: "attention", detail: plaudSafeError(item.error) };
-  if (item.hasTranscript || item.hasSummary) return { label: "文字稿待同步", tone: "neutral", detail: "" };
   return { label: "未生成文字稿", tone: "neutral", detail: "" };
 }
 
 export function hasRecoverablePlaudItems(snapshot: DomiPlaudSnapshot | null) {
   return (snapshot?.items || []).some(item => {
-    if (item.transcriptPath || hasPlaudArtifactError(item) || item.errorCode === "PLAUD_GENERATION_NOT_SUBMITTED" || item.syncOutcome === "failed" || ["managed", "notes_non_project"].includes(item.queueStage)) return false;
+    if (item.transcriptPath || hasPlaudArtifactError(item) || hasPlaudPermanentError(item) || item.errorCode === "PLAUD_GENERATION_NOT_SUBMITTED" || item.syncOutcome === "failed" || ["managed", "notes_non_project"].includes(item.queueStage)) return false;
     if (typeof item.resumeEligible === "boolean") return item.resumeEligible;
     return item.queueStage !== "uploaded" && plaudItemPresentation(item).tone === "waiting";
   });
+}
+
+export function hasImmediatelyRecoverablePlaudItems(snapshot: DomiPlaudSnapshot | null) {
+  if (!snapshot?.ok || snapshot.stale || (snapshot.remoteStatus && snapshot.remoteStatus !== "connected")) return false;
+  return hasRecoverablePlaudItems({ ...snapshot, items: (snapshot.items || []).filter(item =>
+    item.hasTranscript && Boolean(item.queueStage) && item.resumeEligible === true) });
 }
 
 export function plaudQueueSummary(snapshot: DomiPlaudSnapshot) {
@@ -90,7 +124,7 @@ export function plaudQueueSummary(snapshot: DomiPlaudSnapshot) {
     if (presentation.tone === "complete") continue;
     const label = presentation.tone === "attention" ? "需处理"
       : presentation.label === "文字稿待整理" ? "待整理"
-        : presentation.label === "文字稿待同步" ? "待同步"
+        : ["文字稿已就绪", "远端已有内容，待同步"].includes(presentation.label) ? "待同步"
           : presentation.label === "未生成文字稿" ? "待生成"
             : presentation.label;
     counts.set(label, (counts.get(label) || 0) + 1);

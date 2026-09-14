@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSyncFeedback } from "../src/plaud-status.ts";
+import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudItemPresentation, plaudQueueSummary, plaudSafeError, plaudSyncFeedback } from "../src/plaud-status.ts";
 
 const item = (patch = {}) => ({ fileId: "synthetic", fileName: "合成录音", duration: 60, createdAt: 1,
   editedAt: 1, hasTranscript: false, hasSummary: false, processing: false,
@@ -20,6 +20,64 @@ test("a local transcript or final workflow result wins over obsolete errors", ()
     const value = item({ ...patch, error: "old failure", syncOutcome: "failed", resumeEligible: true });
     assert.equal(plaudItemPresentation(value).detail, "");
     assert.equal(hasRecoverablePlaudItems({ items: [value] }), false);
+  }
+});
+
+test("remote transcript readiness wins over a stale processing flag without promising unqueued downloads", () => {
+  for (const queueStage of ["", "uploaded", "generating", "generation_unknown"]) {
+    const value = item({ queueStage, hasTranscript: true, processing: true, syncOutcome: "waiting", resumeEligible: false });
+    const status = plaudItemPresentation(value);
+    assert.equal(status.label, "文字稿已就绪");
+    assert.equal(status.tone, "neutral");
+    assert.equal(status.detail, "");
+    assert.equal(canGeneratePlaudNotes(value), true);
+    assert.equal(hasRecoverablePlaudItems({ items: [value] }), false);
+    assert.equal(hasImmediatelyRecoverablePlaudItems({ ok: true, items: [value] }), false);
+  }
+});
+
+test("remote summary alone does not claim the full transcript is ready", () => {
+  const value = item({ hasSummary: true, processing: true, resumeEligible: false });
+  const status = plaudItemPresentation(value);
+  assert.equal(status.label, "远端已有内容，待同步");
+  assert.equal(status.detail, "");
+  assert.equal(hasImmediatelyRecoverablePlaudItems({ ok: true, items: [value] }), false);
+});
+
+test("unqueued remote generation does not promise an automatic local download", () => {
+  const value = item({ processing: true, resumeEligible: false });
+  assert.equal(plaudItemPresentation(value).label, "等待远端生成");
+  assert.match(plaudItemPresentation(value).detail, /稍后刷新/);
+  assert.doesNotMatch(plaudItemPresentation(value).detail, /继续检查|自动下载/);
+  assert.equal(hasRecoverablePlaudItems({ items: [value] }), false);
+  const queued = { ...value, queueStage: "generating", resumeEligible: true };
+  assert.match(plaudItemPresentation(queued).detail, /继续检查并自动下载/);
+});
+
+test("fresh remote transcripts immediately resume only explicitly eligible existing local work", () => {
+  const value = item({ queueStage: "generating", hasTranscript: true, processing: true, syncOutcome: "waiting", resumeEligible: true });
+  const snapshot = { ok: true, remoteStatus: "connected", items: [value] };
+  assert.equal(plaudItemPresentation(value).label, "待自动补下载");
+  assert.doesNotMatch(plaudItemPresentation(value).detail, /仍在处理|等待远端/);
+  assert.equal(hasImmediatelyRecoverablePlaudItems(snapshot), true);
+  for (const patch of [{ ok: false }, { stale: true }, { remoteStatus: "auth_required" },
+    { remoteStatus: "access_denied" }, { remoteStatus: "network_error" }, { remoteStatus: "rate_limited" }]) {
+    assert.equal(hasImmediatelyRecoverablePlaudItems({ ...snapshot, ...patch }), false);
+  }
+  for (const patch of [{ queueStage: "" }, { resumeEligible: undefined }, { resumeEligible: false },
+    { hasTranscript: false, hasSummary: true }, { transcriptPath: "/synthetic/transcript.md" },
+    { queueStage: "managed" }, { syncOutcome: "failed" }, { errorCode: "PLAUD_GENERATION_NOT_SUBMITTED" }]) {
+    assert.equal(hasImmediatelyRecoverablePlaudItems({ ...snapshot, items: [{ ...value, ...patch }] }), false);
+  }
+});
+
+test("remote readiness never hides a permanent refusal or missing source artifact", () => {
+  for (const errorCode of ["PLAUD_AUTH_REQUIRED", "PLAUD_ACCESS_DENIED", "PLAUD_GENERATION_REJECTED", "PLAUD_TRANSCRIPT_INVALID", "PLAUD_TRANSCRIPT_ARTIFACT_MISSING"]) {
+    const value = item({ hasTranscript: true, processing: true, queueStage: "generating", syncOutcome: "waiting", resumeEligible: true, errorCode });
+    assert.equal(plaudItemPresentation(value).tone, "attention");
+    assert.equal(canGeneratePlaudNotes(value), false);
+    assert.equal(hasRecoverablePlaudItems({ items: [value] }), false);
+    assert.equal(hasImmediatelyRecoverablePlaudItems({ ok: true, items: [value] }), false);
   }
 });
 
@@ -75,6 +133,17 @@ test("a generation budget timeout before submission is a manual next step, never
   assert.equal(plaudItemPresentation(value).label, "待生成");
   assert.match(plaudItemPresentation(value).detail, /本轮尚未提交/);
   assert.equal(hasRecoverablePlaudItems({ items: [value] }), false);
+});
+
+test("legacy not-submitted failures remain pending until remote content is actually available", () => {
+  const value = item({ queueStage: "uploaded", syncOutcome: "failed", resumeEligible: true, errorCode: "PLAUD_GENERATION_NOT_SUBMITTED" });
+  assert.equal(plaudItemPresentation(value).label, "待生成");
+  assert.equal(canGeneratePlaudNotes(value), false);
+  const remoteReady = { ...value, hasTranscript: true, processing: true };
+  assert.equal(plaudItemPresentation(remoteReady).label, "文字稿已就绪");
+  assert.equal(plaudItemPresentation(remoteReady).detail, "");
+  assert.equal(canGeneratePlaudNotes(remoteReady), true);
+  assert.equal(hasImmediatelyRecoverablePlaudItems({ ok: true, items: [remoteReady] }), false);
 });
 
 test("queue summary does not hide a real failure behind pending recordings", () => {
