@@ -1,3 +1,6 @@
+import { attachmentLinkLabel, attachmentPathLabel } from "../shared/attachment-names.mjs";
+import type { AttachmentNameContext } from "../shared/attachment-names.mjs";
+
 const CODEX_FILE_CITATION_PREFIX = "domi-file-citation:";
 
 export type CodexFileCitation = {
@@ -13,6 +16,7 @@ type MessageAstNode = {
   value?: string;
   url?: string;
   title?: string | null;
+  identifier?: string;
   children?: MessageAstNode[];
 };
 
@@ -33,22 +37,15 @@ function parseCitationAttributes(source: string) {
   return attributes;
 }
 
-function decodedPathLabel(path: string) {
-  const withoutTrailingSlash = path.replace(/[\\/]+$/, "");
-  const rawName = withoutTrailingSlash.split(/[\\/]/).pop() || path;
-  try {
-    return decodeURIComponent(rawName);
-  } catch {
-    return rawName;
-  }
-}
-
-export function parseCodexFileCitation(source: string): CodexFileCitation | null {
+export function parseCodexFileCitation(
+  source: string,
+  attachmentNameContext?: AttachmentNameContext
+): CodexFileCitation | null {
   const attributes = parseCitationAttributes(source);
   const path = attributes.path?.trim();
   if (!path) return null;
 
-  const fileLabel = attributes.label?.trim() || decodedPathLabel(path);
+  const fileLabel = attachmentPathLabel(path, attributes.label?.trim(), attachmentNameContext);
   const location = attributes.sheet
     ? `${attributes.sheet}${attributes.range ? `!${attributes.range}` : ""}`
     : attributes.range || "";
@@ -75,7 +72,7 @@ export function codexFileCitationPath(href?: string) {
   }
 }
 
-export function splitCodexFileCitations(value: string) {
+export function splitCodexFileCitations(value: string, attachmentNameContext?: AttachmentNameContext) {
   const segments: Array<
     | { type: "text"; value: string }
     | { type: "citation"; value: CodexFileCitation }
@@ -86,7 +83,7 @@ export function splitCodexFileCitations(value: string) {
   for (const match of value.matchAll(pattern)) {
     const index = match.index ?? 0;
     if (index > cursor) segments.push({ type: "text", value: value.slice(cursor, index) });
-    const citation = parseCodexFileCitation(match[1]);
+    const citation = parseCodexFileCitation(match[1], attachmentNameContext);
     if (citation) {
       segments.push({ type: "citation", value: citation });
     } else {
@@ -99,17 +96,36 @@ export function splitCodexFileCitations(value: string) {
   return segments;
 }
 
-export function remarkCodexFileCitations() {
+export function remarkCodexFileCitations(attachmentNameContext?: AttachmentNameContext) {
   return (tree: MessageAstNode) => {
+    const definitions = new Map<string, string>();
+    const collectDefinitions = (node: MessageAstNode) => {
+      if (node.type === "definition" && node.identifier && node.url) {
+        // Markdown resolves a repeated reference to its first definition.
+        if (!definitions.has(node.identifier)) definitions.set(node.identifier, node.url);
+      }
+      node.children?.forEach(collectDefinitions);
+    };
+    collectDefinitions(tree);
     const visit = (node: MessageAstNode) => {
-      if (node.type === "link" || node.type === "linkReference") return;
+      if (node.type === "link" || node.type === "linkReference") {
+        const label = node.children?.length === 1 ? node.children[0] : undefined;
+        const resource = node.url || (node.identifier ? definitions.get(node.identifier) : undefined);
+        if (resource && label?.type === "text") {
+          const citationPath = codexFileCitationPath(resource);
+          label.value = citationPath
+            ? attachmentPathLabel(citationPath, label.value, attachmentNameContext)
+            : attachmentLinkLabel(resource, label.value, attachmentNameContext);
+        }
+        return;
+      }
       if (!node.children) return;
       node.children = node.children.flatMap((child) => {
         if (child.type !== "text" || !child.value?.includes(":codex-file-citation{")) {
           visit(child);
           return [child];
         }
-        return splitCodexFileCitations(child.value).map((segment): MessageAstNode => {
+        return splitCodexFileCitations(child.value, attachmentNameContext).map((segment): MessageAstNode => {
           if (segment.type === "text") return { type: "text", value: segment.value };
           return {
             type: "link",
