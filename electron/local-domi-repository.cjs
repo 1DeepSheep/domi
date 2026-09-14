@@ -5,9 +5,10 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { DatabaseSync } = require("node:sqlite");
 const { ensureDocumentLibraryStructure } = require("./document-library.cjs");
+const { isLegalEntityName, assertProjectBrandName, projectNameAliases } = require("./project-name-policy.cjs");
 const CANONICAL_PROJECT_TAXONOMY = require("../shared/investment-taxonomy.json");
 
-const LOCAL_REPOSITORY_SCHEMA = 6;
+const LOCAL_REPOSITORY_SCHEMA = 7;
 const PROJECTS_DIRECTORY = "3.项目库";
 const PEOPLE_DIRECTORY = "4.人脉库";
 const NEWS_DIRECTORY = "2.行业动态";
@@ -34,6 +35,8 @@ const TRACKED_INVESTORS = new Set([
 const DATABASE_PATCH_FIELDS = Object.freeze({
   project: new Set([
     "name",
+    "legalName",
+    "aliases",
     "domain",
     "subdomains",
     "status",
@@ -414,13 +417,23 @@ function bestPreviewDocument(directoryPath, canonicalPath = "") {
   )[0];
 }
 
-function scanWorkspaceEntities(libraryDir) {
+function scanWorkspaceEntities(libraryDir, { existingProjects = [] } = {}) {
   const projects = [];
   const people = [];
   const projectNameReviews = [];
   const projectRoot = path.join(libraryDir, PROJECTS_DIRECTORY);
   const peopleRoot = path.join(libraryDir, PEOPLE_DIRECTORY);
   const indexedProjectPaths = new Set();
+  const projectsById = new Map(existingProjects.map((project) => [project.id, project]));
+  const projectsByIdentity = new Map();
+  for (const project of existingProjects) {
+    for (const key of new Set([project.name, project.legal_name, ...parseList(project.aliases_json)]
+      .map(normalizedName).filter(Boolean))) {
+      const matches = projectsByIdentity.get(key) || [];
+      matches.push(project);
+      projectsByIdentity.set(key, matches);
+    }
+  }
 
   function addProject(projectPath, domainName, subdomainName, fallbackName) {
     const resolvedProjectPath = path.resolve(projectPath);
@@ -431,7 +444,12 @@ function scanWorkspaceEntities(libraryDir) {
     if (metadata.entity_type && metadata.entity_type !== "project") return;
     const fallbackProjectName = String(fallbackName || "").trim();
     const explicitCompanyName = String(metadata.company_name || "").trim();
-    const provisionalName = String(explicitCompanyName || fallbackProjectName || "").trim();
+    const sourceName = String(explicitCompanyName || fallbackProjectName || "").trim();
+    const sourceKey = normalizedName(sourceName);
+    const identityMatches = projectsByIdentity.get(sourceKey) || [];
+    const existingById = projectsById.get(String(metadata.project_id || ""));
+    const existing = existingById || (identityMatches.length === 1 ? identityMatches[0] : null);
+    const provisionalName = existing?.name || sourceName;
     if (!looksLikeProjectDirectory(provisionalName, hasCanonicalPage)) return;
     const documentPath = hasCanonicalPage
       ? canonicalPath
@@ -446,10 +464,15 @@ function scanWorkspaceEntities(libraryDir) {
     ) return;
     const nameUnderReview = explicitCompanyName || fallbackProjectName;
     const archiveTitle = parsedArchiveProjectTitle(nameUnderReview);
-    if (archiveTitle || (hasCanonicalPage && !explicitCompanyName)) {
+    if (
+      (archiveTitle && !existingById)
+      || (hasCanonicalPage && !explicitCompanyName && !existingById)
+      || (!existing && isLegalEntityName(nameUnderReview))
+      || (!existingById && identityMatches.length > 1)
+    ) {
       projectNameReviews.push({
         sourceTitle: nameUnderReview,
-        suggestedName: archiveTitle?.entityName || fallbackProjectName,
+        suggestedName: isLegalEntityName(nameUnderReview) ? "" : archiveTitle?.entityName || fallbackProjectName,
         domain: String(domainName || "").trim(),
         subdomain: String(subdomainName || "").trim()
       });
@@ -461,10 +484,12 @@ function scanWorkspaceEntities(libraryDir) {
     const metadataSubdomains = stringList(metadata.subdomains);
     indexedProjectPaths.add(resolvedProjectPath);
     projects.push({
-      id: String(metadata.project_id || stableId("prj", normalized)),
+      id: String(existing?.id || metadata.project_id || stableId("prj", normalized)),
       frontmatterRecordId: String(metadata.project_id || "").trim(),
       name,
       normalizedName: normalized,
+      legalName: existing?.legal_name || String(metadata.legal_name || "").trim(),
+      aliases: existing ? parseList(existing.aliases_json) : projectNameAliases(name, stringList(metadata.aliases)),
       domain: String(metadata.domain || domainName || "").trim(),
       subdomains: metadataSubdomains.length
         ? metadataSubdomains
@@ -528,7 +553,37 @@ function scanWorkspaceEntities(libraryDir) {
     });
   }
 
-  return { projects, people, projectNameReviews };
+  // Review every new candidate in a conflicting group; directory sort order must
+  // never decide which project owns a shared legal name or alias.
+  const identities = new Map();
+  function indexIdentity(id, values) {
+    for (const key of new Set(values.map(normalizedName).filter(Boolean))) {
+      const ids = identities.get(key) || new Set();
+      ids.add(id);
+      identities.set(key, ids);
+    }
+  }
+  for (const project of existingProjects) {
+    indexIdentity(project.id, [project.name, project.legal_name, ...parseList(project.aliases_json)]);
+  }
+  for (const project of projects) {
+    indexIdentity(project.id, [project.name, project.legalName, ...project.aliases]);
+  }
+  const safeProjects = projects.filter((project) => {
+    if (projectsById.has(project.id)) return true;
+    const conflict = [project.name, project.legalName, ...project.aliases]
+      .some((value) => (identities.get(normalizedName(value))?.size || 0) > 1);
+    if (!conflict) return true;
+    projectNameReviews.push({
+      sourceTitle: project.name,
+      suggestedName: "",
+      domain: project.domain,
+      subdomain: project.subdomains[0] || "",
+      reason: "ambiguous_project_identity"
+    });
+    return false;
+  });
+  return { projects: safeProjects, people, projectNameReviews };
 }
 
 function scanManagedEntityIdentityCandidates(
@@ -609,6 +664,8 @@ function workspaceEntitiesSignature(discovered) {
       project.id,
       project.name,
       project.normalizedName,
+      project.legalName || "",
+      ...(project.aliases || []),
       project.domain,
       ...(project.subdomains || []),
       project.status,
@@ -958,6 +1015,10 @@ function readableDate(value) {
   }).format(date);
 }
 
+function projectIdentityLabel(value) {
+  return String(value || "").replace(/[\r\n]+/g, " ").replace(/[\\`*_[\]<>|]/g, "\\$&");
+}
+
 function renderProjectManagedBlock(project) {
   const latestValuation = project.latestValuationUsd100m === null
     ? "未填写"
@@ -973,6 +1034,8 @@ domi_schema: ${LOCAL_REPOSITORY_SCHEMA}
 entity_type: "project"
 project_id: ${JSON.stringify(project.recordId)}
 company_name: ${JSON.stringify(project.name)}
+legal_name: ${JSON.stringify(project.legalName || "")}
+aliases: ${JSON.stringify(project.aliases || [])}
 domain: ${JSON.stringify(project.domain)}
 subdomains: ${JSON.stringify(project.subdomains)}
 status: ${JSON.stringify(project.status)}
@@ -995,7 +1058,7 @@ ${project.notes || "暂无投资摘要。建议补充项目定位、核心产品
 
 ## 项目概览
 
-- **分类**：${project.domain || "未分类"} · ${project.subdomains.join("、") || "未分类"}
+${project.legalName ? `- **工商主体**：${projectIdentityLabel(project.legalName)}\n` : ""}${project.aliases?.length ? `- **别名**：${project.aliases.map(projectIdentityLabel).join("、")}\n` : ""}- **分类**：${project.domain || "未分类"} · ${project.subdomains.join("、") || "未分类"}
 - **进展**：${statusLabel} · **评级**：${project.rating || "未评级"}
 - **城市**：${project.cities.join("、") || "未填写"} · **关注机构**：${project.investors.join("、") || "未填写"}
 - **入库时间**：${readableDate(project.createdAt)} · **最后更新**：${readableDate(project.lastUpdatedAt)}
@@ -1095,6 +1158,8 @@ function projectRow(row) {
   return {
     recordId: row.id,
     name: row.name,
+    legalName: row.legal_name || "",
+    aliases: parseList(row.aliases_json),
     domain: row.domain,
     subdomains: parseList(row.subdomains_json),
     status: row.status,
@@ -1219,6 +1284,8 @@ class LocalDomiRepository {
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         normalized_name TEXT NOT NULL UNIQUE,
+        legal_name TEXT NOT NULL DEFAULT '',
+        aliases_json TEXT NOT NULL DEFAULT '[]',
         domain TEXT NOT NULL DEFAULT '',
         subdomains_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL DEFAULT '待交流',
@@ -1370,6 +1437,19 @@ class LocalDomiRepository {
     const projectColumns = new Set(
       this.database.prepare("PRAGMA table_info(projects)").all().map((column) => column.name)
     );
+    for (const [column, definition] of [
+      ["legal_name", "TEXT NOT NULL DEFAULT ''"],
+      ["aliases_json", "TEXT NOT NULL DEFAULT '[]'"]
+    ]) {
+      if (projectColumns.has(column)) continue;
+      try {
+        this.database.exec(`ALTER TABLE projects ADD COLUMN ${column} ${definition}`);
+      } catch (error) {
+        // The plugin can migrate this same SQLite database while the client starts.
+        if (!this.database.prepare("PRAGMA table_info(projects)").all()
+          .some((candidate) => candidate.name === column)) throw error;
+      }
+    }
     if (!projectColumns.has("financing_history")) {
       this.database.exec("ALTER TABLE projects ADD COLUMN financing_history TEXT NOT NULL DEFAULT ''");
     }
@@ -1411,7 +1491,7 @@ class LocalDomiRepository {
     ).get(READABLE_PROJECT_HOMEPAGE_MIGRATION_KEY)) return { updated: 0, skipped: 0 };
 
     const rows = this.database.prepare(`
-      SELECT id, name, domain, subdomains_json, status, rating, notes,
+      SELECT id, name, legal_name, aliases_json, domain, subdomains_json, status, rating, notes,
         cities_json, investors_json, financing_history, latest_valuation_usd_100m,
         last_updated_at, document_path, created_at, updated_at
       FROM projects
@@ -1547,7 +1627,9 @@ class LocalDomiRepository {
     ) {
       return this.entityRelinkScanCache.discovered;
     }
-    const discovered = scanWorkspaceEntities(this.libraryDir);
+    const discovered = scanWorkspaceEntities(this.libraryDir, {
+      existingProjects: this.database.prepare("SELECT id, name, legal_name, aliases_json FROM projects").all()
+    });
     this.entityRelinkScanCache = { discovered, scannedAt: now };
     return discovered;
   }
@@ -1858,10 +1940,10 @@ class LocalDomiRepository {
     );
     const insertProject = this.database.prepare(`
       INSERT INTO projects (
-        id, name, normalized_name, domain, subdomains_json, status, rating, notes,
+        id, name, normalized_name, legal_name, aliases_json, domain, subdomains_json, status, rating, notes,
         cities_json, investors_json, financing_history, latest_valuation_usd_100m,
         last_updated_at, document_path, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, '', '[]', '[]', '', NULL, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '[]', '[]', '', NULL, ?, ?, ?, ?)
     `);
     const enrichProject = this.database.prepare(`
       UPDATE projects SET
@@ -1944,10 +2026,20 @@ class LocalDomiRepository {
           if (shouldLink) result.projects.linked += 1;
           continue;
         }
+        try {
+          this.assertProjectIdentityAvailable(project);
+        } catch (error) {
+          if (error?.code !== "DOMI_PROJECT_NAME_CONFLICT") throw error;
+          // A plugin write may add an identity after the scan but before this lock.
+          result.projects.needsNameReview += 1;
+          continue;
+        }
         insertProject.run(
           project.id,
           project.name,
           project.normalizedName,
+          project.legalName,
+          JSON.stringify(project.aliases),
           project.domain,
           JSON.stringify(project.subdomains),
           project.status,
@@ -2031,7 +2123,7 @@ class LocalDomiRepository {
 
   listProjects() {
     return this.database.prepare(`
-      SELECT id, name, domain, subdomains_json, status, rating, notes,
+      SELECT id, name, legal_name, aliases_json, domain, subdomains_json, status, rating, notes,
         cities_json, investors_json, financing_history, latest_valuation_usd_100m,
         last_updated_at, document_path, created_at, updated_at
       FROM projects
@@ -2135,7 +2227,7 @@ class LocalDomiRepository {
         : "";
     }
     let row = this.database.prepare(
-      `SELECT id, name, domain, subdomains_json, status, rating, notes,
+      `SELECT id, name, legal_name, aliases_json, domain, subdomains_json, status, rating, notes,
         cities_json, investors_json, financing_history, latest_valuation_usd_100m,
         last_updated_at, document_path, created_at, updated_at
        FROM projects WHERE id = ?`
@@ -2583,12 +2675,52 @@ class LocalDomiRepository {
     return null;
   }
 
-  normalizeDatabasePatch(entityType, current, changes) {
+  projectIdentityChanges(current, changes) {
+    const name = String(changes.name ?? current.name).trim();
+    const renamed = name !== current.name;
+    const legalName = Object.prototype.hasOwnProperty.call(changes, "legalName")
+      ? String(changes.legalName || "").trim()
+      : current.legalName || "";
+    if (Object.prototype.hasOwnProperty.call(changes, "aliases") && !Array.isArray(changes.aliases)) {
+      throw new Error("项目别名必须是数组。");
+    }
+    const aliases = projectNameAliases(name, [
+      ...(current.aliases || []), ...(changes.aliases || []),
+      ...(renamed ? [current.name] : []),
+      ...(current.legalName && current.legalName !== legalName ? [current.legalName] : [])
+    ]);
+    return { legalName, aliases };
+  }
+
+  assertProjectIdentityAvailable(project, recordId = "", previous = null) {
+    const previousKeys = new Set(previous
+      ? [previous.name, previous.legalName, ...(previous.aliases || [])].map(normalizedName).filter(Boolean)
+      : []);
+    const canonicalKey = normalizedName(project.name);
+    const keys = new Set([project.name, project.legalName, ...(project.aliases || [])]
+      .map(normalizedName).filter((key) => key && (
+        !previousKeys.has(key) || (previous?.name !== project.name && key === canonicalKey)
+      )));
+    if (!keys.size) return;
+    const collision = this.database.prepare(
+      "SELECT id, name, legal_name, aliases_json FROM projects WHERE id <> ?"
+    ).all(recordId).find((row) => [row.name, row.legal_name, ...parseList(row.aliases_json)]
+      .some((value) => keys.has(normalizedName(value))));
+    if (collision) {
+      const error = new Error(`项目名称、工商主体或别名与“${collision.name}”重复，请确认已有项目，不能自动合并。`);
+      error.code = "DOMI_PROJECT_NAME_CONFLICT";
+      throw error;
+    }
+  }
+
+  normalizeDatabasePatch(entityType, current, changes, { allowLegalName = false } = {}) {
     const next = { ...current, ...changes };
     if (entityType === "project") {
       const name = String(next.name || "").trim();
       if (!name) throw new Error("公司名称不能为空。");
       assertProjectEntityName(name);
+      assertProjectBrandName(name, { previousName: current.name, allowLegalName });
+      const identity = this.projectIdentityChanges(current, { ...changes, name });
       const investors = stringList(next.investors);
       const invalidInvestor = investors.find((item) => !TRACKED_INVESTORS.has(item));
       if (invalidInvestor) throw new Error(`投资机构“${invalidInvestor}”不在当前关注名单中。`);
@@ -2607,6 +2739,7 @@ class LocalDomiRepository {
       return {
         recordId: current.recordId,
         name,
+        ...identity,
         domain: String(next.domain || "").trim() || "_未分类",
         subdomains: stringList(next.subdomains),
         status: normalizedProjectStatus(next.status),
@@ -2733,7 +2866,7 @@ class LocalDomiRepository {
     if (!Number.isFinite(expectedUpdatedAt) || expectedUpdatedAt !== Number(loaded.row.updated_at)) {
       throw new Error("记录已被其他流程更新，请刷新后再保存。");
     }
-    const normalized = this.normalizeDatabasePatch(entityType, loaded.record, changes);
+    const normalized = this.normalizeDatabasePatch(entityType, loaded.record, changes, request);
     const sourcePath = String(loaded.row.document_path || "").trim();
     const canonicalTargetPath = entityType === "project"
       ? path.join(this.projectDirectory(normalized), PROJECT_PAGE_NAME)
@@ -2779,9 +2912,10 @@ class LocalDomiRepository {
         throw new Error("记录已被其他流程更新，请刷新后再保存。");
       }
       if (entityType === "project") {
+        this.assertProjectIdentityAvailable(normalized, recordId, fresh.record);
         this.database.prepare(`
           UPDATE projects SET
-            name = ?, normalized_name = ?, domain = ?, subdomains_json = ?,
+            name = ?, normalized_name = ?, legal_name = ?, aliases_json = ?, domain = ?, subdomains_json = ?,
             status = ?, rating = ?, notes = ?, cities_json = ?, investors_json = ?,
             financing_history = ?, latest_valuation_usd_100m = ?,
             last_updated_at = ?, document_path = ?, updated_at = ?
@@ -2789,6 +2923,8 @@ class LocalDomiRepository {
         `).run(
           normalized.name,
           normalizedName(normalized.name),
+          normalized.legalName,
+          JSON.stringify(normalized.aliases),
           normalized.domain,
           JSON.stringify(normalized.subdomains),
           normalized.status,
@@ -3084,6 +3220,8 @@ class LocalDomiRepository {
       throw new Error("项目已被其他流程更新，请刷新后再保存。");
     }
 
+    assertProjectBrandName(name, { previousName: row.name, allowLegalName: request.allowLegalName });
+    const identity = this.projectIdentityChanges(projectRow(row), request);
     const domain = String(request.domain || "").trim() || "_未分类";
     if (
       domain === LEGACY_CONSUMER_TECH_DOMAIN
@@ -3120,6 +3258,7 @@ class LocalDomiRepository {
     const project = {
       recordId: id,
       name,
+      ...identity,
       domain,
       subdomains,
       status,
@@ -3132,9 +3271,13 @@ class LocalDomiRepository {
       createdAt: row.created_at || null,
       lastUpdatedAt: now
     };
-    const targetDirectory = this.projectDirectory(project);
+    const canonicalDirectory = this.projectDirectory(project);
     const currentDocumentPath = String(row.document_path || "").trim();
     const currentDirectory = currentDocumentPath ? path.dirname(currentDocumentPath) : "";
+    const layoutChanged = canonicalDirectory !== this.projectDirectory(projectRow(row));
+    const targetDirectory = currentDirectory && !layoutChanged
+      ? currentDirectory
+      : canonicalDirectory;
     const projectRoot = path.join(this.libraryDir, PROJECTS_DIRECTORY);
     if (currentDirectory) assertWithin(projectRoot, currentDirectory);
     if (
@@ -3157,8 +3300,10 @@ class LocalDomiRepository {
     let canonicalPath = path.join(targetDirectory, PROJECT_PAGE_NAME);
     let previousPageExists = false;
     let previousPageContent = "";
+    let pageWriteAttempted = false;
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      this.assertProjectIdentityAvailable(project, id, projectRow(row));
       if (customSubdomain) {
         this.database.prepare(`
           INSERT INTO custom_taxonomy (
@@ -3187,13 +3332,14 @@ class LocalDomiRepository {
       canonicalPath = path.join(targetDirectory, PROJECT_PAGE_NAME);
       previousPageExists = fs.existsSync(canonicalPath);
       previousPageContent = previousPageExists ? fs.readFileSync(canonicalPath, "utf8") : "";
+      pageWriteAttempted = true;
       atomicWriteText(
         canonicalPath,
         replaceManagedBlock(previousPageContent, renderProjectManagedBlock(project))
       );
       const updateResult = this.database.prepare(`
         UPDATE projects SET
-          name = ?, normalized_name = ?, domain = ?, subdomains_json = ?,
+          name = ?, normalized_name = ?, legal_name = ?, aliases_json = ?, domain = ?, subdomains_json = ?,
           status = ?, rating = ?, notes = ?, cities_json = ?, investors_json = ?,
           financing_history = ?, latest_valuation_usd_100m = ?,
           last_updated_at = ?, document_path = ?, updated_at = ?
@@ -3201,6 +3347,8 @@ class LocalDomiRepository {
       `).run(
         project.name,
         normalizedName(project.name),
+        project.legalName,
+        JSON.stringify(project.aliases),
         project.domain,
         JSON.stringify(project.subdomains),
         project.status,
@@ -3218,6 +3366,19 @@ class LocalDomiRepository {
       );
       if (Number(updateResult.changes) !== 1) {
         throw new Error("项目已被其他流程更新，请刷新后再保存。");
+      }
+      if (movedDirectory) {
+        const updateDocumentPath = this.database.prepare("UPDATE documents SET path = ? WHERE id = ?");
+        for (const document of this.database.prepare(
+          "SELECT id, path FROM documents WHERE owner_type = 'project' AND owner_id = ?"
+        ).all(id)) {
+          const documentPath = String(document.path || "");
+          if (!pathInsideDirectory(documentPath, currentDirectory)) continue;
+          updateDocumentPath.run(
+            rebasePathInsideDirectory(documentPath, currentDirectory, targetDirectory),
+            document.id
+          );
+        }
       }
       if (classificationReview) {
         const reviewStatus = CLASSIFICATION_REVIEW_STATUSES.has(classificationReview.status)
@@ -3257,8 +3418,10 @@ class LocalDomiRepository {
     } catch (error) {
       try { this.database.exec("ROLLBACK"); } catch {}
       try {
-        if (previousPageExists) atomicWriteText(canonicalPath, previousPageContent);
-        else fs.rmSync(canonicalPath, { force: true });
+        if (pageWriteAttempted) {
+          if (previousPageExists) atomicWriteText(canonicalPath, previousPageContent);
+          else fs.rmSync(canonicalPath, { force: true });
+        }
         if (movedDirectory && fs.existsSync(targetDirectory)) {
           fs.mkdirSync(path.dirname(currentDirectory), { recursive: true });
           fs.renameSync(targetDirectory, currentDirectory);
@@ -3269,7 +3432,7 @@ class LocalDomiRepository {
       throw error;
     }
     return projectRow(this.database.prepare(`
-      SELECT id, name, domain, subdomains_json, status, rating, notes,
+      SELECT id, name, legal_name, aliases_json, domain, subdomains_json, status, rating, notes,
         cities_json, investors_json, financing_history, latest_valuation_usd_100m,
         last_updated_at, document_path, created_at, updated_at
       FROM projects WHERE id = ?
@@ -3548,13 +3711,15 @@ class LocalDomiRepository {
       documentsByProject.set(row.owner_id, documents);
     }
     return this.database.prepare(`
-      SELECT id, name, domain, subdomains_json, status, rating, notes,
+      SELECT id, name, legal_name, aliases_json, domain, subdomains_json, status, rating, notes,
         cities_json, investors_json, last_updated_at, document_path
       FROM projects
       ORDER BY updated_at ASC, name ASC
     `).all().map((row) => ({
       id: row.id,
       name: row.name,
+      legalName: row.legal_name || "",
+      aliases: parseList(row.aliases_json),
       domain: row.domain,
       subdomains: parseList(row.subdomains_json),
       status: row.status,
