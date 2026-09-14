@@ -74,3 +74,6 @@ jobs:
 
       - name: Verify attachment names, historical links and document previews
         run: npm run test:attachment-names-ui
+
+      - name: Verify follow-up rendering, clipboard and draft isolation
+        run: npm run test:message-followups-ui
