@@ -100,13 +100,66 @@ function mainRunHarness(overrides = {}) {
     }
   });
   vm.createContext(context);
-  for (const name of ["codexThreadRuntimeKey", "resolveThread", "assertCodexRunNotCancelled", "markRunMaterialIndexInjected", "reconcileCodexTurnStart", "runCodex", "stopCodex", "handleCodexNotification", "recoverCodexThread"]) {
+  for (const name of ["domiOutputRuntimeContext", "codexThreadRuntimeKey", "resolveThread", "assertCodexRunNotCancelled", "markRunMaterialIndexInjected", "reconcileCodexTurnStart", "runCodex", "stopCodex", "handleCodexNotification", "recoverCodexThread"]) {
     const implementation = main.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n\\}\\n`));
     assert.ok(implementation, `missing real function ${name}`);
     vm.runInContext(implementation[0], context);
   }
   return { context, calls, events };
 }
+
+test("every real run supplies the domi output contract without changing user input or starting extra turns", async () => {
+  for (const lifecycle of ["new", "resumed", "live"]) {
+    for (const experimentalApi of [true, false]) {
+      const { context, calls } = mainRunHarness({
+        repositoryRuntimeContext: () => "synthetic repository context",
+        larkRuntimeContext: async () => "synthetic lark context"
+      });
+      const client = context.getCodexClient();
+      context.getCodexClient = () => ({
+        ...client,
+        capabilities: () => ({ experimentalApi }),
+        async request(method, params) {
+          const result = await client.request(method, params);
+          if (method === "turn/start") {
+            setImmediate(() => context.handleCodexNotification("turn/completed", {
+              threadId: params.threadId,
+              turnId: result.turn.id,
+              turn: { id: result.turn.id, status: "completed" }
+            }));
+          }
+          return result;
+        }
+      });
+      if (lifecycle === "live") {
+        context.liveCodexThreads.set("original", context.codexThreadRuntimeKey("/synthetic/workspace", "workspace-write"));
+      }
+      const prompt = "用户明确要求解释指令语法，保留代码示例。";
+      const result = await context.runCodex({}, {
+        runId: `output-${lifecycle}-${experimentalApi}`, prompt,
+        ...(lifecycle === "new" ? {} : { threadId: "original" })
+      });
+      assert.equal(result.ok, true, `${lifecycle} run must complete`);
+      const turns = calls.filter(call => call.method === "turn/start");
+      assert.equal(turns.length, 1, "the output contract must not add a model round trip");
+      const params = turns[0].params;
+      const outputContext = experimentalApi
+        ? params.additionalContext["domi-runtime"].value
+        : params.input[0].text;
+      if (experimentalApi) assert.equal(params.input[0].text, prompt);
+      else assert.ok(params.input[0].text.startsWith(`${prompt}\n\n`));
+      assert.match(outputContext, /domi 客户端输出能力/);
+      assert.ok(outputContext.includes('- :codex-followup[简短操作名]{prompt="完整后续请求"}'));
+      assert.match(outputContext, /只将请求填入草稿，用户发送后才执行/);
+      assert.match(outputContext, /正式纪要、研究报告及其他保存或导出的文档不写入 UI 指令/);
+      assert.match(outputContext, /用户明确要求解释语法、展示代码示例或指定原文/);
+      assert.match(outputContext, /synthetic repository context/);
+      assert.match(outputContext, /synthetic lark context/);
+      assert.equal(calls.filter(call => call.method === "thread/start").length, lifecycle === "new" ? 1 : 0);
+      assert.equal(calls.filter(call => call.method === "thread/resume").length, lifecycle === "resumed" ? 1 : 0);
+    }
+  }
+});
 
 test("resume failures preserve the original thread without creating a blank replacement", async () => {
   for (const failure of ["timeout", "not found", "permission denied"]) {

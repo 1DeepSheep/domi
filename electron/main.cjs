@@ -3384,6 +3384,15 @@ function needsLarkAccess(payload) {
     || larkRequestPattern.test(requestText);
 }
 
+function domiOutputRuntimeContext() {
+  return [
+    "domi 客户端输出能力：默认使用普通 Markdown；支持文件引用 :codex-file-citation。",
+    '聊天中的可选后续建议可使用独立单行列表项：- :codex-followup[简短操作名]{prompt="完整后续请求"}。按钮只将请求填入草稿，用户发送后才执行，不代表任务已经开始或完成。',
+    "正式纪要、研究报告及其他保存或导出的文档不写入 UI 指令；确有信息的后续事项使用普通文字。",
+    "除用户明确要求解释语法、展示代码示例或指定原文外，不展示其他未支持的 Codex 协议；遵循用户明确的内容与格式要求。"
+  ].join("\n");
+}
+
 function repositoryRuntimeContext(payload) {
   if (!externalDomiWorkflows.has(payload?.workflowId)
     && !larkRequestPattern.test(String(payload?.requestText || ""))) {
@@ -3745,7 +3754,7 @@ async function runCodex(sender, payload) {
       threadId
     );
     const researchCache = { ...preparedResearchCache, ...actualCacheContext };
-    const runtimeContext = [repositoryContext, larkContext, feishuWriteContext, researchCache.materialContext, researchCache.context]
+    const runtimeContext = [domiOutputRuntimeContext(), repositoryContext, larkContext, feishuWriteContext, researchCache.materialContext, researchCache.context]
       .filter(Boolean)
       .join("\n\n");
     const threadReadyAt = Date.now();

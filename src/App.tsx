@@ -2518,6 +2518,21 @@ function App() {
     }));
   }
 
+  const selectMessageFollowup = useCallback((prompt: string) => {
+    const next = prompt.trim();
+    if (!next) return;
+    setComposerDraftsByThread((current) => {
+      const draft = current[activeThreadId] || EMPTY_COMPOSER_DRAFT;
+      const existing = draft.input.trimEnd();
+      if (`\n\n${existing}\n\n`.includes(`\n\n${next}\n\n`)) return current;
+      return {
+        ...current,
+        [activeThreadId]: { ...draft, input: existing ? `${existing}\n\n${next}` : next }
+      };
+    });
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }, [activeThreadId]);
+
   function setAttachments(
     next: LocalAttachment[] | ((current: LocalAttachment[]) => LocalAttachment[])
   ) {
@@ -13782,8 +13797,8 @@ function App() {
                                     title="这条消息暂时无法显示"
                                     description="任务仍在执行，后续内容到达后会自动恢复。"
                                   >
-                                    <Suspense fallback={<div className="message-text">{message.content}</div>}>
-                                      <MessageContent message={message} onOpenDocument={openDocumentFromMessage} attachmentNameContext={attachmentNameContext} />
+                                    <Suspense fallback={<div className="message-text">{message.role === "assistant" ? "正在显示内容…" : message.content}</div>}>
+                                      <MessageContent message={message} onOpenDocument={openDocumentFromMessage} attachmentNameContext={attachmentNameContext} onSelectFollowup={selectMessageFollowup} followupsDisabled />
                                     </Suspense>
                                   </SectionErrorBoundary>
                                 )}
@@ -13804,8 +13819,8 @@ function App() {
                                 title="这条消息暂时无法显示"
                                 description="消息原文仍保存在本地，可以重试渲染。"
                               >
-                                <Suspense fallback={<div className="message-text">{message.content}</div>}>
-                                  <MessageContent message={message} onOpenDocument={openDocumentFromMessage} attachmentNameContext={attachmentNameContext} />
+                                <Suspense fallback={<div className="message-text">{message.role === "assistant" ? "正在显示内容…" : message.content}</div>}>
+                                  <MessageContent message={message} onOpenDocument={openDocumentFromMessage} attachmentNameContext={attachmentNameContext} onSelectFollowup={selectMessageFollowup} />
                                 </Suspense>
                               </SectionErrorBoundary>
                             )}
