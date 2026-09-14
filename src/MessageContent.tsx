@@ -11,6 +11,7 @@ import {
   codexFileCitationPath,
   remarkCodexFileCitations
 } from "./message-citations";
+import { remarkCodexFollowups, type MessageFollowup } from "./message-followups";
 
 type MessageContentMessage = {
   role: "user" | "assistant" | "system";
@@ -26,27 +27,44 @@ function humanizeMessageStates(content: string) {
     .replace(/`?notes_non_project`?/gi, "“非项目纪要已生成”");
 }
 
+function remarkHumanizeMessageStates() {
+  type Node = { type: string; value?: string; children?: Node[] };
+  return (tree: Node) => {
+    const visit = (node: Node) => {
+      if (["code", "inlineCode", "domiFollowup"].includes(node.type)) return;
+      if (node.type === "text" && node.value) node.value = humanizeMessageStates(node.value);
+      node.children?.forEach(visit);
+    };
+    visit(tree);
+  };
+}
+
 const MessageContent = memo(function MessageContent({
   message,
   onOpenDocument,
-  attachmentNameContext
+  attachmentNameContext,
+  onSelectFollowup,
+  followupsDisabled = false
 }: {
   message: MessageContentMessage;
   onOpenDocument: (resource: string) => void;
   attachmentNameContext?: AttachmentNameContext;
+  onSelectFollowup?: (prompt: string) => void;
+  followupsDisabled?: boolean;
 }) {
   if (message.role !== "assistant") {
     return <div className="message-text">{message.content}</div>;
   }
 
-  const displayContent = humanizeMessageStates(
-    stripDomiEntityResultMarker(message.content)
-  );
+  const displayContent = stripDomiEntityResultMarker(message.content);
+  // Keep prompts outside DOM attributes and URLs. Only an explicit button
+  // click can return one to the caller for editing in the draft composer.
+  const followups = new Map<string, MessageFollowup>();
 
   return (
     <div className="message-text message-markdown" onCopy={copyMessageSelection}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, [remarkCodexFileCitations, attachmentNameContext], remarkMessageFormatting]}
+        remarkPlugins={[remarkGfm, [remarkCodexFollowups, followups], [remarkCodexFileCitations, attachmentNameContext], remarkMessageFormatting, remarkHumanizeMessageStates]}
         urlTransform={(url, key, node) => {
           if (key === "href" && codexFileCitationPath(url)) return url;
           if (
@@ -56,6 +74,25 @@ const MessageContent = memo(function MessageContent({
           return defaultUrlTransform(url);
         }}
         components={{
+          button: ({ node, children }) => {
+            const id = node?.properties["data-domi-followup-id"];
+            const followup = typeof id === "string" ? followups.get(id) : undefined;
+            if (!followup) return <span>{children}</span>;
+            if (!onSelectFollowup) {
+              return <span className="message-followup-label" title="后续建议">{followup.label}</span>;
+            }
+            return (
+              <button
+                type="button"
+                className="message-followup"
+                title="填入输入框，可编辑后发送"
+                disabled={followupsDisabled}
+                onClick={() => onSelectFollowup(followup.prompt)}
+              >
+                {followup.label}
+              </button>
+            );
+          },
           table: ({ children, node: _node, ...props }) => (
             <div
               className="markdown-table-scroll"
@@ -99,6 +136,8 @@ const MessageContent = memo(function MessageContent({
   previous.message === next.message
   && previous.attachmentNameContext === next.attachmentNameContext
   && previous.onOpenDocument === next.onOpenDocument
+  && previous.onSelectFollowup === next.onSelectFollowup
+  && previous.followupsDisabled === next.followupsDisabled
 ));
 
 export default MessageContent;

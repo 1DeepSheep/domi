@@ -92,6 +92,9 @@ export function copyMessageSelection(event: React.ClipboardEvent<HTMLDivElement>
     ancestor = ancestor.parentElement;
   }
   container.append(fragment as DocumentFragment | HTMLElement);
+  for (const action of container.querySelectorAll(".message-followup, .message-followup-label")) {
+    action.replaceWith(document.createTextNode(action.textContent || ""));
+  }
   for (const wrapper of container.querySelectorAll(".markdown-table-scroll")) wrapper.replaceWith(...wrapper.childNodes);
   for (const element of container.querySelectorAll<HTMLElement>("table, th, td, u")) {
     if (element.tagName === "TABLE") element.style.borderCollapse = "collapse";
