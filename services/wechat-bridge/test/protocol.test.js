@@ -277,7 +277,7 @@ test("existing local Markdown links become deliverable attachments", (t) => {
 test("Codex file citations become deliverable attachments without exposing local paths", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-citation-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const filePath = path.join(directory, 'UniPat（李宽） Pre A&A轮“二次”见面&Pre IC.pdf');
+  const filePath = path.join(directory, 'ExampleVenture（匿名人物丙） Pre A&A轮“二次”见面&Pre IC.pdf');
   fs.writeFileSync(filePath, "pdf", "utf8");
   const marker = `:codex-file-citation{path=${JSON.stringify(filePath)} purpose="source"}`;
 

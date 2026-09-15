@@ -10,11 +10,11 @@ import {
 
 test("turns a local PDF citation into a short material label", () => {
   const citation = parseCodexFileCitation(
-    'path="/资料库/Mist/原始材料/Ambi 管访纪要.pdf" purpose="source"'
+    'path="/资料库/ExampleWear/原始材料/ExampleInterview 管访纪要.pdf" purpose="source"'
   );
   assert.deepEqual(citation, {
-    path: "/资料库/Mist/原始材料/Ambi 管访纪要.pdf",
-    label: "Ambi 管访纪要.pdf",
+    path: "/资料库/ExampleWear/原始材料/ExampleInterview 管访纪要.pdf",
+    label: "ExampleInterview 管访纪要.pdf",
     artifactKind: undefined,
     sheet: undefined,
     range: undefined

@@ -1737,7 +1737,7 @@ test("local repository safely and idempotently indexes existing workspace entiti
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const databasePath = path.join(root, "domi-repository.sqlite3");
   const libraryDir = path.join(root, "domi工作区");
-  const projectPath = path.join(libraryDir, "3.项目库", "AI", "AI基础设施", "驭驯网络");
+  const projectPath = path.join(libraryDir, "3.项目库", "AI", "AI基础设施", "示例网络");
   const legacyProjectPath = path.join(
     libraryDir,
     "3.项目库",
@@ -1777,7 +1777,7 @@ test("local repository safely and idempotently indexes existing workspace entiti
 domi_schema: 2
 entity_type: "project"
 project_id: "prj_existing_workspace"
-company_name: "驭驯网络"
+company_name: "示例网络"
 domain: "AI"
 subdomains: ["AI基础设施"]
 status: "已交流"
@@ -1785,7 +1785,7 @@ rating: "A"
 last_updated_at: "2026-07-30T00:00:00.000Z"
 ---
 
-# 驭驯网络
+# 示例网络
 `);
   fs.writeFileSync(path.join(personPath, "人物主页.md"), `<!-- domi:managed:start -->
 ---
@@ -1820,7 +1820,7 @@ rating: "A"
   assert.deepEqual(first.people, { discovered: 1, created: 1, linked: 0 });
   assert.equal(repository.listProjects().length, 2);
   assert.equal(repository.listPeople().length, 1);
-  const indexedProject = repository.listProjects().find((project) => project.name === "驭驯网络");
+  const indexedProject = repository.listProjects().find((project) => project.name === "示例网络");
   assert.equal(indexedProject.domain, "AI");
   assert.deepEqual(indexedProject.subdomains, ["AI基础设施"]);
   assert.equal(indexedProject.status, "已交流");
@@ -1851,7 +1851,7 @@ rating: "A"
 
   repository.database.prepare(`
     UPDATE projects SET status = '深度跟踪', rating = 'S', notes = '保留人工维护信息'
-    WHERE normalized_name = '驭驯网络'
+    WHERE normalized_name = '示例网络'
   `).run();
   const second = repository.reindexWorkspace();
   assert.deepEqual(second.projects, {
@@ -1863,7 +1863,7 @@ rating: "A"
   assert.deepEqual(second.people, { discovered: 1, created: 0, linked: 0 });
   assert.equal(second.unchanged, true);
   assert.ok(second.indexedAt > 0);
-  const preservedProject = repository.listProjects().find((project) => project.name === "驭驯网络");
+  const preservedProject = repository.listProjects().find((project) => project.name === "示例网络");
   assert.equal(preservedProject.status, "深度跟踪");
   assert.equal(preservedProject.rating, "S");
   assert.equal(preservedProject.notes, "保留人工维护信息");
@@ -2282,14 +2282,14 @@ test("local repository relinks uniquely renamed project and person directories b
     "3.项目库",
     "消费科技",
     "可穿戴",
-    "20260715-Mist-AI可穿戴-A"
+    "20260715-ExampleWear-AI可穿戴-A"
   );
   const newProjectDirectory = path.join(
     path.dirname(oldProjectDirectory),
-    "20260715-Mist labs-AI可穿戴-A"
+    "20260715-ExampleWear labs-AI可穿戴-A"
   );
-  const oldPersonDirectory = path.join(libraryDir, "4.人脉库", "莫子皓");
-  const newPersonDirectory = path.join(libraryDir, "4.人脉库", "莫子皓-补充资料");
+  const oldPersonDirectory = path.join(libraryDir, "4.人脉库", "匿名人物甲");
+  const newPersonDirectory = path.join(libraryDir, "4.人脉库", "匿名人物甲-补充资料");
   const oldProjectPage = path.join(oldProjectDirectory, "项目主页.md");
   const oldProjectMaterial = path.join(oldProjectDirectory, "原始材料", "BP.pdf");
   const oldPersonPage = path.join(oldPersonDirectory, "人物主页.md");
@@ -2301,19 +2301,19 @@ test("local repository relinks uniquely renamed project and person directories b
   fs.writeFileSync(oldProjectPage, `---
 entity_type: "project"
 project_id: "prj_external_rename"
-company_name: "Mist"
+company_name: "ExampleWear"
 domain: "消费科技"
 subdomains: ["可穿戴"]
 last_updated_at: "2026-08-01T00:00:00.000Z"
 ---
-# Mist
+# ExampleWear
 `);
   fs.writeFileSync(oldPersonPage, `---
 entity_type: "person"
 person_id: "per_external_rename"
-name: "莫子皓"
+name: "匿名人物甲"
 ---
-# 莫子皓
+# 匿名人物甲
 `);
 
   let repository = new LocalDomiRepository({ databasePath, libraryDir });
@@ -2375,7 +2375,7 @@ name: "莫子皓"
   assert.equal(reindexed.people.relinked, 1);
   assert.equal(repository.listProjects().length, 1, "ID-first reindex must not insert a second project");
   assert.equal(repository.listPeople().length, 1, "an old empty person shell must not become a ghost record");
-  assert.equal(repository.listProjects()[0].name, "Mist");
+  assert.equal(repository.listProjects()[0].name, "ExampleWear");
   assert.equal(
     repository.recordDirectory("person", "per_external_rename"),
     newPersonDirectory
@@ -2445,16 +2445,16 @@ test("local repository fails closed when the same frontmatter ID exists in two d
   const databasePath = path.join(root, "domi-repository.sqlite3");
   const libraryDir = path.join(root, "domi工作区");
   const projectRoot = path.join(libraryDir, "3.项目库", "消费科技", "可穿戴");
-  const firstDirectory = path.join(projectRoot, "Mist labs");
-  const secondDirectory = path.join(projectRoot, "20260715-Mist labs-AI可穿戴-A");
+  const firstDirectory = path.join(projectRoot, "ExampleWear labs");
+  const secondDirectory = path.join(projectRoot, "20260715-ExampleWear labs-AI可穿戴-A");
   const pageContent = `---
 entity_type: "project"
 project_id: "prj_duplicate_directory"
-company_name: "Mist labs"
+company_name: "ExampleWear labs"
 domain: "消费科技"
 subdomains: ["可穿戴"]
 ---
-# Mist labs
+# ExampleWear labs
 `;
   fs.mkdirSync(path.join(firstDirectory, "原始材料"), { recursive: true });
   fs.mkdirSync(secondDirectory, { recursive: true });
@@ -2475,7 +2475,7 @@ subdomains: ["可穿戴"]
       last_updated_at, document_path, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    "prj_duplicate_directory", "Mist labs", "mistlabs", "消费科技", '["可穿戴"]',
+    "prj_duplicate_directory", "ExampleWear labs", "examplewearlabs", "消费科技", '["可穿戴"]',
     "已交流", "A", "", "[]", "[]", "", null, now,
     originalDocumentPath, now, now
   );
@@ -2708,28 +2708,28 @@ test("local people list exposes persisted research documents without a full work
   const libraryDir = path.join(root, "domi工作区");
   const repository = new LocalDomiRepository({ databasePath, libraryDir });
   t.after(() => repository.close());
-  const personDirectory = path.join(libraryDir, "4.人脉库", "叶锐");
+  const personDirectory = path.join(libraryDir, "4.人脉库", "匿名人物乙");
   const researchDirectory = path.join(personDirectory, "研究");
   const homepage = path.join(personDirectory, "人物主页.md");
-  const researchPath = path.join(researchDirectory, "20260803-叶锐-人物研究.md");
+  const researchPath = path.join(researchDirectory, "20260803-匿名人物乙-人物研究.md");
   fs.mkdirSync(researchDirectory, { recursive: true });
-  fs.writeFileSync(homepage, "# 叶锐\n");
-  fs.writeFileSync(researchPath, "# 叶锐人物研究\n");
+  fs.writeFileSync(homepage, "# 匿名人物乙\n");
+  fs.writeFileSync(researchPath, "# 匿名人物乙人物研究\n");
   const now = Date.now();
   repository.database.prepare(`
     INSERT INTO people (
       id, name, normalized_name, types_json, organization, status, rating,
       last_contact_at, cities_json, interaction_documents_json, document_path, created_at, updated_at
     ) VALUES (?, ?, ?, '[]', '', '已研究', '', NULL, '[]', '[]', ?, ?, ?)
-  `).run("per_research", "叶锐", "叶锐", homepage, now, now);
+  `).run("per_research", "匿名人物乙", "匿名人物乙", homepage, now, now);
   repository.database.prepare(`
     INSERT INTO documents (id, owner_type, owner_id, kind, title, path, created_at, updated_at)
     VALUES (?, 'person', ?, '研究', ?, ?, ?, ?)
-  `).run("doc_research", "per_research", "20260803-叶锐-人物研究", researchPath, now, now);
+  `).run("doc_research", "per_research", "20260803-匿名人物乙-人物研究", researchPath, now, now);
 
   const person = repository.listPeople().find((item) => item.recordId === "per_research");
   assert.deepEqual(person.documents.map((document) => [document.kind, document.title]), [
-    ["研究", "20260803-叶锐-人物研究"]
+    ["研究", "20260803-匿名人物乙-人物研究"]
   ]);
   assert.deepEqual(person.interactionDocuments, []);
 });
@@ -3477,7 +3477,7 @@ test("classification review keeps evidence roles separate and applies local form
   const originalDirectory = path.join(libraryDir, "3.项目库", "_未分类", "边缘项目");
   const canonicalPath = path.join(originalDirectory, "项目主页.md");
   const projectEvidence = path.join(originalDirectory, "原始材料", "路演纪要.md");
-  const comparableEvidence = path.join(originalDirectory, "研究", "可比公司-智慧尘埃.md");
+  const comparableEvidence = path.join(originalDirectory, "研究", "可比公司-示例可比公司.md");
   const industryEvidence = path.join(originalDirectory, "研究", "行业研究-边缘智能.md");
   fs.mkdirSync(path.dirname(projectEvidence), { recursive: true });
   fs.mkdirSync(path.dirname(comparableEvidence), { recursive: true });
@@ -4817,24 +4817,24 @@ test("brand policy migrates schema 6 identity columns without changing old proje
 
 test("brand correction keeps the legal entity, old names, record ID, material and searchable snapshot", (t) => {
   const { repository, seed, patch } = projectBrandFixture(t);
-  const oldPage = seed("brand", "蓝色鲸鱼科技有限公司", { aliases: ["WhaleTech AI"] });
+  const oldPage = seed("brand", "示例品牌科技有限公司", { aliases: ["ExampleBrand AI"] });
   fs.writeFileSync(path.join(path.dirname(oldPage), "BP.pdf"), "fixture material");
-  const corrected = patch("brand", { name: "蓝色鲸鱼", legalName: "蓝色鲸鱼科技有限公司" });
+  const corrected = patch("brand", { name: "示例品牌", legalName: "示例品牌科技有限公司" });
   assert.equal(corrected.recordId, "brand");
-  assert.equal(corrected.legalName, "蓝色鲸鱼科技有限公司");
-  assert.deepEqual(corrected.aliases, ["WhaleTech AI", "蓝色鲸鱼科技有限公司"]);
+  assert.equal(corrected.legalName, "示例品牌科技有限公司");
+  assert.deepEqual(corrected.aliases, ["ExampleBrand AI", "示例品牌科技有限公司"]);
   const current = patch("brand", { notes: "修改摘要", aliases: [] });
-  assert.equal(current.name, "蓝色鲸鱼");
+  assert.equal(current.name, "示例品牌");
   assert.equal(current.legalName, corrected.legalName);
   assert.deepEqual(current.aliases, corrected.aliases);
   assert.deepEqual(repository.listProjects()[0].aliases, corrected.aliases);
   const page = require("node:url").fileURLToPath(current.link);
   assert.equal(fs.readFileSync(path.join(path.dirname(page), "BP.pdf"), "utf8"), "fixture material");
-  assert.match(fs.readFileSync(page, "utf8"), /工商主体.*蓝色鲸鱼科技有限公司/);
-  assert.match(fs.readFileSync(page, "utf8"), /别名.*WhaleTech AI/);
+  assert.match(fs.readFileSync(page, "utf8"), /工商主体.*示例品牌科技有限公司/);
+  assert.match(fs.readFileSync(page, "utf8"), /别名.*ExampleBrand AI/);
   assert.match(fs.readFileSync(page, "utf8"), /用户原文必须保留/);
-  const swappedEntity = patch("brand", { legalName: "蓝鲸智能有限责任公司" });
-  assert.ok(swappedEntity.aliases.includes("蓝色鲸鱼科技有限公司"));
+  const swappedEntity = patch("brand", { legalName: "示例智能有限责任公司" });
+  assert.ok(swappedEntity.aliases.includes("示例品牌科技有限公司"));
 });
 
 test("new legal-form display names require confirmation while unchanged legal records remain editable", (t) => {
@@ -4880,7 +4880,7 @@ test("cross-project aliases and legal names reject collisions before files or re
 
 test("folder intake reviews unfamiliar legal names without mechanically truncating technology brands", (t) => {
   const { repository, libraryDir } = projectBrandFixture(t);
-  for (const name of ["上海远航科技有限公司", "若生科技", "Example Labs Ltd."]) {
+  for (const name of ["上海远航科技有限公司", "匿名示例科技", "Example Labs Ltd."]) {
     const directory = path.join(libraryDir, "3.项目库", "AI", "Agent", name);
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(path.join(directory, "材料.md"), "fixture");
@@ -4888,25 +4888,25 @@ test("folder intake reviews unfamiliar legal names without mechanically truncati
   const result = repository.reindexWorkspace();
   assert.equal(result.projects.needsNameReview, 2);
   assert.equal(result.projects.created, 1);
-  assert.deepEqual(repository.listProjects().map((project) => project.name), ["若生科技"]);
+  assert.deepEqual(repository.listProjects().map((project) => project.name), ["匿名示例科技"]);
   assert.equal(repository.reindexWorkspace().projects.created, 0);
 });
 
 test("known identity and exact old alias never let an old directory revert the canonical brand", (t) => {
   const { repository, seed, libraryDir } = projectBrandFixture(t);
-  const page = seed("brand", "蓝色鲸鱼", {
-    legalName: "蓝色鲸鱼科技有限公司", aliases: ["WhaleTech AI"], directoryName: "旧物理目录"
+  const page = seed("brand", "示例品牌", {
+    legalName: "示例品牌科技有限公司", aliases: ["ExampleBrand AI"], directoryName: "旧物理目录"
   });
-  fs.writeFileSync(page, fs.readFileSync(page, "utf8").replace('company_name: "蓝色鲸鱼"',
-    'company_name: "蓝色鲸鱼科技有限公司"'));
-  const aliasDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "ｗｈａｌｅｔｅｃｈ－ａｉ");
+  fs.writeFileSync(page, fs.readFileSync(page, "utf8").replace('company_name: "示例品牌"',
+    'company_name: "示例品牌科技有限公司"'));
+  const aliasDirectory = path.join(libraryDir, "3.项目库", "AI", "Agent", "ｅｘａｍｐｌｅｂｒａｎｄ－ａｉ");
   fs.mkdirSync(aliasDirectory, { recursive: true });
   fs.writeFileSync(path.join(aliasDirectory, "材料.md"), "fixture");
   const result = repository.reindexWorkspace();
   assert.equal(result.projects.created, 0);
   assert.equal(result.projects.needsNameReview, 0);
   assert.equal(repository.listProjects().length, 1);
-  assert.equal(repository.listProjects()[0].name, "蓝色鲸鱼");
+  assert.equal(repository.listProjects()[0].name, "示例品牌");
   assert.equal(repository.databasePatchRecord("project", "brand").row.document_path, page);
 });
 
@@ -4928,31 +4928,31 @@ test("ambiguous legacy aliases require review for new intake but never block unr
 
 test("folder intake uses verified frontmatter brand and keeps its legal-name metadata", (t) => {
   const { repository, libraryDir } = projectBrandFixture(t);
-  const page = path.join(libraryDir, "3.项目库", "AI", "Agent", "上海相形无迹科技有限公司", "项目主页.md");
+  const page = path.join(libraryDir, "3.项目库", "AI", "Agent", "上海示例产品科技有限公司", "项目主页.md");
   fs.mkdirSync(path.dirname(page), { recursive: true });
   fs.writeFileSync(page, `---
 entity_type: "project"
 project_id: "frontmatter-brand"
-company_name: "Formless"
-legal_name: "上海相形无迹科技有限公司"
-aliases: ["相形无迹"]
+company_name: "ExampleProduct"
+legal_name: "上海示例产品科技有限公司"
+aliases: ["示例产品"]
 ---
-# Formless
+# ExampleProduct
 `);
   const result = repository.reindexWorkspace();
   assert.equal(result.projects.created, 1);
   assert.equal(result.projects.needsNameReview, 0);
   const record = repository.listProjects()[0];
-  assert.equal(record.name, "Formless");
-  assert.equal(record.legalName, "上海相形无迹科技有限公司");
-  assert.deepEqual(record.aliases, ["相形无迹"]);
+  assert.equal(record.name, "ExampleProduct");
+  assert.equal(record.legalName, "上海示例产品科技有限公司");
+  assert.deepEqual(record.aliases, ["示例产品"]);
   assert.equal(repository.databasePatchRecord("project", record.recordId).row.document_path, page);
   assert.equal(repository.reindexWorkspace().projects.created, 0);
 });
 
 test("full project edits preserve a stable legacy directory after a plugin brand correction", (t) => {
   const { repository, seed } = projectBrandFixture(t);
-  const page = seed("stable-brand", "蓝色鲸鱼", { directoryName: "蓝色鲸鱼科技有限公司" });
+  const page = seed("stable-brand", "示例品牌", { directoryName: "示例品牌科技有限公司" });
   const material = path.join(path.dirname(page), "原始材料", "BP.pdf");
   fs.mkdirSync(path.dirname(material), { recursive: true });
   fs.writeFileSync(material, "stable material");
@@ -4966,12 +4966,12 @@ test("full project edits preserve a stable legacy directory after a plugin brand
   assert.equal(repository.database.prepare("SELECT path FROM documents WHERE id = 'stable-bp'").get().path, material);
   assert.equal(fs.readFileSync(material, "utf8"), "stable material");
   assert.match(fs.readFileSync(page, "utf8"), /完整编辑只更新摘要/);
-  assert.equal(fs.existsSync(path.join(path.dirname(path.dirname(page)), "蓝色鲸鱼")), false);
+  assert.equal(fs.existsSync(path.join(path.dirname(path.dirname(page)), "示例品牌")), false);
 });
 
 test("explicit project relocation updates owned document paths in the same transaction", (t) => {
   const { repository, seed } = projectBrandFixture(t);
-  const page = seed("relocate-brand", "蓝色鲸鱼", { directoryName: "旧归档目录" });
+  const page = seed("relocate-brand", "示例品牌", { directoryName: "旧归档目录" });
   const oldDirectory = path.dirname(page);
   const material = path.join(oldDirectory, "原始材料", "BP.pdf");
   fs.mkdirSync(path.dirname(material), { recursive: true });
