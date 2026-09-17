@@ -54,6 +54,12 @@ if (state.mode === "queue") {
 }
 const workbench = window.workbench = { ...fallback,
   loadSettings: async () => ({ ok: true, settings: structuredClone(settings), updatedAt: Date.now() }),
+  loadDomiCache: async () => state.mode === "plugin-version" ? { ok: true, snapshot: {
+    version: 1, backend: "local", syncedAt: 1, projects: [], people: [],
+    sources: { projects: { name: "Synthetic projects", total: 0, localLibraryDir: "" }, people: { name: "Synthetic people", total: 0 } },
+    health: { plugin: { ok: true, version: "7.0.10", displayName: "domi", root: "/synthetic/old-plugin" },
+      lark: { ok: true, userName: "", appName: "" }, plaud: { ok: false, disabled: true, queueCount: 0, queueStages: {} } }
+  } } : fallback.loadDomiCache(),
   saveSettings: async request => { Object.assign(settings, request); return { ok: true, settings: structuredClone(settings) }; },
   loadState: async defaults => ({ ok: true, isNew: false, updatedAt: Date.now(), state: {
     ...defaults, activeThreadId: "fixture-thread", threads: [{ ...defaults.threads[0],
@@ -95,7 +101,7 @@ try {
     configFile: false, root, cacheDir: cache, logLevel: "error", appType: "custom",
     esbuild: { jsx: "automatic", jsxImportSource: "react" },
     optimizeDeps: { include: ["react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime", "@tiptap/pm/model", "@tiptap/pm/state"] },
-    server: { host: "127.0.0.1", port: 0, hmr: false },
+    server: { host: "127.0.0.1", port: 0, hmr: false, fs: { allow: [root, await fs.realpath(path.join(root, "node_modules"))] } },
     plugins: [{ name: "codex-readiness-fixture",
       resolveId(id) { if (id === fixture) return resolvedFixture; },
       load(id) { if (id === resolvedFixture) return source; },
@@ -139,6 +145,19 @@ try {
   const pluginFailure = { ok: false, connectionOk: true,
     pluginSetup: { ok: false, status: "check-failed", error: "Command failed: /private/synthetic/codex plugin list --json" },
     error: "Command failed: /private/synthetic/codex plugin list --json" };
+
+  {
+    const ui = await open("plugin-version");
+    const pluginHealth = ui.page.locator(".domi-health-list > div").filter({ has: ui.page.getByText("插件", { exact: true }) }).locator("strong");
+    await pluginHealth.getByText("v7.0.10", { exact: true }).waitFor();
+    await ui.release({ pluginSetup: { ok: true, status: "ready", version: "7.0.11" } });
+    await ui.status.getByText("Codex 已就绪", { exact: true }).waitFor();
+    assert.equal(await pluginHealth.innerText(), "v7.0.11", "The sidebar plugin row must follow the verified runtime rather than repository health cache");
+    assert.equal(await ui.count("run"), 0);
+    assert.equal(await ui.count("full-test"), 0);
+    assert.deepEqual(ui.errors, []);
+    await ui.context.close();
+  }
 
   // Run the actual browser timer path once, without Playwright's clock. A
   // fake timer accepts arbitrary receivers and cannot catch Window timer APIs

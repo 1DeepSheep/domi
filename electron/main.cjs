@@ -346,6 +346,21 @@ function getDesktopNotifications() {
   return desktopNotifications;
 }
 
+async function withPlaudPluginActivation(operation) {
+  const integration = getDomiIntegration();
+  const owner = `plugin-activation:${crypto.randomUUID()}`;
+  try {
+    // This pauses new readers immediately, drains existing sync/queue work,
+    // then closes the old worker before Codex can remove its plugin directory.
+    await integration.reservePlaudForWorkflow(owner);
+    return await operation();
+  } finally {
+    // The existing availability event invalidates the PLAUD list and resumes
+    // read-only refreshes. It never replays a submitted generation operation.
+    integration.releasePlaudWorkflow(owner);
+  }
+}
+
 function getDomiPluginManager({ readOnly = false } = {}) {
   if (!domiPluginManager) {
     const bundledRoot = app.isPackaged
@@ -359,7 +374,8 @@ function getDomiPluginManager({ readOnly = false } = {}) {
       bundledPluginRoot: bundledRoot,
       bundledLockPath,
       clientVersion: app.getVersion(),
-      recoverTransactions: !readOnly,
+      recoverTransactions: false,
+      withActivationLease: withPlaudPluginActivation,
       remoteUpdateEnabled: process.env.DOMI_PLUGIN_AUTO_UPDATE !== "0"
     });
   }
@@ -3732,6 +3748,11 @@ async function runCodex(sender, payload) {
         workspacePath
       };
     }
+    // Wait before taking a PLAUD reservation: activation itself drains that
+    // queue. Holding the reservation while awaiting activation would deadlock.
+    // startingCodexRunIds already prevents a new activation from overtaking us.
+    await getDomiPluginActivationGate().waitForActivation();
+    assertCodexRunNotCancelled(runId);
     const plaudWorkflowPlan = getDomiIntegration().plaudWorkflowPlan(payload);
     if (plaudWorkflowPlan.requiresBrowser) {
       // Reserve before draining the reader. A second recording task joins the
@@ -3740,9 +3761,6 @@ async function runCodex(sender, payload) {
       await getDomiIntegration().reservePlaudForWorkflow(runId);
       assertCodexRunNotCancelled(runId);
     }
-    // Imports/updates that claimed an idle activation slot before this task
-    // arrived must finish (including reset) before it touches the app-server.
-    await getDomiPluginActivationGate().waitForActivation();
     const client = getCodexClient();
     assertCodexRunNotCancelled(runId);
     const researchCacheScope = projectResearchCacheScope(payload, workspacePath);

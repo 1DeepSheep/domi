@@ -265,7 +265,7 @@ async function verifyActivationGate() {
   assert.equal(ensureCalls, 1, "busy connection checks do not install/remove plugins");
   assert.equal(resetCalls, 1);
   const realRun = main.slice(main.indexOf("async function runCodex(sender, payload)"), main.indexOf("async function stopCodex("));
-  assert.match(realRun, /await getDomiPluginActivationGate\(\)\.waitForActivation\(\);\s*const client = getCodexClient\(\)/);
+  assert(realRun.indexOf("await getDomiPluginActivationGate().waitForActivation();") < realRun.indexOf("const client = getCodexClient();"));
   assert.match(main, /isBusy: \(\) => updateRestartPreparing\s*\|\| !codexClientIdleForSkillReload\(activeRuns, startingCodexRunIds\)/);
 }
 
@@ -593,7 +593,164 @@ async function verifyReadinessDiagnostics() {
   assert.equal(maintenanceContext.prepareCodexConnectionMaintenance("busy").ok, false);
 }
 
-Promise.all([verifyBoundedRemoteStartup(), verifyActivationGate(), verifyRecoveryReaderLease(),
+async function verifyPlaudPluginActivationLease() {
+  const { DomiIntegration } = require("../electron/domi-integration.cjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plugin-plaud-lease-"));
+  const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const helper = main.match(/async function withPlaudPluginActivation\([\s\S]*?\n\}\n/)[0];
+  const events = [], availability = [];
+  let integration, manager;
+  const context = { crypto: require("node:crypto"), getDomiIntegration: () => integration };
+  vm.createContext(context);
+  vm.runInContext(helper, context);
+  const source = path.join(directory, "bundle");
+  const lockPath = path.join(directory, "lock.json");
+  const writeBundle = version => {
+    fs.mkdirSync(path.join(source, ".codex-plugin"), { recursive: true });
+    fs.writeFileSync(path.join(source, ".codex-plugin/plugin.json"), JSON.stringify({ name: "domi", version }));
+    fs.writeFileSync(lockPath, JSON.stringify({ pluginVersion: version, gitCommit: `fixture-${version}`, sha256: `fixture-${version}` }));
+  };
+  const cache = new Map();
+  let pluginRoot = path.join(directory, "cache-v1");
+  fs.mkdirSync(pluginRoot);
+  const oldPluginRoot = pluginRoot;
+  let readResponse = null, readEntered = null, addResponse = null, addEntered = null, failAdd = false;
+  integration = new DomiIntegration({
+    stateStore: { loadCache: key => cache.get(key), saveCache: (key, value) => cache.set(key, { value }) },
+    configProvider: () => ({ plaudConnectionMode: "enabled", plaudBrowser: "chrome" }),
+    plaudStateDir: directory,
+    onPlaudReaderAvailability: state => { availability.push(state.available); events.push(state.available ? "available" : "paused"); },
+    plaudBroker: {
+      request: async (_command, _args, selectedPlugin) => {
+        assert.equal(fs.existsSync(selectedPlugin), true, "A running reader must retain its selected plugin directory");
+        readEntered?.resolve();
+        if (readResponse) await readResponse.promise;
+        assert.equal(fs.existsSync(selectedPlugin), true, "The old directory cannot disappear before the read completes");
+        events.push("read-complete");
+        return { ok: true, items: [{ fileId: "synthetic", fileName: "Synthetic" }] };
+      },
+      stop: async () => { events.push("worker-closed"); }
+    }
+  });
+  integration.findPlugin = () => ({ root: pluginRoot });
+  integration.loadPlaudWorkflowRecords = () => [];
+  let leaseCalls = 0, registryVersion = "1.0.0";
+  const mutationEntered = deferred();
+  writeBundle("1.0.0");
+  manager = new DomiPluginManager({ userDataPath: directory, bundledPluginRoot: source, bundledLockPath: lockPath,
+    remoteUpdateEnabled: false, recoverTransactions: false,
+    withActivationLease: operation => { leaseCalls++; mutationEntered.resolve(); return context.withPlaudPluginActivation(operation); }
+  });
+  manager.writeManagedMarketplace(manager.bundledInfo());
+  manager.runCodex = async (_binary, args) => {
+    if (args[1] === "marketplace") return { marketplaces: [{ name: "domi-managed", root: manager.marketplaceRoot }] };
+    if (args[1] === "list") return { installed: [{ name: "domi", enabled: true, pluginId: "domi@domi-managed", version: registryVersion }] };
+    assert.equal(integration.plaudReaderPaused(), true, "Cache mutation owns the PLAUD lease");
+    if (args[1] === "remove") {
+      assert(events.includes("worker-closed"), "Close the worker before removing its plugin");
+      events.push("remove");
+      fs.rmSync(pluginRoot, { recursive: true, force: true });
+      return {};
+    }
+    assert.equal(args[1], "add", "The installer must never execute a PLAUD generation command");
+    events.push("add"); addEntered?.resolve();
+    if (addResponse) await addResponse.promise;
+    if (failAdd && manager.installedInfo().manifest.version === "3.0.0") throw new Error("Synthetic installation failure");
+    registryVersion = manager.installedInfo().manifest.version;
+    pluginRoot = path.join(directory, `cache-${registryVersion}`);
+    fs.mkdirSync(pluginRoot, { recursive: true });
+    return {};
+  };
+  try {
+    writeBundle("2.0.0");
+    readEntered = deferred(); readResponse = deferred();
+    const reading = integration.plaudQueue({ fresh: true });
+    await readEntered.promise;
+    const activation = manager.ensure({ binary: "synthetic", env: {} });
+    await mutationEntered.promise;
+    assert.equal(integration.plaudReaderPaused(), true);
+    assert.equal(fs.existsSync(oldPluginRoot), true);
+    assert.equal(manager.installedInfo().manifest.version, "1.0.0", "Do not replace marketplace files before readers drain");
+    assert.equal(events.includes("remove"), false);
+    addEntered = deferred(); addResponse = deferred();
+    readResponse.resolve(); await reading;
+    await addEntered.promise;
+    const paused = await integration.plaudQueue({ fresh: true });
+    assert.equal(paused.paused, true);
+    assert.equal(paused.items[0].fileId, "synthetic", "Keep the last verified list during installation");
+    assert.equal((await integration.syncPlaud()).paused, true, "New syncs cannot submit during activation");
+    assert.equal(events.filter(event => event === "read-complete").length, 1);
+    addResponse.resolve();
+    assert.equal((await activation).updated, true);
+    assert.deepEqual(events.filter(event => ["read-complete", "worker-closed", "remove", "add", "available"].includes(event)),
+      ["read-complete", "worker-closed", "remove", "add", "available"]);
+    assert.equal(availability.at(-1), true, "Existing availability subscription will trigger a fresh list");
+    readResponse = null; addResponse = null;
+    assert.equal((await integration.plaudQueue({ fresh: true })).stale, false);
+    const priorLeases = leaseCalls;
+    assert.equal((await manager.ensure({ binary: "synthetic", env: {} })).updated, false);
+    assert.equal(leaseCalls, priorLeases, "An ordinary installed-version check must not pause PLAUD");
+
+    // Failed install and rollback remain inside the lease, then always release.
+    writeBundle("3.0.0"); failAdd = true;
+    const failed = await manager.ensure({ binary: "synthetic", env: {} });
+    assert.equal(failed.ok, false);
+    assert.equal(manager.installedInfo().manifest.version, "2.0.0");
+    assert.equal(registryVersion, "2.0.0", "Rollback restored the previous registered plugin");
+    assert.equal(integration.plaudReaderPaused(), false);
+    assert.equal(availability.at(-1), true);
+
+    // Crash recovery mutates directories too and must wait for an existing owner.
+    manager.prepareManagedMarketplace(manager.bundledInfo());
+    assert.equal(manager.installedInfo().manifest.version, "3.0.0");
+    await integration.reservePlaudForWorkflow("existing-recording-task");
+    const beforeRecovery = leaseCalls;
+    const recovery = manager.ensure({ binary: "synthetic", env: {} });
+    await Promise.resolve();
+    assert.equal(leaseCalls, beforeRecovery + 1);
+    assert.equal(manager.installedInfo().manifest.version, "3.0.0", "Do not recover over an existing workflow owner");
+    integration.releasePlaudWorkflow("existing-recording-task");
+    assert.equal((await recovery).ok, false, "The synthetic new-version install still fails after recovery");
+    assert.equal(manager.installedInfo().manifest.version, "2.0.0");
+    assert.equal(integration.plaudReaderPaused(), false);
+
+    // Exercise the real run preparation statements with an activation that
+    // needs the same PLAUD lease. Reserving first would deadlock both promises.
+    const realRun = main.slice(main.indexOf("async function runCodex(sender, payload)"), main.indexOf("async function stopCodex("));
+    const start = realRun.indexOf("await getDomiPluginActivationGate().waitForActivation();");
+    const end = realRun.indexOf("const client = getCodexClient();", start);
+    assert(start >= 0 && end > start);
+    assert(start < realRun.indexOf("await getDomiIntegration().reservePlaudForWorkflow(runId)"));
+    const beginReplacement = deferred(), enteredEnsure = deferred();
+    const starting = new Set();
+    const gate = new DomiPluginActivationGate({ isBusy: () => starting.size > 0,
+      installedInfo: () => manager.installedInfo(),
+      ensure: async () => { enteredEnsure.resolve(); await beginReplacement.promise;
+        return context.withPlaudPluginActivation(async () => ({ ok: true, updated: true })); },
+      onActivated: () => events.push("reset") });
+    context.getDomiPluginActivationGate = () => gate;
+    context.assertCodexRunNotCancelled = () => {};
+    integration.plaudWorkflowPlan = () => ({ requiresBrowser: true });
+    vm.runInContext(`async function prepareRun(runId, payload) { let plaudWorkflowReserved = false; ${realRun.slice(start, end)} return plaudWorkflowReserved; }`, context);
+    const replacing = gate.ensureWhenIdle({ enabled: true });
+    await enteredEnsure.promise;
+    starting.add("next-task");
+    const preparing = context.prepareRun("next-task", {});
+    assert.equal(integration.plaudWorkflowOwners.has("next-task"), false, "Wait for activation before reserving its queue");
+    beginReplacement.resolve();
+    let timer;
+    try {
+      const [, reserved] = await Promise.race([Promise.all([replacing, preparing]),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Plugin/PLAUD deadlock")), 1000); })]);
+      assert.equal(reserved, true);
+      assert.equal(integration.plaudActiveWorkflowOwner, "next-task");
+      assert.equal((await gate.ensureWhenIdle({ enabled: true })).deferred, true);
+    } finally { clearTimeout(timer); integration.releasePlaudWorkflow("next-task"); }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+}
+
+Promise.all([verifyPlaudPluginActivationLease(), verifyBoundedRemoteStartup(), verifyActivationGate(), verifyRecoveryReaderLease(),
   verifyReadOnlyInstalledCheck(), verifyReadinessDiagnostics()])
   .then(() => console.log("domi plugin manager tests passed."))
   .catch((error) => {

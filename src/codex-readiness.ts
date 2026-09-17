@@ -1,4 +1,4 @@
-import type { AppSettings, AppSettingsSaveRequest, CodexCheckResult } from "./env";
+import type { AppSettings, AppSettingsSaveRequest, CodexCheckResult, DomiHealth } from "./env";
 
 export function codexConnectionReady(status: CodexCheckResult | null | undefined) {
   return status?.connectionOk ?? status?.ok ?? false;
@@ -6,6 +6,13 @@ export function codexConnectionReady(status: CodexCheckResult | null | undefined
 
 export function codexTaskReady(status: CodexCheckResult | null | undefined, needsPlugin: boolean) {
   return codexConnectionReady(status) && (!needsPlugin || status?.pluginSetup?.ok === true);
+}
+
+export function domiPluginVersionLabel(current: CodexCheckResult["pluginSetup"], cached?: DomiHealth["plugin"]) {
+  // Repository health predates runtime activation after an app/plugin update.
+  // Use it only until an actual plugin check has supplied the current state.
+  if (current) return current.ok ? current.version?.trim() ? `v${current.version.trim()}` : "已就绪" : "等待检测";
+  return cached?.ok && cached.version?.trim() ? `v${cached.version.trim()}` : "等待检测";
 }
 
 const CONNECTION_KEYS = ["authMode", "codexPath", "apiBaseUrl", "apiModel", "relayCredentialConfigured"] as const;

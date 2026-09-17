@@ -1,6 +1,6 @@
 import { attachmentDisplayName, attachmentPrompt, type AttachmentNameContext } from "../shared/attachment-names.mjs";
 import { newsDiscoveryContext } from "./news-discovery-context";
-import { CodexReadinessController, codexConnectionReady, codexConnectionSettingsChanged, codexReadinessPresentation, codexTaskReady, type CodexReadinessSnapshot } from "./codex-readiness";
+import { CodexReadinessController, codexConnectionReady, codexConnectionSettingsChanged, codexReadinessPresentation, codexTaskReady, domiPluginVersionLabel, type CodexReadinessSnapshot } from "./codex-readiness";
 import { podcastAutomationJob, podcastProgressRequests, podcastWorkflowContract } from "./podcast-progress";
 import { canSkipTodoSync, nextTodoEvaluationAt, parseTodoReceipt, todoInputFingerprint, TODO_RULE_VERSION, verifiedTodoReceipt, type TodoSyncCheckpoint } from "./todo-sync-policy";
 import { indexBy, indexConversation, latestAssistant } from "./render-indexes";
@@ -14429,9 +14429,7 @@ function App() {
                   <div>
                     <span>插件</span>
                     <strong>
-                      {domiSnapshot?.health.plugin.ok
-                        ? `v${domiSnapshot.health.plugin.version}`
-                        : "等待检测"}
+                      {domiPluginVersionLabel(codexStatus?.pluginSetup, domiSnapshot?.health.plugin)}
                     </strong>
                   </div>
                   <div>
