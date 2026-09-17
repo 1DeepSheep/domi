@@ -63,12 +63,13 @@ workbench.loadState = async defaults => ({ ok: true, state: { ...defaults, threa
   ]
 }] }, updatedAt: Date.now(), isNew: false });
 workbench.listPlaud = request => invoke("list", request);
-workbench.syncPlaud = () => invoke("sync");
+workbench.syncPlaud = request => invoke("sync", request);
 workbench.resumePlaudTranscripts = () => invoke("resume");
 workbench.onPlaudReaderAvailability = callback => {
   state.readerListeners.push(callback);
   return () => { state.readerListeners = state.readerListeners.filter(listener => listener !== callback); };
 };
+workbench.onPrepareClose = callback => { state.prepareClose = callback; return () => { state.prepareClose = null; }; };
 workbench.plaudWorkflowCompletion = async ({ fileId }) => {
   state.calls.push({ kind: "completion", payload: { fileId } });
   return { ok: false, fileId, stage: "", ...startup.completion };
@@ -124,7 +125,7 @@ try {
     configFile: false, root, cacheDir: cache, logLevel: "error", appType: "custom",
     esbuild: { jsx: "automatic", jsxImportSource: "react" },
     optimizeDeps: { include: ["react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime", "@tiptap/pm/model", "@tiptap/pm/state"] },
-    server: { host: "127.0.0.1", port: 0, hmr: false },
+    server: { host: "127.0.0.1", port: 0, hmr: false, fs: { allow: [root, await fs.realpath(path.join(root, "node_modules"))] } },
     plugins: [{ name: "plaud-status-fixture",
       resolveId(id) { if (id === fixture) return resolvedFixture; },
       load(id) { if (id === resolvedFixture) return source; },
@@ -349,7 +350,7 @@ try {
     try {
       await startupPage.goto(origin, { waitUntil: "networkidle" });
       await verify({ page: startupPage, count, wait, release });
-      assert.equal(await count("sync"), 0, "Startup must never call generating sync");
+      if (!config.manualSync) assert.equal(await count("sync"), 0, "Startup must never call generating sync");
       assert.deepEqual(startupErrors, []);
     } catch (error) {
       console.error("Synthetic startup scenario failed", JSON.stringify(config), await startupPage.evaluate(() => ({
@@ -531,6 +532,184 @@ try {
     await page.clock.fastForward(180_001);
     assert.equal(await count("list"), 1, "Disabling PLAUD must cancel an already scheduled list retry");
   });
+
+  const preflightFailure = (patch = {}) => ({ ok: false, status: "failed", preflight: true, submissionStarted: false,
+    retryable: true, recoveryScope: "synthetic-scope", errorCode: "PLAUD_NETWORK_TIMEOUT", errorStage: "list",
+    error: "Failed to fetch", snapshot: transient, ...patch });
+  const queuePlan = (page, kind, value) => page.evaluate(({ kind, value }) => {
+    window.__plaudStatusTest.plans[kind].push(value);
+  }, { kind, value });
+  const syncButton = page => page.getByRole("button", { name: "同步 PLAUD 并生成文字稿", exact: true });
+  const pendingNotice = page => page.getByText("已保留同步请求，连接恢复后自动继续。", { exact: true });
+  const manualScenario = verify => startupScenario({ manualSync: true, snapshot: snapshot([startupReady]) }, verify);
+  await manualScenario(async ({ page, count, wait, release }) => {
+    await wait("list", 1);
+    await queuePlan(page, "sync", { result: preflightFailure({ errorCode: "PLAUD_READ_TRANSIENT", errorStage: "discovery" }) });
+    await syncButton(page).click();
+    await pendingNotice(page).waitFor();
+    await page.getByRole("button", { name: "刷新 PLAUD 最近录音", exact: true }).click();
+    await wait("list", 2);
+    await pendingNotice(page).waitFor();
+    assert.equal(await page.locator(".plaud-inline-notice.complete").count(), 0,
+      "A successful read cannot clear or announce completion of the user's deferred sync");
+    await queuePlan(page, "sync", { hold: true });
+    await page.clock.fastForward(2_001);
+    await wait("sync", 2);
+    const continued = await page.evaluate(() => window.__plaudStatusTest.calls.filter(call => call.kind === "sync")[1]);
+    assert.deepEqual(continued.payload, { expectedRecoveryScope: "synthetic-scope" });
+    await page.clock.fastForward(180_001);
+    assert.equal(await count("sync"), 2, "Automatic continuation uses the existing single-flight sync lock");
+    assert.equal(await count("list"), 2, "Deferred sync must not also run a separate automatic list-retry loop");
+    await release("sync", readyResult);
+    await page.locator(".plaud-inline-notice.complete").waitFor();
+    assert.equal(await pendingNotice(page).count(), 0);
+    await page.clock.fastForward(180_001);
+    assert.equal(await count("sync"), 2, "Successful generation clears the deferred user intent");
+  });
+  await manualScenario(async ({ page, count, wait }) => {
+    await wait("list", 1);
+    for (let attempt = 0; attempt < 4; attempt++) await queuePlan(page, "sync", { result: preflightFailure() });
+    await syncButton(page).click();
+    for (const [attempt, delay] of [2001, 5001, 15001].entries()) {
+      await pendingNotice(page).waitFor();
+      await page.clock.fastForward(delay);
+      await wait("sync", attempt + 2);
+    }
+    await page.locator(".plaud-inline-notice.failed").waitFor();
+    await page.clock.fastForward(900_001);
+    assert.equal(await count("sync"), 4, "One manual sync has at most three automatic continuations");
+    assert.equal(await pendingNotice(page).count(), 0);
+    await page.locator(".plaud-inline-notice.failed").waitFor();
+    assert.match(await page.locator(".plaud-inline-notice.failed").innerText(), /同步未完成/,
+      "A later automatic successful list refresh must not erase an exhausted manual sync failure");
+  });
+  await manualScenario(async ({ page, count, wait }) => {
+    await wait("list", 1);
+    const retryAt = await page.evaluate(() => Date.now() + 90_000);
+    await queuePlan(page, "sync", { result: preflightFailure({ errorCode: "PLAUD_RATE_LIMITED", retryAt, retryAfterMs: 60_000 }) });
+    await queuePlan(page, "sync", { result: readyResult });
+    await syncButton(page).click();
+    await pendingNotice(page).waitFor();
+    await emitAvailability(page, true, 0, 1);
+    await page.clock.fastForward(89_000);
+    assert.equal(await count("sync"), 1, "Owner release cannot bypass a server retry-at cooldown");
+    assert.equal(await count("list"), 1, "Rate-limited continuation must not create extra automatic list calls");
+    await page.clock.fastForward(1_001);
+    await wait("sync", 2);
+    await page.locator(".plaud-inline-notice.complete").waitFor();
+  });
+  await manualScenario(async ({ page, count, wait, release }) => {
+    await wait("list", 1);
+    const retryAt = await page.evaluate(() => Date.now() + 300_000);
+    const rateLimited = { ...waiting, syncOutcome: "retryable", retryable: true, errorCode: "PLAUD_RATE_LIMITED", error: "PLAUD_RATE_LIMITED: synthetic cooldown" };
+    await queuePlan(page, "sync", { result: { ok: false, status: "waiting", retryableCount: 1, resumePendingCount: 1,
+      submissionStarted: true, snapshot: snapshot([rateLimited], { retryable: true, remoteStatus: "rate_limited", retryAt, retryAfterMs: 300_000 }) } });
+    await syncButton(page).click();
+    await queuePlan(page, "resume", { hold: true });
+    await page.clock.fastForward(90_001);
+    assert.equal(await count("resume"), 1, "A submitted task's recovery must honor Retry-After beyond the usual 90 seconds");
+    await page.clock.fastForward(200_000);
+    assert.equal(await count("resume"), 1);
+    assert.equal(await count("list"), 1);
+    await page.clock.fastForward(10_001);
+    await wait("resume", 2);
+    assert.equal(await count("sync"), 1, "Rate-limited submitted work resumes reads without replaying generation");
+    await release("resume", readyResult);
+    await page.locator(".plaud-inline-notice.complete").waitFor();
+  });
+  await manualScenario(async ({ page, count, wait }) => {
+    await wait("list", 1);
+    const retryAt = await page.evaluate(() => Date.now() + 300_000);
+    await queuePlan(page, "sync", { result: { ok: false, status: "failed", submissionStarted: true,
+      resumePendingCount: 0, error: "PLAUD_RATE_LIMITED: synthetic cooldown",
+      snapshot: snapshot([startupReady], { stale: true, retryable: true, remoteStatus: "rate_limited", retryAt, retryAfterMs: 300_000 }) } });
+    await syncButton(page).click();
+    await emitAvailability(page, false, 1, 1);
+    await page.clock.fastForward(30_000);
+    await emitAvailability(page, true, 0, 2);
+    assert.equal(await count("list"), 1, "An owner release at 30 seconds cannot bypass a 300-second server cooldown");
+    await page.clock.fastForward(260_000);
+    assert.equal(await count("list"), 1);
+    assert.equal(await count("resume"), 1);
+    await page.clock.fastForward(10_001);
+    await wait("list", 2);
+    assert.equal(await count("sync"), 1, "The deferred owner-release refresh remains read-only");
+  });
+  await manualScenario(async ({ page, count, wait, release }) => {
+    await wait("list", 1);
+    await queuePlan(page, "sync", { hold: true });
+    await syncButton(page).click();
+    await emitAvailability(page, false, 1, 1);
+    await release("sync", preflightFailure({ paused: true, status: "paused", errorCode: "PLAUD_WORKFLOW_IN_USE", snapshot: pausedSnapshot }));
+    await page.getByText("已保留同步请求，任务完成后自动继续。", { exact: true }).waitFor();
+    await page.clock.fastForward(15_001);
+    assert.equal(await count("sync"), 1);
+    await queuePlan(page, "sync", { result: readyResult });
+    await emitAvailability(page, true, 0, 2);
+    await wait("sync", 2);
+    await page.locator(".plaud-inline-notice.complete").waitFor();
+    assert.equal(await count("list"), 1, "The last owner's release continues the pending sync instead of replacing it with a list refresh");
+  });
+  await manualScenario(async ({ page, count, wait }) => {
+    await wait("list", 1);
+    for (const patch of [{ submissionStarted: undefined }, { submissionStarted: true }, { preflight: false },
+      { recoveryScope: undefined }, { errorCode: "PLAUD_AUTH_REQUIRED" }, { errorCode: "PLAUD_ACCESS_DENIED" },
+      { errorCode: "PLAUD_GENERATION_UNCONFIRMED" }]) {
+      const before = await count("sync");
+      await queuePlan(page, "sync", { result: preflightFailure({ snapshot: snapshot([]), ...patch }) });
+      await syncButton(page).click();
+      await wait("sync", before + 1);
+      await page.clock.fastForward(180_001);
+      assert.equal(await count("sync"), before + 1, "Unknown submissions, unsupported runtimes and permanent errors must never be replayed");
+      assert.equal(await pendingNotice(page).count(), 0);
+    }
+  });
+  for (const action of ["disable", "browser", "same-browser-login", "shutdown"]) {
+    await manualScenario(async ({ page, count, wait }) => {
+      await wait("list", 1);
+      await queuePlan(page, "sync", { result: preflightFailure() });
+      await syncButton(page).click();
+      await pendingNotice(page).waitFor();
+      if (action === "shutdown") {
+        await page.evaluate(() => window.__plaudStatusTest.prepareClose());
+      } else {
+        await page.getByTitle("打开 Codex 设置", { exact: true }).click();
+        const settings = page.getByRole("dialog", { name: "domi 设置", exact: true });
+        await settings.getByRole("button", { name: "录音转写", exact: true }).click();
+        if (action === "disable") {
+          await settings.getByRole("radio").filter({ hasText: "暂时不用" }).click();
+          await settings.getByRole("button", { name: "保存 PLAUD 设置", exact: true }).click();
+        } else {
+          if (action === "browser") await settings.getByRole("radio").filter({ hasText: "Tabbit" }).click();
+          await settings.getByRole("button", { name: "重新检测", exact: true }).click();
+        }
+      }
+      await page.clock.fastForward(900_001);
+      assert.equal(await count("sync"), 1, `${action} must cancel the deferred manual intent`);
+    });
+  }
+  await manualScenario(async ({ page, count, wait, release }) => {
+    await wait("list", 1);
+    await queuePlan(page, "sync", { hold: true });
+    await syncButton(page).click();
+    await page.evaluate(() => window.__plaudStatusTest.prepareClose());
+    await release("sync", preflightFailure());
+    await page.clock.fastForward(900_001);
+    assert.equal(await count("sync"), 1, "A late preflight result cannot recreate an intent canceled during shutdown");
+    assert.equal(await pendingNotice(page).count(), 0);
+  });
+  await manualScenario(async ({ page, count, wait }) => {
+    await wait("list", 1);
+    await queuePlan(page, "sync", { result: preflightFailure() });
+    await queuePlan(page, "sync", { result: preflightFailure({ superseded: true }) });
+    await syncButton(page).click();
+    await pendingNotice(page).waitFor();
+    await page.clock.fastForward(2_001);
+    await wait("sync", 2);
+    await page.clock.fastForward(900_001);
+    assert.equal(await count("sync"), 2, "Backend rejection of a changed account/session scope ends the continuation");
+    assert.equal(await pendingNotice(page).count(), 0);
+  });
   await startupScenario({ allowRun: true, models: [], snapshot: snapshot([startupReady]) }, async ({ page, count, wait }) => {
     await wait("list", 1);
     await page.getByRole("button", { name: "生成纪要并入库", exact: true }).click();
@@ -571,7 +750,7 @@ try {
       assert.equal(await page.locator(".domi-inline-error").count(), 0, "Notes finalization errors must not be rendered as a PLAUD connection failure");
     });
   }
-  console.log("PLAUD UI passed: startup and browser isolation; reserved profile and last-owner release; paused-response race; finite list retry and cancellation; accepted notes status; verified clarification/non-project completion; no receipt bypass; original recovery/mutation/status regressions.");
+  console.log("PLAUD UI passed: bounded scoped preflight continuation; retry-at cooldown; owner release; no unknown POST replay; login/browser/disable/shutdown cancellation; late-response invalidation; startup/list/recovery/mutation/status and verified notes completion regressions.");
 } finally {
   await browser?.close();
   await server?.close();

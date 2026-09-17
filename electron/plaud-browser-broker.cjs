@@ -1,4 +1,5 @@
 const { spawn } = require("node:child_process");
+const { plaudErrorDetails } = require("./plaud-worker.cjs");
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 90_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 40_000;
@@ -10,6 +11,12 @@ function sanitizedBrokerError(error) {
     .replace(/\b(?:authorization|cookie|x-pld-user|x-device-id)\s*[:=]\s*[^\r\n]+/gi, "[REDACTED]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "[REDACTED]")
     .slice(0, 1000);
+}
+
+function brokerFailure(message, diagnostic = {}) {
+  const error = new Error(sanitizedBrokerError(message));
+  Object.assign(error, plaudErrorDetails({ ...diagnostic, message: error.message }, diagnostic.stage));
+  return error;
 }
 
 class PlaudSessionBroker {
@@ -117,10 +124,17 @@ class PlaudSessionBroker {
       }
       const request = this.pending.get(String(message?.id || ""));
       if (!request) continue;
+      if (message.type === "diagnostic") {
+        const details = plaudErrorDetails(message.diagnostic || {}, message.diagnostic?.stage);
+        request.lastDiagnostic = { ...request.lastDiagnostic, ...(message.diagnostic?.code ? details : { stage: details.stage }) };
+        continue;
+      }
       this.pending.delete(String(message.id));
       clearTimeout(request.timer);
       if (message.ok === false) {
-        request.reject(new Error(sanitizedBrokerError(message.error || "PLAUD 后台操作失败。")));
+        const error = brokerFailure(message.error || "PLAUD 后台操作失败。", message.diagnostic);
+        try { this.onDiagnostic({ operation: request.command, outcome: "failed", ...plaudErrorDetails(error) }); } catch { /* diagnostic only */ }
+        request.reject(error);
       } else {
         request.resolve(message.result);
       }
@@ -137,13 +151,16 @@ class PlaudSessionBroker {
     this.stdoutBuffer = "";
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
-      request.reject(new Error(sanitizedBrokerError(error)));
+      request.reject(brokerFailure(error.message || error, { ...request.lastDiagnostic, ...plaudErrorDetails(error) }));
     }
     this.pending.clear();
     return child;
   }
 
   async request(command, args, pluginRoot, options = {}) {
+    const startedAt = Date.now();
+    const timeoutMs = Math.max(1_000, Number(options.timeoutMs) || this.requestTimeoutMs);
+    const deadlineAt = Math.min(startedAt + timeoutMs, Number.isFinite(options.deadlineAt) ? options.deadlineAt : Infinity);
     this.clearIdleTimer();
     if (this.stopPromise) await this.stopPromise;
     const sessionKey = String(options.sessionKey || pluginRoot || "");
@@ -153,20 +170,24 @@ class PlaudSessionBroker {
     )) {
       await this.stop("plugin-changed");
     }
+    if (Date.now() >= deadlineAt) throw brokerFailure("PLAUD_NETWORK_TIMEOUT: 等待 PLAUD 后台会话释放已超时。", { code: "PLAUD_NETWORK_TIMEOUT", stage: "init" });
     if (!this.isRunning()) this.start(pluginRoot, sessionKey);
     const child = this.child;
     if (!child?.stdin?.writable) throw new Error("PLAUD 后台会话尚未就绪。");
     const id = String(++this.sequence);
-    const timeoutMs = Math.max(1_000, Number(options.timeoutMs) || this.requestTimeoutMs);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
         this.pending.delete(id);
-        reject(new Error("PLAUD_NETWORK_TIMEOUT: PLAUD 后台操作超时；已保留上次成功数据。"));
+        const error = brokerFailure("PLAUD_NETWORK_TIMEOUT: PLAUD 后台操作超时；已保留上次成功数据。", { ...pending?.lastDiagnostic, code: "PLAUD_NETWORK_TIMEOUT" });
+        try { this.onDiagnostic({ operation: command, outcome: "timeout", ...plaudErrorDetails(error),
+          ...(pending?.lastDiagnostic?.code ? { lastErrorCode: pending.lastDiagnostic.code } : {}) }); } catch { /* diagnostic only */ }
+        reject(error);
         void this.stop("request-timeout");
-      }, timeoutMs);
+      }, Math.max(1, deadlineAt - Date.now()));
       timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer });
-      child.stdin.write(`${JSON.stringify({ id, command, args })}\n`, (error) => {
+      this.pending.set(id, { resolve, reject, timer, command, lastDiagnostic: { stage: "init" } });
+      child.stdin.write(`${JSON.stringify({ id, command, args, deadlineAt })}\n`, (error) => {
         if (!error) return;
         const request = this.pending.get(id);
         if (!request) return;

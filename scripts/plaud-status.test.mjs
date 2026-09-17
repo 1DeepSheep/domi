@@ -2,10 +2,58 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback } from "../src/plaud-status.ts";
 import { restorePlaudOnStartup } from "../src/plaud-startup.ts";
+import { planPlaudSyncContinuation } from "../src/plaud-sync-intent.ts";
 
 const item = (patch = {}) => ({ fileId: "synthetic", fileName: "合成录音", duration: 60, createdAt: 1,
   editedAt: 1, hasTranscript: false, hasSummary: false, processing: false,
   queueStage: "", transcriptPath: "", error: "", ...patch });
+
+const safePreflight = (patch = {}) => ({ ok: false, preflight: true, submissionStarted: false,
+  retryable: true, recoveryScope: "synthetic-scope", errorCode: "PLAUD_NETWORK_TIMEOUT", errorStage: "list", ...patch });
+
+test("manual sync continuation requires an explicit never-submitted, scoped transient preflight failure", () => {
+  assert.ok(planPlaudSyncContinuation(safePreflight(), 1, null, 1000));
+  assert.ok(planPlaudSyncContinuation(safePreflight({ errorCode: "PLAUD_READ_TRANSIENT" }), 1, null, 1000),
+    "Vendor discovery failure may continue when the backend verifies zero submissions");
+  assert.equal(planPlaudSyncContinuation(safePreflight({ errorCode: "PLAUD_READ_TRANSIENT", submissionStarted: undefined }), 1, null, 1000), null);
+  for (const patch of [
+    { submissionStarted: undefined }, { submissionStarted: true }, { preflight: false }, { retryable: false },
+    { recoveryScope: "" }, { recoveryScope: true }, { superseded: true }, { snapshot: { superseded: true } },
+    { errorCode: "PLAUD_AUTH_REQUIRED" }, { errorCode: "PLAUD_ACCESS_DENIED" }, { errorCode: "PLAUD_READ_FAILED" },
+    { errorCode: "PLAUD_GENERATION_UNCONFIRMED" }, { errorCode: "UNKNOWN" }
+  ]) assert.equal(planPlaudSyncContinuation(safePreflight(patch), 1, null, 1000), null);
+});
+
+test("manual sync continuation has three attempts and one absolute expiry", () => {
+  const first = planPlaudSyncContinuation(safePreflight(), 1, null, 1000);
+  const second = planPlaudSyncContinuation(safePreflight(), 1, first, 3000);
+  const third = planPlaudSyncContinuation(safePreflight(), 1, second, 8000);
+  assert.deepEqual([first.retryAt, second.retryAt, third.retryAt], [3000, 8000, 23000]);
+  assert.equal(second.expiresAt, first.expiresAt);
+  assert.equal(third.expiresAt, first.expiresAt);
+  assert.equal(planPlaudSyncContinuation(safePreflight(), 1, third, 23000), null);
+  assert.equal(planPlaudSyncContinuation(safePreflight(), 1, first, first.expiresAt), null);
+  assert.equal(planPlaudSyncContinuation(safePreflight(), 2, first, 3000), null);
+  assert.equal(planPlaudSyncContinuation(safePreflight({ recoveryScope: "changed-account" }), 1, first, 3000), null);
+  assert.equal(planPlaudSyncContinuation(safePreflight(), 1, null, 1000, 2500), null,
+    "Time spent on the initial preflight belongs to the same user intent budget");
+});
+
+test("rate limits respect both retry-at and retry-after without an immediate refresh storm", () => {
+  const result = safePreflight({ errorCode: "PLAUD_RATE_LIMITED", retryAt: 91000, retryAfterMs: 60000 });
+  assert.equal(planPlaudSyncContinuation(result, 1, null, 1000).retryAt, 91000);
+  assert.equal(plaudReadRetryDelay({ ok: false, retryable: true, remoteStatus: "rate_limited", retryAt: 91000, retryAfterMs: 60000 }, 0, 1000), 90000);
+  assert.equal(plaudReadRetryDelay({ ok: false, retryable: true, remoteStatus: "rate_limited", retryAt: 301000, retryAfterMs: 300000 }, 0, 31000), 270000,
+    "An owner release does not restart a server cooldown that already has an absolute deadline");
+  assert.equal(planPlaudSyncContinuation(safePreflight({ retryAt: 1000000 }), 1, null, 1000), null);
+});
+
+test("background recovery cannot announce full completion with pending local work", () => {
+  const feedback = plaudSyncFeedback({ ok: true, status: "complete", resumePendingCount: 2 });
+  assert.equal(feedback.tone, "waiting");
+  assert.match(feedback.text, /2 份待继续处理/);
+  assert.doesNotMatch(feedback.text, /同步完成|已同步到最新/);
+});
 
 test("confirmed generation, uncertain submission and unsubmitted recordings have distinct states", () => {
   assert.equal(plaudItemPresentation(item({ queueStage: "generating", processing: true, error: "timeout" })).label, "等待远端生成");

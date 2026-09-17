@@ -22,7 +22,7 @@ function fixture(integration) {
     Error
   });
   assert.equal(handlers.size, 2);
-  return { call: name => handlers.get(name)(), coordinator };
+  return { call: (name, request) => handlers.get(name)(undefined, request), coordinator };
 }
 
 test("sync and recovery IPC preserve failed and partial per-record results", async () => {
@@ -58,4 +58,23 @@ test("concurrent IPC requests share one operation and never replay thrown genera
   assert.equal(failure.ok, false);
   assert.equal(failure.error, "Synthetic uncertain submission");
   assert.equal(calls, 2, "An uncertain submission must never be replayed by IPC retry policy");
+});
+
+test("automatic sync scope is passed through IPC and an expired scope cannot join another sync", async () => {
+  const requests = [];
+  let release;
+  const f = fixture({
+    plaudRecoveryScope: () => "current-scope",
+    syncPlaud: async request => {
+      requests.push(request);
+      if (request.expectedRecoveryScope !== "current-scope") return { ok: false, superseded: true };
+      return new Promise(resolve => { release = resolve; });
+    }
+  });
+  const current = f.call("domi:plaud-sync", { expectedRecoveryScope: "current-scope" });
+  const expired = await f.call("domi:plaud-sync", { expectedRecoveryScope: "old-scope" });
+  assert.equal(expired.superseded, true);
+  assert.deepEqual(requests, [{ expectedRecoveryScope: "current-scope" }, { expectedRecoveryScope: "old-scope" }]);
+  release({ ok: true });
+  assert.equal((await current).ok, true);
 });

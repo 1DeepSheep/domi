@@ -78,6 +78,7 @@ import {
 import { hasNativeWorkbench, workbench } from "./bridge";
 import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
 import { restorePlaudOnStartup } from "./plaud-startup";
+import { planPlaudSyncContinuation, type PlaudSyncIntent } from "./plaud-sync-intent";
 import {
   clearTaskResultUnread,
   isTaskResultVisible,
@@ -1959,6 +1960,7 @@ function App() {
   const [podcastError, setPodcastError] = useState("");
   const [plaudReaderBusy, setPlaudReaderBusy] = useState(false);
   const [plaudReadRetryPending, setPlaudReadRetryPending] = useState(false);
+  const [plaudSyncIntent, setPlaudSyncIntentState] = useState<PlaudSyncIntent | null>(null);
   const [plaudNotice, setPlaudNoticeState] = useState<PlaudFeedback | null>(null);
   const [editingPlaudId, setEditingPlaudId] = useState<string | null>(null);
   const [plaudTitleDraft, setPlaudTitleDraft] = useState("");
@@ -2129,6 +2131,10 @@ function App() {
   const plaudReaderEventGenerationRef = useRef(0);
   const plaudIdleRefreshPromiseRef = useRef<Promise<DomiPlaudSnapshot | null> | null>(null);
   const plaudReadRetryAttemptRef = useRef(0);
+  const plaudSnapshotRef = useRef(plaudSnapshot);
+  const plaudSyncIntentRef = useRef<PlaudSyncIntent | null>(null);
+  const plaudSyncIntentEpochRef = useRef(0);
+  const plaudContinuationPromiseRef = useRef<Promise<void> | null>(null);
   const plaudListOwnerRef = useRef<object | null>(null);
   const plaudSyncOwnerRef = useRef<object | null>(null);
   const plaudSnapshotRevisionRef = useRef(0);
@@ -2169,6 +2175,7 @@ function App() {
   composerDraftsByThreadRef.current = composerDraftsByThread;
   activeRunsByThreadRef.current = activeRunsByThread;
   domiSnapshotRef.current = domiSnapshot;
+  plaudSnapshotRef.current = plaudSnapshot;
   workspaceViewRef.current = workspaceView;
   rightPanelOpenRef.current = rightPanelOpen;
   markdownDraftRef.current = markdownDraft;
@@ -2407,6 +2414,8 @@ function App() {
   }
 
   flushClientStateRef.current = async () => {
+    // A deferred sync is not a submitted job. Closing must never start it.
+    cancelPlaudSyncIntent();
     if (settingsDirtyRef.current) {
       return { ok: false, error: "设置页还有未保存的修改，请先保存或放弃修改后再关闭 domi。" };
     }
@@ -3387,6 +3396,7 @@ function App() {
     }
     plaudSnapshotRevisionRef.current += 1;
     plaudScopeVersionRef.current += 1;
+    cancelPlaudSyncIntent();
     plaudIdleRefreshPromiseRef.current = null;
     plaudReaderBusyRef.current = false;
     plaudReadRetryAttemptRef.current = 0;
@@ -3455,13 +3465,18 @@ function App() {
         plaudReadRetryAttemptRef.current = 0;
         // Wait for a deferred response already in flight before the one fresh
         // read; otherwise that response could consume the release event.
-        void refreshPlaudAfterIdle();
+        if (plaudSyncIntentRef.current) void continuePlaudSyncIntent(plaudSyncIntentRef.current);
+        else if (Number(plaudSnapshotRef.current?.retryAt) > Date.now()) {
+          // Resume the existing bounded read-retry effect at its absolute
+          // cooldown, instead of turning an owner-release event into a read.
+          setPlaudSnapshot(current => current ? { ...current, paused: false, stale: true } : current);
+        } else void refreshPlaudAfterIdle();
       }
     });
   }, [plaudEnabled, appSettings?.onboardingComplete, appSettings?.plaudBrowser]);
 
   useEffect(() => {
-    if (!plaudEnabled || !appSettings?.onboardingComplete || plaudReaderBusy) return;
+    if (!plaudEnabled || !appSettings?.onboardingComplete || plaudReaderBusy || plaudSyncIntent) return;
     const delay = plaudReadRetryDelay(plaudSnapshot, plaudReadRetryAttemptRef.current);
     if (delay === null) return;
     let disposed = false;
@@ -3471,24 +3486,53 @@ function App() {
       void refreshPlaudAfterIdle({ automatic: true }).finally(() => { if (!disposed) setPlaudReadRetryPending(false); });
     }, delay);
     return () => { disposed = true; window.clearTimeout(timer); setPlaudReadRetryPending(false); };
-  }, [plaudSnapshot, plaudEnabled, appSettings?.onboardingComplete, appSettings?.plaudBrowser, plaudReaderBusy]);
+  }, [plaudSnapshot, plaudEnabled, appSettings?.onboardingComplete, appSettings?.plaudBrowser, plaudReaderBusy, plaudSyncIntent]);
+
+  useEffect(() => {
+    if (!plaudSyncIntent) return;
+    // Keep the server's cooldown even if the shared browser becomes free
+    // earlier. Busy ownership consumes time, but never the submission budget.
+    const target = plaudReaderBusy ? plaudSyncIntent.expiresAt : plaudSyncIntent.retryAt;
+    const timer = window.setTimeout(() => {
+      if (plaudSyncIntentRef.current !== plaudSyncIntent) return;
+      if (Date.now() >= plaudSyncIntent.expiresAt) setPlaudSyncIntent(null);
+      else void continuePlaudSyncIntent(plaudSyncIntent);
+    }, Math.max(0, target - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [plaudSyncIntent, plaudReaderBusy]);
+
+  useEffect(() => () => {
+    // Invalidate callbacks which were awaiting a bridge operation on unmount.
+    plaudSyncIntentRef.current = null;
+    plaudSyncIntentEpochRef.current += 1;
+    plaudScopeVersionRef.current += 1;
+  }, []);
 
   const plaudNeedsRecovery = plaudEnabled
-    && !plaudReaderBusy && !plaudSnapshot?.paused
+    && !plaudReaderBusy && !plaudSnapshot?.paused && !plaudSyncIntent
     && (plaudResumePendingCount === null ? hasRecoverablePlaudItems(plaudSnapshot) : plaudResumePendingCount > 0)
     && !["auth_required", "access_denied", "runtime_unavailable"]
       .includes(plaudSnapshot?.remoteStatus || "");
+  const plaudResumeRetryAt = Number.isFinite(plaudSnapshot?.retryAt) ? plaudSnapshot!.retryAt! : 0;
+  const plaudResumeRetryAfterMs = Number.isFinite(plaudSnapshot?.retryAfterMs) ? plaudSnapshot!.retryAfterMs! : 0;
   useEffect(() => {
     if (!plaudNeedsRecovery) return;
     // This read/download-only operation never submits generation. Keep the
     // interval independent of snapshot objects and panel visibility so normal
     // renders or switching tasks cannot indefinitely postpone recovery.
-    const timer = window.setInterval(() => {
+    const resume = () => {
       if (plaudListPromiseRef.current || plaudSyncPromiseRef.current || plaudMutationIdsRef.current.size) return;
       void syncPlaudQueue({ resumeOnly: true });
-    }, 90_000);
-    return () => window.clearInterval(timer);
-  }, [plaudNeedsRecovery, appSettings?.plaudBrowser]);
+    };
+    let interval: number | undefined;
+    // A pending transcript is still read-only recovery, but a server cooldown
+    // must also constrain this independent 90-second polling path.
+    const timer = window.setTimeout(() => {
+      resume();
+      interval = window.setInterval(resume, 90_000);
+    }, Math.max(90_000, plaudResumeRetryAt - Date.now(), plaudResumeRetryAt ? 0 : plaudResumeRetryAfterMs));
+    return () => { window.clearTimeout(timer); window.clearInterval(interval); };
+  }, [plaudNeedsRecovery, appSettings?.plaudBrowser, plaudResumeRetryAt, plaudResumeRetryAfterMs]);
 
   useEffect(() => {
     if (!selectedWorkflow?.requiresPlaud || plaudEnabled) return;
@@ -5957,6 +6001,39 @@ function App() {
     setPlaudNoticeState(text ? { text, tone } : null);
   }
 
+  function setPlaudSyncIntent(intent: PlaudSyncIntent | null) {
+    plaudSyncIntentRef.current = intent;
+    setPlaudSyncIntentState(intent);
+  }
+
+  function cancelPlaudSyncIntent() {
+    plaudSyncIntentEpochRef.current += 1;
+    setPlaudSyncIntent(null);
+  }
+
+  async function continuePlaudSyncIntent(intent: PlaudSyncIntent): Promise<void> {
+    if (plaudContinuationPromiseRef.current) return plaudContinuationPromiseRef.current;
+    const current = () => plaudSyncIntentRef.current === intent
+      && intent.scopeVersion === plaudScopeVersionRef.current && currentPlaudScope();
+    if (!current() || Date.now() < intent.retryAt || plaudReaderBusyRef.current) return;
+    const request = Promise.resolve().then(async () => {
+      for (let handoff = 0; handoff < 8 && current(); handoff += 1) {
+        await Promise.allSettled([plaudScopeHandoffRef.current, plaudListPromiseRef.current,
+          plaudSyncPromiseRef.current, plaudMutationPromiseRef.current]);
+        if (!current() || plaudReaderBusyRef.current) return;
+        if (Date.now() >= intent.expiresAt) { setPlaudSyncIntent(null); return; }
+        if (plaudListPromiseRef.current || plaudSyncPromiseRef.current || plaudMutationPromiseRef.current) continue;
+        await syncPlaudQueue({ continuation: intent });
+        return;
+      }
+      if (current()) setPlaudSyncIntent(null);
+    }).finally(() => {
+      if (plaudContinuationPromiseRef.current === request) plaudContinuationPromiseRef.current = null;
+    });
+    plaudContinuationPromiseRef.current = request;
+    return request;
+  }
+
   function currentPlaudScope() {
     return appSettingsRef.current?.plaudConnectionMode === "enabled"
       && appSettingsRef.current?.plaudBrowser === appSettings?.plaudBrowser
@@ -6014,7 +6091,7 @@ function App() {
     plaudListOwnerRef.current = owner;
     setPlaudLoading(true);
     setPlaudError("");
-    setPlaudNotice("");
+    if (!automatic) setPlaudNotice("");
     let refreshedSnapshot: DomiPlaudSnapshot | null = null;
     const request = (async (): Promise<DomiPlaudSnapshot | null> => {
       try {
@@ -6030,6 +6107,8 @@ function App() {
                 stale: true,
                 remoteStatus: result.remoteStatus,
                 retryable: result.retryable,
+                errorCode: result.errorCode, errorStage: result.errorStage,
+                retryAt: result.retryAt, retryAfterMs: result.retryAfterMs,
                 warning: result.warning
               };
             }
@@ -6039,6 +6118,8 @@ function App() {
                 stale: true,
                 remoteStatus: result.remoteStatus,
                 retryable: result.retryable,
+                errorCode: result.errorCode, errorStage: result.errorStage,
+                retryAt: result.retryAt, retryAfterMs: result.retryAfterMs,
                 warning: result.warning || result.error
               };
             }
@@ -6046,15 +6127,15 @@ function App() {
           });
           if (!result.ok) {
             setPlaudError(plaudSafeError(result.error || result.warning, "PLAUD 队列暂时无法刷新。"));
-            setPlaudNotice("");
+            if (!automatic) setPlaudNotice("");
           } else if (result.stale) {
             setPlaudError(plaudSafeError(result.warning, "PLAUD 暂时无法刷新，已显示上次成功读取的录音。"));
-            setPlaudNotice("");
+            if (!automatic) setPlaudNotice("");
           } else {
             plaudReadRetryAttemptRef.current = 0;
             plaudNeedsFreshListRef.current = false;
             setPlaudError("");
-            setPlaudNotice("");
+            if (!automatic) setPlaudNotice("");
             // A fresh list may reveal submitted work after the last resume
             // reported an empty queue. Derive eligibility from this snapshot.
             setPlaudResumePendingCount(null);
@@ -6163,10 +6244,15 @@ function App() {
     return request;
   }
 
-  async function syncPlaudQueue({ resumeOnly = false }: { resumeOnly?: boolean } = {}): Promise<DomiPlaudSyncResult | null> {
+  async function syncPlaudQueue({ resumeOnly = false, continuation = null }: { resumeOnly?: boolean; continuation?: PlaudSyncIntent | null } = {}): Promise<DomiPlaudSyncResult | null> {
+    if (resumeOnly && plaudSyncIntentRef.current) return null;
+    if (!resumeOnly && !continuation) cancelPlaudSyncIntent();
+    const intentEpoch = plaudSyncIntentEpochRef.current;
+    const intentDeadline = continuation?.expiresAt ?? Date.now() + 15 * 60_000;
     if (plaudScopeHandoffRef.current) await plaudScopeHandoffRef.current;
     if (!currentPlaudScope()) return null;
-    if (plaudReaderBusyRef.current) return { ok: true, paused: true, status: "paused", snapshot: { ok: true, paused: true, remoteStatus: "workflow_in_use" } };
+    if (continuation && (plaudSyncIntentRef.current !== continuation || continuation.scopeVersion !== plaudScopeVersionRef.current)) return null;
+    if (plaudReaderBusyRef.current && (resumeOnly || continuation)) return { ok: true, paused: true, status: "paused", snapshot: { ok: true, paused: true, remoteStatus: "workflow_in_use" } };
     if (plaudSyncPromiseRef.current) return plaudSyncPromiseRef.current;
     if (plaudListPromiseRef.current) return null;
     if (plaudMutationIdsRef.current.size > 0) return null;
@@ -6180,9 +6266,16 @@ function App() {
     setPlaudNotice("");
     const request = (async (): Promise<DomiPlaudSyncResult | null> => {
       try {
-        const result = await Promise.resolve().then(() => resumeOnly ? workbench.resumePlaudTranscripts() : workbench.syncPlaud());
-        if (result.superseded || result.snapshot?.superseded) return null;
+        const result = await Promise.resolve().then(() => resumeOnly ? workbench.resumePlaudTranscripts()
+          : workbench.syncPlaud(continuation ? { expectedRecoveryScope: continuation.recoveryScope } : undefined));
+        if (result.superseded || result.snapshot?.superseded) {
+          if (!resumeOnly && currentPlaudRequest(revision)) setPlaudSyncIntent(null);
+          return null;
+        }
         if (!currentPlaudRequest(revision)) return result;
+        if (!resumeOnly && intentEpoch === plaudSyncIntentEpochRef.current) {
+          setPlaudSyncIntent(planPlaudSyncContinuation(result, plaudScopeVersionRef.current, continuation, Date.now(), intentDeadline));
+        }
         if (result.paused || result.snapshot?.paused) { acceptPlaudPause(result.snapshot || { ok: true, paused: true }, readerGeneration); return result; }
         if (result.snapshot) {
           const snapshot = plaudSnapshotForScope(result.snapshot, !plaudNeedsFreshListRef.current);
@@ -6198,7 +6291,10 @@ function App() {
         }
         return result;
       } catch (error) {
-        if (currentPlaudRequest(revision)) setPlaudError(plaudSafeError(error));
+        if (currentPlaudRequest(revision)) {
+          if (!resumeOnly) setPlaudSyncIntent(null);
+          setPlaudError(plaudSafeError(error));
+        }
         return null;
       } finally {
         if (plaudSyncOwnerRef.current === owner) {
@@ -6454,6 +6550,9 @@ function App() {
   }
 
   async function saveAppSettings(request: AppSettingsSaveRequest): Promise<AppSettingsSaveResult> {
+    // Login and connection checks save these fields before touching the
+    // managed session, including when the browser value itself is unchanged.
+    if (["plaudConnectionMode", "plaudBrowser"].some(key => Object.prototype.hasOwnProperty.call(request, key))) cancelPlaudSyncIntent();
     const dataConnectionChanged = requestChangesDataConnection(request);
     if (
       dataConnectionChanged
@@ -14108,7 +14207,7 @@ function App() {
                 )}
                 {plaudEnabled ? (
                   <>
-                    {plaudError && (
+                    {plaudError && !plaudSyncIntent && (
                       <div className={plaudReadRetryPending ? "plaud-inline-notice waiting" : "domi-inline-error actionable"} role="status">
                         <AlertCircle size={14} />
                         <span>{plaudError}{plaudReadRetryPending ? " 正在自动恢复最近录音。" : ""}</span>
@@ -14130,8 +14229,10 @@ function App() {
                         )}
                       </div>
                     )}
-                    {plaudReaderBusy && <div className="plaud-inline-notice waiting" role="status">任务正在使用 PLAUD，完成后会自动更新最近录音。</div>}
-                    {plaudNotice && <div className={`plaud-inline-notice ${plaudNotice.tone}`} role="status">{plaudNotice.text}</div>}
+                    {plaudSyncIntent ? <div className="plaud-inline-notice waiting" role="status">{plaudReaderBusy ? "已保留同步请求，任务完成后自动继续。" : "已保留同步请求，连接恢复后自动继续。"}</div> : <>
+                      {plaudReaderBusy && <div className="plaud-inline-notice waiting" role="status">任务正在使用 PLAUD，完成后会自动更新最近录音。</div>}
+                      {plaudNotice && <div className={`plaud-inline-notice ${plaudNotice.tone}`} role="status">{plaudNotice.text}</div>}
+                    </>}
                     <div className="plaud-queue-header">
                       <strong>最近录音</strong>
                       <span>

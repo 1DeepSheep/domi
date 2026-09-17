@@ -36,18 +36,22 @@ export function plaudSnapshotForScope(snapshot: DomiPlaudSnapshot, scopeVerified
   return {
     ok: false, stale: true, items: [], pendingCount: 0, queueCount: 0,
     remoteStatus: snapshot.remoteStatus, retryable: snapshot.retryable,
+    errorCode: snapshot.errorCode, errorStage: snapshot.errorStage,
+    retryAt: snapshot.retryAt, retryAfterMs: snapshot.retryAfterMs,
     error: plaudSafeError(snapshot.error, snapshot.remoteStatus === "auth_required"
       ? "PLAUD 登录已失效，请在设置中重新登录。"
       : "PLAUD 最近录音暂时无法读取，请稍后重试。")
   };
 }
 
-export function plaudReadRetryDelay(snapshot: DomiPlaudSnapshot | null, attempt: number) {
+export function plaudReadRetryDelay(snapshot: DomiPlaudSnapshot | null, attempt: number, now = Date.now()) {
   const delays = [2_000, 5_000, 15_000];
   if (!snapshot || snapshot.paused || !snapshot.retryable || (snapshot.ok && !snapshot.stale)
     || !["verification_pending", "authorization_pending", "profile_locked", "browser_unavailable", "network_error", "rate_limited", "service_unavailable"].includes(snapshot.remoteStatus || "")
     || attempt < 0 || attempt >= delays.length) return null;
-  return snapshot.remoteStatus === "rate_limited" ? Math.max(30_000, delays[attempt]) : delays[attempt];
+  return Math.max(delays[attempt], snapshot.remoteStatus === "rate_limited" ? 30_000 : 0,
+    Number.isFinite(snapshot.retryAt) ? Math.max(0, snapshot.retryAt! - now)
+      : Number.isFinite(snapshot.retryAfterMs) ? Math.max(0, snapshot.retryAfterMs!) : 0);
 }
 
 export function plaudSafeError(error: unknown, fallback = "暂时无法连接 PLAUD，请稍后刷新。") {
@@ -187,7 +191,7 @@ export function plaudSyncFeedback(result: DomiPlaudSyncResult): PlaudFeedback {
   const retryable = count(result.retryableCount);
   const failed = count(result.failedCount);
   const completed = generated + recovered;
-  const pending = waiting + retryable;
+  const pending = Math.max(waiting + retryable, count(result.resumePendingCount));
   const unsubmitted = (result.results || []).filter(item => item.errorCode === "PLAUD_GENERATION_NOT_SUBMITTED");
   const uncertainUploads = (result.results || []).filter(item => item.stage === "uploaded" && item.outcome !== "ready" && item.errorCode !== "PLAUD_GENERATION_NOT_SUBMITTED");
   const unsubmittedWaiting = unsubmitted.filter(item => item.outcome === "waiting").length;
@@ -204,6 +208,7 @@ export function plaudSyncFeedback(result: DomiPlaudSyncResult): PlaudFeedback {
     recovered ? `已补下载 ${recovered} 份文字稿` : "",
     waiting > uploadedWaiting ? `${waiting - uploadedWaiting} 份等待远端生成或确认` : "",
     retryable > uploadedRetryable ? `${retryable - uploadedRetryable} 份等待自动恢复` : "",
+    pending > waiting + retryable ? `${pending - waiting - retryable} 份待继续处理` : "",
     uncertainUploads.length ? `${uncertainUploads.length} 份等待连接恢复或提交确认` : "",
     unsubmitted.length ? `${unsubmitted.length} 份尚未提交生成` : "",
     failed ? `${failed} 份需要处理` : ""

@@ -51,6 +51,33 @@ function safeError(error) {
     .slice(0, 1000);
 }
 
+// Only machine-readable, bounded fields cross the process boundary. Browser
+// errors can contain recording names, authenticated URLs or local Profile paths.
+function plaudErrorDetails(error, stage = "") {
+  const message = typeof error?.message === "string" ? error.message : String(error || "");
+  const status = Number(error?.httpStatus || error?.status || message.match(/(?:HTTP|status)\s*(\d{3})/i)?.[1]);
+  let code = String(error?.code || message.match(/\bPLAUD_[A-Z_]+\b/)?.[0] || "");
+  if (!/^PLAUD_[A-Z_]{1,70}$/.test(code)) code = "";
+  if (!code) {
+    if (/account sign-in is required|登录已失效/i.test(message)) code = "PLAUD_AUTH_REQUIRED";
+    else if (status === 401 || /unauthori/i.test(message)) code = "PLAUD_UNAUTHORIZED";
+    else if (status === 403) code = "PLAUD_ACCESS_DENIED";
+    else if (status === 429 || /too many requests|rate.?limit/i.test(message)) code = "PLAUD_RATE_LIMITED";
+    else if (/singleton|profile.*(?:lock|use)|already in use|EBUSY|专用浏览器.*(?:另一个任务使用|被占用)/i.test(message)) code = "PLAUD_PROFILE_LOCKED";
+    else if (/authorization request was not observed|会话验证未完成/i.test(message)) code = "PLAUD_SESSION_PROBE_INCOMPLETE";
+    else if (/connectOverCDP|Not attached to an active page|Target page, context or browser has been closed|Execution context was destroyed|Protocol error.*(?:Page|Target)/i.test(message)) code = "PLAUD_BROWSER_UNAVAILABLE";
+    else if (status >= 500 && status <= 599) code = "PLAUD_SERVICE_UNAVAILABLE";
+    else if (isRetryableReadError(error) || /timeout|超时/i.test(message)) code = "PLAUD_NETWORK_TIMEOUT";
+    else code = "PLAUD_READ_FAILED";
+  }
+  const retryAfterMs = Number(error?.retryAfterMs);
+  const errorStage = ["init", "connection", "list", "download", "rename", "trash", "cleanup"].includes(error?.stage)
+    ? error.stage : ["init", "connection", "list", "download", "rename", "trash", "cleanup"].includes(stage) ? stage : "";
+  return { code, ...(errorStage ? { stage: errorStage } : {}),
+    ...(Number.isInteger(status) && status >= 400 && status <= 599 ? { httpStatus: status } : {}),
+    ...(Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? { retryAfterMs: Math.min(retryAfterMs, Number.MAX_SAFE_INTEGER) } : {}) };
+}
+
 function resolveClient(pluginRoot) {
   const root = path.resolve(String(pluginRoot || ""));
   const clientPath = path.join(root, "skills", "plaud", "vendor", "plaud-cli", "src", "plaud.js");
@@ -76,6 +103,8 @@ function isTransientNavigationError(error) {
 }
 
 function isRetryableReadError(error) {
+  if (["PLAUD_AUTH_REQUIRED", "PLAUD_UNAUTHORIZED", "PLAUD_ACCESS_DENIED", "PLAUD_RATE_LIMITED", "PLAUD_PROFILE_LOCKED"].includes(error?.code)) return false;
+  if (["PLAUD_NETWORK_TIMEOUT", "PLAUD_READ_TRANSIENT", "PLAUD_BROWSER_UNAVAILABLE", "PLAUD_SESSION_PROBE_INCOMPLETE", "PLAUD_SERVICE_UNAVAILABLE"].includes(error?.code)) return true;
   const message = error instanceof Error ? error.message : String(error);
   if (/PLAUD_AUTH_REQUIRED|PLAUD_UNAUTHORIZED|PLAUD_ACCESS_DENIED|(?:HTTP|status)\s*(?:401|403)|unauthori|account sign-in is required/i.test(message)) {
     return false;
@@ -145,7 +174,7 @@ function installSignalCleanup() {
   process.once("SIGINT", () => stop("SIGINT"));
 }
 
-async function listWithClient(client, requestedLimit, requestedOffset) {
+async function listWithClient(client, requestedLimit, requestedOffset, options = {}) {
   const visibleLimit = Math.min(Math.max(Number(requestedLimit) || 50, 1), 100);
   const offset = Math.min(Math.max(Number(requestedOffset) || 0, 0), 10_000);
   // The first page keeps the old 100-record pending-count coverage while
@@ -154,7 +183,7 @@ async function listWithClient(client, requestedLimit, requestedOffset) {
   const fetchLimit = offset === 0
     ? Math.max(100, visibleLimit + 1)
     : visibleLimit + 1;
-  const files = await client.listFiles({ limit: fetchLimit, skip: offset });
+  const files = await client.listFiles({ limit: fetchLimit, skip: offset, ...(Number.isFinite(options.deadlineAt) ? { deadlineAt: options.deadlineAt } : {}) });
   // Preserve the server's edit_time ordering. Re-sorting the first 100-item
   // pending-count window before slicing made items from server page two leak
   // into page one, which then produced duplicates on the next request.
@@ -180,13 +209,13 @@ async function list(pluginRoot, requestedLimit, requestedOffset) {
   );
 }
 
-async function downloadWithClient(client, fileId, outputDir) {
+async function downloadWithClient(client, fileId, outputDir, options = {}) {
   const id = String(fileId || "").trim();
   if (!/^[A-Za-z0-9_-]{12,80}$/.test(id)) throw new Error("无效的 PLAUD 文件标识。");
   if (!path.isAbsolute(String(outputDir || ""))) throw new Error("PLAUD 下载目录必须是绝对路径。");
   // The vendor download method only reads an exact file ID and writes local
   // transcript artifacts. Queue transitions belong to the caller's fresh lock.
-  const transcript = await client.downloadTranscript(id, outputDir);
+  const transcript = await client.downloadTranscript(id, outputDir, options);
   return {
     ok: true,
     fileId: id,
@@ -256,12 +285,15 @@ async function closeServerClient() {
   if (candidate) await candidate.close().catch(() => {});
 }
 
-async function ensureServerClient(pluginRoot) {
+async function ensureServerClient(pluginRoot, options = {}) {
   const normalizedRoot = path.resolve(String(pluginRoot || ""));
-  if (serverClient && serverPluginRoot === normalizedRoot) return serverClient;
+  if (serverClient && serverPluginRoot === normalizedRoot) {
+    serverClient.operationDeadlineAt = options.deadlineAt;
+    return serverClient;
+  }
   await closeServerClient();
   const PlaudClient = resolveClient(normalizedRoot);
-  const candidate = new PlaudClient({ headless: true });
+  const candidate = new PlaudClient({ headless: true, operationDeadlineAt: options.deadlineAt });
   activeClient = candidate;
   try {
     await candidate.init();
@@ -277,19 +309,33 @@ async function ensureServerClient(pluginRoot) {
 
 async function runServerCommand(pluginRoot, command, args = [], options = {}) {
   let operationStarted = false;
+  let stage = "init";
+  const now = options.now || Date.now;
+  const remaining = () => Number.isFinite(options.deadlineAt) ? options.deadlineAt - now() : Infinity;
+  const emitDiagnostic = (error) => options.onDiagnostic?.(error ? plaudErrorDetails(error, stage) : { stage });
+  const checkDeadline = () => {
+    if (remaining() > 0) return;
+    throw Object.assign(new Error("PLAUD_NETWORK_TIMEOUT: PLAUD 本轮读取已达到时间上限。"), { code: "PLAUD_NETWORK_TIMEOUT", stage });
+  };
   const execute = async () => {
-    const client = await ensureServerClient(pluginRoot);
+    stage = "init";
+    checkDeadline();
+    emitDiagnostic();
+    const client = await ensureServerClient(pluginRoot, options);
+    checkDeadline();
+    stage = command;
+    emitDiagnostic();
     operationStarted = true;
     if (command === "connection") {
-      await client.listFiles({ limit: 1, skip: 0 });
+      await client.listFiles({ limit: 1, skip: 0, ...(Number.isFinite(options.deadlineAt) ? { deadlineAt: options.deadlineAt } : {}) });
       return {
         ok: true,
         connected: true,
         browserLabel: client.browserLabel || "PLAUD 专用浏览器"
       };
     }
-    if (command === "list") return listWithClient(client, args[0], args[1]);
-    if (command === "download") return downloadWithClient(client, args[0], args[1]);
+    if (command === "list") return listWithClient(client, args[0], args[1], options);
+    if (command === "download") return downloadWithClient(client, args[0], args[1], { deadlineAt: options.deadlineAt });
     if (command === "rename") return renameWithClient(client, args[0], args[1]);
     if (command === "trash") return moveToTrashWithClient(client, args[0]);
     throw new Error(`未知的 PLAUD worker 命令：${command || "(空)"}`);
@@ -301,11 +347,19 @@ async function runServerCommand(pluginRoot, command, args = [], options = {}) {
     try {
       return await execute();
     } catch (error) {
+      Object.assign(error, plaudErrorDetails(error, stage));
+      emitDiagnostic(error);
       const readOnly = ["connection", "list", "download"].includes(command);
+      // Release even on the final failure. A later read must not reuse the
+      // detached page that exhausted this request's recovery budget.
+      await closeServerClient();
       // Never replay an executed PATCH/POST after an uncertain response.
       if (!isRetryableReadError(error) || (operationStarted && !readOnly) || attempt === 2) throw error;
-      await closeServerClient();
-      await pause(attempt === 0 ? 400 : 1200);
+      const delay = attempt === 0 ? 400 : 1200;
+      // A new private browser needs meaningful time to initialize. The broker
+      // remains the hard bound for an older plugin that ignores deadlineAt.
+      if (remaining() < delay + 5_000) throw error;
+      await pause(delay);
     }
   }
 }
@@ -325,13 +379,17 @@ function serve(pluginRoot) {
         let request;
         try {
           request = JSON.parse(line);
-          const result = await runServerCommand(pluginRoot, request.command, request.args || []);
+          const result = await runServerCommand(pluginRoot, request.command, request.args || [], {
+            deadlineAt: Number.isFinite(request.deadlineAt) ? request.deadlineAt : undefined,
+            onDiagnostic: diagnostic => print({ id: String(request.id || ""), type: "diagnostic", diagnostic })
+          });
           print({ id: String(request.id || ""), ok: true, result });
         } catch (error) {
           print({
             id: String(request?.id || ""),
             ok: false,
-            error: safeError(error)
+            error: safeError(error),
+            diagnostic: plaudErrorDetails(error)
           });
         }
       });
@@ -368,6 +426,7 @@ module.exports = {
   isTransientNavigationError,
   list,
   listWithClient,
+  plaudErrorDetails,
   runServerCommand,
   safeError
 };
