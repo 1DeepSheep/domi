@@ -22,7 +22,7 @@ const { localTaskReceipt } = require("./task-receipt.cjs");
 const { PodcastProgress } = require("./podcast-progress.cjs");
 const { normalizeWebResource } = require("./resource-target.cjs");
 const { TaskQueue } = require("./service-coordinator.cjs");
-const { safeError: safePlaudWorkerError } = require("./plaud-worker.cjs");
+const { safeError: safePlaudWorkerError, plaudErrorDetails } = require("./plaud-worker.cjs");
 const { PLAUD_RECOVERY_STAGES, plaudRecordReady, plaudStageProtected, plaudRecoveryCandidate,
   readablePlaudTranscript, normalizePlaudSyncItem, summarizePlaudSync } = require("./plaud-sync-state.cjs");
 const CANONICAL_PROJECT_TAXONOMY = require("../shared/investment-taxonomy.json");
@@ -280,6 +280,21 @@ function plaudBrowserLabel(browser) {
 }
 
 function plaudFailureStatus(error) {
+  const codedStatus = {
+    PLAUD_AUTH_REQUIRED: "auth_required", PLAUD_UNAUTHORIZED: "authorization_pending",
+    PLAUD_ACCESS_DENIED: "access_denied", PLAUD_RATE_LIMITED: "rate_limited",
+    PLAUD_SESSION_PROBE_INCOMPLETE: "verification_pending", PLAUD_PROFILE_LOCKED: "profile_locked",
+    PLAUD_BROWSER_UNAVAILABLE: "browser_unavailable", PLAUD_WORKER_EXITED: "browser_unavailable",
+    PLAUD_NETWORK_TIMEOUT: "network_error", PLAUD_SERVICE_UNAVAILABLE: "service_unavailable",
+    PLAUD_READ_TRANSIENT: "network_error",
+    PLAUD_WORKFLOW_IN_USE: "workflow_in_use"
+  }[error?.code];
+  if (codedStatus) return codedStatus;
+  const httpStatus = Number(error?.httpStatus || error?.status);
+  if (httpStatus === 401) return "authorization_pending";
+  if (httpStatus === 403) return "access_denied";
+  if (httpStatus === 429) return "rate_limited";
+  if (httpStatus >= 500 && httpStatus <= 599) return "service_unavailable";
   const message = error instanceof Error ? error.message : String(error || "");
   const normalized = message.toLocaleLowerCase("en-US");
   if (/plaud_workflow_in_use/.test(normalized)) return "workflow_in_use";
@@ -319,7 +334,7 @@ function isRetryablePlaudReadFailure(error) {
   return new Set([
     "verification_pending",
     "authorization_pending",
-    "access_denied",
+    "profile_locked",
     "browser_unavailable",
     "network_error",
     "rate_limited",
@@ -354,7 +369,10 @@ function safePlaudSyncError(error) {
 
 function classifyPlaudConnectionFailure(error, browser) {
   const status = plaudFailureStatus(error);
-  let guidance = "请重新检测；如果仍然失败，可以让 Codex 连接助手继续诊断。";
+  const details = plaudErrorDetails(error);
+  const retryAfterMs = status === "rate_limited" ? Math.max(30_000, details.retryAfterMs || 0)
+    : status === "profile_locked" ? Math.max(5_000, details.retryAfterMs || 0) : details.retryAfterMs;
+  let guidance = `PLAUD 最近录音读取未完成（${details.code}）。已保留本地列表；可在“系统诊断”查看读取阶段和错误码。`;
   if (status === "workflow_in_use") {
     guidance = "PLAUD 正由录音任务使用，任务结束后将自动恢复最近录音。";
   } else if (status === "runtime_unavailable") {
@@ -386,6 +404,9 @@ function classifyPlaudConnectionFailure(error, browser) {
     browser,
     browserLabel: plaudBrowserLabel(browser),
     status,
+    errorCode: details.code,
+    ...(details.stage ? { errorStage: details.stage } : {}),
+    ...(retryAfterMs !== undefined ? { retryAfterMs, retryAt: Date.now() + retryAfterMs } : {}),
     checkedAt: Date.now(),
     error: guidance
   };
@@ -1220,6 +1241,7 @@ class DomiIntegration {
     this.plaudVerifiedSnapshot = null;
     this.plaudConfigFingerprint = "";
     this.plaudConfigGeneration = 0;
+    this.plaudRecoveryEpoch = crypto.randomUUID();
     this.taskDocumentSources = new Map();
     this.plaudOutputDir = path.resolve(plaudOutputDir || path.join(os.homedir(), "Documents", "domi", "work", "domi", "plaud"));
     this.plaudStateFile = path.join(
@@ -1637,6 +1659,10 @@ class DomiIntegration {
         }
         if (options.requirePlaudEnabled && !this.plaudEnabled()) throw new Error("PLAUD 已停用，已取消后续读取。");
       }
+      // Releasing the old browser awaits Profile shutdown. Login/logout can
+      // invalidate this sync during that wait, so recheck immediately before
+      // constructing/spawning its CLI without another asynchronous gap.
+      if (options.queue === "plaud") this.assertPlaudReaderAvailable();
       let stdout;
       try {
         const commandOptions = {
@@ -1658,6 +1684,9 @@ class DomiIntegration {
       }
       const value = JSON.parse(stdout.trim());
       if (value?.ok === false) {
+        // Sync failures may still contain committed per-record artifacts and
+        // an explicit zero-submission discovery receipt. Preserve that result.
+        if (options.acceptPlaudSyncResults && Array.isArray(value.results)) return value;
         const message = typeof value.error === "string" ? value.error : value.error?.message;
         throw new Error(message || "domi 命令执行失败。 ");
       }
@@ -1892,6 +1921,7 @@ class DomiIntegration {
         plugin.root,
         {
           timeoutMs: command === "download" ? Math.min(Math.max(Number(options.timeoutMs) || 30_000, 1000), 30_000) : 90_000,
+          ...(Number.isFinite(options.deadlineAt) ? { deadlineAt: options.deadlineAt } : {}),
           sessionKey
         }
       );
@@ -1919,12 +1949,18 @@ class DomiIntegration {
   assertPlaudReaderAvailable() {
     const scope = this.plaudDrainContext?.getStore()?.scope;
     if (scope && scope !== this.plaudSnapshotScope()) throw new Error("PLAUD_READER_SCOPE_CHANGED: 录音连接设置已变化，已取消旧连接的后续读取。");
+    const recoveryScope = this.plaudDrainContext?.getStore()?.recoveryScope;
+    if (recoveryScope && recoveryScope !== this.plaudRecoveryScope()) throw new Error("PLAUD_READER_SCOPE_CHANGED: PLAUD 登录已变化，已取消旧连接的同步。");
     if (this.plaudReaderPaused()) throw new Error("PLAUD_WORKFLOW_IN_USE: PLAUD 正由录音任务使用。");
   }
 
   plaudSnapshotScope() {
     const settings = this.configProvider();
     return [settings.plaudConnectionMode, this.normalizePlaudBrowser(settings.plaudBrowser), this.domiConfigPath].join("\0");
+  }
+
+  plaudRecoveryScope() {
+    return crypto.createHash("sha256").update(`${this.plaudSnapshotScope()}\0${this.plaudRecoveryEpoch}`).digest("hex");
   }
 
   plaudListCacheKey(scope) {
@@ -2229,6 +2265,7 @@ class DomiIntegration {
   async loginPlaud(request = {}) {
     if (this.plaudReaderPaused()) return { ...classifyPlaudConnectionFailure("PLAUD_WORKFLOW_IN_USE", this.normalizePlaudBrowser(request.browser || this.configProvider().plaudBrowser)), paused: true };
     this.plaudVerifiedSnapshot = null;
+    this.plaudRecoveryEpoch = crypto.randomUUID();
     const browser = this.normalizePlaudBrowser(
       request.browser || this.configProvider().plaudBrowser
     );
@@ -2298,6 +2335,7 @@ class DomiIntegration {
   async disconnectPlaud(request = {}) {
     this.assertPlaudReaderAvailable();
     this.plaudVerifiedSnapshot = null;
+    this.plaudRecoveryEpoch = crypto.randomUUID();
     const result = await this.runPlaudConnectionCommand("logout", request.browser);
     this.plaudRemoteHealth = null;
     return result;
@@ -2379,7 +2417,7 @@ class DomiIntegration {
     }
     const { plugin } = this.plaudPaths();
     const [remoteResult] = await Promise.allSettled([
-      this.runPlaudWorker("list", [String(limit), String(offset)], plugin)
+      this.runPlaudWorker("list", [String(limit), String(offset)], plugin, { deadlineAt: requested.deadlineAt })
     ]);
     if (requestedScope !== this.plaudSnapshotScope()) {
       return this.supersededPlaudSnapshot();
@@ -2454,6 +2492,10 @@ class DomiIntegration {
       : "";
     const remoteStatus = remoteFailure?.status || "connected";
     const retryable = Boolean(remoteFailure && isRetryablePlaudReadFailure(remoteResult.reason));
+    const failureDetails = remoteFailure ? {
+      errorCode: remoteFailure.errorCode, errorStage: remoteFailure.errorStage || "list",
+      ...(remoteFailure.retryAfterMs !== undefined ? { retryAfterMs: remoteFailure.retryAfterMs, retryAt: remoteFailure.retryAt } : {})
+    } : {};
     const lastSuccessfulSnapshot = fresh && stale
       ? {
           ok: true,
@@ -2469,6 +2511,7 @@ class DomiIntegration {
           items: mergeWorkflowState(cachedSnapshot?.items || [], true),
           remoteStatus,
           retryable,
+          ...failureDetails,
           warning,
           error: ""
         }
@@ -2491,6 +2534,8 @@ class DomiIntegration {
       items,
       remoteStatus,
       retryable,
+      ...failureDetails,
+      recoveryScope: this.plaudRecoveryScope(),
       ...(lastSuccessfulSnapshot ? { lastSuccessfulSnapshot } : {}),
       warning,
       error: remoteResult.status === "fulfilled" || (!fresh && stale) ? "" : remoteError
@@ -2502,7 +2547,8 @@ class DomiIntegration {
   }
 
   async plaudQueueForSync() {
-    let snapshot = await this.plaudQueue();
+    const deadlineAt = Date.now() + 90_000;
+    let snapshot = await this.plaudQueue({ deadlineAt: Math.min(deadlineAt, Date.now() + 45_000) });
     if (!shouldRecoverPlaudSyncRead(snapshot)) return snapshot;
 
     // A cold managed browser can refresh its PLAUD authorization while the
@@ -2512,30 +2558,37 @@ class DomiIntegration {
     // submitted twice.
     await this.enqueuePlaudOperation(() => this.stopPlaudBackgroundSession("sync-read-recovery"));
     await this.sleep(500);
-    if (!this.plaudEnabled() || this.plaudShuttingDown) return snapshot;
-    snapshot = await this.plaudQueue({ fresh: true });
+    if (!this.plaudEnabled() || this.plaudShuttingDown || deadlineAt - Date.now() < 5_000) return snapshot;
+    snapshot = await this.plaudQueue({ fresh: true, deadlineAt });
     return snapshot;
   }
 
-  syncPlaud() {
-    return this.startPlaudSync(false);
+  syncPlaud(request = {}) {
+    return this.startPlaudSync(false, request);
   }
 
   resumePlaudTranscripts() {
     return this.startPlaudSync(true);
   }
 
-  startPlaudSync(resumeOnly) {
+  startPlaudSync(resumeOnly, request = {}) {
+    const recoveryScope = this.plaudRecoveryScope();
+    if (request.expectedRecoveryScope && request.expectedRecoveryScope !== recoveryScope) {
+      return Promise.resolve({ ok: false, superseded: true, preflight: true, submissionStarted: false,
+        recoveryScope, error: "PLAUD 登录或连接已变化，已取消旧连接的待续接同步。" });
+    }
     if (this.plaudSyncPromise) {
       // A user sync must still submit new work after a read-only recovery ends.
       if (!resumeOnly && this.plaudSyncResumeOnly) {
-        return this.plaudSyncPromise.then(() => this.startPlaudSync(false));
+        return this.plaudSyncPromise.then(() => this.startPlaudSync(false, request));
       }
       return this.plaudSyncPromise;
     }
-    if (this.plaudReaderPaused()) return Promise.resolve(this.pausedPlaudSync());
+    if (this.plaudReaderPaused()) return Promise.resolve({ ...this.pausedPlaudSync(), preflight: true,
+      submissionStarted: false, retryable: true, errorCode: "PLAUD_WORKFLOW_IN_USE", recoveryScope,
+      retryAfterMs: 5_000, retryAt: Date.now() + 5_000 });
     this.plaudSyncResumeOnly = resumeOnly;
-    const pending = this.plaudDrainContext.run({ scope: this.plaudSnapshotScope() }, () => this.performPlaudSync(resumeOnly)).finally(() => {
+    const pending = this.plaudDrainContext.run({ scope: this.plaudSnapshotScope(), recoveryScope }, () => this.performPlaudSync(resumeOnly)).finally(() => {
       if (this.plaudSyncPromise === pending) this.plaudSyncPromise = null;
     });
     this.plaudSyncPromise = pending;
@@ -2640,7 +2693,9 @@ class DomiIntegration {
       items: [...byId.values()].sort(comparePlaudItems),
       ...(fresh ? {} : { hasMore: false, nextOffset: 0,
         remoteStatus: snapshot?.remoteStatus || "unknown", retryable: snapshot?.retryable === true,
-        warning: "本轮列表刷新未完成，已保留提交状态和已下载成果。" }) };
+        ...(snapshot?.retryAt ? { retryAt: snapshot.retryAt, retryAfterMs: snapshot.retryAfterMs,
+          errorCode: snapshot.errorCode, errorStage: snapshot.errorStage } : {}),
+        warning: snapshot?.warning || "本轮列表刷新未完成，已保留提交状态和已下载成果。" }) };
   }
 
   async plaudSupportsRecovery(script) {
@@ -2668,6 +2723,7 @@ class DomiIntegration {
 
   async performPlaudSync(resumeOnly) {
     const requestedScope = this.plaudSnapshotScope();
+    const requestedRecoveryScope = this.plaudDrainContext.getStore()?.recoveryScope || this.plaudRecoveryScope();
     const empty = () => ({ ...summarizePlaudSync([]), manifestPath: "", resumePendingCount: 0, error: "" });
     const superseded = () => ({ ...empty(), superseded: true, snapshot: this.supersededPlaudSnapshot() });
     if (!this.plaudEnabled() || this.plaudShuttingDown) {
@@ -2680,23 +2736,44 @@ class DomiIntegration {
     let current;
     if (!resumeOnly) {
       try { current = await this.plaudQueueForSync(); }
-      catch (error) { current = { ok: false, error: safePlaudSyncError(error) }; }
-      if (current?.superseded || requestedScope !== this.plaudSnapshotScope()) return superseded();
+      catch (error) {
+        const failure = classifyPlaudConnectionFailure(error, this.normalizePlaudBrowser(this.configProvider().plaudBrowser));
+        current = { ...failure, remoteStatus: failure.status, retryable: isRetryablePlaudReadFailure(error) };
+      }
+      if (current?.superseded || requestedScope !== this.plaudSnapshotScope() || requestedRecoveryScope !== this.plaudRecoveryScope()) return superseded();
       if (!current.ok || current.stale) return {
         ...empty(), ok: false, status: "failed", snapshot: current,
         resumePendingCount: localPending.length,
-        error: current.error || (current.remoteStatus === "auth_required"
+        preflight: true, submissionStarted: false, retryable: current.retryable === true,
+        recoveryScope: requestedRecoveryScope, errorCode: current.errorCode || "PLAUD_READ_FAILED",
+        errorStage: current.errorStage || "list",
+        ...(current.retryAfterMs !== undefined ? { retryAfterMs: current.retryAfterMs, retryAt: current.retryAt } : {}),
+        error: current.error || current.warning || (current.remoteStatus === "auth_required"
           ? "PLAUD 登录已失效，请在设置中重新登录并验证。"
           : "PLAUD 本轮远端读取未完成，未提交新的生成请求；已保留上次列表，请稍后重试。")
       };
     }
     const { script } = this.plaudPaths();
     const supportsRecovery = await this.plaudSupportsRecovery(script);
-    if (requestedScope !== this.plaudSnapshotScope()) return superseded();
+    if (requestedScope !== this.plaudSnapshotScope() || requestedRecoveryScope !== this.plaudRecoveryScope()) return superseded();
     const outputDir = path.join(this.plaudOutputDir, new Date().toISOString().replace(/[:.]/g, "-"));
     let results = [];
     let manifestPath = "";
     let operationError = "";
+    let discovery;
+    let safeDiscoveryContinuation;
+    let readCooldown;
+    const rememberRateLimit = (value = {}) => {
+      const details = plaudErrorDetails({ code: value.errorCode || value.code,
+        message: value.error || value.message, status: value.httpStatus || value.status, retryAfterMs: value.retryAfterMs });
+      if (details.code !== "PLAUD_RATE_LIMITED" && details.httpStatus !== 429) return;
+      const checkedAt = Date.now();
+      const retryAfterMs = Math.max(30_000, details.retryAfterMs || 0);
+      const retryAt = Math.max(checkedAt + retryAfterMs, Number.isFinite(value.retryAt) ? value.retryAt : 0);
+      if (!readCooldown || retryAt > readCooldown.retryAt) readCooldown = {
+        errorCode: "PLAUD_RATE_LIMITED", errorStage: "list", retryAfterMs, retryAt
+      };
+    };
     try {
       if (supportsRecovery) {
         const count = Math.min(100, Math.max(Number(current?.pendingCount) || 0, localPending.length, 1));
@@ -2705,11 +2782,33 @@ class DomiIntegration {
             resumeOnly ? "recover-pending" : "sync-pending", String(count), outputDir,
             resumeOnly ? "20" : "900", resumeOnly ? "3" : "8"], {
             timeout: resumeOnly ? 60_000 : 930_000, queue: "plaud", requirePlaudEnabled: true,
+            acceptPlaudSyncResults: true,
             releasePlaudSession: resumeOnly ? "resume-transcripts" : "sync-workflow", env: this.plaudRuntimeEnv()
           });
           // Whole sync-pending is never retried: it may already have sent POST.
           const response = resumeOnly ? await this.withPlaudReadRecovery(execute) : await execute();
           if (!Array.isArray(response.results)) throw new Error("PLAUD 同步结果不完整，已保留队列，请更新插件后重试。");
+          rememberRateLimit(response);
+          if (response.discovery) rememberRateLimit(response.discovery);
+          response.results.forEach(rememberRateLimit);
+          if (response.ok === false) operationError = safePlaudSyncError(response.error || "PLAUD 同步未完成，已保留现有任务和成果。");
+          if (response.discovery?.complete === false) {
+            discovery = { complete: false, errorCode: plaudErrorDetails({ code: response.discovery.errorCode }).code,
+              retryable: response.discovery.retryable === true,
+              error: safePlaudSyncError(response.discovery.error || "PLAUD 本轮新录音发现未完成，已保留现有任务。") };
+            operationError = discovery.error;
+            // Only a complete, explicit no-POST receipt permits continuing the
+            // user's intent. Missing fields and thrown/uncertain results do not.
+            if (!resumeOnly && response.submissionStarted === false && response.submitted === 0) {
+              const failure = classifyPlaudConnectionFailure(Object.assign(new Error(discovery.error), {
+                code: discovery.errorCode, stage: "list", retryAfterMs: response.discovery.retryAfterMs ?? response.retryAfterMs
+              }), this.normalizePlaudBrowser(this.configProvider().plaudBrowser));
+              safeDiscoveryContinuation = { preflight: true, submissionStarted: false, recoveryScope: requestedRecoveryScope,
+                retryable: discovery.retryable && isRetryablePlaudReadFailure({ code: discovery.errorCode }),
+                errorCode: discovery.errorCode, errorStage: "list",
+                ...(failure.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs, retryAt: failure.retryAt } : {}) };
+            }
+          }
           results = response.results.map(item => this.normalizePlaudSyncResult(item,
             resumeOnly || baseline.some(record => record.fileId === item.fileId) ? "recovered" : "generated"));
           manifestPath = response.manifestPath || "";
@@ -2728,13 +2827,25 @@ class DomiIntegration {
           operationError = "旧版 PLAUD 插件不支持安全续接；已恢复可读成果，请更新插件后再生成其余录音。";
         }
       }
-    } catch (error) { operationError = safePlaudSyncError(error); }
+    } catch (error) { rememberRateLimit(error); operationError = safePlaudSyncError(error); }
 
-    if (requestedScope !== this.plaudSnapshotScope()) return superseded();
+    if (requestedScope !== this.plaudSnapshotScope() || requestedRecoveryScope !== this.plaudRecoveryScope()) return superseded();
+    results.forEach(rememberRateLimit);
     let snapshot;
-    try { snapshot = await this.plaudQueueForSync(); }
-    catch (error) { snapshot = { ok: false, error: safePlaudSyncError(error) }; }
-    if (snapshot?.superseded || requestedScope !== this.plaudSnapshotScope()) return superseded();
+    if (readCooldown?.retryAt > Date.now()) {
+      // A final cosmetic list refresh is still a remote read. Respect the
+      // longest vendor cooldown, including one returned by an individual ID.
+      const cached = current || (this.plaudVerifiedSnapshot?.scope === requestedScope ? this.plaudVerifiedSnapshot.snapshot : null);
+      snapshot = { ...(cached || {}), ok: false, stale: true, items: cached?.items || [],
+        remoteStatus: "rate_limited", retryable: true, ...readCooldown,
+        warning: "PLAUD 服务暂时限流，已保留列表和已下载成果，将在等待时间结束后继续读取。",
+        error: "PLAUD_RATE_LIMITED: PLAUD 服务暂时限流，等待时间结束前不会再次读取。" };
+      if (safeDiscoveryContinuation) safeDiscoveryContinuation = { ...safeDiscoveryContinuation, ...readCooldown };
+    } else {
+      try { snapshot = await this.plaudQueueForSync(); }
+      catch (error) { snapshot = { ok: false, error: safePlaudSyncError(error) }; }
+    }
+    if (snapshot?.superseded || requestedScope !== this.plaudSnapshotScope() || requestedRecoveryScope !== this.plaudRecoveryScope()) return superseded();
     // Read local commits after the final remote read: a download may complete
     // during that read, even if the CLI itself lost its response.
     const latest = this.loadPlaudWorkflowRecords();
@@ -2755,7 +2866,7 @@ class DomiIntegration {
     const listRefreshFailed = !snapshot?.ok || snapshot.stale === true;
     const summary = summarizePlaudSync(results, { listRefreshFailed, operationFailed: Boolean(operationError) });
     const retained = this.retainPlaudSyncSnapshot(snapshot, current, summary.results);
-    return { ...summary, manifestPath, snapshot: retained,
+    return { ...summary, manifestPath, snapshot: retained, ...(discovery ? { discovery } : {}), ...safeDiscoveryContinuation,
       resumePendingCount: this.loadPlaudWorkflowRecords().filter(plaudRecoveryCandidate).length,
       warning: operationError || (listRefreshFailed ? retained.warning : ""),
       error: operationError || (listRefreshFailed ? safePlaudSyncError(snapshot.error || snapshot.warning || "PLAUD 列表暂时不可用。") : "") };

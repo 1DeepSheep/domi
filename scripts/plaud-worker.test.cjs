@@ -256,3 +256,51 @@ test("PLAUD worker server read retry rebuilds sessions but never replays execute
   assert.equal(globalThis.__plaudServerTest.id, "recording-file-id");
   assert.equal(globalThis.__plaudServerTest.downloads, 2); assert.equal(globalThis.__plaudServerTest.posts, 1);
 });
+
+test("server releases the final broken client and a later request starts fresh", async t => {
+  const { runServerCommand, closeServerClient } = require("../electron/plaud-worker.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-final-failure-"));
+  const clientPath = path.join(root, "skills/plaud/vendor/plaud-cli/src/plaud.js");
+  fs.mkdirSync(path.dirname(clientPath), { recursive: true });
+  globalThis.__plaudFinalFailure = { inits: 0, closes: 0, reads: 0 };
+  fs.writeFileSync(clientPath, `module.exports.PlaudClient = class {
+    async init() { globalThis.__plaudFinalFailure.inits++; }
+    async close() { globalThis.__plaudFinalFailure.closes++; }
+    async listFiles() { if (++globalThis.__plaudFinalFailure.reads <= 3) throw new Error('Failed to fetch'); return []; }
+  };`);
+  t.after(async () => { await closeServerClient(); delete globalThis.__plaudFinalFailure; fs.rmSync(root, { recursive: true, force: true }); });
+  await assert.rejects(runServerCommand(root, "list", [], { sleep: async () => {} }), /Failed to fetch/);
+  assert.equal(globalThis.__plaudFinalFailure.closes, 3);
+  await runServerCommand(root, "list", [], { sleep: async () => {} });
+  assert.equal(globalThis.__plaudFinalFailure.inits, 4);
+});
+
+test("server passes one deadline through initialization and list and does not cold-retry an exhausted budget", async t => {
+  const { runServerCommand, closeServerClient } = require("../electron/plaud-worker.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-read-deadline-"));
+  const clientPath = path.join(root, "skills/plaud/vendor/plaud-cli/src/plaud.js");
+  fs.mkdirSync(path.dirname(clientPath), { recursive: true });
+  globalThis.__plaudDeadline = { inits: 0, closes: 0, reads: 0 };
+  fs.writeFileSync(clientPath, `module.exports.PlaudClient = class {
+    constructor(options) { globalThis.__plaudDeadline.initDeadline = options.operationDeadlineAt; }
+    async init() { globalThis.__plaudDeadline.inits++; }
+    async close() { globalThis.__plaudDeadline.closes++; }
+    async listFiles(options) { const s = globalThis.__plaudDeadline; s.reads++; s.readDeadline = options.deadlineAt; throw new Error('Failed to fetch'); }
+  };`);
+  t.after(async () => { await closeServerClient(); delete globalThis.__plaudDeadline; fs.rmSync(root, { recursive: true, force: true }); });
+  const diagnostics = [];
+  await assert.rejects(runServerCommand(root, "list", [], {
+    now: () => 1000, deadlineAt: 5000, sleep: async () => { throw new Error("no retry budget remains"); },
+    onDiagnostic: value => diagnostics.push(value)
+  }), /Failed to fetch/);
+  assert.deepEqual(globalThis.__plaudDeadline, { inits: 1, closes: 1, reads: 1, initDeadline: 5000, readDeadline: 5000 });
+  assert.deepEqual(diagnostics.at(-1), { code: "PLAUD_NETWORK_TIMEOUT", stage: "list" });
+});
+
+test("structured worker diagnostics retain vendor Retry-After without private request data", () => {
+  const { plaudErrorDetails } = require("../electron/plaud-worker.cjs");
+  const syntheticAuthorization = ["Bearer", "fixture".repeat(3)].join(" ");
+  const error = Object.assign(new Error(`HTTP 429 https://private.example/recording-secret Authorization: ${syntheticAuthorization}`),
+    { code: "PLAUD_RATE_LIMITED", status: 429, retryAfterMs: 120000 });
+  assert.deepEqual(plaudErrorDetails(error, "list"), { code: "PLAUD_RATE_LIMITED", stage: "list", httpStatus: 429, retryAfterMs: 120000 });
+});

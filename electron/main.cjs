@@ -4776,11 +4776,15 @@ ipcMain.handle("domi:plaud-workflow-completion", async (_event, request) => {
       errorCode: "PLAUD_WORKFLOW_STATE_UNAVAILABLE", error: "无法核验本地录音工作流状态。" };
   }
 });
-ipcMain.handle("domi:plaud-sync", async () => {
+ipcMain.handle("domi:plaud-sync", async (_event, request = {}) => {
   try {
+    const integration = getDomiIntegration();
+    if (request.expectedRecoveryScope && request.expectedRecoveryScope !== integration.plaudRecoveryScope()) {
+      return integration.syncPlaud(request);
+    }
     const result = await serviceCoordinator.run(
       "domi:plaud-sync",
-      () => getDomiIntegration().syncPlaud(),
+      () => integration.syncPlaud(request),
       // A structured partial/failure result carries per-record progress. Keep
       // it intact instead of reducing it to one thrown error and losing paths.
       { force: true, allowStale: false, retries: 0 }

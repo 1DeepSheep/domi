@@ -122,6 +122,7 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", li
   if (request.args[0] === "crash") process.exit(9);
   process.stdout.write(JSON.stringify({id:request.id,ok:true,result:{ok:true,items:[]}}) + "\\n");
 });
+
 `);
   const diagnostics = [];
   const broker = new PlaudSessionBroker({ executable: process.execPath, workerPath,
@@ -134,4 +135,28 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", li
   await broker.stop("test-finished");
   assert.deepEqual(diagnostics.at(-1), { operation: "worker-exit", reason: "test-finished", code: "SIGTERM", pendingCount: 0 });
   assert.doesNotMatch(JSON.stringify(diagnostics), /private-recording|synthetic-worker|domi-plaud-exit/);
+});
+
+test("broker keeps structured failure fields and drains diagnostic plus response in the same chunk", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-diagnostic-"));
+  const workerPath = path.join(root, "synthetic-worker.cjs");
+  fs.writeFileSync(workerPath, `require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+    const request = JSON.parse(line);
+    const diagnostic = {code:'PLAUD_RATE_LIMITED',stage:'list',httpStatus:429,retryAfterMs:120000,privateUrl:'https://private.invalid/secret'};
+    process.stdout.write(JSON.stringify({id:request.id,type:'diagnostic',diagnostic})+'\\n'+JSON.stringify({id:request.id,ok:false,error:'PLAUD_RATE_LIMITED: paused',diagnostic})+'\\n');
+  });`);
+  const diagnostics = [];
+  const broker = new PlaudSessionBroker({ executable: process.execPath, workerPath,
+    requestTimeoutMs: 2000, shutdownTimeoutMs: 1000, onDiagnostic: event => diagnostics.push(event) });
+  t.after(async () => { await broker.stop("test-cleanup"); fs.rmSync(root, { recursive: true, force: true }); });
+  await assert.rejects(broker.request("list", ["private-recording-name"], root), error => {
+    assert.equal(error.code, "PLAUD_RATE_LIMITED");
+    assert.equal(error.stage, "list");
+    assert.equal(error.httpStatus, 429);
+    assert.equal(error.retryAfterMs, 120000);
+    assert.equal(error.privateUrl, undefined);
+    return true;
+  });
+  assert.deepEqual(diagnostics[0], { operation: "list", outcome: "failed", code: "PLAUD_RATE_LIMITED", stage: "list", httpStatus: 429, retryAfterMs: 120000 });
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private|secret|https/);
 });

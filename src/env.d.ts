@@ -148,7 +148,7 @@ declare global {
         request?: DomiPlaudConnectionRequest
       ) => Promise<DomiPlaudConnectionResult>;
       listPlaud: (request?: DomiPlaudListRequest) => Promise<DomiPlaudSnapshot>;
-      syncPlaud: () => Promise<DomiPlaudSyncResult>;
+      syncPlaud: (request?: { expectedRecoveryScope?: string }) => Promise<DomiPlaudSyncResult>;
       resumePlaudTranscripts: () => Promise<DomiPlaudSyncResult>;
       onPlaudReaderAvailability?: (callback: (status: DomiPlaudReaderAvailability) => void) => () => void;
       plaudWorkflowCompletion: (request: { fileId: string }) => Promise<DomiPlaudWorkflowCompletion>;
@@ -1338,6 +1338,10 @@ export type DomiPlaudSnapshot = {
   items?: DomiPlaudItem[];
   remoteStatus?: DomiPlaudRemoteStatus;
   retryable?: boolean;
+  errorCode?: string;
+  errorStage?: string;
+  retryAfterMs?: number;
+  retryAt?: number;
   lastSuccessfulSnapshot?: DomiPlaudSnapshot;
   warning?: string;
   error?: string;
@@ -1347,6 +1351,14 @@ export type DomiPlaudSyncResult = {
   ok: boolean;
   paused?: boolean;
   superseded?: boolean;
+  submissionStarted?: boolean;
+  preflight?: boolean;
+  retryable?: boolean;
+  recoveryScope?: string;
+  errorCode?: string;
+  errorStage?: string;
+  retryAfterMs?: number;
+  retryAt?: number;
   status?: "complete" | "partial" | "waiting" | "failed" | "paused";
   generatedCount?: number;
   recoveredCount?: number;

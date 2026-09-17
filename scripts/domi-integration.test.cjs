@@ -3940,7 +3940,9 @@ test("PLAUD sync recovers a cold authorization refresh within the same click", a
   assert.equal(result.ok, true);
   assert.equal(result.generatedCount, 1);
   assert.equal(generationCalls, 1);
-  assert.deepEqual(queueRequests, [undefined, { fresh: true }, undefined]);
+  assert.deepEqual(queueRequests.map(request => request.fresh === true), [false, true, false]);
+  assert.ok(queueRequests.every(request => Number.isFinite(request.deadlineAt)));
+  assert.ok(queueRequests[1].deadlineAt > queueRequests[0].deadlineAt);
   assert.deepEqual(stoppedReasons, ["sync-read-recovery", "sync-workflow"]);
 });
 
@@ -4766,6 +4768,187 @@ test("PLAUD legacy recovery has one 30 second read budget per round and fairly r
   };
   await integration.resumePlaudTranscripts(); assert.deepEqual(ids, ["first-record-id"]);
   await integration.resumePlaudTranscripts(); assert.deepEqual(ids, ["first-record-id", "second-record-id"]);
+});
+
+test("PLAUD cached preflight preserves refusal, rate limit and owner-lock causes without submitting", async t => {
+  for (const [code, status, retryable, delay] of [
+    ["PLAUD_ACCESS_DENIED", "access_denied", false, undefined],
+    ["PLAUD_RATE_LIMITED", "rate_limited", true, 120000],
+    ["PLAUD_PROFILE_LOCKED", "profile_locked", true, 5000]
+  ]) {
+    const { integration } = plaudSyncFixture(t);
+    const cache = new Map();
+    integration.stateStore = { loadCache: key => cache.get(key), saveCache: (key, value) => cache.set(key, { value }) };
+    integration.plaudQueue = DomiIntegration.prototype.plaudQueue.bind(integration);
+    integration.runPlaudWorker = async () => ({ pendingCount: 1, items: [{ fileId: "cached-file", fileName: "Cached" }] });
+    await integration.plaudQueue();
+    let reads = 0;
+    integration.runPlaudWorker = async () => { reads++; throw Object.assign(new Error(code), {
+      code, stage: "list", ...(code === "PLAUD_RATE_LIMITED" ? { retryAfterMs: delay } : {})
+    }); };
+    integration.runJson = integration.stopPlaudBackgroundSession = async () => { throw new Error("must not submit or take another owner's browser"); };
+    const result = await integration.syncPlaud();
+    assert.equal(reads, 1);
+    assert.equal(result.ok, false);
+    assert.equal(result.snapshot.stale, true);
+    assert.equal(result.snapshot.items[0].fileId, "cached-file");
+    assert.equal(result.snapshot.remoteStatus, status);
+    assert.equal(result.errorCode, code);
+    assert.equal(result.errorStage, "list");
+    assert.equal(result.submissionStarted, false);
+    assert.equal(result.preflight, true);
+    assert.equal(result.retryable, retryable);
+    assert.equal(result.recoveryScope, integration.plaudRecoveryScope());
+    assert.equal(result.retryAfterMs, delay);
+    assert.doesNotMatch(result.error, /本轮远端读取未完成/);
+    if (delay !== undefined) assert.ok(result.retryAt >= Date.now() + delay - 1000);
+  }
+});
+
+test("PLAUD pending sync scope expires on login and is checked again after preflight", async t => {
+  const { integration } = plaudSyncFixture(t);
+  const scope = integration.plaudRecoveryScope();
+  integration.plaudDoctor = async () => ({ ok: true });
+  integration.runPlaudConnectionCommand = async () => ({ ok: true, connected: true });
+  await integration.loginPlaud();
+  let reads = 0;
+  integration.plaudQueue = async () => { reads++; throw new Error("expired scope must stop before reading"); };
+  assert.equal((await integration.syncPlaud({ expectedRecoveryScope: scope })).superseded, true);
+  assert.equal(reads, 0);
+  integration.plaudQueue = async () => {
+    integration.plaudRecoveryEpoch = "changed-during-preflight";
+    return { ok: true, stale: false, pendingCount: 1, items: [] };
+  };
+  integration.runJson = async () => { throw new Error("changed login must stop before POST"); };
+  assert.equal((await integration.syncPlaud()).superseded, true);
+});
+
+test("PLAUD sync rechecks login scope after awaiting browser release and before spawning CLI", async t => {
+  const { integration } = plaudSyncFixture(t);
+  let spawned = 0;
+  integration.stopPlaudBackgroundSession = async () => {
+    await Promise.resolve();
+    integration.plaudRecoveryEpoch = "login-changed-during-browser-release";
+  };
+  integration.execTrackedPlaudFile = async () => { spawned++; return { stdout: '{"ok":true}' }; };
+  const context = { scope: integration.plaudSnapshotScope(), recoveryScope: integration.plaudRecoveryScope() };
+  await assert.rejects(integration.plaudDrainContext.run(context, () => integration.runJson(process.execPath, ["synthetic-only"], {
+    queue: "plaud", releasePlaudSession: "sync-workflow", requirePlaudEnabled: true
+  })), /PLAUD_READER_SCOPE_CHANGED/);
+  assert.equal(spawned, 0);
+});
+
+test("PLAUD incomplete discovery cannot report a complete sync after recovering known transcripts", async t => {
+  const { integration, artifact } = plaudSyncFixture(t);
+  integration.plaudQueue = async () => ({ ok: true, stale: false, pendingCount: 1, items: [] });
+  let calls = 0;
+  integration.runJson = async () => {
+    calls++;
+    return { results: [{ fileId: "known", transcriptPath: artifact(), outcome: "ready", source: "recovered" }],
+      discovery: { complete: false, errorCode: "PLAUD_NETWORK_TIMEOUT", retryable: true, error: "Failed to fetch" } };
+  };
+  const result = await integration.syncPlaud();
+  assert.equal(calls, 1);
+  assert.equal(result.status, "partial");
+  assert.equal(result.ok, false);
+  assert.equal(result.discovery.complete, false);
+  assert.equal(result.submissionStarted, undefined, "an entered sync workflow cannot be replayed as preflight");
+  assert.ok(result.error);
+});
+
+test("PLAUD discovery continues only with an exact no-submission receipt, never an uncertain result", async t => {
+  for (const [receipt, safe] of [
+    [{ submissionStarted: false, submitted: 0 }, true],
+    [{ submissionStarted: false, submitted: "0" }, false],
+    [{ submissionStarted: false }, false],
+    [{ submissionStarted: true, submitted: 0 }, false]
+  ]) {
+    const { integration } = plaudSyncFixture(t);
+    integration.plaudQueue = async () => ({ ok: true, stale: false, pendingCount: 1, items: [] });
+    integration.runJson = async () => ({ ok: false, results: [], ...receipt,
+      discovery: { complete: false, errorCode: "PLAUD_RATE_LIMITED", retryable: true, retryAfterMs: 75000, error: "HTTP 429" } });
+    const result = await integration.syncPlaud();
+    assert.equal(result.ok, false);
+    assert.equal(result.submissionStarted, safe ? false : undefined);
+    if (safe) {
+      assert.equal(result.preflight, true);
+      assert.equal(result.retryable, true);
+      assert.equal(result.retryAfterMs, 75000);
+      assert.equal(result.recoveryScope, integration.plaudRecoveryScope());
+    }
+  }
+  for (const [errorCode, retryable] of [["PLAUD_READ_TRANSIENT", true], ["PLAUD_REMOTE_READ_FAILED", false]]) {
+    const { integration } = plaudSyncFixture(t);
+    integration.plaudQueue = async () => ({ ok: true, stale: false, pendingCount: 1, items: [] });
+    integration.runJson = async () => ({ ok: false, results: [], submissionStarted: false, submitted: 0,
+      discovery: { complete: false, errorCode, retryable: true, error: "read unavailable" } });
+    const result = await integration.syncPlaud();
+    assert.equal(result.errorCode, errorCode);
+    assert.equal(result.retryable, retryable, "unknown discovery errors must not gain automatic continuation");
+  }
+});
+
+test("PLAUD command boundary preserves structured failed sync receipts and rejects ordinary failures", async t => {
+  const { integration, dir } = plaudSyncFixture(t);
+  const script = path.join(dir, "synthetic-receipt.cjs");
+  const receipt = { ok: false, results: [], submissionStarted: false, submitted: 0,
+    discovery: { complete: false, errorCode: "PLAUD_NETWORK_TIMEOUT", retryable: true, error: "read failed" } };
+  fs.writeFileSync(script, `process.stdout.write(${JSON.stringify(JSON.stringify(receipt))});`);
+  assert.deepEqual(await integration.runJson(process.execPath, [script], { queue: "plaud", acceptPlaudSyncResults: true }), receipt);
+  await assert.rejects(integration.runJson(process.execPath, [script], { queue: "plaud" }), /命令执行失败/);
+});
+
+test("PLAUD discovery rate limit skips final remote refresh and keeps its safe continuation cooldown", async t => {
+  const { integration } = plaudSyncFixture(t);
+  let submittedWorkflow = false, finalReads = 0, initialReads = 0;
+  integration.plaudQueueForSync = async () => {
+    if (submittedWorkflow) finalReads++; else initialReads++;
+    return { ok: true, stale: false, pendingCount: 1, items: [{ fileId: "cached-file", fileName: "Cached" }] };
+  };
+  integration.runJson = async () => {
+    submittedWorkflow = true;
+    return { ok: false, submitted: 0, submissionStarted: false, results: [],
+      discovery: { complete: false, errorCode: "PLAUD_RATE_LIMITED", retryable: true, retryAfterMs: 120000, error: "HTTP 429" } };
+  };
+  const startedAt = Date.now();
+  const result = await integration.syncPlaud();
+  assert.equal(initialReads, 1);
+  assert.equal(finalReads, 0);
+  assert.equal(result.snapshot.items[0].fileId, "cached-file");
+  assert.equal(result.snapshot.stale, true);
+  assert.equal(result.snapshot.remoteStatus, "rate_limited");
+  assert.equal(result.snapshot.retryable, true);
+  assert.ok(result.snapshot.retryAt >= startedAt + 120000);
+  assert.equal(result.preflight, true);
+  assert.equal(result.submissionStarted, false);
+  assert.equal(result.retryAt, result.snapshot.retryAt);
+});
+
+test("PLAUD per-record rate limits use the longest cooldown and never authorize replaying submitted work", async t => {
+  for (const resumeOnly of [false, true]) {
+    const { integration } = plaudSyncFixture(t, [{ fileId: "existing", stage: "generating", generationAcceptedAt: "accepted" }]);
+    let ranWorkflow = false, finalReads = 0;
+    integration.plaudQueueForSync = async () => {
+      if (ranWorkflow) finalReads++;
+      return { ok: true, stale: false, pendingCount: 1, items: [{ fileId: "existing", fileName: "Existing" }] };
+    };
+    integration.runJson = async () => {
+      ranWorkflow = true;
+      return { ok: false, errorCode: "PLAUD_RATE_LIMITED", retryAfterMs: 45000, submissionStarted: true, submitted: 1,
+        results: [60000, 180000].map((retryAfterMs, index) => ({ fileId: `limited-${index}`, stage: "generating",
+          outcome: "retryable", errorCode: "PLAUD_RATE_LIMITED", retryAfterMs, error: "HTTP 429" })) };
+    };
+    const startedAt = Date.now();
+    const result = resumeOnly ? await integration.resumePlaudTranscripts() : await integration.syncPlaud();
+    assert.equal(finalReads, 0);
+    assert.equal(result.snapshot.remoteStatus, "rate_limited");
+    assert.equal(result.snapshot.retryAfterMs, 180000);
+    assert.ok(result.snapshot.retryAt >= startedAt + 180000);
+    assert.equal(result.submissionStarted, undefined);
+    assert.equal(result.preflight, undefined);
+    assert.equal(result.snapshot.stale, true);
+    assert.equal(result.results.filter(item => item.errorCode === "PLAUD_RATE_LIMITED").length, 2);
+  }
 });
 
 function projectBrandFixture(t) {
