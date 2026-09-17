@@ -750,7 +750,237 @@ async function verifyPlaudPluginActivationLease() {
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 }
 
-Promise.all([verifyPlaudPluginActivationLease(), verifyBoundedRemoteStartup(), verifyActivationGate(), verifyRecoveryReaderLease(),
+async function verifyLocalPlaudCompletionLease() {
+  const { DomiIntegration } = require("../electron/domi-integration.cjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-plaud-verifier-lease-"));
+  const startedPath = path.join(directory, "verifier-started");
+  const releasePath = path.join(directory, "release-verifier");
+  let pluginRoot = path.join(directory, "plugin-v1");
+  const installFixture = root => {
+    const scripts = path.join(root, "skills", "plaud", "scripts");
+    fs.mkdirSync(scripts, { recursive: true });
+    fs.writeFileSync(path.join(scripts, "quality.cjs"), `module.exports = ${JSON.stringify({
+      ok: true, fileId: "synthetic", stage: "notes_non_project", checks: { notesAudit: "passed" }
+    })};`);
+    // Run a real child, keeping a dependency unread until the test releases it.
+    // Removing its plugin directory during verification would fail the receipt.
+    fs.writeFileSync(path.join(scripts, "plaud.js"), `
+      const fs = require("node:fs");
+      fs.writeFileSync(${JSON.stringify(startedPath)}, "started");
+      const timeout = setTimeout(() => process.exit(1), 5000);
+      function finish() {
+        if (!fs.existsSync(${JSON.stringify(releasePath)})) return setTimeout(finish, 5);
+        clearTimeout(timeout);
+        console.log(JSON.stringify(require("./quality.cjs")));
+      }
+      finish();
+    `);
+  };
+  const waitForStarted = async () => {
+    const deadline = Date.now() + 5000;
+    while (!fs.existsSync(startedPath)) {
+      assert(Date.now() < deadline, "The synthetic local verifier must start");
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  };
+  let handler;
+  try {
+    installFixture(pluginRoot);
+    const transcriptPath = path.join(directory, "transcript.txt");
+    const notesPath = path.join(directory, "notes.md");
+    fs.writeFileSync(transcriptPath, "Synthetic transcript");
+    fs.writeFileSync(notesPath, "Synthetic notes");
+    fs.writeFileSync(path.join(directory, "plaud-workflow.json"), JSON.stringify({ records: {
+      synthetic: { fileId: "synthetic", stage: "notes_non_project", transcriptPath, notesPath }
+    } }));
+    const integration = new DomiIntegration({
+      stateStore: { loadCache() {}, saveCache() {} },
+      configProvider: () => ({ plaudConnectionMode: "enabled", plaudBrowser: "chrome" }),
+      plaudStateDir: directory, podcastCacheDir: path.join(directory, "podcasts"),
+      plaudBroker: { stop: async () => {} }
+    });
+    integration.findPlugin = () => ({ root: pluginRoot });
+    const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+    const activationHelper = main.match(/async function withPlaudPluginActivation\([\s\S]*?\n\}\n/)[0];
+    const completionHandler = main.match(/ipcMain\.handle\("domi:plaud-workflow-completion", async \([\s\S]*?\n\}\);/)[0];
+    let mutationEntered, releaseMutation;
+    const mutationStarted = new Promise(resolve => { mutationEntered = resolve; });
+    const mutationMayFinish = new Promise(resolve => { releaseMutation = resolve; });
+    const context = { crypto: require("node:crypto"), getDomiIntegration: () => integration,
+      ipcMain: { handle: (_name, callback) => { handler = callback; } } };
+    vm.createContext(context);
+    vm.runInContext(activationHelper, context);
+    const gate = new DomiPluginActivationGate({ isBusy: () => false,
+      installedInfo: () => ({ manifest: { version: "1.0.0" } }), onActivated: () => {},
+      ensure: () => context.withPlaudPluginActivation(async () => {
+        mutationEntered();
+        await mutationMayFinish;
+        fs.rmSync(pluginRoot, { recursive: true, force: true });
+        pluginRoot = path.join(directory, "plugin-v2");
+        installFixture(pluginRoot);
+        return { ok: true, updated: true };
+      }) });
+    context.getDomiPluginActivationGate = () => gate;
+    vm.runInContext(completionHandler, context);
+
+    // A local verifier remains independent of the browser Profile owner.
+    await integration.reservePlaudForWorkflow("synthetic-recording-owner");
+    const verifying = handler(null, { fileId: "synthetic" });
+    await waitForStarted();
+    assert.equal(gate.readers, 1);
+    assert.equal(integration.plaudCommandQueue.snapshot().activeCount, 0);
+    assert.equal((await gate.ensureWhenIdle({ enabled: true })).deferred, true,
+      "An active local verifier must defer plugin cache replacement");
+    assert.equal(fs.existsSync(pluginRoot), true);
+    fs.writeFileSync(releasePath, "release");
+    assert.equal((await verifying).outcome, "completed");
+    assert.equal(integration.plaudActiveWorkflowOwner, "synthetic-recording-owner");
+    integration.releasePlaudWorkflow("synthetic-recording-owner");
+    assert.equal(gate.readers, 0);
+
+    // A verifier arriving after activation waits before resolving its script.
+    fs.rmSync(startedPath);
+    const activation = gate.ensureWhenIdle({ enabled: true });
+    await mutationStarted;
+    const following = handler(null, { fileId: "synthetic" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fs.existsSync(startedPath), false);
+    releaseMutation();
+    assert.equal((await activation).updated, true);
+    assert.equal((await following).outcome, "completed");
+    assert.equal(gate.readers, 0);
+  } finally {
+    fs.writeFileSync(releasePath, "release");
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+async function verifyLongPluginOperationLeases() {
+  const { DomiIntegration } = require("../electron/domi-integration.cjs");
+  const { ServiceCoordinator, TaskQueue } = require("../electron/service-coordinator.cjs");
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const gateDefinition = main.match(/function getDomiPluginActivationGate\([\s\S]*?\n\}\n/)[0];
+  const leaseDefinition = main.match(/async function withPlaudPluginActivation\([\s\S]*?\n\}\n/)[0];
+  const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
+  const nextTick = () => new Promise(resolve => setImmediate(resolve));
+  const within = async promise => {
+    let timer;
+    try { return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Plugin lease deadlock")), 5000);
+    })]); } finally { clearTimeout(timer); }
+  };
+  for (const operationName of ["domi:plaud-sync", "domi:plaud-resume", "domi:podcast-process", "domi:sync"]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-long-plugin-operation-"));
+    const legacy = operationName === "domi:sync";
+    let selectedPlugin = path.join(root, "plugin-v1");
+    const install = () => {
+      const scripts = path.join(selectedPlugin, "skills/investment-mgmt/scripts");
+      fs.mkdirSync(scripts, { recursive: true });
+      fs.writeFileSync(path.join(scripts, "ensure-intake-time-fields.js"), 'console.log(JSON.stringify(require("./fixture.cjs")));');
+      fs.writeFileSync(path.join(scripts, "fixture.cjs"), 'module.exports = {ok:true};');
+    };
+    install();
+    let started = deferred(), finishOperation = deferred(), startCount = 0, mutationStarted = deferred(), finishMutation = deferred();
+    const integration = new DomiIntegration({
+      stateStore: { loadCache() {}, saveCache() {} },
+      configProvider: () => ({ plaudConnectionMode: "enabled", plaudBrowser: "chrome" }),
+      plaudStateDir: root, podcastCacheDir: path.join(root, "podcasts"),
+      plaudBroker: { stop: async () => {} }
+    });
+    integration.findPlugin = () => ({ root: selectedPlugin, version: path.basename(selectedPlugin) });
+    integration.performPlaudSync = integration.processPodcastEpisodeOnce = async () => {
+      startCount++; started.resolve(); await finishOperation.promise; return { ok: true };
+    };
+    // This case executes the real legacy sync, migration and child process. Its
+    // migration deliberately waits in the real lark queue before loading code.
+    if (legacy) {
+      integration.readProjectConfig = () => ({ backend: "feishu" });
+      integration.status = async () => ({ lark: { ok: true } });
+      integration.resolvePeopleBase = () => ({});
+      integration.fetchRecords = async () => ({ total: 0, records: [] });
+      integration.normalizeProjects = integration.normalizePeople = () => [];
+      integration.larkCommandQueue = new TaskQueue(1);
+      const originalQueueRun = integration.larkCommandQueue.run.bind(integration.larkCommandQueue);
+      integration.larkCommandQueue.run = operation => { startCount++; started.resolve(); return originalQueueRun(operation); };
+    }
+    let handler, mutationCount = 0;
+    const context = {
+      crypto: require("node:crypto"), DomiPluginActivationGate, domiPluginActivationGate: null,
+      domiIntegration: integration, getDomiIntegration: () => integration,
+      updateRestartPreparing: false, activeRuns: new Map(), startingCodexRunIds: new Set(),
+      codexClientIdleForSkillReload: () => true, resetCodexClient() {},
+      serviceCoordinator: new ServiceCoordinator(),
+      ipcMain: { handle: (_name, callback) => { handler = callback; } },
+      getDomiPluginManager: () => ({ installedInfo: () => ({ manifest: { version: "1.0.0" } }),
+        ensure: () => context.withPlaudPluginActivation(async () => {
+          mutationCount++; mutationStarted.resolve(); await finishMutation.promise;
+          fs.rmSync(selectedPlugin, { recursive: true, force: true });
+          selectedPlugin = path.join(root, "plugin-v2"); install();
+          return { ok: true, updated: true };
+        }) })
+    };
+    vm.createContext(context);
+    vm.runInContext(leaseDefinition + gateDefinition, context);
+    const registration = main.match(new RegExp(`ipcMain\\.handle\\("${operationName}", async \\([\\s\\S]*?\\n\\}\\);`))[0];
+    vm.runInContext(registration, context);
+    const gate = context.getDomiPluginActivationGate();
+    const request = operationName === "domi:podcast-process" ? { jobId: "synthetic" } : {};
+    let queuedBlock;
+    try {
+      if (legacy) queuedBlock = integration.larkCommandQueue.run(() => finishOperation.promise);
+      // Ignore the queue blocker when observing the actual migration.
+      if (legacy) { started = deferred(); startCount = 0; }
+      const existing = handler(null, request);
+      await within(started.promise);
+      assert.equal(gate.readers, 1, operationName);
+      if (legacy) assert.equal(integration.larkCommandQueue.snapshot().pendingCount, 1);
+      assert.equal((await gate.ensureWhenIdle({ enabled: true })).deferred, true, operationName);
+      assert.equal(gate.pending, null, "An old long operation must not occupy activation's global pending slot");
+      await within(gate.waitForActivation());
+      assert.equal(mutationCount, 0, "Ordinary Codex preparation can proceed without waiting for old background work");
+      finishOperation.resolve();
+      assert.equal((await within(existing)).ok, true);
+      if (queuedBlock) await queuedBlock;
+      assert.equal(gate.readers, 0);
+
+      // Also cover internal pre-existing promises without an IPC read lease.
+      if (!legacy) {
+        started = deferred(); finishOperation = deferred();
+        const internal = operationName === "domi:podcast-process"
+          ? integration.processPodcastEpisode(request) : integration.resumePlaudTranscripts();
+        await within(started.promise);
+        assert.equal(gate.readers, 0);
+        assert.equal((await gate.ensureWhenIdle({ enabled: true })).deferred, true,
+          "isBusy protects internal long operations before an IPC lease exists");
+        assert.equal(gate.pending, null);
+        finishOperation.resolve(); await within(internal);
+      }
+
+      // If activation wins, the new operation must not publish a long promise
+      // that activation's profile drain would then wait for in the opposite order.
+      started = deferred(); finishOperation = deferred(); startCount = 0;
+      const activating = gate.ensureWhenIdle({ enabled: true });
+      await within(mutationStarted.promise);
+      const following = handler(null, request);
+      await nextTick();
+      assert.equal(startCount, 0, "Do not enter the integration or lark queue before activation completes");
+      assert.equal(integration.plaudSyncPromise, null);
+      assert.equal(integration.podcastProcessPromises.size, 0);
+      finishMutation.resolve();
+      assert.equal((await within(activating)).updated, true);
+      if (!legacy) { await within(started.promise); finishOperation.resolve(); }
+      assert.equal((await within(following)).ok, true);
+      assert.equal(gate.readers, 0);
+      assert.equal(mutationCount, 1);
+      assert.equal(integration.plaudReaderPaused(), false);
+    } finally {
+      finishOperation.resolve(); finishMutation.resolve();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+}
+
+Promise.all([verifyLongPluginOperationLeases(), verifyLocalPlaudCompletionLease(), verifyPlaudPluginActivationLease(), verifyBoundedRemoteStartup(), verifyActivationGate(), verifyRecoveryReaderLease(),
   verifyReadOnlyInstalledCheck(), verifyReadinessDiagnostics()])
   .then(() => console.log("domi plugin manager tests passed."))
   .catch((error) => {

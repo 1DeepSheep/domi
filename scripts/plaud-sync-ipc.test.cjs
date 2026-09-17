@@ -19,6 +19,7 @@ function fixture(integration) {
     ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
     serviceCoordinator: coordinator,
     getDomiIntegration: () => integration,
+    getDomiPluginActivationGate: () => ({ withStableClient: operation => operation() }),
     Error
   });
   assert.equal(handlers.size, 2);

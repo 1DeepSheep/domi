@@ -10,11 +10,19 @@ function print(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+function isPageCompactionFailure(error) {
+  const message = typeof error?.message === "string" ? error.message : String(error || "");
+  return /^PLAUD browser restored \d+ tabs and could not be compacted safely\.$/.test(message);
+}
+
 function safeError(error) {
   const homeDirectory = os.homedir();
   const message = (error instanceof Error ? error.message : String(error))
     .split(homeDirectory)
     .join("~");
+  if (error?.code === "PLAUD_BROWSER_UNAVAILABLE" || isPageCompactionFailure(error)) {
+    return "PLAUD 后台浏览器本轮未能准备好读取页面。domi 已保留现有录音，请稍后重试；无需重新登录。";
+  }
   if (/Cannot find module ['"]playwright['"]/i.test(message)) {
     return "PLAUD 缺少浏览器运行组件。请重启 domi；如果仍然失败，请重新安装最新版 domi。";
   }
@@ -65,7 +73,7 @@ function plaudErrorDetails(error, stage = "") {
     else if (status === 429 || /too many requests|rate.?limit/i.test(message)) code = "PLAUD_RATE_LIMITED";
     else if (/singleton|profile.*(?:lock|use)|already in use|EBUSY|专用浏览器.*(?:另一个任务使用|被占用)/i.test(message)) code = "PLAUD_PROFILE_LOCKED";
     else if (/authorization request was not observed|会话验证未完成/i.test(message)) code = "PLAUD_SESSION_PROBE_INCOMPLETE";
-    else if (/connectOverCDP|Not attached to an active page|Target page, context or browser has been closed|Execution context was destroyed|Protocol error.*(?:Page|Target)/i.test(message)) code = "PLAUD_BROWSER_UNAVAILABLE";
+    else if (isPageCompactionFailure(error) || /connectOverCDP|Not attached to an active page|Target page, context or browser has been closed|Execution context was destroyed|Protocol error.*(?:Page|Target)/i.test(message)) code = "PLAUD_BROWSER_UNAVAILABLE";
     else if (status >= 500 && status <= 599) code = "PLAUD_SERVICE_UNAVAILABLE";
     else if (isRetryableReadError(error) || /timeout|超时/i.test(message)) code = "PLAUD_NETWORK_TIMEOUT";
     else code = "PLAUD_READ_FAILED";
@@ -115,7 +123,7 @@ function isRetryableReadError(error) {
   if (/(?:HTTP|status)\s*429|too many requests|rate.?limit|请求过于频繁/i.test(message)) {
     return false;
   }
-  return isTransientNavigationError(error)
+  return isPageCompactionFailure(error) || isTransientNavigationError(error)
     || /PLAUD_SESSION_PROBE_INCOMPLETE|authorization request was not observed|PLAUD (?:API|接口).*timed?\s*out|接口读取超时|ENOTFOUND|ENETUNREACH|fetch failed|Failed to fetch|(?:HTTP|status)\s*5\d\d|service unavailable|bad gateway|gateway timeout/i.test(message);
 }
 

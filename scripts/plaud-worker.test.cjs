@@ -304,3 +304,79 @@ test("structured worker diagnostics retain vendor Retry-After without private re
     { code: "PLAUD_RATE_LIMITED", status: 429, retryAfterMs: 120000 });
   assert.deepEqual(plaudErrorDetails(error, "list"), { code: "PLAUD_RATE_LIMITED", stage: "list", httpStatus: 429, retryAfterMs: 120000 });
 });
+
+test("server rebuilds failed tab compaction within one deadline and never replays a started write", async t => {
+  const { runServerCommand, closeServerClient } = require("../electron/plaud-worker.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-compaction-"));
+  const clientPath = path.join(root, "skills/plaud/vendor/plaud-cli/src/plaud.js");
+  fs.mkdirSync(path.dirname(clientPath), { recursive: true });
+  const message = "PLAUD browser restored 2 tabs and could not be compacted safely.";
+  fs.writeFileSync(clientPath, `module.exports.PlaudClient = class {
+    constructor(options) { this.deadline = options.operationDeadlineAt; }
+    async init() {
+      const s = globalThis.__plaudCompaction; s.inits++; s.deadlines.push(this.deadline);
+      if (s.failures-- > 0) {
+        if (s.consumeBudget) s.clock = this.deadline - 1000;
+        throw Object.assign(new Error(s.message), s.code ? {code:s.code} : {});
+      }
+    }
+    async close() { globalThis.__plaudCompaction.closes++; }
+    async listFiles() { globalThis.__plaudCompaction.reads++; return []; }
+    async api() { globalThis.__plaudCompaction.writes++; throw new Error(${JSON.stringify(message)}); }
+  };`);
+  const fresh = failures => ({ inits: 0, closes: 0, reads: 0, writes: 0, deadlines: [], clock: 1000, failures, message });
+  t.after(async () => { await closeServerClient(); delete globalThis.__plaudCompaction; fs.rmSync(root, { recursive: true, force: true }); });
+  const delays = [], diagnostics = [];
+  const options = { deadlineAt: 20000, now: () => globalThis.__plaudCompaction.clock,
+    sleep: async delay => { delays.push(delay); globalThis.__plaudCompaction.clock += delay; },
+    onDiagnostic: value => diagnostics.push(value) };
+  globalThis.__plaudCompaction = fresh(2);
+  await runServerCommand(root, "list", [], options);
+  assert.equal(globalThis.__plaudCompaction.inits, 3);
+  assert.equal(globalThis.__plaudCompaction.closes, 2);
+  assert.equal(globalThis.__plaudCompaction.reads, 1);
+  assert.deepEqual(globalThis.__plaudCompaction.deadlines, [20000, 20000, 20000]);
+  assert.deepEqual(delays, [400, 1200]);
+  assert.deepEqual(diagnostics.filter(value => value.code), [
+    { code: "PLAUD_BROWSER_UNAVAILABLE", stage: "init" },
+    { code: "PLAUD_BROWSER_UNAVAILABLE", stage: "init" }
+  ]);
+  await closeServerClient();
+
+  globalThis.__plaudCompaction = fresh(3);
+  await assert.rejects(runServerCommand(root, "list", [], options), error => error.code === "PLAUD_BROWSER_UNAVAILABLE" && error.stage === "init");
+  assert.equal(globalThis.__plaudCompaction.inits, 3);
+  assert.equal(globalThis.__plaudCompaction.closes, 3);
+  await runServerCommand(root, "list", [], options);
+  assert.equal(globalThis.__plaudCompaction.inits, 4, "A later read must construct a fresh client after final init failure");
+  await closeServerClient();
+
+  globalThis.__plaudCompaction = { ...fresh(3), consumeBudget: true };
+  await assert.rejects(runServerCommand(root, "list", [], options), /could not be compacted safely/);
+  assert.equal(globalThis.__plaudCompaction.inits, 1, "Do not rebuild after the shared deadline leaves insufficient startup time");
+  assert.equal(globalThis.__plaudCompaction.closes, 1);
+
+  globalThis.__plaudCompaction = fresh(0);
+  await assert.rejects(runServerCommand(root, "rename", ["synthetic-recording-id", "Synthetic title"], options), /could not be compacted safely/);
+  assert.equal(globalThis.__plaudCompaction.inits, 1);
+  assert.equal(globalThis.__plaudCompaction.writes, 1, "Classification must not permit replaying a started PATCH or POST");
+  for (const code of ["PLAUD_AUTH_REQUIRED", "PLAUD_ACCESS_DENIED", "PLAUD_RATE_LIMITED", "PLAUD_BROWSER_CONFIG_REQUIRED"]) {
+    globalThis.__plaudCompaction = { ...fresh(3), code, message: `${code}: synthetic failure` };
+    await assert.rejects(runServerCommand(root, "list", [], options), error => error.code === code);
+    assert.equal(globalThis.__plaudCompaction.inits, 1, `${code} must not rebuild repeatedly`);
+    assert.equal(globalThis.__plaudCompaction.closes, 1);
+  }
+});
+
+test("typed browser init failures never expose native diagnostics or hide missing dependencies", () => {
+  const { plaudErrorDetails } = require("../electron/plaud-worker.cjs");
+  const error = Object.assign(new Error("Synthetic private recording; stderr https://private.invalid/synthetic-auth-url"),
+    { code: "PLAUD_BROWSER_UNAVAILABLE", stage: "init" });
+  assert.doesNotMatch(safeError(error), /Synthetic|private|stderr|https:/);
+  assert.deepEqual(plaudErrorDetails(error), { code: "PLAUD_BROWSER_UNAVAILABLE", stage: "init" });
+  assert.match(safeError(Object.assign(new Error("Cannot find module 'playwright'"),
+    { code: "PLAUD_READ_FAILED", stage: "init" })), /缺少浏览器运行组件/);
+  assert.equal(isRetryableReadError(new Error("PLAUD browser restored 2 tabs and could not be compacted safely.")), true);
+  assert.equal(isRetryableReadError(new Error("Unrecognized synthetic startup failure")), false,
+    "Do not treat arbitrary init failures as transient browser failures");
+});
