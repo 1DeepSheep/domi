@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# electron-builder must traverse this checkout's complete dependency tree.
+# Reusing another checkout through a root symlink can silently omit transitive
+# dependencies even though the app still builds and signs successfully.
+if [[ -L "$ROOT_DIR/node_modules" ]]; then
+  echo "Refusing to package with a symlinked root node_modules: $ROOT_DIR/node_modules" >&2
+  echo "Install a real project-local dependency directory with npm ci in this checkout before packaging. The symlink has not been changed." >&2
+  exit 1
+fi
 MODE="${1:-dir}"
 OUTPUT_DIR="${DOMI_BUILD_OUTPUT:-$HOME/Library/Caches/com.domi.workbench/build}"
 BUILDER="$ROOT_DIR/node_modules/.bin/electron-builder"

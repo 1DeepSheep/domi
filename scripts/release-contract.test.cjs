@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const packageMacPath = path.resolve(__dirname, "package-mac.sh");
@@ -29,6 +30,45 @@ const packageJson = require("../package.json");
 const packageLock = require("../package-lock.json");
 
 execFileSync("/bin/bash", ["-n", packageMacPath]);
+
+// Execute the real entry point in an isolated checkout. A fake node records
+// whether dependency loading began; no builder, signing tool or network runs.
+const packagingFixture = fs.mkdtempSync(path.join(os.tmpdir(), "domi-packaging-dependency-guard-"));
+try {
+  const fixtureScripts = path.join(packagingFixture, "scripts");
+  const fixtureBin = path.join(packagingFixture, "bin");
+  const linkedDependencies = path.join(packagingFixture, "shared-dependencies");
+  const modules = path.join(packagingFixture, "node_modules");
+  const invoked = path.join(packagingFixture, "node-invoked");
+  fs.mkdirSync(fixtureScripts);
+  fs.mkdirSync(fixtureBin);
+  fs.mkdirSync(linkedDependencies);
+  fs.writeFileSync(path.join(linkedDependencies, "untouched.txt"), "Dependency target must not be modified.\n");
+  fs.copyFileSync(packageMacPath, path.join(fixtureScripts, "package-mac.sh"));
+  fs.writeFileSync(path.join(fixtureBin, "node"), '#!/bin/sh\nprintf "invoked\\n" >> "$DOMI_GUARD_TEST_MARKER"\nexit 97\n', { mode: 0o755 });
+  const runPackaging = mode => spawnSync("/bin/bash", [path.join(fixtureScripts, "package-mac.sh"), mode], {
+    encoding: "utf8", timeout: 5000,
+    env: { ...process.env, PATH: `${fixtureBin}:/usr/bin:/bin`, DOMI_GUARD_TEST_MARKER: invoked }
+  });
+  for (const target of [linkedDependencies, path.join(packagingFixture, "missing-dependencies")]) {
+    fs.symlinkSync(target, modules, "dir");
+    for (const mode of ["dir", "dist", "resume"]) {
+      const result = runPackaging(mode);
+      assert.equal(result.status, 1, `${mode}: root dependency symlinks must fail before packaging`);
+      assert.match(result.stderr, /Refusing to package with a symlinked root node_modules/);
+      assert.match(result.stderr, /npm ci/);
+      assert.equal(fs.existsSync(invoked), false, "The guard must run before loading any dependency or invoking Node");
+      assert.equal(fs.readlinkSync(modules), target, "The guard must leave the symlink untouched");
+    }
+    fs.unlinkSync(modules);
+  }
+  assert.equal(fs.readFileSync(path.join(linkedDependencies, "untouched.txt"), "utf8"), "Dependency target must not be modified.\n");
+  fs.mkdirSync(modules);
+  assert.equal(runPackaging("dir").status, 97, "A real node_modules directory must pass the guard and reach the fake Node preflight");
+  assert.equal(fs.existsSync(invoked), true);
+} finally {
+  fs.rmSync(packagingFixture, { recursive: true, force: true });
+}
 
 const distCase = source.indexOf("  dist)");
 const buildLoop = source.indexOf('build_app_for_arch "$arch"', distCase);
