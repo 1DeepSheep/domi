@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CodexReadinessController, codexConnectionReady, codexTaskReady, codexReadinessPresentation,
-  codexConnectionSettingsChanged } from "../src/codex-readiness.ts";
+  codexConnectionSettingsChanged, domiPluginVersionLabel } from "../src/codex-readiness.ts";
 
 const ready = { ok: true, connectionOk: true, path: "/synthetic/codex", version: "test", authMode: "chatgpt",
   account: { email: "fixture@example.com" }, requiresOpenaiAuth: false, credentialStored: true,
@@ -10,6 +10,18 @@ const failed = { ...ready, ok: false, connectionOk: false, error: "Synthetic una
 const transient = { ...ready, ok: false, pluginSetup: { ok: false, status: "check-failed", reason: "plugin-check-timeout" } };
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+
+test("plugin health displays the verified active version before an older repository cache", () => {
+  const cached = { ok: true, version: "7.0.10" };
+  assert.equal(domiPluginVersionLabel({ ok: true, version: "7.0.11" }, cached), "v7.0.11");
+  assert.equal(domiPluginVersionLabel({ ok: true, version: "7.0.10", bundledVersion: "7.0.11" }, cached), "v7.0.10",
+    "A bundled but not activated update is not the active plugin version");
+  assert.equal(domiPluginVersionLabel({ ok: false, status: "missing" }, cached), "等待检测");
+  assert.equal(domiPluginVersionLabel({ ok: true }, cached), "已就绪");
+  assert.equal(domiPluginVersionLabel(undefined, cached), "v7.0.10");
+  assert.equal(domiPluginVersionLabel(null, { ok: true, version: "" }), "等待检测");
+  assert.equal(domiPluginVersionLabel(undefined, { ok: false, version: "7.0.10" }), "等待检测");
+});
 function harness() {
   let id = 0;
   const scheduled = new Map();

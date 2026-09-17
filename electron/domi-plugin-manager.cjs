@@ -207,8 +207,10 @@ class DomiPluginManager {
     remoteUpdateEnabled = true,
     remoteStartupBudgetMs = DEFAULT_REMOTE_STARTUP_BUDGET_MS,
     codexCommandTimeoutMs = DEFAULT_CODEX_PLUGIN_COMMAND_TIMEOUT_MS,
-    recoverTransactions = true
+    recoverTransactions = true,
+    withActivationLease = operation => operation()
   }) {
+    this.withActivationLease = withActivationLease;
     this.userDataPath = userDataPath;
     this.bundledPluginRoot = bundledPluginRoot;
     this.bundledLockPath = bundledLockPath;
@@ -320,15 +322,19 @@ class DomiPluginManager {
     }, null, 2)}\n`, "utf8");
   }
 
+  managedSourceChanged(info) {
+    const installedLock = readJsonSafe(path.join(this.marketplaceRoot, "domi-plugin-lock.json"));
+    return !installedLock
+      || installedLock.pluginVersion !== info.lock.pluginVersion
+      || installedLock.gitCommit !== info.lock.gitCommit
+      || installedLock.sha256 !== info.lock.sha256;
+  }
+
   prepareManagedMarketplace(info) {
     const pluginRoot = path.join(this.marketplaceRoot, "plugins", "domi");
     const installedLockPath = path.join(this.marketplaceRoot, "domi-plugin-lock.json");
     const previousPluginRoot = path.join(this.marketplaceRoot, "plugins", ".domi-previous");
-    const installedLock = readJsonSafe(installedLockPath);
-    const sourceChanged = !installedLock
-      || installedLock.pluginVersion !== info.lock.pluginVersion
-      || installedLock.gitCommit !== info.lock.gitCommit
-      || installedLock.sha256 !== info.lock.sha256;
+    const sourceChanged = this.managedSourceChanged(info);
 
     this.writeMarketplaceDefinition();
     if (!sourceChanged) {
@@ -456,7 +462,11 @@ class DomiPluginManager {
   }
 
   async #ensure({ binary, env }) {
-    this.recoverInterruptedTransaction();
+    // Recovery can rename plugin directories too. Production defers constructor
+    // recovery so every mutation waits for the same active-reader handoff.
+    if (fs.existsSync(this.transactionStatePath)) {
+      await this.withActivationLease(() => this.recoverInterruptedTransaction());
+    }
     const bundledInfo = this.bundledInfo();
     if (!bundledInfo) return {
       ok: false, skipped: true, status: "missing", reason: "plugin-bundle-missing",
@@ -507,8 +517,7 @@ class DomiPluginManager {
       };
     }
 
-    const transaction = this.prepareManagedMarketplace(info);
-    if (managedIsCurrent && !transaction.changed) {
+    if (managedIsCurrent && !this.managedSourceChanged(info)) {
       return {
         ok: true,
         updated: false,
@@ -521,39 +530,42 @@ class DomiPluginManager {
       };
     }
 
-    try {
-      if (managedExisting) {
-        await this.runCodex(binary, ["plugin", "remove", PLUGIN_ID], env);
-      }
-      await this.runCodex(binary, ["plugin", "add", PLUGIN_ID, "--json"], env);
-      for (const plugin of installedDomi) {
-        if (plugin.pluginId !== PLUGIN_ID && compareVersions(plugin.version, info.manifest.version) <= 0) {
-          await this.runCodex(binary, ["plugin", "remove", plugin.pluginId], env);
+    return this.withActivationLease(async () => {
+      const transaction = this.prepareManagedMarketplace(info);
+      try {
+        if (managedExisting) {
+          await this.runCodex(binary, ["plugin", "remove", PLUGIN_ID], env);
         }
-      }
-      transaction.finalize();
-    } catch (error) {
-      transaction.rollback();
-      if (managedExisting) {
-        try {
-          await this.runCodex(binary, ["plugin", "add", PLUGIN_ID, "--json"], env);
-        } catch {
-          // Preserve the original error; the restored files remain available
-          // for the next startup recovery attempt.
+        await this.runCodex(binary, ["plugin", "add", PLUGIN_ID, "--json"], env);
+        for (const plugin of installedDomi) {
+          if (plugin.pluginId !== PLUGIN_ID && compareVersions(plugin.version, info.manifest.version) <= 0) {
+            await this.runCodex(binary, ["plugin", "remove", plugin.pluginId], env);
+          }
         }
+        transaction.finalize();
+      } catch (error) {
+        transaction.rollback();
+        if (managedExisting) {
+          try {
+            await this.runCodex(binary, ["plugin", "add", PLUGIN_ID, "--json"], env);
+          } catch {
+            // Preserve the original error; the restored files remain available
+            // for the next startup recovery attempt.
+          }
+        }
+        throw error;
       }
-      throw error;
-    }
-    return {
-      ok: true,
-      updated: true,
-      pluginId: PLUGIN_ID,
-      version: info.manifest.version,
-      bundledVersion: bundledInfo.manifest.version,
-      gitCommit: info.lock.gitCommit,
-      source: info.source,
-      remoteUpdate: remoteResult
-    };
+      return {
+        ok: true,
+        updated: true,
+        pluginId: PLUGIN_ID,
+        version: info.manifest.version,
+        bundledVersion: bundledInfo.manifest.version,
+        gitCommit: info.lock.gitCommit,
+        source: info.source,
+        remoteUpdate: remoteResult
+      };
+    });
   }
 }
 

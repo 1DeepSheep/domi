@@ -346,6 +346,21 @@ function getDesktopNotifications() {
   return desktopNotifications;
 }
 
+async function withPlaudPluginActivation(operation) {
+  const integration = getDomiIntegration();
+  const owner = `plugin-activation:${crypto.randomUUID()}`;
+  try {
+    // This pauses new readers immediately, drains existing sync/queue work,
+    // then closes the old worker before Codex can remove its plugin directory.
+    await integration.reservePlaudForWorkflow(owner);
+    return await operation();
+  } finally {
+    // The existing availability event invalidates the PLAUD list and resumes
+    // read-only refreshes. It never replays a submitted generation operation.
+    integration.releasePlaudWorkflow(owner);
+  }
+}
+
 function getDomiPluginManager({ readOnly = false } = {}) {
   if (!domiPluginManager) {
     const bundledRoot = app.isPackaged
@@ -359,7 +374,8 @@ function getDomiPluginManager({ readOnly = false } = {}) {
       bundledPluginRoot: bundledRoot,
       bundledLockPath,
       clientVersion: app.getVersion(),
-      recoverTransactions: !readOnly,
+      recoverTransactions: false,
+      withActivationLease: withPlaudPluginActivation,
       remoteUpdateEnabled: process.env.DOMI_PLUGIN_AUTO_UPDATE !== "0"
     });
   }
@@ -384,7 +400,10 @@ function getDomiPluginActivationGate() {
   if (!domiPluginActivationGate) {
     domiPluginActivationGate = new DomiPluginActivationGate({
       isBusy: () => updateRestartPreparing
-        || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds),
+        || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)
+        // Internal long operations may predate their IPC read lease. Defer
+        // activation instead of holding its global slot while they finish.
+        || Boolean(domiIntegration?.plaudSyncPromise || domiIntegration?.podcastProcessPromises.size),
       installedInfo: () => getDomiPluginManager().installedInfo(),
       ensure: (request) => getDomiPluginManager().ensure(request),
       onActivated: () => resetCodexClient()
@@ -576,7 +595,7 @@ async function resolveCanonicalEntityWorkspace(request, { repairMissing = false 
       ? async () => {
           const synced = await serviceCoordinator.run(
             "domi:sync",
-            () => getDomiIntegration().sync(),
+            () => getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().sync()),
             {
               force: true,
               allowStale: false,
@@ -3732,6 +3751,11 @@ async function runCodex(sender, payload) {
         workspacePath
       };
     }
+    // Wait before taking a PLAUD reservation: activation itself drains that
+    // queue. Holding the reservation while awaiting activation would deadlock.
+    // startingCodexRunIds already prevents a new activation from overtaking us.
+    await getDomiPluginActivationGate().waitForActivation();
+    assertCodexRunNotCancelled(runId);
     const plaudWorkflowPlan = getDomiIntegration().plaudWorkflowPlan(payload);
     if (plaudWorkflowPlan.requiresBrowser) {
       // Reserve before draining the reader. A second recording task joins the
@@ -3740,9 +3764,6 @@ async function runCodex(sender, payload) {
       await getDomiIntegration().reservePlaudForWorkflow(runId);
       assertCodexRunNotCancelled(runId);
     }
-    // Imports/updates that claimed an idle activation slot before this task
-    // arrived must finish (including reset) before it touches the app-server.
-    await getDomiPluginActivationGate().waitForActivation();
     const client = getCodexClient();
     assertCodexRunNotCancelled(runId);
     const researchCacheScope = projectResearchCacheScope(payload, workspacePath);
@@ -4680,7 +4701,7 @@ ipcMain.handle("domi:podcast-process", async (_event, request) => {
     const jobId = String(request?.jobId || "");
     const result = await serviceCoordinator.run(
       `domi:podcast-process:${jobId}`,
-      () => getDomiIntegration().processPodcastEpisode(request),
+      () => getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().processPodcastEpisode(request)),
       { force: true, retries: 0, allowStale: false }
     );
     serviceCoordinator.invalidate("domi:plaud-list");
@@ -4770,7 +4791,9 @@ ipcMain.handle("domi:plaud-list", async (_event, request) => {
 });
 ipcMain.handle("domi:plaud-workflow-completion", async (_event, request) => {
   try {
-    return await getDomiIntegration().plaudWorkflowCompletion(request);
+    return await getDomiPluginActivationGate().withStableClient(() =>
+      getDomiIntegration().plaudWorkflowCompletion(request)
+    );
   } catch {
     return { ok: false, fileId: String(request?.fileId || ""),
       errorCode: "PLAUD_WORKFLOW_STATE_UNAVAILABLE", error: "无法核验本地录音工作流状态。" };
@@ -4784,7 +4807,7 @@ ipcMain.handle("domi:plaud-sync", async (_event, request = {}) => {
     }
     const result = await serviceCoordinator.run(
       "domi:plaud-sync",
-      () => integration.syncPlaud(request),
+      () => getDomiPluginActivationGate().withStableClient(() => integration.syncPlaud(request)),
       // A structured partial/failure result carries per-record progress. Keep
       // it intact instead of reducing it to one thrown error and losing paths.
       { force: true, allowStale: false, retries: 0 }
@@ -4799,7 +4822,7 @@ ipcMain.handle("domi:plaud-resume", async () => {
   try {
     const result = await serviceCoordinator.run(
       "domi:plaud-resume",
-      () => getDomiIntegration().resumePlaudTranscripts(),
+      () => getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().resumePlaudTranscripts()),
       { force: true, allowStale: false, retries: 0 }
     );
     serviceCoordinator.invalidate("domi:plaud-list");
@@ -4830,7 +4853,7 @@ ipcMain.handle("domi:sync", async () => {
   try {
     const result = await serviceCoordinator.run(
       "domi:sync",
-      () => getDomiIntegration().sync(),
+      () => getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().sync()),
       { force: true, allowStale: false }
     );
     serviceCoordinator.invalidate("domi:status");
