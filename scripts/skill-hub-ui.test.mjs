@@ -141,7 +141,8 @@ try {
         })
       };
     });
-    assert.equal(navigation.buttons.length, 4, "All four primary navigation entries must remain present");
+    assert.equal(navigation.buttons.length, 5, "All five primary navigation entries, including Industry Overview, must remain present");
+    assert.ok(navigation.buttons.some(button => button.title === "行业速览"), "Industry Overview must remain available alongside the existing entries");
     for (const button of navigation.buttons) {
       const description = `${button.title} at ${width}×${height}, documents ${documentsExpanded ? "expanded" : "collapsed"}`;
       for (const [inner, outer, relation] of [[button.bounds, navigation.bounds, "button within navigation"], [button.text, button.bounds, "title within button"], [button.text, navigation.bounds, "title within navigation"]]) {
