@@ -2,6 +2,10 @@ const { attachmentDisplayName } = require("../shared/attachment-names.mjs");
 const { app, autoUpdater: nativeAutoUpdater, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, Notification, protocol, safeStorage, session, shell } = require("electron");
 const { execFile } = require("node:child_process");
 const crypto = require("node:crypto");
+const { createCodexNetworkResolver } = require("./codex-network.cjs");
+const { maybeInstallApplication } = require("./application-installation.cjs");
+const { workflowCapabilities, verifyCodexWorkflow, verifyWorkspace } = require("./codex-onboarding.cjs");
+const { sanitizeDiagnosticReport } = require("./diagnostic-report.cjs");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -163,6 +167,9 @@ const CODEX_CHECK_CACHE_TTL_MS = 60 * 1000;
 const CODEX_VERSION_CHECK_TIMEOUT_MS = 10_000;
 const CODEX_HEALTH_REQUEST_TIMEOUT_MS = 20_000;
 const codexConnectionTests = new CodexConnectionTestController();
+const codexNetwork = createCodexNetworkResolver({ resolveProxy: url => session.defaultSession.resolveProxy(url) });
+let codexNetworkDiagnostic = null;
+let codexNetworkReloadPending = false;
 const LARK_STATUS_CACHE_TTL_MS = 5 * 60 * 1000;
 const DOCUMENT_LIBRARY_CACHE_TTL_MS = 60 * 1000;
 let documentLibraryCache = {
@@ -441,9 +448,29 @@ function getCodexRuntime() {
     ...runtime,
     env: {
       ...(runtime.env || {}),
+      CODEX_HOME: process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : path.join(os.homedir(), ".codex"),
       ...(larkCliPath ? { LARK_CLI_PATH: larkCliPath } : {})
     }
   };
+}
+
+async function getPreparedCodexRuntime({ refresh = false } = {}) {
+  const runtime = getCodexRuntime();
+  const target = runtime.authMode === "relay"
+    ? { authMode: "relay", providerEndpoint: runtime.apiBaseUrl }
+    : getCodexBootstrap().connectionTarget();
+  let network = await codexNetwork.resolve({ env: process.env, ...target, refresh });
+  // A newer concurrent refresh owns the routing decision. Join it once instead
+  // of treating the superseded lookup as a user-visible connection failure.
+  if (network.diagnostic?.status === "superseded") network = await codexNetwork.resolve({ env: process.env, ...target });
+  codexNetworkDiagnostic = { ...network.diagnostic, ok: network.ok };
+  if (network.ok === false) {
+    const error = new Error(network.diagnostic?.message || "当前网络规则无法自动应用。请在 VPN 中启用适用于所有应用的连接方式，然后重新检查。");
+    error.code = "DOMI_CODEX_NETWORK_CONFIGURATION";
+    throw error;
+  }
+  const networkFingerprint = crypto.createHash("sha256").update(JSON.stringify(network.env)).digest("hex");
+  return { ...runtime, networkFingerprint, env: { ...runtime.env, ...network.env } };
 }
 
 function getAppSettings() {
@@ -451,6 +478,7 @@ function getAppSettings() {
     appSettings = new AppSettingsService({
       stateStore: getStateStore(),
       safeStorage,
+      defaultRepositoryDir: path.join(brandPaths.development ? demoWorkspace : app.getPath("documents"), "domi工作区"),
       domiConfigPath: path.join(app.getPath("userData"), "domi-plugin-config.json"),
       developmentFallbackConfigPath: brandPaths.development
         && process.env.DOMI_DEV_ISOLATED !== "1"
@@ -472,6 +500,7 @@ function getCodexBootstrap() {
   if (!codexBootstrap) {
     const electronFetcher = createElectronNetFetcher(net);
     codexBootstrap = new CodexBootstrapService({
+      codexHome: process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : path.join(os.homedir(), ".codex"),
       fetchInstaller: () => fetchOfficialInstaller(electronFetcher),
       installBundled: () => getCodexRuntimeManager().installBundled(),
       runtimeManager: getCodexRuntimeManager(),
@@ -2649,10 +2678,14 @@ function failAllRuns(error) {
 
 function getCodexClient() {
   if (!codexClient) {
-    codexClient = new CodexAppServer({
+    const client = new CodexAppServer({
       cwd: demoWorkspace,
       version: app.getVersion(),
-      runtimeProvider: getCodexRuntime,
+      runtimeProvider: async () => {
+        const runtime = await getPreparedCodexRuntime();
+        client.networkFingerprint = runtime.networkFingerprint;
+        return runtime;
+      },
       onNotification: handleCodexNotification,
       onUserInputRequest: handleCodexUserInputRequest,
       onUserInputRequestClosed: handleCodexUserInputRequestClosed,
@@ -2669,11 +2702,13 @@ function getCodexClient() {
         }
       }
     });
+    codexClient = client;
   }
   return codexClient;
 }
 
 function resetCodexClient() {
+  codexNetworkReloadPending = false;
   codexCheckGeneration += 1;
   codexClient?.close();
   codexClient = null;
@@ -2684,9 +2719,9 @@ function resetCodexClient() {
 }
 
 function schedulePendingSkillHubCodexReload() {
-  if (!skillHubCodexReloadPending || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) return;
+  if ((!skillHubCodexReloadPending && !codexNetworkReloadPending) || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) return;
   setImmediate(() => {
-    if (!skillHubCodexReloadPending || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) return;
+    if ((!skillHubCodexReloadPending && !codexNetworkReloadPending) || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) return;
     skillHubCodexReloadPending = false;
     resetCodexClient();
   });
@@ -2751,7 +2786,14 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY, re
     env: {}
   };
   try {
-    runtime = getCodexRuntime();
+    checkStage = "network";
+    runtime = readOnly ? getCodexRuntime() : await getPreparedCodexRuntime({ refresh: true });
+    throwIfCodexCheckAborted(signal);
+    if (!readOnly && codexClient?.initialized && codexClient.networkFingerprint !== runtime.networkFingerprint) {
+      if (codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)) resetCodexClient();
+      else codexNetworkReloadPending = true;
+    }
+    checkStage = "runtime/resolve";
     const runtimeKey = codexCheckRuntimeKey(runtime);
     const binary = resolveCodexBinary(runtime.codexPath);
     detectedPath = binary;
@@ -2866,15 +2908,16 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY, re
       ok: authenticated && pluginSetup.ok !== false,
       connectionOk: authenticated,
       diagnosticWarnings,
+      network: codexNetworkDiagnostic,
       path: binary,
       version: detectedVersion,
       transport: "app-server",
       workspacePath: demoWorkspace,
       account,
       authMode: runtime.authMode,
-      providerLabel: runtime.providerLabel,
+      providerLabel: runtime.authMode === "chatgpt" && !requiresOpenaiAuth && !account ? "已有 Codex 连接" : runtime.providerLabel,
       apiBaseUrl: runtime.apiBaseUrl,
-      credentialStored: Boolean(account || runtime.hasApiKey),
+      credentialStored: Boolean(account || runtime.hasApiKey || !requiresOpenaiAuth),
       requiresOpenaiAuth,
       configuredModel: config.model || "",
       configuredReasoningEffort: config.model_reasoning_effort || "medium",
@@ -2943,7 +2986,12 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY, re
       configuredServiceTier: "standard",
       pluginSetup,
       models: [],
-      error: error?.code === "DOMI_CODEX_CHECK_SUPERSEDED"
+      diagnosticCode: error?.code,
+      stage: checkStage,
+      network: codexNetworkDiagnostic,
+      error: error?.code === "DOMI_CODEX_NETWORK_CONFIGURATION"
+        ? error.message
+        : error?.code === "DOMI_CODEX_CHECK_SUPERSEDED"
         ? "连接配置已变更，请重新检查。"
         : checkStage === "app-server/health"
           ? "暂时无法确认 Codex 连接，请稍后重试。"
@@ -3087,7 +3135,8 @@ async function saveRuntimeSettings(request) {
     "localRepositoryDir"
   ].some((key) => Object.prototype.hasOwnProperty.call(settingsRequest, key)
     && settingsRequest[key] !== current[key]);
-  const connectionChanged = codexConnectionChanged || dataConnectionChanged;
+  const completingOnboarding = settingsRequest.onboardingComplete === true && !current.onboardingComplete;
+  const connectionChanged = codexConnectionChanged || dataConnectionChanged || completingOnboarding;
   if (connectionChanged) {
     const maintenance = prepareCodexConnectionMaintenance(
       "请先停止正在执行的用户任务，再修改 Codex 或资料库连接。"
@@ -3102,7 +3151,8 @@ async function saveRuntimeSettings(request) {
       }
     }
     const result = getAppSettings().save(settingsRequest);
-    if (dataConnectionChanged) {
+    if (dataConnectionChanged || completingOnboarding) {
+      serviceCoordinator.invalidate("domi:sync");
       serviceCoordinator.invalidate("domi:lark-status");
     }
     if (["storageBackend", "localLibraryDir", "localRepositoryDir"].some(
@@ -3225,20 +3275,36 @@ async function configureCodexRelay(request = {}) {
     }
 
     setStage("relay-model-tool");
-    const verification = await getCodexBootstrap().testConnection(result.codexPath, {
-      signal,
-      timeoutMs: remainingMs()
-    });
+    const verification = await verifyCurrentCodexWorkflow(codex, { signal, timeoutMs: remainingMs(), setStage });
     throwIfCodexCheckAborted(signal);
     return {
       ok: verification.ok,
       configured: true,
       codex,
       verification,
+      diagnosticCode: verification.diagnosticCode,
       pausedBackgroundRuns: maintenance.pausedBackgroundRuns,
       error: verification.ok ? "" : verification.error || "中转站测试失败。"
     };
   });
+}
+
+async function verifyCurrentCodexWorkflow(codex, options) {
+  const settings = getAppSettings().load().settings;
+  try {
+    return await verifyCodexWorkflow({
+      ...options, version: app.getVersion(), runtime: await getPreparedCodexRuntime(),
+      models: codex.models,
+      workspacePath: settings.localRepositoryDir || settings.localLibraryDir || demoWorkspace
+    });
+  } catch (error) {
+    if (["EACCES", "EPERM", "ENOTDIR", "EROFS", "ENOSPC"].includes(error?.code)) {
+      const failure = new Error(error.code === "ENOSPC" ? "磁盘空间不足，请释放空间后重试。" : "无法保存资料，请允许 domi 访问该文件夹，或更换保存位置。");
+      failure.code = "DOMI_WORKSPACE_NOT_WRITABLE";
+      throw failure;
+    }
+    throw error;
+  }
 }
 
 async function testCodexConnection(request = {}) {
@@ -3259,15 +3325,13 @@ async function testCodexConnection(request = {}) {
     }
 
     setStage("model-tool");
-    const verification = await getCodexBootstrap().testConnection(codex.path, {
-      signal,
-      timeoutMs: remainingMs()
-    });
+    const verification = await verifyCurrentCodexWorkflow(codex, { signal, timeoutMs: remainingMs(), setStage });
     throwIfCodexCheckAborted(signal);
     return {
       ok: verification.ok,
       codex,
       verification,
+      diagnosticCode: verification.diagnosticCode,
       pausedBackgroundRuns: maintenance.pausedBackgroundRuns,
       error: verification.ok ? "" : verification.error || "Codex 连接测试失败。"
     };
@@ -3323,8 +3387,8 @@ async function runSystemDiagnostics() {
 
   try {
     ensureDemoWorkspace();
-    await fs.promises.access(demoWorkspace, fs.constants.R_OK | fs.constants.W_OK);
-    push("workspace", "本地工作区", true, demoWorkspace);
+    verifyWorkspace(settings.settings.localRepositoryDir || demoWorkspace);
+    push("workspace", "资料保存", true, "文件写入和回读正常");
   } catch (error) {
     push("workspace", "本地工作区", false, error instanceof Error ? error.message : String(error));
   }
@@ -3345,6 +3409,12 @@ async function runSystemDiagnostics() {
       ? `${codex.version} · ${codex.providerLabel}`
       : codex.error || "Codex 不可用"
   );
+  if (codexNetworkDiagnostic) push("network", "网络连接方式", codexNetworkDiagnostic.ok !== false,
+    [codexNetworkDiagnostic.message || codexNetworkDiagnostic.status || codexNetworkDiagnostic.source || "已检查",
+      codexNetworkDiagnostic.code].filter(Boolean).join(" · "));
+  const capabilities = workflowCapabilities(codex.models);
+  for (const check of capabilities.checks) push(`model-${check.id}`, check.label, check.ok,
+    check.ok ? "所需模型能力可用" : `当前连接缺少 ${check.model} / ${check.effort}`);
   push(
     "domi-plugin-package",
     "内置 domi 插件",
@@ -3378,20 +3448,24 @@ async function runSystemDiagnostics() {
     push("plaud", "PLAUD 录音转写", false, "domi 插件未就绪，暂时无法检测 PLAUD");
   }
 
-  return {
+  return sanitizeDiagnosticReport({
     ok: checks.every((check) => check.ok),
     generatedAt: Date.now(),
     durationMs: Date.now() - startedAt,
     app: { name: appName, version: app.getVersion(), packaged: app.isPackaged },
     system: { platform: process.platform, arch: process.arch, release: os.release() },
     connection: {
+      ok: codex.connectionOk,
+      stage: codex.stage,
+      diagnosticCode: codex.diagnosticCode,
       authMode: settings.settings.authMode,
       providerLabel: codex.providerLabel,
       apiBaseUrl: codex.apiBaseUrl || "",
       credentialStored: codex.credentialStored
     },
+    network: codexNetworkDiagnostic,
     checks
-  };
+  });
 }
 
 async function exportSystemDiagnostics(sender, report) {
@@ -3403,7 +3477,7 @@ async function exportSystemDiagnostics(sender, report) {
       filters: [{ name: "JSON", extensions: ["json"] }]
     });
     if (result.canceled || !result.filePath) return { ok: true, canceled: true };
-    const safeReport = report?.checks ? report : await runSystemDiagnostics();
+    const safeReport = sanitizeDiagnosticReport(report?.checks ? report : await runSystemDiagnostics());
     await fs.promises.writeFile(result.filePath, JSON.stringify(safeReport, null, 2), "utf8");
     return { ok: true, canceled: false, path: result.filePath };
   } catch (error) {
@@ -4162,6 +4236,11 @@ function answerCodexUserInput(sender, request = {}) {
 }
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
+  const installation = await maybeInstallApplication({ app, dialog,
+    isSafeToInstall: () => hasSingleInstanceLock && activeRuns.size === 0 && startingCodexRunIds.size === 0 && pendingRunPostProcessing.size === 0,
+    onEvent: (status, detail) => appendRuntimeLog(`application-installation-${status}`, detail)
+  });
+  if (!installation.continueStartup) return;
   appendRuntimeLog("app-ready", {
     version: app.getVersion(),
     packaged: app.isPackaged,

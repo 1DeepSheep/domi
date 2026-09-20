@@ -892,12 +892,12 @@ assert.match(
 );
 assert.match(
   setupCenter,
-  /disabled=\{saving \|\| installBusy \|\| \(!codexInstalled && !codexPathRequiresApply\)\}/,
+  /disabled=\{saving \|\| installBusy \|\| loginBusy \|\| loginWaiting \|\| \(!codexInstalled && !codexPathRequiresApply\)\}/,
   "Onboarding must not advance while Codex installation is incomplete, while keeping its primary control available to cancel a running test."
 );
 assert.match(
   setupCenter,
-  /if \(codexPathRequiresApply\) \{[\s\S]*?await save\(false\)[\s\S]*?Codex 路径已应用并刷新运行状态[\s\S]*?codexPathRequiresApply[\s\S]*?应用 Codex 路径/,
+  /if \(codexPathRequiresApply\) \{[\s\S]*?await save\(false, "connection"\)[\s\S]*?Codex 路径已应用并刷新运行状态[\s\S]*?codexPathRequiresApply[\s\S]*?应用 Codex 路径/,
   "First-run setup must provide a save-and-refresh transaction before testing a changed custom Codex path."
 );
 assert.match(
@@ -927,12 +927,12 @@ assert.match(
 );
 assert.match(
   setupCenter,
-  /role="radio"[\s\S]*?disabled=\{connectionOperationBusy\}[\s\S]*?role="radio"[\s\S]*?disabled=\{connectionOperationBusy\}/,
+  /role="radio"[\s\S]*?disabled=\{connectionOperationBusy \|\| loginBusy \|\| loginWaiting\}[\s\S]*?role="radio"[\s\S]*?disabled=\{connectionOperationBusy \|\| loginBusy \|\| loginWaiting\}/,
   "Connection-mode controls must stay immutable while their configuration is under test."
 );
 assert.match(
   setupCenter,
-  /onClick=\{startLogin\} disabled=\{connectionOperationBusy \|\| loginBusy \|\| !codexInstalled\}[\s\S]*?自定义 Codex 路径[\s\S]*?disabled=\{connectionOperationBusy\}/,
+  /onClick=\{startLogin\} disabled=\{connectionOperationBusy \|\| loginBusy \|\| loginWaiting \|\| !codexInstalled\}[\s\S]*?自定义 Codex 路径[\s\S]*?disabled=\{connectionOperationBusy \|\| loginBusy \|\| loginWaiting\}/,
   "Account switching and custom Codex paths must not change during a connection test."
 );
 assert.match(
@@ -977,12 +977,12 @@ assert.match(
 );
 assert.match(
   main,
-  /async function configureCodexRelay[\s\S]*?codexConnectionTests\.run[\s\S]*?configureRelay\(request, \{[\s\S]*?signal[\s\S]*?timeoutMs: remainingMs\(\)[\s\S]*?testConnection\(result\.codexPath, \{[\s\S]*?signal/,
+  /async function configureCodexRelay[\s\S]*?codexConnectionTests\.run[\s\S]*?configureRelay\(request, \{[\s\S]*?signal[\s\S]*?timeoutMs: remainingMs\(\)[\s\S]*?verifyCurrentCodexWorkflow\(codex, \{ signal, timeoutMs: remainingMs\(\), setStage \}\)/,
   "Relay credential saving, runtime checks, and the model/tool probe must share one bounded cancellable operation."
 );
 assert.match(
   setupCenter,
-  /async function save\(complete: boolean\)[\s\S]*?try \{[\s\S]*?await onSave[\s\S]*?catch \(saveError\)[\s\S]*?finally \{[\s\S]*?setSaving\(false\)/,
+  /async function save\(complete: boolean, panel: SetupTab = tab\)[\s\S]*?try \{[\s\S]*?await persistSettings[\s\S]*?catch \(saveError\)[\s\S]*?finally \{[\s\S]*?setSaving\(false\)/,
   "A rejected settings save must always release the setup-wide saving lock."
 );
 assert.match(

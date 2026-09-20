@@ -8700,6 +8700,79 @@ body.panel-resizing .main-grid {
   background: #fcf4f1;
 }
 
+.setup-first-use-note {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  margin-top: 20px;
+  padding: 15px 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.first-use .connection-panel { margin-top: 14px; }
+.first-use .setup-inline-actions:empty { display: none; }
+
+.setup-first-use-note strong,
+.setup-first-use-note small,
+.setup-first-use-note span {
+  display: block;
+  line-height: 1.6;
+}
+
+.setup-first-use-note strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.setup-first-use-note small {
+  overflow-wrap: anywhere;
+  margin: 3px 0 5px;
+  color: var(--faint);
+}
+
+.setup-first-use-note button,
+.setup-login-waiting button {
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  padding: 2px 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.setup-login-waiting,
+.setup-recovery-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 13px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.setup-login-waiting span { flex: 1; }
+.setup-recovery-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  padding: 7px 10px;
+  font: inherit;
+}
+.setup-recovery-actions button:disabled { opacity: .5; }
+.setup-feedback details { margin-top: 6px; overflow-wrap: anywhere; }
+.setup-feedback details summary { cursor: pointer; }
+.connection-advanced > .codex-mode-options,
+.connection-advanced > .relay-settings { margin: 0 13px 14px; }
+
 .setup-footer {
   display: flex;
   min-height: 66px;

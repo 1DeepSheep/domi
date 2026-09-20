@@ -24,6 +24,7 @@ import { useEffect, useRef, useState } from "react";
 import { workbench } from "./bridge";
 import { codexConnectionReady, codexReadinessPresentation } from "./codex-readiness";
 import { useAppConfirm } from "./AppConfirmDialog";
+import { acknowledgeSetupSave, mergeSetupSettings, setupPanelRequest, type SetupTab } from "./setup-draft";
 import {
   CODEX_CONNECTION_TEST_UI_TIMEOUT_MS,
   codexConnectionConfigFingerprint,
@@ -61,6 +62,7 @@ type SetupCenterProps = {
   onSave: (request: AppSettingsSaveRequest) => Promise<AppSettingsSaveResult>;
   onLogin: () => Promise<ChatGPTLoginResult>;
   onRefresh: (verifiedStatus?: CodexCheckResult) => Promise<void>;
+  onReadOnlyRefresh?: () => Promise<void>;
 };
 
 function domiWorkspacePath(selectedDirectory: string) {
@@ -175,13 +177,19 @@ export default function SetupCenter({
   onDirtyChange,
   onSave,
   onLogin,
-  onRefresh
+  onRefresh,
+  onReadOnlyRefresh
 }: SetupCenterProps) {
   const { confirm, confirmDialog } = useAppConfirm();
-  const [tab, setTab] = useState<"connection" | "data" | "plaud" | "updates" | "diagnostics">(initialTab);
+  const [tab, setTab] = useState<SetupTab>(required ? "connection" : initialTab);
   const [draft, setDraft] = useState(settings);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const previousSettingsRef = useRef(settings);
   const [saving, setSaving] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
+  const [loginWaiting, setLoginWaiting] = useState(false);
+  const [loginAttempted, setLoginAttempted] = useState(false);
   const [installBusy, setInstallBusy] = useState(false);
   const [installError, setInstallError] = useState("");
   const autoInstallAttemptedRef = useRef(false);
@@ -221,8 +229,19 @@ export default function SetupCenter({
     phase: FeishuAssistPhase;
     error: string;
   } | null>(null);
-  const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
+  const [feedback, setFeedback] = useState<Partial<Record<SetupTab, { notice?: string; error?: string }>>>({});
+  const notice = feedback[tab]?.notice || "";
+  const error = feedback[tab]?.error || "";
+  const connectionErrorRef = useRef("");
+  connectionErrorRef.current = feedback.connection?.error || "";
+  // Each async action captures its origin tab. A late optional check must not
+  // appear as a new Codex error after the user changes pages.
+  const setError = (value: string, scope: SetupTab = tab) => setFeedback(current => ({
+    ...current, [scope]: { ...current[scope], error: value }
+  }));
+  const setNotice = (value: string, scope: SetupTab = tab) => setFeedback(current => ({
+    ...current, [scope]: { ...current[scope], notice: value }
+  }));
   const onDirtyChangeRef = useRef(onDirtyChange);
   onDirtyChangeRef.current = onDirtyChange;
   const hasUnsavedChanges = JSON.stringify(draft) !== JSON.stringify(settings)
@@ -243,10 +262,14 @@ export default function SetupCenter({
   const connectionConfigFingerprintRef = useRef(connectionConfigFingerprint);
   connectionConfigFingerprintRef.current = connectionConfigFingerprint;
 
-  useEffect(() => setDraft(settings), [settings]);
+  useEffect(() => {
+    const previous = previousSettingsRef.current;
+    previousSettingsRef.current = settings;
+    setDraft(current => mergeSetupSettings(current, previous, settings));
+  }, [settings]);
   useEffect(() => {
     if (initialTab !== "connection") cancelConnectionTest({ silent: true });
-    setTab(initialTab);
+    setTab(required ? "connection" : initialTab);
   }, [initialTab]);
   useEffect(() => {
     onDirtyChangeRef.current?.(hasUnsavedChanges);
@@ -257,6 +280,104 @@ export default function SetupCenter({
     connectionTestAttemptRef.current = null;
     attempt?.controller.abort();
   }, []);
+
+  async function persistSettings(request: AppSettingsSaveRequest) {
+    const result = await onSave(request);
+    if (result.ok && result.settings) {
+      const saved = result.settings;
+      setDraft(current => acknowledgeSetupSave(current, request, saved));
+    }
+    return result;
+  }
+
+  const loginRefreshRef = useRef(onRefresh);
+  loginRefreshRef.current = onReadOnlyRefresh
+    || (async () => onRefresh(await workbench.checkCodex({ readOnly: true, force: true })));
+  const networkRefreshRef = useRef(onRefresh);
+  networkRefreshRef.current = onRefresh;
+  const loginStatusRef = useRef(codexStatus);
+  loginStatusRef.current = codexStatus;
+  const operationBusyRef = useRef(false);
+  operationBusyRef.current = connectionTestBusy || relayBusy || saving || installBusy || loginBusy;
+  const automaticCheckBusyRef = useRef(false);
+  const automaticRecoveryRef = useRef({ attempts: 0, lastAttempt: 0 });
+  useEffect(() => {
+    if (!loginWaiting) return;
+    let disposed = false;
+    let inFlight = false;
+    let attempts = 0;
+    let lastAttempt = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const deadline = Date.now() + 60_000;
+    const stop = () => {
+      if (disposed) return;
+      setLoginWaiting(false);
+      setNotice("尚未确认登录。完成浏览器登录后，点击“重新检查连接”即可继续。", "connection");
+    };
+    const check = async () => {
+      if (disposed || inFlight || automaticCheckBusyRef.current || operationBusyRef.current || Date.now() - lastAttempt < 1_500) return;
+      if (codexConnectionReady(loginStatusRef.current) && loginStatusRef.current?.authMode === "chatgpt") return;
+      if (attempts >= 6 || Date.now() >= deadline) { stop(); return; }
+      clearTimeout(timer);
+      inFlight = true;
+      automaticCheckBusyRef.current = true;
+      attempts += 1;
+      lastAttempt = Date.now();
+      try { await loginRefreshRef.current(); } catch { /* The next bounded check can recover. */ }
+      finally {
+        inFlight = false;
+        automaticCheckBusyRef.current = false;
+        if (!disposed) {
+          timer = setTimeout(() => { void check(); }, [2_000, 4_000, 6_000, 8_000, 10_000, 10_000][attempts - 1]);
+        }
+      }
+    };
+    const focus = () => { if (document.visibilityState === "visible") void check(); };
+    timer = setTimeout(() => { void check(); }, 1_500);
+    const deadlineTimer = setTimeout(stop, 60_000);
+    window.addEventListener("focus", focus);
+    document.addEventListener("visibilitychange", focus);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      clearTimeout(deadlineTimer);
+      window.removeEventListener("focus", focus);
+      document.removeEventListener("visibilitychange", focus);
+    };
+  }, [loginWaiting]);
+  useEffect(() => {
+    if (loginWaiting && codexConnectionReady(codexStatus) && codexStatus?.authMode === "chatgpt") {
+      setLoginWaiting(false);
+      setError("", "connection");
+      setNotice(required ? "账号已连接。点击“开始使用”即可继续。" : "账号已连接，可以测试并保存设置。", "connection");
+    }
+  }, [loginWaiting, codexStatus]);
+  useEffect(() => {
+    if (!required || tab !== "connection" || loginWaiting) return;
+    const recover = async () => {
+      const current = loginStatusRef.current;
+      const recovery = automaticRecoveryRef.current;
+      if (document.visibilityState !== "visible" || !current
+        || (codexConnectionReady(current) && current.pluginSetup?.ok === true && !connectionErrorRef.current)
+        || (current.requiresOpenaiAuth && !current.account)
+        || operationBusyRef.current || automaticCheckBusyRef.current
+        || recovery.attempts >= 6 || Date.now() - recovery.lastAttempt < 3_000) return;
+      recovery.attempts += 1;
+      recovery.lastAttempt = Date.now();
+      automaticCheckBusyRef.current = true;
+      // This configuration check can apply a newly enabled system proxy. It
+      // does not invoke a model; main defers runtime changes during real tasks.
+      try { await networkRefreshRef.current(); } catch { /* Keep the existing actionable state. */ }
+      finally { automaticCheckBusyRef.current = false; }
+    };
+    const listener = () => { void recover(); };
+    window.addEventListener("focus", listener);
+    window.addEventListener("online", listener);
+    return () => {
+      window.removeEventListener("focus", listener);
+      window.removeEventListener("online", listener);
+    };
+  }, [required, tab, loginWaiting]);
 
 
   async function refreshFeishuStatus(force = false) {
@@ -291,9 +412,9 @@ export default function SetupCenter({
   }
 
   useEffect(() => {
-    if (tab !== "data") return;
+    if (tab !== "data" || required) return;
     void refreshFeishuStatus(false);
-  }, [tab]);
+  }, [tab, required]);
 
   async function startFeishuAuth() {
     setFeishuAuthBusy(true);
@@ -454,7 +575,7 @@ export default function SetupCenter({
       if (!cancelled) {
         setError(statusError instanceof Error
           ? statusError.message
-          : `无法读取软件更新状态：${String(statusError)}`);
+          : `无法读取软件更新状态：${String(statusError)}`, "updates");
       }
     });
     workbench.getCodexRuntimeStatus().then((status) => {
@@ -463,7 +584,7 @@ export default function SetupCenter({
       if (!cancelled) {
         setError(runtimeError instanceof Error
           ? runtimeError.message
-          : `无法读取 Codex Runtime 状态：${String(runtimeError)}`);
+          : `无法读取 Codex Runtime 状态：${String(runtimeError)}`, "updates");
       }
     });
     return () => {
@@ -472,24 +593,19 @@ export default function SetupCenter({
     };
   }, []);
 
-  async function save(complete: boolean) {
+  async function save(complete: boolean, panel: SetupTab = tab) {
     setSaving(true);
     setError("");
     setNotice("");
     try {
-      const result = await onSave({
-        ...draft,
-        storageBackend: "local",
-        storageMigration: "none",
-        onboardingComplete: complete || settings.onboardingComplete
-      });
+      const result = await persistSettings(setupPanelRequest(draftRef.current, panel, complete));
       if (!result.ok) {
         setError(result.error || "保存设置失败。");
         return false;
       }
       setNotice(result.warning || (result.codex?.ok
           ? "连接已保存并验证。"
-          : "设置已保存；本地资料库继续作为唯一主资料库。"));
+          : "设置已保存。"));
       if (complete) onClose();
       return true;
     } catch (saveError) {
@@ -537,9 +653,9 @@ export default function SetupCenter({
     setTab(nextTab);
   }
 
-  async function saveConnection(continueToData: boolean) {
+  async function saveConnection(complete: boolean) {
     if (codexPathRequiresApply) {
-      const applied = await save(false);
+      const applied = await save(false, "connection");
       if (applied) {
         setConnectionVerified(false);
         setError("");
@@ -552,20 +668,23 @@ export default function SetupCenter({
       return;
     }
     if (!selectedConnectionReady) {
-      setError(draft.authMode === "relay"
-        ? "请先安全保存中转站配置并完成测试；无需登录 ChatGPT。"
-        : "请先完成 ChatGPT 登录并测试连接。");
+      if (needsChatGPTLogin) { await startLogin(); return; }
+      if (draft.authMode === "relay" && !relayDraftMatchesRuntime) {
+        setError("请在高级设置中保存中转站配置并完成测试，无需登录 ChatGPT。");
+        return;
+      }
+      await retryConnection();
       return;
     }
     if (required && !connectionVerified) {
       const verified = await testConnection();
       if (!verified) return;
     }
-    if (await save(false) && continueToData) setTab("data");
+    await save(complete, "connection");
   }
 
   async function saveDataAndContinue() {
-    if (await save(false)) setTab("plaud");
+    await saveConnection(true);
   }
 
   async function checkOutlookProfile() {
@@ -607,7 +726,7 @@ export default function SetupCenter({
         return;
       }
       const verifiedAt = Date.now();
-      const saved = await onSave({
+      const saved = await persistSettings({
         outlookCalendarEmail: email,
         outlookCalendarEmailVerifiedAt: verifiedAt
       });
@@ -636,7 +755,7 @@ export default function SetupCenter({
     setNotice("");
     try {
       const browser = draft.plaudBrowser === "tabbit" ? "tabbit" : "chrome";
-      const saved = await onSave({ plaudConnectionMode: "enabled", plaudBrowser: browser });
+      const saved = await persistSettings({ plaudConnectionMode: "enabled", plaudBrowser: browser });
       if (!saved.ok) {
         setError(saved.error || "无法保存 PLAUD 设置。");
         return;
@@ -672,7 +791,7 @@ export default function SetupCenter({
     setNotice("");
     try {
       const browser = draft.plaudBrowser === "tabbit" ? "tabbit" : "chrome";
-      const saved = await onSave({ plaudConnectionMode: "enabled", plaudBrowser: browser });
+      const saved = await persistSettings({ plaudConnectionMode: "enabled", plaudBrowser: browser });
       if (!saved.ok) {
         setError(saved.error || "无法保存 PLAUD 设置。");
         return;
@@ -716,7 +835,7 @@ export default function SetupCenter({
         setError(result.error || "PLAUD 本地登录清理失败。");
         return;
       }
-      const saved = await onSave({ plaudConnectionMode: "disabled", plaudBrowser: browser });
+      const saved = await persistSettings({ plaudConnectionMode: "disabled", plaudBrowser: browser });
       if (!saved.ok) {
         setError(saved.error || "PLAUD 已断开，但无法保存关闭状态。");
         return;
@@ -805,31 +924,32 @@ export default function SetupCenter({
   }
 
   async function startLogin() {
-    if (connectionTestAttemptRef.current) return;
+    if (connectionTestAttemptRef.current || loginBusy || loginWaiting) return;
     setLoginBusy(true);
     setError("");
     setNotice("");
     setConnectionVerified(false);
-    setDraft((current) => ({
-      ...current,
-      authMode: "chatgpt",
-      apiBaseUrl: "",
-      apiModel: "",
-      relayCredentialConfigured: false
-    }));
-    const saved = await onSave({ ...draft, authMode: "chatgpt" });
-    if (!saved.ok) {
-      setError(saved.error || "无法切换到 ChatGPT 登录模式。");
+    try {
+      const request = { authMode: "chatgpt" as const, apiBaseUrl: "", apiModel: "", relayCredentialConfigured: false };
+      const saved = await persistSettings(request);
+      if (!saved.ok) {
+        setError(saved.error || "无法切换到 ChatGPT 登录模式。");
+        return;
+      }
+      setDraft(current => ({ ...current, ...request }));
+      const result = await onLogin();
+      if (!result.ok) {
+        setError(result.error || "无法打开 ChatGPT 登录页面。");
+        return;
+      }
+      setLoginWaiting(true);
+      setLoginAttempted(true);
+      setNotice("请在浏览器完成登录，domi 会自动确认。", "connection");
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : String(loginError));
+    } finally {
       setLoginBusy(false);
-      return;
     }
-    const result = await onLogin();
-    setLoginBusy(false);
-    if (!result.ok) {
-      setError(result.error || "无法打开 ChatGPT 登录页面。");
-      return;
-    }
-    setNotice("登录页面已在浏览器打开。完成登录后回到 domi 重新检测。");
   }
 
   async function installCodex(automatic = false) {
@@ -845,7 +965,7 @@ export default function SetupCenter({
         return;
       }
       setDraft((current) => ({ ...current, codexPath: result.path }));
-      await onSave({ codexPath: result.path });
+      await persistSettings({ codexPath: result.path });
       await onRefresh();
       if (!automatic) {
         setNotice(result.installedNow
@@ -861,6 +981,7 @@ export default function SetupCenter({
 
   async function configureRelay() {
     if (connectionTestAttemptRef.current) return;
+    setLoginWaiting(false);
     const pathBlockReason = codexConnectionDraftBlockReason({
       draftCodexPath: draft.codexPath,
       savedCodexPath: settings.codexPath,
@@ -949,7 +1070,7 @@ export default function SetupCenter({
       };
       setDraft(nextDraft);
       setRelayApiKey("");
-      const saved = await onSave({
+      const saved = await persistSettings({
         authMode: "relay",
         apiBaseUrl: nextDraft.apiBaseUrl,
         apiModel: nextDraft.apiModel,
@@ -981,6 +1102,7 @@ export default function SetupCenter({
 
   async function testConnection(): Promise<boolean> {
     if (connectionTestAttemptRef.current) return false;
+    setLoginWaiting(false);
     const blockReason = codexConnectionDraftBlockReason({
       draftCodexPath: draft.codexPath,
       savedCodexPath: settings.codexPath,
@@ -1117,12 +1239,32 @@ export default function SetupCenter({
     if (!result.ok) setError(result.error || "无法导出诊断报告。");
   }
 
+  async function retryConnection() {
+    setError("", "connection");
+    setNotice("", "connection");
+    try { await onRefresh(); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure), "connection"); }
+  }
+
+  async function diagnoseAndExport() {
+    setDiagnosing(true);
+    try {
+      const nextReport = await workbench.runDiagnostics();
+      setReport(nextReport);
+      const result = await workbench.exportDiagnostics(nextReport);
+      if (!result.ok) setError(result.error || "无法导出诊断报告。");
+      else setNotice("诊断报告已导出，可交给同事协助检查。报告不包含登录令牌。");
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally { setDiagnosing(false); }
+  }
+
   async function saveUpdateSettings() {
     setSaving(true);
     setError("");
     setNotice("");
     try {
-      const result = await onSave({ updateChannel: draft.updateChannel });
+      const result = await persistSettings({ updateChannel: draft.updateChannel });
       if (!result.ok) {
         setError(result.error || "保存更新设置失败。");
         return;
@@ -1253,13 +1395,16 @@ export default function SetupCenter({
     && codexStatus?.authMode === draft.authMode
     && relayDraftMatchesRuntime
   );
+  const needsChatGPTLogin = draft.authMode === "chatgpt"
+    && codexStatus?.requiresOpenaiAuth === true && !codexStatus.account;
+  const pluginNeedsPreparation = selectedConnectionReady && codexStatus?.pluginSetup?.ok !== true;
   const connectionDetail = selectedConnectionReady
-    ? draft.authMode === "relay"
+    ? required ? codexStatus?.account?.email || "沿用这台电脑现有的 Codex 设置。" : draft.authMode === "relay"
       ? [codexStatus?.configuredModel, codexStatus?.apiBaseUrl, codexStatus?.version].filter(Boolean).join(" · ")
       : [codexStatus?.account?.email, codexStatus?.account?.planType, codexStatus?.version].filter(Boolean).join(" · ")
     : (codexChecking ? "正在检查本机连接状态" : codexStatus ? codexReadinessPresentation({ status: codexStatus, checking: false, checkFailed: false }).detail : "") || (draft.authMode === "relay"
       ? "请填写中转站信息并保存测试"
-      : "请登录 ChatGPT 后重新测试");
+      : "点击“检查连接并继续”，domi 会检查当前连接。");
   const installStepState = codexInstalled
     ? "ok"
     : installError
@@ -1284,7 +1429,7 @@ export default function SetupCenter({
 
   return (
     <div className="setup-overlay" role="dialog" aria-modal="true" aria-label="domi 设置">
-      <div className="setup-window">
+      <div className={`setup-window ${required ? "first-use" : ""}`}>
         <aside className="setup-nav">
           <div className="setup-brand">
             <img src="./domi-icon.png" alt="" />
@@ -1292,12 +1437,12 @@ export default function SetupCenter({
           </div>
           <nav>
             <button className={tab === "connection" ? "active" : ""} onClick={() => selectTab("connection")}>
-              <Settings2 size={16} />Codex 连接
+              <Settings2 size={16} />{required ? "开始使用" : "Codex 连接"}
             </button>
             <button className={tab === "data" ? "active" : ""} onClick={() => selectTab("data")}>
-              <Database size={16} />资料连接
+              <Database size={16} />{required ? "资料保存位置" : "资料连接"}
             </button>
-            <button className={tab === "plaud" ? "active" : ""} onClick={() => selectTab("plaud")}>
+            {!required && <><button className={tab === "plaud" ? "active" : ""} onClick={() => selectTab("plaud")}>
               <Mic size={16} />录音转写
             </button>
             <button className={tab === "updates" ? "active" : ""} onClick={() => selectTab("updates")}>
@@ -1305,7 +1450,7 @@ export default function SetupCenter({
             </button>
             <button className={tab === "diagnostics" ? "active" : ""} onClick={() => selectTab("diagnostics")}>
               <ShieldCheck size={16} />系统诊断
-            </button>
+            </button></>}
           </nav>
           <div className="setup-security-note">
             <ShieldCheck size={15} />
@@ -1313,23 +1458,23 @@ export default function SetupCenter({
           </div>
         </aside>
 
-        <section className={`setup-content ${tab === "connection" ? "connection-tab" : ""}`}>
+        <section className={`setup-content ${tab === "connection" ? "connection-tab" : ""}`} inert={saving || undefined}>
           <header className="setup-header">
             <div>
               <span>{required ? "开始使用 domi" : "偏好设置"}</span>
               <h2>{tab === "connection"
-                ? "选择 Codex 连接方式"
+                ? required ? "欢迎使用 domi" : "Codex 连接"
                 : tab === "data"
-                  ? "配置 domi 资料库"
+                  ? required ? "资料保存位置" : "配置 domi 资料库"
                   : tab === "plaud"
                     ? "连接 PLAUD"
                   : tab === "updates"
                     ? "软件更新"
                     : "系统诊断"}</h2>
               <p>{tab === "connection"
-                ? "domi 会自动准备 Codex CLI；你只需选择 ChatGPT 账号或 Responses 中转站。"
+                ? "自动沿用这台电脑已登录的 Codex 账号。没有账号时，按提示登录即可。"
                 : tab === "data"
-                  ? "domi 默认使用本地 SQLite + Markdown；飞书可选连接，作为外部参考资料库和发布平台。配置仅保存在这台 Mac。"
+                  ? required ? "已经准备好默认位置，你也可以选择其他文件夹。之后随时可以在设置中修改。" : "资料默认保存在本机。飞书、录音和日历可按需连接。"
                 : tab === "plaud"
                   ? "PLAUD 仅用于把录音转成文字稿。现在不用可以直接跳过，domi 不会连接或读取录音。"
                 : tab === "updates"
@@ -1353,12 +1498,12 @@ export default function SetupCenter({
                       : <Terminal size={18} />}</i>
                 <span>
                   <strong>{codexInstalled
-                    ? "Codex CLI 已准备好"
+                    ? required ? "已找到可用的 Codex" : "Codex CLI 已准备好"
                     : installError
                       ? "Codex CLI 自动安装未完成"
                       : "正在自动准备 Codex CLI"}</strong>
                   <small>{codexInstalled
-                    ? `${codexStatus?.version || "版本已检测"} · ${codexStatus?.path}`
+                    ? required ? "无需重复安装，domi 会使用现有连接。" : `${codexStatus?.version || "版本已检测"} · ${codexStatus?.path}`
                     : installError
                       ? installError
                       : "正在校验并安装 domi 内置的 Codex Runtime，无需打开终端或连接 GitHub。"}</small>
@@ -1375,14 +1520,101 @@ export default function SetupCenter({
                 )}
               </div>
 
+              <div className={`connection-panel ${selectedConnectionReady && codexStatus?.pluginSetup?.ok === true ? "ok" : "warning"}`}>
+                <div className="connection-status">
+                  <i className="connection-status-icon">
+                    {selectedConnectionReady ? <BadgeCheck size={20} /> : <CircleAlert size={20} />}
+                  </i>
+                  <div>
+                    <small>{draft.authMode === "relay" ? "Responses 中转站" : "ChatGPT / Codex"}</small>
+                    <strong>{selectedConnectionReady
+                      ? pluginNeedsPreparation ? "Codex 已连接，domi 组件待准备" : codexStatus?.account ? "已登录，可以开始使用" : "已找到可用的 Codex 连接"
+                      : codexChecking ? "正在检查 Codex 连接" : "连接待检查"}</strong>
+                    <span>{connectionDetail}</span>
+                  </div>
+                  <b className="connection-status-badge">
+                    {connectionVerified
+                      ? "已实测"
+                      : selectedConnectionReady
+                        ? required ? "继续时自动验证" : "待实测"
+                        : "待连接"}
+                  </b>
+                </div>
+                <div className="setup-inline-actions">
+                  {(!required || loginAttempted || Boolean(error) || pluginNeedsPreparation) &&
+                  <button type="button" onClick={() => void retryConnection()} disabled={codexChecking || connectionOperationBusy || saving || loginWaiting}>
+                    <RefreshCw className={codexChecking ? "spinning" : ""} size={15} />
+                    {codexChecking ? "正在检查" : "重新检查连接"}
+                  </button>}
+                  {draft.authMode === "chatgpt" && !required && (
+                    <button type="button" onClick={startLogin} disabled={connectionOperationBusy || loginBusy || loginWaiting || !codexInstalled}>
+                      {loginBusy ? <LoaderCircle className="spinning" size={16} /> : <LogIn size={16} />}
+                      {selectedConnectionReady ? "切换 ChatGPT 账号" : "登录 ChatGPT"}
+                      <ExternalLink size={13} />
+                    </button>
+                  )}
+                  {connectionOperationBusy ? (
+                    <button className="connection-test-cancel" type="button" onClick={() => cancelConnectionTest()}>
+                      <X size={15} />{relayBusy ? "取消配置测试" : "取消测试"}
+                    </button>
+                  ) : !required ? (
+                    <button
+                      type="button"
+                      onClick={testConnection}
+                      disabled={Boolean(connectionTestBlockReason) || !codexInstalled || (draft.authMode === "relay" && !draft.relayCredentialConfigured)}
+                    >
+                      <RefreshCw size={15} />测试完整连接
+                    </button>
+                  ) : null}
+                </div>
+                {loginWaiting && <div className="setup-login-waiting" role="status">
+                  <LoaderCircle className="spinning" size={15} />
+                  <span>等待浏览器登录，完成后会自动确认。</span>
+                  <button type="button" onClick={() => {
+                    setLoginWaiting(false);
+                    setNotice("已停止自动确认。完成登录后可点击“重新检查连接”。", "connection");
+                  }}>取消等待</button>
+                </div>}
+                {selectedConnectionReady && codexStatus?.pluginSetup?.ok !== true && (
+                  <p className="codex-readiness-note" role="status">账号连接正常，domi 组件尚未准备好。点击“重新检查连接”可继续准备，无需重新登录。</p>
+                )}
+                {!!codexStatus?.diagnosticWarnings?.length && (
+                  <p className="codex-readiness-note">{selectedConnectionReady ? "连接正常，部分辅助检查未完成。" : "部分辅助检查未完成。"}<button type="button" onClick={() => setTab("diagnostics")}>查看系统诊断</button></p>
+                )}
+                {connectionOperationBusy && (
+                  <div className="connection-test-progress" role="status">
+                    <LoaderCircle className="spinning" size={14} />
+                    <span>{relayBusy
+                      ? "正在安全保存中转站并验证模型与 Shell 工具；最多等待 90 秒，可随时取消。"
+                      : "正在确认 domi 可以正常完成任务；最多等待 90 秒，可随时取消。"}</span>
+                  </div>
+                )}
+                {!connectionOperationBusy && connectionTestBlockReason && (
+                  <div className="connection-test-prerequisite" role="note">
+                    <CircleAlert size={13} />
+                    <span>{connectionTestBlockReason}</span>
+                  </div>
+                )}
+              </div>
+
+              {required && <div className="setup-first-use-note">
+                <FolderOpen size={18} />
+                <div><strong>资料将保存在本机</strong><small>{draft.localRepositoryDir || "正在准备默认文件夹…"}</small>
+                  <span>飞书、PLAUD 和日历都可以之后再连接。</span></div>
+                <button type="button" onClick={() => selectTab("data")}>更改位置</button>
+              </div>}
+
+              <details className="advanced-settings connection-advanced">
+                <summary><HardDrive size={15} />高级设置</summary>
               <div className="codex-mode-options" role="radiogroup" aria-label="Codex 连接方式（二选一）">
                 <button
                   type="button"
                   role="radio"
                   aria-checked={draft.authMode === "chatgpt"}
                   className={draft.authMode === "chatgpt" ? "selected" : ""}
-                  disabled={connectionOperationBusy}
+                  disabled={connectionOperationBusy || loginBusy || loginWaiting}
                   onClick={() => {
+                    setLoginWaiting(false);
                     setDraft((current) => ({
                       ...current,
                       authMode: "chatgpt",
@@ -1407,8 +1639,9 @@ export default function SetupCenter({
                   role="radio"
                   aria-checked={draft.authMode === "relay"}
                   className={draft.authMode === "relay" ? "selected" : ""}
-                  disabled={connectionOperationBusy}
+                  disabled={connectionOperationBusy || loginBusy || loginWaiting}
                   onClick={() => {
+                    setLoginWaiting(false);
                     setDraft((current) => ({ ...current, authMode: "relay" }));
                     setConnectionVerified(false);
                     setError("");
@@ -1485,76 +1718,7 @@ export default function SetupCenter({
                 </div>
               )}
 
-              <div className={`connection-panel ${selectedConnectionReady ? "ok" : "warning"}`}>
-                <div className="connection-status">
-                  <i className="connection-status-icon">
-                    {selectedConnectionReady ? <BadgeCheck size={20} /> : <CircleAlert size={20} />}
-                  </i>
-                  <div>
-                    <small>{draft.authMode === "relay" ? "Responses 中转站" : "ChatGPT / Codex"}</small>
-                    <strong>{selectedConnectionReady
-                      ? draft.authMode === "relay" ? "中转站配置已就绪" : "ChatGPT 身份已就绪"
-                      : codexChecking ? "正在检查 Codex 连接" : "连接待检查"}</strong>
-                    <span>{connectionDetail}</span>
-                  </div>
-                  <b className="connection-status-badge">
-                    {connectionVerified
-                      ? "已实测"
-                      : selectedConnectionReady
-                        ? required ? "下一步自动测试" : "待实测"
-                        : "待连接"}
-                  </b>
-                </div>
-                <div className="setup-inline-actions">
-                  <button type="button" onClick={() => void onRefresh()} disabled={codexChecking || connectionOperationBusy || saving}>
-                    <RefreshCw className={codexChecking ? "spinning" : ""} size={15} />
-                    {codexChecking ? "正在检查" : "重新检查连接"}
-                  </button>
-                  {draft.authMode === "chatgpt" && (
-                    <button type="button" onClick={startLogin} disabled={connectionOperationBusy || loginBusy || !codexInstalled}>
-                      {loginBusy ? <LoaderCircle className="spinning" size={16} /> : <LogIn size={16} />}
-                      {selectedConnectionReady ? "切换 ChatGPT 账号" : "登录 ChatGPT"}
-                      <ExternalLink size={13} />
-                    </button>
-                  )}
-                  {connectionOperationBusy ? (
-                    <button className="connection-test-cancel" type="button" onClick={() => cancelConnectionTest()}>
-                      <X size={15} />{relayBusy ? "取消配置测试" : "取消测试"}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={testConnection}
-                      disabled={Boolean(connectionTestBlockReason) || !codexInstalled || (draft.authMode === "relay" && !draft.relayCredentialConfigured)}
-                    >
-                      <RefreshCw size={15} />测试完整连接
-                    </button>
-                  )}
-                </div>
-                {selectedConnectionReady && codexStatus?.pluginSetup?.ok !== true && (
-                  <p className="codex-readiness-note" role="status">Codex 已连接，domi 插件尚待检查；插件任务准备完成后即可继续。</p>
-                )}
-                {!!codexStatus?.diagnosticWarnings?.length && (
-                  <p className="codex-readiness-note">{selectedConnectionReady ? "连接正常，部分辅助检查未完成。" : "部分辅助检查未完成。"}<button type="button" onClick={() => setTab("diagnostics")}>查看系统诊断</button></p>
-                )}
-                {connectionOperationBusy && (
-                  <div className="connection-test-progress" role="status">
-                    <LoaderCircle className="spinning" size={14} />
-                    <span>{relayBusy
-                      ? "正在安全保存中转站并验证模型与 Shell 工具；最多等待 90 秒，可随时取消。"
-                      : "正在验证模型响应与 Shell 工具；最多等待 90 秒，可随时取消。"}</span>
-                  </div>
-                )}
-                {!connectionOperationBusy && connectionTestBlockReason && (
-                  <div className="connection-test-prerequisite" role="note">
-                    <CircleAlert size={13} />
-                    <span>{connectionTestBlockReason}</span>
-                  </div>
-                )}
-              </div>
 
-              <details className="advanced-settings">
-                <summary><HardDrive size={15} />高级设置</summary>
                 <button
                   className={`permission-setting ${draft.externalAccessMode === "always" ? "enabled" : ""}`}
                   type="button"
@@ -1582,15 +1746,34 @@ export default function SetupCenter({
                     }}
                     placeholder="自动检测，通常无需填写"
                     spellCheck={false}
-                    disabled={connectionOperationBusy}
+                    disabled={connectionOperationBusy || loginBusy || loginWaiting}
                   />
                 </label>
               </details>
 
-              {(error || notice) && <div className={`setup-feedback ${error ? "error" : "success"}`}>{error || notice}</div>}
+              {(error || notice) && <div className={`setup-feedback ${error ? "error" : "success"}`} role="status">
+                {error ? <><strong>{pluginNeedsPreparation ? "Codex 连接正常，domi 组件还需准备。"
+                  : /timeout|timed out|超时|network|网络|proxy|代理/i.test(error) ? "连接暂时没有完成，请检查网络后重试。"
+                    : "设置尚未完成，请查看详情或运行检查。"}</strong>
+                  <details><summary>查看详情</summary><span>{error}</span></details></> : notice}
+              </div>}
+              {(error || pluginNeedsPreparation) && <div className="setup-recovery-actions">
+                <button type="button" onClick={() => void retryConnection()} disabled={codexChecking || connectionOperationBusy || saving || loginWaiting}>
+                  <RefreshCw size={14} />{pluginNeedsPreparation ? "重新准备 domi 组件" : "重新检查连接"}
+                </button>
+                <button type="button" onClick={diagnoseAndExport} disabled={diagnosing}>
+                  {diagnosing ? <LoaderCircle className="spinning" size={14} /> : <Download size={14} />}
+                  {diagnosing ? "正在准备诊断…" : "导出诊断报告"}
+                </button>
+              </div>}
             </div>
           ) : tab === "data" ? (
             <div className="setup-form data-connection-form">
+              {required && connectionOperationBusy && <div className="connection-test-progress" role="status">
+                <LoaderCircle className="spinning" size={14} />
+                <span>正在确认 domi 可以正常完成任务；最多等待 90 秒，可随时取消。</span>
+              </div>}
+              {!required && <>
               <div className="storage-backend-options local-only" aria-label="本地主资料库">
                 <div className="selected">
                   <HardDrive size={19} />
@@ -1698,12 +1881,13 @@ export default function SetupCenter({
                     : "飞书是可选的外部参考资料库和发布平台。未经你的明确指令，domi 不会把本地记录发布到飞书，也不会用飞书内容覆盖本地数据。"}</small>
                 </span>
               </div>
+              </>}
               <div className="local-storage-panel">
                   <div className="local-storage-summary">
                     <Database size={20} />
                     <span>
-                      <strong>一套资料库，三种内容自动对应</strong>
-                      <small>项目、人脉和行业事件写入 SQLite；项目主页与纪要写成 Markdown；BP、录音和附件保留原文件。</small>
+                      <strong>资料自动整理到同一个文件夹</strong>
+                      <small>项目、纪要和附件会保存在这里，已有文件不会被覆盖。</small>
                     </span>
                   </div>
                   <label className="local-library-setting">
@@ -1721,13 +1905,13 @@ export default function SetupCenter({
                     </div>
                     <small>选择上级目录后，domi 会先创建“domi工作区”，在根目录生成“0.待办事项.md”，再建立行业研究、行业动态、项目库和人脉库；已有文件不会被删除或覆盖。</small>
                   </label>
-                  <div className="local-database-location">
+                  {!required && <div className="local-database-location">
                     <span>SQLite 数据库</span>
                     <code>{draft.localDatabasePath || "保存设置后自动创建"}</code>
                     <small>数据库保存在 Application Support，不放入同步盘，Markdown 和附件仍可选择 iCloud、OneDrive 或普通文件夹。</small>
-                  </div>
+                  </div>}
                 </div>
-              <section className="task-calendar-settings">
+              {!required && <section className="task-calendar-settings">
                 <div className="task-calendar-settings-heading">
                   <CalendarDays size={20} />
                   <span>
@@ -1799,7 +1983,7 @@ export default function SetupCenter({
                     </label>
                   </section>
                 </div>
-              </section>
+              </section>}
               {(error || notice) && <div className={`setup-feedback ${error ? "error" : "success"}`}>{error || notice}</div>}
             </div>
           ) : tab === "plaud" ? (
@@ -2090,9 +2274,9 @@ export default function SetupCenter({
 
           <footer className="setup-footer">
             <span>{tab === "connection"
-              ? "更改连接会重启本地 Codex 服务，不影响 domi 中的对话记录。"
+              ? required ? "确认连接后即可开始，其他功能不需要现在配置。" : "更改连接会重启本地 Codex 服务，不影响 domi 中的对话记录。"
               : tab === "data"
-                ? "配置保存在 Application Support；覆盖安装和自动更新会继续沿用，无需重复配置。"
+                ? "资料和设置会在更新后保留，无需重复配置。"
               : tab === "plaud"
                 ? "PLAUD 登录只保存在本机 domi 专用浏览器 Profile；不会进入插件、Git 或诊断报告。"
               : tab === "updates"
@@ -2104,31 +2288,36 @@ export default function SetupCenter({
                 type="button"
                 onClick={() => connectionOperationBusy
                   ? cancelConnectionTest()
-                  : saveConnection(required)}
-                disabled={saving || installBusy || (!codexInstalled && !codexPathRequiresApply)}
+                  : loginWaiting ? undefined
+                  : needsChatGPTLogin && !codexPathRequiresApply
+                    ? startLogin()
+                    : saveConnection(required)}
+                disabled={saving || installBusy || loginBusy || loginWaiting || (!codexInstalled && !codexPathRequiresApply)}
               >
                 {saving && <LoaderCircle className="spinning" size={16} />}
                 {connectionOperationBusy
                   ? relayBusy ? "取消中转站配置测试" : "取消连接测试"
                   : codexPathRequiresApply
                     ? "应用 Codex 路径"
-                  : required
-                    ? "下一步：资料连接"
-                    : "保存设置"}
+                  : loginWaiting ? "等待登录…"
+                  : loginBusy ? "正在打开登录…"
+                  : needsChatGPTLogin ? "登录并继续"
+                  : !selectedConnectionReady ? "检查连接并继续"
+                  : required ? "开始使用" : "保存设置"}
               </button>
             )}
             {tab === "data" && (
               <button
                 className="setup-primary"
                 type="button"
-                onClick={required ? saveDataAndContinue : () => save(false)}
+                onClick={required ? () => connectionOperationBusy ? cancelConnectionTest() : saveDataAndContinue() : () => save(false)}
                 disabled={saving || feishuAuthBusy}
               >
                 {(saving || feishuAuthBusy) && <LoaderCircle className="spinning" size={16} />}
-                {feishuAuthBusy
+                {required && connectionOperationBusy ? "取消连接测试" : feishuAuthBusy
                   ? "正在连接飞书…"
                   : required
-                    ? "下一步：录音转写"
+                    ? "开始使用"
                     : "保存资料连接"}
               </button>
             )}

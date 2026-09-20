@@ -6548,7 +6548,8 @@ function App() {
     // Login and connection checks save these fields before touching the
     // managed session, including when the browser value itself is unchanged.
     if (["plaudConnectionMode", "plaudBrowser"].some(key => Object.prototype.hasOwnProperty.call(request, key))) cancelPlaudSyncIntent();
-    const dataConnectionChanged = requestChangesDataConnection(request);
+    const completingOnboarding = request.onboardingComplete === true && !appSettingsRef.current?.onboardingComplete;
+    const dataConnectionChanged = requestChangesDataConnection(request) || completingOnboarding;
     if (
       dataConnectionChanged
       && (
@@ -14549,6 +14550,7 @@ function App() {
           onSave={saveAppSettings}
           onLogin={startChatGPTLogin}
           onRefresh={refreshCodex}
+          onReadOnlyRefresh={async () => { await codexReadinessController.refresh(undefined, { readOnly: true, force: true }); }}
         />
       </Suspense>
     )}

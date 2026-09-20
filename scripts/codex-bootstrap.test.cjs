@@ -540,3 +540,17 @@ test("connection test does not accept markers echoed outside completed tool and 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("an explicit Codex home keeps bootstrap config and provider detection with the running CLI", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-custom-codex-home-"));
+  try {
+    const service = new CodexBootstrapService({ homeDir: path.join(root, "home"), codexHome: root });
+    fs.writeFileSync(path.join(root, "config.toml"), 'model_provider = "existing"\n[model_providers.existing]\nbase_url = "https://relay.example.com/v1"\n');
+    assert.equal(service.configPath(), path.join(root, "config.toml"));
+    assert.equal(service.providerStatePath(), path.join(root, "domi-provider-state.json"));
+    assert.deepEqual(service.connectionTarget(), { authMode: "relay", providerEndpoint: "https://relay.example.com/v1" });
+    fs.appendFileSync(path.join(root, "config.toml"), 'requires_openai_auth = true\n');
+    assert.deepEqual(service.connectionTarget(), { authMode: "chatgpt", providerEndpoint: "https://relay.example.com/v1" });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

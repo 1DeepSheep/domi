@@ -102,6 +102,7 @@ class CodexAppServer {
     this.onExit = onExit;
     this.requestTimeoutMs = requestTimeoutMs;
     this.child = null;
+    this.lifecycleGeneration = 0;
     this.initialized = false;
     this.startPromise = null;
     this.pending = new Map();
@@ -184,14 +185,13 @@ class CodexAppServer {
     }
 
     const pending = this.#startProcess();
-    const startingChild = this.child;
     this.startPromise = pending;
     try {
       await pending;
     } catch (error) {
       // A living process is not necessarily an initialized server. Retire a
       // failed handshake before allowing another request to start a new one.
-      if (this.child === startingChild) {
+      if (this.startPromise === pending) {
         this.close();
         this.child = null;
       }
@@ -203,7 +203,9 @@ class CodexAppServer {
 
   async #startProcess() {
     if (this.child) this.close();
-    const runtime = this.runtimeProvider?.() || {};
+    const generation = this.lifecycleGeneration;
+    const runtime = await this.runtimeProvider?.() || {};
+    if (generation !== this.lifecycleGeneration) throw new Error("Codex 连接准备已取消。");
     const binary = resolveCodexBinary(runtime.codexPath);
     this.intentionalClose = false;
     this.initialized = false;
@@ -297,6 +299,7 @@ class CodexAppServer {
   }
 
   close() {
+    this.lifecycleGeneration += 1;
     this.intentionalClose = true;
     this.initialized = false;
     this.#clearUserInputRequests("client-close", true);

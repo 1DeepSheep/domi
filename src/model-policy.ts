@@ -1,5 +1,7 @@
-export const DOMI_ECONOMY_MODEL_ID = "gpt-5.6-terra";
-export const DOMI_PREMIUM_MODEL_ID = "gpt-5.6-sol";
+import requirements from "../shared/model-requirements.json" with { type: "json" };
+
+export const DOMI_ECONOMY_MODEL_ID = requirements.economy.model;
+export const DOMI_PREMIUM_MODEL_ID = requirements.premium.model;
 
 export type DomiModelPolicyClass = "economy" | "premium" | "inherit";
 export type DomiModelPolicyRunKind = "podcast-archive";
@@ -351,7 +353,7 @@ export function resolveDomiModelPolicy(
   const modelId = policyClass === "economy"
     ? DOMI_ECONOMY_MODEL_ID
     : DOMI_PREMIUM_MODEL_ID;
-  const requiredEffort = policyClass === "economy" ? "medium" : "max";
+  const requiredEffort = requirements[policyClass].effort;
   const model = requiredModel(request.models, modelId, policyClass);
   assertReasoningEffort(model, requiredEffort);
 

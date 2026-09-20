@@ -411,3 +411,32 @@ input.on("line", (line) => {
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 });
+
+
+test("concurrent startup waits for one async network environment and passes it to the real child", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-async-environment-"));
+  const binary = path.join(root, "codex");
+  writeFakeCodex(binary, '#!/usr/bin/env node\nconst r=require("node:readline").createInterface({input:process.stdin});r.on("line",l=>{const q=JSON.parse(l);if(q.id)console.log(JSON.stringify({id:q.id,result:q.method==="ping"?{network:process.env.DOMI_TEST_NETWORK}: {}}));});\n');
+  let calls = 0, release;
+  const prepared = new Promise(resolve => { release = resolve; });
+  const client = new CodexAppServer({ cwd: root, version: "test", runtimeProvider: async () => { calls++; await prepared; return { codexPath: binary, env: { DOMI_TEST_NETWORK: "prepared" } }; } });
+  try {
+    const one = client.request("ping"); const two = client.request("ping");
+    assert.equal(client.child, null);
+    release();
+    assert.deepEqual(await Promise.all([one,two]), [{network:"prepared"},{network:"prepared"}]);
+    assert.equal(calls, 1);
+  } finally { client.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("closing during network preparation prevents a late process from spawning", async () => {
+  let release;
+  const prepared = new Promise(resolve => { release = resolve; });
+  const client = new CodexAppServer({ cwd: os.tmpdir(), version: "test", runtimeProvider: () => prepared });
+  const pending = client.start();
+  client.close();
+  release({ codexPath: "/synthetic/not-a-real-binary" });
+  await assert.rejects(pending, /取消/);
+  assert.equal(client.child, null);
+  assert.equal(client.startPromise, null);
+});
