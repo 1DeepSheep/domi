@@ -209,12 +209,13 @@ try {
     await page.clock.fastForward(20_000);
     assert.equal(await ui.count("check"), 1, "Unknown run IDs cannot establish readiness or trigger recovery");
     const dialog = await ui.setup();
-    assert.match(await dialog.innerText(), /ChatGPT 身份已就绪/);
-    assert.match(await dialog.innerText(), /domi 插件尚待检查/);
+    assert.match(await dialog.innerText(), /Codex 已连接，domi 组件待准备/);
+    assert.match(await dialog.innerText(), /账号连接正常[\s\S]*无需重新登录/);
+    assert.equal(await dialog.getByRole("button", { name: "重新准备 domi 组件", exact: true }).isEnabled(), true);
     assert.doesNotMatch(await dialog.innerText(), /Command failed|\/private\/synthetic/);
     if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, "plugin-warning.png"), fullPage: true, animations: "disabled" });
     await ui.plan({});
-    await dialog.getByRole("button", { name: "重新检查连接", exact: true }).click();
+    await dialog.getByRole("button", { name: "重新准备 domi 组件", exact: true }).click();
     await ui.status.getByText("Codex 已就绪", { exact: true }).waitFor();
     const manual = await page.evaluate(() => window.__readinessTest.calls.filter(call => call.kind === "check").at(-1));
     assert.deepEqual(manual.options, { readOnly: false, force: true }, "Manual recovery can initialize an absent server and bypass stale checks without a model call");

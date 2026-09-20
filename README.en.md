@@ -115,24 +115,27 @@ For users upgrading from an older Feishu-primary setup, the existing Base, Wiki,
 
 1. Open [domi Releases](https://github.com/1DeepSheep/domi/releases/latest).
 2. On an M-series Mac, download the installer ending in `arm64.dmg`. On an Intel Mac, download the installer ending in `x64.dmg`.
-3. Open the DMG, drag “domi” into Applications, and launch it.
+3. Open the DMG, drag “domi” into Applications, and launch it. You can also open domi directly inside the DMG and choose “安装并打开” (Install and open) in the one-time prompt.
 
-### 2. Connect Codex
+The same prompt appears when a release build starts from Downloads or another location outside Applications. Choosing “继续使用” (Continue using) dismisses it permanently; macOS handles any installation authorization. If Applications already contains domi, the guide preserves that copy. Open the installed version and use its in-app update to avoid replacing an app with active tasks. Cancellation or installation failure still lets you use the current copy, and you can install it later by dragging it in Finder.
 
-On first launch, domi checks for the Codex CLI. If it is not installed, domi verifies and extracts the bundled official OpenAI standalone distribution—without requiring Terminal or a live GitHub connection. The runtime is stored in Codex's official `~/.codex/packages/standalone` location, with a user-level link in `~/.local/bin`; system directories are not modified.
+arm64 and x64 builds remain separate. The guide uses Electron's built-in installation support and requires no additional installer download.
 
-Choose one identity option:
+### 2. Confirm the existing connection and start
 
-- **ChatGPT account:** open the official Codex sign-in and use the ChatGPT/Codex account on this Mac.
-- **Responses gateway:** provide the URL, model name, and API key of an OpenAI Responses API-compatible gateway. The key is stored only in macOS Keychain.
+On first launch, domi first reuses an existing Codex Runtime, sign-in, and configured provider on this Mac. There is no need to enter that connection again. If a usable Runtime is missing, domi verifies and extracts the bundled official OpenAI standalone distribution, without requiring Terminal or a fresh GitHub download. If no usable identity is available, choose “登录并继续” (Sign in and continue); domi checks the status automatically after you complete the official sign-in flow.
 
-“Test full connection” runs a temporary task with no saved history to verify both the model response and a Shell tool call. Setup completes only when both pass. A conventional Chat Completions endpoint does not provide the full Codex capability set. See the [official Codex CLI documentation](https://developers.openai.com/codex/cli) and [Codex configuration reference](https://developers.openai.com/codex/config-reference).
+When you choose “开始使用” (Start using domi), setup first checks availability of `gpt-5.6-terra / medium` for market radar and follow-ups, and `gpt-5.6-sol / max` for meeting notes and research. It then runs one temporary task with no saved history through the same App Server channel used for real tasks, using the notes and research configuration to verify the actual model response and a Shell tool call. A program separately checks local file writing and reading. Setup completes only after verification; missing capabilities produce a useful error rather than an automatic reduction in task settings.
 
-### 3. Create the local workspace
+Open Advanced settings when you need to change the connection method, configure a Responses gateway, or specify a Codex path. A gateway must support the OpenAI Responses API and the models and tools above; its key is stored in macOS Keychain. See the [official Codex CLI documentation](https://developers.openai.com/codex/cli) and [Codex configuration reference](https://developers.openai.com/codex/config-reference).
 
-Select a parent directory. domi creates or reuses `domi工作区`, initializes SQLite and Markdown directories, and creates `0.待办事项.md`. You can start immediately, then connect Feishu, PLAUD, and Outlook only if needed. New users do not need to enter Base tokens, table IDs, or a Wiki space ID manually.
+For VPNs and proxies, domi attempts to apply the proxy routes macOS resolves for the relevant services to Codex, preserving explicit proxy environment settings first. Complex PAC routing or rules requiring multiple proxies may not translate automatically. In that case, enable your VPN's mode that covers all applications, then check the connection again. Connectivity still depends on the network and routing configuration; support is not guaranteed for a particular VPN brand or mode.
 
-domi installs the plugin version matched to the desktop release automatically. Regular users do not need to install Skills or the plugin separately.
+### 3. Use the default workspace and add optional connections later
+
+New users default to `domi工作区` inside Documents, with no extra configuration required. Completing setup creates or reuses the document directories, initializes local indexing and `0.待办事项.md`, and preserves existing workspace locations. Choose “更改位置” (Change location) during setup if you prefer another folder.
+
+Feishu, PLAUD, and Outlook are optional and can be configured in Settings after entering the app. First use requires no Base token, table ID, or Wiki space ID, and does not enable PLAUD automatically. domi prepares the plugin version matched to the desktop release; users do not need to install Skills or the plugin separately.
 
 ## Where data is stored
 

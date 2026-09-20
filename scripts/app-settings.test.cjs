@@ -51,7 +51,8 @@ function createService(
       decryptString: (value) => value.toString("utf8")
     },
     domiConfigPath: path.join(root, "domi-plugin-config.json"),
-    developmentFallbackConfigPath: options.developmentFallbackConfigPath || ""
+    developmentFallbackConfigPath: options.developmentFallbackConfigPath || "",
+    defaultRepositoryDir: options.defaultRepositoryDir || ""
   });
 }
 
@@ -509,4 +510,33 @@ test("new settings cannot select Feishu as the management backend", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("first-run default workspace initializes only on completion and preserves existing files", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-default-"));
+  try {
+    const defaultRepositoryDir = path.join(root, "文稿", "domi工作区");
+    const service = createService(root, {}, null, { defaultRepositoryDir });
+    assert.equal(service.load().settings.localRepositoryDir, defaultRepositoryDir);
+    assert.equal(fs.existsSync(defaultRepositoryDir), false);
+    service.save({ codexPath: "/synthetic/codex" });
+    assert.equal(fs.existsSync(defaultRepositoryDir), false);
+    fs.mkdirSync(defaultRepositoryDir, { recursive: true });
+    fs.writeFileSync(path.join(defaultRepositoryDir, "keep.md"), "unchanged");
+    service.save({ localRepositoryDir: defaultRepositoryDir, onboardingComplete: true, plaudConnectionMode: "disabled" });
+    assert.equal(fs.readFileSync(path.join(defaultRepositoryDir, "keep.md"), "utf8"), "unchanged");
+    assert.equal(fs.existsSync(path.join(defaultRepositoryDir, "0.待办事项.md")), true);
+    assert.equal(service.load().settings.onboardingComplete, true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("default workspace never overrides legacy or completed repositories", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-settings-preserve-"));
+  try {
+    for (const existing of [{...legacyFeishuConfig, version: 9}, { onboardingComplete: true, version: 9, plaudConnectionMode: "disabled" }, { version: 9, localLibraryDir: "/synthetic/existing" }]) {
+      const service = createService(root, existing, 1, { defaultRepositoryDir: path.join(root, "new") });
+      assert.equal(service.load().settings.localRepositoryDir, "");
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

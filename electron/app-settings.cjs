@@ -231,12 +231,14 @@ class AppSettingsService {
     stateStore,
     safeStorage,
     domiConfigPath,
-    developmentFallbackConfigPath = ""
+    developmentFallbackConfigPath = "",
+    defaultRepositoryDir = ""
   }) {
     this.stateStore = stateStore;
     this.safeStorage = safeStorage;
     this.domiConfigPath = domiConfigPath;
     this.developmentFallbackConfigPath = developmentFallbackConfigPath;
+    this.defaultRepositoryDir = defaultRepositoryDir;
     this.localDatabasePath = domiConfigPath
       ? path.join(path.dirname(domiConfigPath), "domi-repository.sqlite3")
       : "";
@@ -390,6 +392,10 @@ class AppSettingsService {
         localDatabasePath: localDomiConfig.localDatabasePath || this.localDatabasePath
       });
     }
+    if (!settings.onboardingComplete && settings.storageBackend === "local"
+      && !settings.localRepositoryDir && !settings.localLibraryDir && this.defaultRepositoryDir) {
+      settings.localRepositoryDir = domiWorkspaceRoot(this.defaultRepositoryDir);
+    }
     return {
       settings,
       hasApiKey: settings.relayCredentialConfigured,
@@ -415,7 +421,7 @@ class AppSettingsService {
         !current.settings.localRepositoryDir
         || (
           !current.settings.onboardingComplete
-          && requestedLocalRepositoryDir !== current.settings.localRepositoryDir
+          && (request.onboardingComplete || requestedLocalRepositoryDir !== current.settings.localRepositoryDir)
         )
       );
     if (initializesLocalWorkspace) {
@@ -441,7 +447,12 @@ class AppSettingsService {
     }
     if (initializesLocalWorkspace) {
       const location = documentLibraryLocation(settings);
-      ensureDocumentLibraryStructure(location.rootPath);
+      try {
+        ensureDocumentLibraryStructure(location.rootPath);
+        require("./codex-onboarding.cjs").verifyWorkspace(location.rootPath);
+      } catch {
+        throw new Error("无法在当前文件夹保存资料。请允许 domi 访问该文件夹，或选择其他保存位置；已有资料未改动。");
+      }
     }
 
     const saved = this.stateStore.saveAppSettings(SETTINGS_KEY, settings);

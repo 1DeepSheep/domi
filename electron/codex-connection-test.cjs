@@ -47,7 +47,7 @@ function connectionTestFailure(error, { requestId, stage, timeoutMs }) {
     cancelled: false,
     timedOut: false,
     stage,
-    diagnosticCode: "DOMI_CODEX_CONNECTION_TEST_FAILED",
+    diagnosticCode: /^DOMI_[A-Z_]+$/.test(code) ? code : "DOMI_CODEX_CONNECTION_TEST_FAILED",
     error: error instanceof Error ? error.message : String(error || "Codex 完整连接测试失败。")
   };
 }

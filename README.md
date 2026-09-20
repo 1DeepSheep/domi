@@ -115,24 +115,27 @@ domi 只有一套权威资料库：SQLite 保存项目、人脉、行业动态�
 
 1. 打开 [domi Releases](https://github.com/1DeepSheep/domi/releases/latest)。
 2. M 系列芯片下载名称以 `arm64.dmg` 结尾的安装包；Intel 芯片下载名称以 `x64.dmg` 结尾的安装包。
-3. 打开 DMG，把「domi」拖入“应用程序”文件夹，然后启动。
+3. 打开 DMG，把「domi」拖入“应用程序”文件夹，然后启动。也可以直接打开 DMG 内的 domi，在首次出现的引导中选择“安装并打开”。
 
-### 2. 连接 Codex
+从下载目录等其他位置启动正式版时，也会提供同样的一次性引导；选择“继续使用”后不会在每次启动时重复询问。安装需要的权限由 macOS 确认。若“应用程序”中已有 domi，引导会保留已有版本；请打开该版本并通过应用内软件更新升级，避免覆盖正在执行的任务。安装取消或失败时仍可继续使用，也可以稍后通过访达完成拖拽安装。
 
-首次启动时，domi 会检测 Codex CLI；如果尚未安装，会校验并解压安装包内置的 OpenAI 官方独立发行版，无需打开终端，也不依赖当时能否连接 GitHub。运行时保存在 Codex 官方的 `~/.codex/packages/standalone`，并在 `~/.local/bin` 建立用户级链接，不修改系统目录。
+arm64 与 x64 继续分别提供，安装引导使用 Electron 内置能力，无需额外下载安装器。
 
-随后选择一种身份方式：
+### 2. 确认现有连接，开始使用
 
-- **ChatGPT 账号**：打开 Codex 官方登录，复用本机 ChatGPT／Codex 账号；
-- **Responses 中转站**：填写兼容 OpenAI Responses API 的地址、模型名称和 API Key。密钥只写入 macOS 钥匙串。
+首次启动时，domi 优先复用本机已有的 Codex Runtime、登录状态和已配置的服务提供方，无需重新填写连接信息。缺少可用 Runtime 时，会校验并解压安装包内置的 OpenAI 官方独立发行版，无需打开终端或临时从 GitHub 下载。没有可用身份时，点击“登录并继续”，在官方登录页面完成登录后，domi 会自动确认状态。
 
-点击“测试完整连接”后，domi 会用不保存历史的临时任务验证模型响应和 Shell 工具调用，两项都通过后才完成设置。普通 Chat Completions 接口不支持完整 Codex 能力。配置说明见 [Codex CLI 官方文档](https://developers.openai.com/codex/cli) 和 [Codex 配置参考](https://developers.openai.com/codex/config-reference)。
+点击“开始使用”后，domi 会先确认行业动态与待办所需的 `gpt-5.6-terra / medium`、纪要与研究所需的 `gpt-5.6-sol / max` 均可用，再通过正式任务使用的 App Server 通道，以纪要与研究配置运行一次不保存历史的临时任务，验证实际模型响应和 Shell 工具调用。本地文件写入与回读由程序检查；验证通过后才完成首次设置，缺少所需能力时会提示处理，不自动降低任务配置。
 
-### 3. 建立本地工作区
+需要更改连接方式、使用 Responses 中转站或指定 Codex 路径时，再展开“高级设置”。中转站需要支持 OpenAI Responses API 及上述模型和工具能力；密钥保存在 macOS 钥匙串。配置说明见 [Codex CLI 官方文档](https://developers.openai.com/codex/cli) 和 [Codex 配置参考](https://developers.openai.com/codex/config-reference)。
 
-选择一个上级目录；domi 会创建或复用 `domi工作区`，初始化 SQLite、Markdown 目录和 `0.待办事项.md`。随后可以直接开始使用，也可以按需连接飞书、PLAUD 和 Outlook。新用户不需要手工填写 Base Token、Table ID 或 Wiki Space ID。
+使用 VPN 或代理时，domi 会尝试将 macOS 为相关服务解析出的代理规则应用于 Codex；已有代理环境设置优先保留。复杂 PAC 分流或需要多个代理的规则可能无法自动对应，此时请在 VPN 中启用覆盖所有应用的连接方式，再重新检查。是否可连接仍取决于当前网络和代理规则，不保证某个 VPN 品牌或模式一定可用。
 
-domi 会自动安装与当前客户端匹配的 domi 插件，普通用户不需要单独安装 Skills 或插件。
+### 3. 使用默认资料位置，按需连接其他服务
+
+新用户默认使用“文稿”目录中的 `domi工作区`，无需额外配置。首次设置完成时会创建或复用资料目录、初始化本地索引及 `0.待办事项.md`；已有资料位置继续沿用。需要其他保存位置时，可以在引导页点击“更改位置”。
+
+飞书、PLAUD 和 Outlook 都是可选连接，进入应用后可在设置中按需配置；首次使用不要求填写 Base Token、Table ID 或 Wiki Space ID，也不会自动启用 PLAUD。domi 会自动准备与当前客户端匹配的 domi 插件，无需单独安装 Skills 或插件。
 
 ## 资料保存在哪里
 

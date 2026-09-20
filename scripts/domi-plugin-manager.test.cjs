@@ -227,11 +227,13 @@ async function verifyActivationGate() {
   const context = {
     process: { env: {} }, app: { isPackaged: true },
     codexCheckRuntimeKey: () => "test-runtime", codexCheckGeneration: 0,
+    codexClient: null, codexNetworkDiagnostic: { ok: true, status: "direct" },
     codexCheckFailureDetails, pluginCheckFailure,
     ensureDemoWorkspace() {}, ensureCodexRuntimeReady: async () => {},
     throwIfCodexCheckAborted() {}, codexCheckTimeout: (_deadline, maximum) => maximum,
     getAppSettings: () => ({ load: () => ({ settings: { codexPath: "codex" } }) }),
     getCodexRuntime: () => ({ authMode: "chatgpt", codexPath: "codex", env: {} }),
+    getPreparedCodexRuntime: async () => ({ authMode: "chatgpt", codexPath: "codex", env: {} }),
     resolveCodexBinary: () => "codex", codexEnvironment: () => ({}),
     getDomiPluginActivationGate: () => gate,
     getDomiPluginManager: () => ({ checkInstalled: async () => {
@@ -450,11 +452,13 @@ async function verifyReadinessDiagnostics() {
   const context = {
     process: { env: {} }, app: { isPackaged: true },
     crypto: require("node:crypto"), codexCheckGeneration: 0, codexClient: client,
+    codexNetworkDiagnostic: { ok: true, status: "direct" },
     ensureDemoWorkspace: () => calls.push("workspace"),
     ensureCodexRuntimeReady: async () => calls.push("runtime-install"),
     throwIfCodexCheckAborted() {}, codexCheckTimeout: (_deadline, max) => max,
     getAppSettings: () => ({ load: () => ({ settings: { codexPath: runtime.codexPath } }) }),
     getCodexRuntime: () => ({ ...runtime }),
+    getPreparedCodexRuntime: async () => { calls.push("network"); return { ...runtime }; },
     resolveCodexBinary: () => "fixture", codexEnvironment: () => ({}),
     getDomiPluginActivationGate: () => gate,
     getDomiPluginManager: (options) => {

@@ -1,0 +1,4 @@
+{
+  "economy": { "model": "gpt-5.6-terra", "effort": "medium", "label": "行业动态与待办" },
+  "premium": { "model": "gpt-5.6-sol", "effort": "max", "label": "纪要与研究" }
+}

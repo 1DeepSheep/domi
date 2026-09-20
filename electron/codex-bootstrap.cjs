@@ -396,6 +396,7 @@ function bootstrapRemainingTimeout(deadlineAt, maximumMs) {
 class CodexBootstrapService {
   constructor({
     homeDir = os.homedir(),
+    codexHome = "",
     exec = execFileAsync,
     fetchInstaller = fetchOfficialInstaller,
     resolveBinary = resolveCodexBinary,
@@ -407,6 +408,7 @@ class CodexBootstrapService {
     sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
   } = {}) {
     this.homeDir = homeDir;
+    this.codexHome = codexHome || path.join(homeDir, ".codex");
     this.exec = exec;
     this.fetchInstaller = fetchInstaller;
     this.resolveBinary = resolveBinary;
@@ -419,11 +421,24 @@ class CodexBootstrapService {
   }
 
   configPath() {
-    return path.join(this.homeDir, ".codex", "config.toml");
+    return path.join(this.codexHome, "config.toml");
+  }
+
+  connectionTarget() {
+    try {
+      const config = parse(fs.readFileSync(this.configPath(), "utf8"));
+      const profile = config.profiles?.[config.profile] || {};
+      const provider = profile.model_provider || config.model_provider;
+      const providerConfig = config.model_providers?.[provider];
+      const baseUrl = providerConfig?.base_url;
+      return typeof baseUrl === "string"
+        ? { authMode: providerConfig.requires_openai_auth === true ? "chatgpt" : "relay", providerEndpoint: baseUrl }
+        : { authMode: "chatgpt" };
+    } catch { return { authMode: "chatgpt" }; }
   }
 
   providerStatePath() {
-    return path.join(this.homeDir, ".codex", "domi-provider-state.json");
+    return path.join(this.codexHome, "domi-provider-state.json");
   }
 
   async status(preferredPath = "", {
