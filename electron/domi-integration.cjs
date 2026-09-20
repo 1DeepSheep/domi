@@ -2495,7 +2495,7 @@ class DomiIntegration {
         if (result?.ok === false || !Array.isArray(result?.items)
           || result.items.some(item => !item || typeof item.fileId !== "string" || !item.fileId)) {
           throw Object.assign(new Error(result?.error || "PLAUD_READ_FAILED: 本轮录音列表未成功读取。"), {
-            code: result?.errorCode || "PLAUD_READ_FAILED", stage: result?.errorStage || "list",
+            code: result?.errorCode || (result?.apiStatus === -3901 ? "PLAUD_AUTH_CONTEXT_MISMATCH" : "PLAUD_READ_FAILED"), stage: result?.errorStage || "list",
             ...(Number.isInteger(result?.httpStatus) && result.httpStatus >= 100 && result.httpStatus <= 599 ? { httpStatus: result.httpStatus } : {}),
             ...(Number.isSafeInteger(result?.apiStatus) ? { apiStatus: result.apiStatus } : {}),
             ...(result?.retryAfterMs !== undefined ? { retryAfterMs: result.retryAfterMs } : {})
@@ -2567,8 +2567,10 @@ class DomiIntegration {
       merged.sort(comparePlaudItems);
       return merged;
     };
+    // After an account action, unscoped workflow-only rows cannot prove
+    // membership in the new account. Matching remote IDs remain enriched.
     const items = remoteResult.status === "fulfilled" || stale
-      ? mergeWorkflowState(remoteSnapshot?.items || [], remoteResult.status === "fulfilled" && offset === 0)
+      ? mergeWorkflowState(remoteSnapshot?.items || [], remoteResult.status === "fulfilled" && offset === 0 && !this.plaudAccountEpoch())
       : [];
     const remoteError = remoteFailure?.error || "";
     const warning = stale

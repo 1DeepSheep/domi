@@ -299,7 +299,8 @@ function persistentPlaudFixture(t) {
       if (mode === "plugin-missing") throw new Error("Synthetic plugin unavailable");
       return { root: "/synthetic/plugin" };
     };
-    integration.loadPlaudWorkflowRecords = () => [{ fileId: "unbound-private-queue", fileName: "Synthetic unbound", stage: "generating" }];
+    integration.loadPlaudWorkflowRecords = () => [{ fileId: "unbound-private-queue", fileName: "Synthetic unbound", stage: "generating" },
+      ...(mode === "seed-new-account" ? [{ fileId: browser + "-new-account", stage: "generating" }] : [])];
     integration.plaudDoctor = async () => { if (mode === "login-fail") throw new Error("Synthetic doctor failed"); return { ok: true }; };
     integration.runPlaudConnectionCommand = async command => ({ ok: true, connected: command === "login" });
     integration.runPlaudWorker = async () => {
@@ -307,7 +308,7 @@ function persistentPlaudFixture(t) {
       if (mode === "fail") throw Object.assign(new Error("Synthetic initialization failure"), { code: "PLAUD_READ_FAILED", stage: "init" });
       if (mode === "auth-fail") throw Object.assign(new Error("PLAUD_AUTH_REQUIRED: synthetic signed-out response"), { code: "PLAUD_AUTH_REQUIRED" });
       if (mode === "context-fail") throw Object.assign(new Error("Synthetic context mismatch"), { code: "PLAUD_AUTH_CONTEXT_MISMATCH", httpStatus: 200, apiStatus: -3901, stage: "list" });
-      if (mode === "context-payload") return { ok: false, items: [], error: "Synthetic context mismatch", errorCode: "PLAUD_AUTH_CONTEXT_MISMATCH", httpStatus: 200, apiStatus: -3901 };
+      if (mode === "context-payload") return { ok: false, items: [], error: "Synthetic context mismatch", httpStatus: 200, apiStatus: -3901 };
       if (mode === "failed-payload") return { ok: false, items: [], error: "Synthetic failure response", errorCode: "PLAUD_READ_FAILED" };
       if (mode === "malformed-payload") return { ok: true, items: null };
       if (mode === "inflight") {
@@ -383,6 +384,7 @@ test("PLAUD failed refreshes and malformed fulfilled responses cannot replace pe
     assert.equal(failed.storedSuccessAt, seeded.storedSuccessAt, failure);
     assert.deepEqual(failed.storedItemIds, ["chrome-known"], failure);
     if (failure.startsWith("context-")) {
+      assert.equal(failed.result.errorCode, "PLAUD_AUTH_CONTEXT_MISMATCH");
       assert.equal(failed.result.remoteStatus, "authorization_pending");
       assert.equal(failed.result.retryable, false);
       assert.equal(failed.result.apiStatus, -3901); assert.equal(failed.result.httpStatus, 200);
@@ -398,7 +400,8 @@ test("PLAUD failed refreshes and malformed fulfilled responses cannot replace pe
 
 test("PLAUD explicit login and logout persist account isolation across restart without clearing another Profile", t => {
   const f = persistentPlaudFixture(t);
-  f.run("seed"); f.run("seed", "tabbit");
+  const legacy = f.run("seed").result; f.run("seed", "tabbit");
+  assert(legacy.items.some(item => item.fileId === "unbound-private-queue"), "Before an explicit account action, legacy workflow display stays unchanged");
   assert.equal(f.run("login").result.cacheInvalidated, true);
   for (const mode of ["cache", "fail"]) {
     const current = f.run(mode).result;
@@ -406,10 +409,13 @@ test("PLAUD explicit login and logout persist account isolation across restart w
     assert.equal(current.syncedAt, 0); assert.equal(current.lastSuccessfulAt, undefined);
   }
   assert.deepEqual(f.run("cache", "tabbit").result.items.map(item => item.fileId), ["tabbit-known"]);
-  f.run("seed-new-account");
+  const switched = f.run("seed-new-account").result;
+  assert.deepEqual(switched.items.map(item => item.fileId), ["chrome-new-account"], "Fresh reads after switching accounts must not append unscoped old workflow rows");
+  assert.equal(switched.items[0].queueStage, "generating", "Matching remote IDs still receive local workflow state");
   const current = f.run("cache").result;
   assert.equal(current.cacheInvalidated, false);
   assert.deepEqual(current.items.map(item => item.fileId), ["chrome-new-account"]);
+  assert.deepEqual(f.run("seed-empty").result.items, [], "A verified empty new account cannot display an old queue");
   assert.equal(f.run("logout").result.cacheInvalidated, true);
   assert.deepEqual(f.run("cache").result.items, []);
   f.run("seed-new-account");
