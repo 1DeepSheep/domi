@@ -4801,6 +4801,14 @@ class DomiIntegration {
     });
   }
 
+  refreshIndustryOverviews() {
+    const source = this.readProjectConfig();
+    if (source.backend !== "local") {
+      return { ok: false, entries: [], error: "行业速览需要本地资料库；当前资料库保持不变。" };
+    }
+    return this.withLocalRepository(source, (repository) => repository.refreshIndustryOverviews());
+  }
+
   databaseSnapshot() {
     const source = this.readProjectConfig();
     if (source.backend !== "local") {

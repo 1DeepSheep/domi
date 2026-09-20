@@ -76,6 +76,7 @@ import {
   useState
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
+import IndustryOverview from "./IndustryOverview";
 import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
 import { restorePlaudOnStartup } from "./plaud-startup";
 import { planPlaudSyncContinuation, type PlaudSyncIntent } from "./plaud-sync-intent";
@@ -211,7 +212,7 @@ const RadarSourceManager = lazy(() => import("./RadarSourceManager"));
 const SkillHubManager = lazy(() => import("./SkillHubManager"));
 
 type Role = "user" | "assistant" | "system";
-type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents";
+type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents" | "industries";
 
 type DomiSearchOption =
   | { key: string; kind: "project"; record: DomiProject }
@@ -240,7 +241,8 @@ const WORKSPACE_VIEW_DEFAULT_RIGHT_PANEL: Record<WorkspaceView, boolean> = {
   tasks: true,
   news: true,
   data: false,
-  documents: false
+  documents: false,
+  industries: false
 };
 
 const WORKSPACE_SCROLL_SELECTORS: Record<WorkspaceView, string[]> = {
@@ -251,7 +253,8 @@ const WORKSPACE_SCROLL_SELECTORS: Record<WorkspaceView, string[]> = {
   tasks: [".task-board-scroll", ".task-column-list", ".right-panel:not(.document-panel)"],
   news: [".home-weekly-news", ".right-panel:not(.document-panel)"],
   data: [".database-grid-shell", ".right-panel:not(.document-panel)"],
-  documents: [".rich-markdown-scroll"]
+  documents: [".rich-markdown-scroll"],
+  industries: [".industry-overview-reader"]
 };
 
 const COMPOSER_DRAFTS_STORAGE_KEY = "domi.composerDrafts.v1";
@@ -1870,6 +1873,7 @@ function App() {
     indexedCount: 0,
     lastIndexedAt: 0
   });
+  const [industryRefreshKey, setIndustryRefreshKey] = useState(0);
   const [databaseSnapshot, setDatabaseSnapshot] = useState<DomiDatabaseSnapshot | null>(null);
   const [databaseWorkspaceTab, setDatabaseWorkspaceTab] = useState<DatabaseWorkspaceTab>("project");
   const [databaseEntityType, setDatabaseEntityType] = useState<DatabaseEntityType>("project");
@@ -2047,7 +2051,8 @@ function App() {
     tasks: { rightPanelOpen: true, scrollPositions: [] },
     news: { rightPanelOpen: true, scrollPositions: [] },
     data: { rightPanelOpen: false, scrollPositions: [] },
-    documents: { rightPanelOpen: false, scrollPositions: [] }
+    documents: { rightPanelOpen: false, scrollPositions: [] },
+    industries: { rightPanelOpen: false, scrollPositions: [] }
   });
   const documentPreviewOriginRef = useRef<DocumentPreviewOrigin | null>(null);
   const documentPanelFocusedRef = useRef(false);
@@ -9835,10 +9840,11 @@ function App() {
     }
   }
 
-  async function openPrimaryWorkspace(view: "tasks" | "news" | "data") {
+  async function openPrimaryWorkspace(view: "tasks" | "news" | "data" | "industries") {
     if (!await navigateWorkspace(view)) return;
     setDocumentLibrarySidebarExpanded(false);
     setThreadMenuId(null);
+    if (view === "industries") { setRightPanelOpen(false); setIndustryRefreshKey((key) => key + 1); return; }
     if (view !== "data") return;
     setRightPanelOpen(false);
     void refreshDatabase({ preserveSelection: true });
@@ -13592,6 +13598,15 @@ function App() {
             <span className="sidebar-nav-meta" />
           </button>
           <button
+            className={`sidebar-nav-item ${workspaceView === "industries" ? "active" : ""}`}
+            type="button"
+            onClick={() => void openPrimaryWorkspace("industries")}
+          >
+            <LayoutDashboard className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
+            <strong>行业速览</strong>
+            <span className="sidebar-nav-meta" />
+          </button>
+          <button
             className={`sidebar-nav-item ${workspaceView === "data" ? "active" : ""}`}
             type="button"
             onClick={() => {
@@ -13893,6 +13908,8 @@ function App() {
               ? "待办事项"
               : workspaceView === "news"
                 ? "行业动态"
+                : workspaceView === "industries"
+                  ? "行业速览"
                 : workspaceView === "data"
                   ? "投资档案"
                 : workspaceView === "documents"
@@ -13902,6 +13919,8 @@ function App() {
               ? `${taskNavigationCount} 个待办事项`
               : workspaceView === "news"
                 ? "domi 行业雷达"
+                : workspaceView === "industries"
+                  ? "行业情况与项目对比"
                 : workspaceView === "data"
                   ? `${databaseSnapshot?.projects?.length || 0} 项目 / ${databaseSnapshot?.people?.length || 0} 人脉 / ${databaseSnapshot?.news?.length || 0} 行业信息`
                 : workspaceView === "documents"
@@ -13921,6 +13940,8 @@ function App() {
                   ])
                 : workspaceView === "news"
                   ? scanWeeklyNews()
+                  : workspaceView === "industries"
+                    ? setIndustryRefreshKey((key) => key + 1)
                   : workspaceView === "data"
                     ? refreshDatabase({ preserveSelection: true })
                   : workspaceView === "documents"
@@ -13937,6 +13958,8 @@ function App() {
                 ? "刷新待办事项来源"
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
+                  : workspaceView === "industries"
+                    ? "刷新行业速览"
                   : workspaceView === "data"
                     ? "刷新投资档案"
                   : workspaceView === "documents"
@@ -13946,6 +13969,8 @@ function App() {
                 ? "刷新任务来源"
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
+                  : workspaceView === "industries"
+                    ? "刷新行业速览"
                   : workspaceView === "data"
                     ? "刷新投资档案"
                   : workspaceView === "documents"
@@ -13978,10 +14003,10 @@ function App() {
         </header>
 
         <div
-          className={`main-grid ${rightPanelOpen ? "right-open" : "right-closed"} ${documentPanelActive ? "document-open" : ""} ${workspaceView === "tasks" ? "task-view" : workspaceView === "news" ? "news-view" : workspaceView === "data" ? "data-view" : workspaceView === "documents" ? "document-library-view" : ""}`}
+          className={`main-grid ${rightPanelOpen ? "right-open" : "right-closed"} ${documentPanelActive ? "document-open" : ""} ${workspaceView === "tasks" ? "task-view" : workspaceView === "news" ? "news-view" : workspaceView === "data" ? "data-view" : (workspaceView === "documents" || workspaceView === "industries") ? "document-library-view" : ""}`}
           style={{ "--right-panel-width": `${activeRightPanelWidth}px` } as CSSProperties}
         >
-          <section className={`chat-pane ${workspaceView === "tasks" ? "task-mode" : workspaceView === "news" ? "news-mode" : workspaceView === "data" ? "data-mode" : workspaceView === "documents" ? "document-library-mode" : hasConversation ? "has-conversation" : "is-home"}`}>
+          <section className={`chat-pane ${workspaceView === "tasks" ? "task-mode" : workspaceView === "news" ? "news-mode" : workspaceView === "data" ? "data-mode" : (workspaceView === "documents" || workspaceView === "industries") ? "document-library-mode" : hasConversation ? "has-conversation" : "is-home"}`}>
             <SectionErrorBoundary
               resetKey={`${workspaceView}:${activeThread.id}:${visibleMessages.length}:${visibleMessages[visibleMessages.length - 1]?.content.length || 0}:${weeklyNews?.syncedAt || 0}`}
               title="工作区暂时无法显示"
@@ -13992,6 +14017,8 @@ function App() {
                 ? renderTaskBoard()
                 : workspaceView === "news"
                   ? renderNewsWorkspace()
+                  : workspaceView === "industries"
+                    ? <IndustryOverview refreshKey={industryRefreshKey} onOpenAttachment={openDocument} />
                   : workspaceView === "data"
                     ? renderDatabaseWorkspace()
                   : workspaceView === "documents"

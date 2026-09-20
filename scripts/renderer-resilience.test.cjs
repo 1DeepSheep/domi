@@ -1769,7 +1769,7 @@ assert.match(
 );
 assert.match(
   app,
-  /async function openDocumentLibrary\(\)[\s\S]*?if \(!await navigateWorkspace\("documents"\)\) return;[\s\S]*?async function openPrimaryWorkspace\(view: "tasks" \| "news" \| "data"\)[\s\S]*?if \(!await navigateWorkspace\(view\)\) return;/,
+  /async function openDocumentLibrary\(\)[\s\S]*?if \(!await navigateWorkspace\("documents"\)\) return;[\s\S]*?async function openPrimaryWorkspace\(view: "tasks" \| "news" \| "data" \| "industries"\)[\s\S]*?if \(!await navigateWorkspace\(view\)\) return;/,
   "Sidebar UI state must change only after the current page has safely completed navigation."
 );
 assert.match(
@@ -1779,7 +1779,7 @@ assert.match(
 );
 assert.match(
   app,
-  /async function openPrimaryWorkspace\(view: "tasks" \| "news" \| "data"\)[\s\S]*?if \(view !== "data"\) return;[\s\S]*?refreshDatabase\(\{ preserveSelection: true \}\)/,
+  /async function openPrimaryWorkspace\(view: "tasks" \| "news" \| "data" \| "industries"\)[\s\S]*?if \(view !== "data"\) return;[\s\S]*?refreshDatabase\(\{ preserveSelection: true \}\)/,
   "Every database workspace open must refresh while preserving the current selection."
 );
 assert.match(

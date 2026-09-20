@@ -80,3 +80,6 @@ jobs:
 
       - name: Verify follow-up rendering, clipboard and draft isolation
         run: npm run test:message-followups-ui
+
+      - name: Verify industry overview, project navigation and source attachments
+        run: node scripts/industry-overview-ui.test.mjs
