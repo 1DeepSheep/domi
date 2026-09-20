@@ -7,6 +7,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { ensureDocumentLibraryStructure } = require("./document-library.cjs");
 const { isLegalEntityName, assertProjectBrandName, projectNameAliases } = require("./project-name-policy.cjs");
 const CANONICAL_PROJECT_TAXONOMY = require("../shared/investment-taxonomy.json");
+const { refreshRepositoryIndustryOverviews, repairProjectHomepage, projectMaterialLinks } = require("./industry-overview.cjs");
 
 const LOCAL_REPOSITORY_SCHEMA = 7;
 const PROJECTS_DIRECTORY = "3.项目库";
@@ -1019,7 +1020,7 @@ function projectIdentityLabel(value) {
   return String(value || "").replace(/[\r\n]+/g, " ").replace(/[\\`*_[\]<>|]/g, "\\$&");
 }
 
-function renderProjectManagedBlock(project) {
+function renderProjectManagedBlock(project, materialLinks = "") {
   const latestValuation = project.latestValuationUsd100m === null
     ? "未填写"
     : `${project.latestValuationUsd100m} 亿美元`;
@@ -1070,6 +1071,8 @@ ${project.legalName ? `- **工商主体**：${projectIdentityLabel(project.legal
 ${financingHistory}
 
 ## 相关材料
+
+${materialLinks}
 
 - [在 Finder 中查看项目全部材料](domi-folder:current)
 - 会议纪要、投资快评、深度研究、BP / Datapack 与 IC 材料均保留在项目目录中。
@@ -1512,7 +1515,7 @@ class LocalDomiRepository {
         const previous = fs.readFileSync(documentPath, "utf8");
         atomicWriteText(
           documentPath,
-          replaceManagedBlock(previous, renderProjectManagedBlock(projectRow(row)))
+          replaceManagedBlock(previous, renderProjectManagedBlock(projectRow(row), projectMaterialLinks(this, row.id, documentPath)))
         );
         updated += 1;
       } catch {
@@ -2118,6 +2121,7 @@ class LocalDomiRepository {
       this.database.exec("ROLLBACK");
       throw error;
     }
+    this.maintainIndustryOverviews();
     return result;
   }
 
@@ -2380,6 +2384,7 @@ class LocalDomiRepository {
       this.database.exec("ROLLBACK");
       throw error;
     }
+    if (entityType === "project") this.maintainIndustryOverviews();
     return {
       ok: true,
       entityType,
@@ -2389,6 +2394,28 @@ class LocalDomiRepository {
       sourcePath: String(row.document_path || ""),
       deletedAt: now
     };
+  }
+
+  repairProjectHomepage(request = {}) {
+    const result = repairProjectHomepage(this, request, {
+      fallbackPath: row => path.join(this.projectDirectory(projectRow(row)), PROJECT_PAGE_NAME),
+      render: (row, target) => renderProjectManagedBlock(projectRow(row), projectMaterialLinks(this, row.id, target))
+    });
+    return { ...result, industryOverviews: this.maintainIndustryOverviews() };
+  }
+
+  refreshIndustryOverviews() {
+    return refreshRepositoryIndustryOverviews(this, CANONICAL_PROJECT_TAXONOMY);
+  }
+
+  maintainIndustryOverviews() {
+    try {
+      this.lastIndustryOverviewRefresh = this.refreshIndustryOverviews();
+    } catch (error) {
+      // A derived overview failure must not turn an already committed project write into a retry.
+      this.lastIndustryOverviewRefresh = { ok: false, entries: [], conflicts: [], warnings: [{ code: "overview_refresh_failed", message: error.message }] };
+    }
+    return this.lastIndustryOverviewRefresh;
   }
 
   listTaxonomy() {
@@ -3133,7 +3160,7 @@ class LocalDomiRepository {
         ? fs.readFileSync(targetPath, "utf8")
         : "";
       const managedBlock = entityType === "project"
-        ? renderProjectManagedBlock(loaded.record)
+        ? renderProjectManagedBlock(loaded.record, projectMaterialLinks(this, recordId, targetPath, sourcePath))
         : entityType === "person"
           ? renderPersonManagedBlock(loaded.record)
           : renderNewsManagedBlock(loaded.record);
@@ -3185,6 +3212,7 @@ class LocalDomiRepository {
         try { this.database.exec("ROLLBACK"); } catch {}
         throw error;
       }
+      if (entityType === "project") this.maintainIndustryOverviews();
       return { ok: true, entityType, recordId, materialized: true, path: targetPath };
     } catch (error) {
       this.database.prepare(`
@@ -3335,7 +3363,7 @@ class LocalDomiRepository {
       pageWriteAttempted = true;
       atomicWriteText(
         canonicalPath,
-        replaceManagedBlock(previousPageContent, renderProjectManagedBlock(project))
+        replaceManagedBlock(previousPageContent, renderProjectManagedBlock(project, projectMaterialLinks(this, id, canonicalPath, currentDocumentPath)))
       );
       const updateResult = this.database.prepare(`
         UPDATE projects SET
@@ -3431,6 +3459,7 @@ class LocalDomiRepository {
       } catch {}
       throw error;
     }
+    this.maintainIndustryOverviews();
     return projectRow(this.database.prepare(`
       SELECT id, name, legal_name, aliases_json, domain, subdomains_json, status, rating, notes,
         cities_json, investors_json, financing_history, latest_valuation_usd_100m,

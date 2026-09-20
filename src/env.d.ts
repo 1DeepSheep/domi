@@ -108,6 +108,7 @@ declare global {
       ) => Promise<FeishuSetupStatus>;
       provisionFeishuSetup: () => Promise<FeishuSetupProvisionResult>;
       syncDomi: () => Promise<DomiSyncResult>;
+      refreshIndustryOverviews: () => Promise<IndustryOverviewResult>;
       listDomiDatabase: (request?: { fresh?: boolean }) => Promise<DomiDatabaseSnapshot>;
       updateDomiDatabaseRecord: (
         request: DomiDatabaseUpdateRequest
@@ -1913,3 +1914,6 @@ export type CodexEventItem = {
   status?: string;
   exitCode?: number;
 };
+
+export type IndustryOverviewEntry = { domain: string; subdomain: string; title: string; path: string; projectCount: number };
+export type IndustryOverviewResult = { ok: boolean; entries: IndustryOverviewEntry[]; indexPath?: string; conflicts?: unknown[]; warnings?: unknown[]; error?: string };

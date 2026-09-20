@@ -4538,6 +4538,9 @@ ipcMain.handle("workspace:open", async (_event, requestedWorkspacePath) => {
 });
 
 ipcMain.handle("domi:cache", () => getDomiIntegration().loadCache());
+ipcMain.handle("domi:industry-overviews", () => require("./industry-overview-service.cjs").loadIndustryOverviews(
+  serviceCoordinator, () => getDomiIntegration().refreshIndustryOverviews()
+));
 ipcMain.handle("domi:database-list", async (_event, request = {}) => {
   try {
     return await serviceCoordinator.run(

@@ -555,6 +555,7 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "浏览器预览模式不能同步 domi 数据。"
   }),
+  refreshIndustryOverviews: async () => ({ ok: false, entries: [], error: "请在 domi 中打开本地行业速览。" }),
   listDomiDatabase: async () => ({
     ok: true,
     backend: "local",
