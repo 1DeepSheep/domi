@@ -5939,6 +5939,38 @@ body.panel-resizing .main-grid {
   line-height: 1.5;
 }
 
+.plaud-connection-status {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px 9px;
+  margin: 0 1px 8px;
+  color: var(--faint);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+}
+
+.plaud-connection-status > span { flex: 1; }
+.plaud-connection-status button,
+.plaud-connection-status summary {
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.plaud-connection-status button:disabled { opacity: 0.5; cursor: default; }
+.plaud-connection-status details[open] { flex-basis: 100%; }
+.plaud-connection-status details > span,
+.plaud-connection-status code {
+  display: block;
+  margin-top: 4px;
+  font-size: inherit;
+  overflow-wrap: anywhere;
+}
+
 .plaud-inline-notice.waiting {
   border-color: #9e9a8d;
   color: #6d695f;

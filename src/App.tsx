@@ -76,7 +76,7 @@ import {
   useState
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
-import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
+import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
 import { restorePlaudOnStartup } from "./plaud-startup";
 import { planPlaudSyncContinuation, type PlaudSyncIntent } from "./plaud-sync-intent";
 import {
@@ -3426,15 +3426,28 @@ function App() {
     if (!plaudEnabled || !appSettings?.onboardingComplete) return;
     let cancelled = false;
     const browser = appSettings.plaudBrowser;
+    const scope = plaudScopeVersionRef.current;
     const isCurrent = () => !cancelled
+      && scope === plaudScopeVersionRef.current
       && appSettingsRef.current?.plaudConnectionMode === "enabled"
       && appSettingsRef.current?.plaudBrowser === browser
       && appSettingsRef.current?.onboardingComplete === true;
     setPlaudInitializing(true);
-    // Resume first checks existing local work. An empty queue does not return
-    // a snapshot, so finish startup with a read-only list in that case.
+    // Restore only backend-verified local rows first. This does not wait for
+    // Codex/plugin readiness or open the browser; remote recovery follows.
     // Let effect cleanup cancel a superseded/StrictMode setup before any IPC.
     void Promise.resolve().then(async () => {
+      if (!isCurrent()) return;
+      const revision = plaudSnapshotRevisionRef.current;
+      try {
+        const cached = await workbench.listPlaud({ cacheOnly: true, offset: 0, limit: 50 });
+        if (isCurrent() && scope === plaudScopeVersionRef.current
+          && revision === plaudSnapshotRevisionRef.current && !cached.superseded) {
+          if (cached.cacheInvalidated) setPlaudSnapshot(plaudSnapshotForScope(cached, false));
+          else if (cached.cacheVerified === true) setPlaudSnapshot(current => current || cached);
+        }
+      } catch { /* A cache miss must not prevent the following read-only check. */ }
+      if (!isCurrent() || scope !== plaudScopeVersionRef.current) return;
       await plaudScopeHandoffRef.current;
       await restorePlaudOnStartup({
         isCurrent,
@@ -3442,7 +3455,7 @@ function App() {
         pendingSync: () => plaudSyncPromiseRef.current,
         pendingMutation: () => plaudMutationPromiseRef.current,
         resume: () => syncPlaudQueue({ resumeOnly: true }),
-        list: () => refreshPlaudQueue({ fresh: true })
+        list: () => refreshPlaudQueue({ fresh: true, automatic: true })
       });
     }).catch((error) => {
       if (isCurrent()) setPlaudError(plaudSafeError(error));
@@ -6067,7 +6080,8 @@ function App() {
     if (readerGeneration < plaudReaderEventGenerationRef.current && !plaudReaderBusyRef.current) return;
     plaudReaderBusyRef.current = true;
     setPlaudReaderBusy(true);
-    setPlaudSnapshot((current) => current ? { ...current, paused: true, stale: true }
+    setPlaudSnapshot((current) => snapshot.cacheInvalidated ? plaudSnapshotForScope(snapshot, false)
+      : current ? { ...current, paused: true, stale: true }
       : { ...snapshot, items: [], syncedAt: undefined });
   }
 
@@ -6100,36 +6114,12 @@ function App() {
         const result = plaudSnapshotForScope(response, !plaudNeedsFreshListRef.current);
         if (currentPlaudRequest(revision)) {
           if (result.paused) { acceptPlaudPause(result, readerGeneration); return result; }
-          setPlaudSnapshot((current) => {
-            if (result.lastSuccessfulSnapshot) {
-              return {
-                ...result.lastSuccessfulSnapshot,
-                stale: true,
-                remoteStatus: result.remoteStatus,
-                retryable: result.retryable,
-                errorCode: result.errorCode, errorStage: result.errorStage,
-                retryAt: result.retryAt, retryAfterMs: result.retryAfterMs,
-                warning: result.warning
-              };
-            }
-            if (!result.ok && current) {
-              return {
-                ...current,
-                stale: true,
-                remoteStatus: result.remoteStatus,
-                retryable: result.retryable,
-                errorCode: result.errorCode, errorStage: result.errorStage,
-                retryAt: result.retryAt, retryAfterMs: result.retryAfterMs,
-                warning: result.warning || result.error
-              };
-            }
-            return result;
-          });
+          setPlaudSnapshot(current => mergePlaudSnapshot(current, result));
           if (!result.ok) {
             setPlaudError(plaudSafeError(result.error || result.warning, "PLAUD 队列暂时无法刷新。"));
             if (!automatic) setPlaudNotice("");
           } else if (result.stale) {
-            setPlaudError(plaudSafeError(result.warning, "PLAUD 暂时无法刷新，已显示上次成功读取的录音。"));
+            setPlaudError(plaudSafeError(result.warning, "PLAUD 最近录音暂未更新。"));
             if (!automatic) setPlaudNotice("");
           } else {
             plaudReadRetryAttemptRef.current = 0;
@@ -6279,11 +6269,16 @@ function App() {
         if (result.paused || result.snapshot?.paused) { acceptPlaudPause(result.snapshot || { ok: true, paused: true }, readerGeneration); return result; }
         if (result.snapshot) {
           const snapshot = plaudSnapshotForScope(result.snapshot, !plaudNeedsFreshListRef.current);
-          setPlaudSnapshot(snapshot);
+          setPlaudSnapshot(current => mergePlaudSnapshot(current, snapshot));
+          if (resumeOnly && (!snapshot.ok || snapshot.stale)) setPlaudError(plaudSafeError(snapshot.error || snapshot.warning));
           if (snapshot.ok && !snapshot.stale) plaudNeedsFreshListRef.current = false;
         }
         setPlaudResumePendingCount(typeof result.resumePendingCount === "number" ? Math.max(0, result.resumePendingCount) : null);
-        if (resumeOnly && result.ok && !result.snapshot && !(result.results?.length)
+        if (resumeOnly && result.snapshot && (!result.snapshot.ok || result.snapshot.stale)) {
+          // Connection feedback belongs to the compact status, not a second
+          // failure banner above the same retained recordings.
+          setPlaudNotice("");
+        } else if (resumeOnly && result.ok && !result.snapshot && !(result.results?.length)
           && !result.generatedCount && !result.recoveredCount && !result.waitingCount && !result.retryableCount && !result.failedCount) {
           setPlaudNotice("");
         } else {
@@ -14208,9 +14203,8 @@ function App() {
                 {plaudEnabled ? (
                   <>
                     {plaudError && !plaudSyncIntent && (
-                      <div className={plaudReadRetryPending ? "plaud-inline-notice waiting" : "domi-inline-error actionable"} role="status">
-                        <AlertCircle size={14} />
-                        <span>{plaudError}{plaudReadRetryPending ? " 正在自动恢复最近录音。" : ""}</span>
+                      <div className="plaud-connection-status" role="status">
+                        <span>{plaudConnectionSummary(plaudSnapshot, plaudReadRetryPending)}</span>
                         {!plaudReadRetryPending && (
                         <button
                           type="button"
@@ -14227,6 +14221,11 @@ function App() {
                           {plaudSnapshot?.remoteStatus === "auth_required" ? "重新登录" : "重试"}
                         </button>
                         )}
+                        <details>
+                          <summary>详情</summary>
+                          <span>{plaudError}</span>
+                          {plaudSnapshot?.errorCode && <code>{plaudSnapshot.errorCode}{plaudSnapshot.errorStage ? ` · ${plaudSnapshot.errorStage}` : ""}{Number.isSafeInteger(plaudSnapshot.apiStatus) ? ` · API ${plaudSnapshot.apiStatus}` : ""}</code>}
+                        </details>
                       </div>
                     )}
                     {plaudSyncIntent ? <div className="plaud-inline-notice waiting" role="status">{plaudReaderBusy ? "已保留同步请求，任务完成后自动继续。" : "已保留同步请求，连接恢复后自动继续。"}</div> : <>
@@ -14272,7 +14271,7 @@ function App() {
                       {(plaudLoading || plaudInitializing || plaudResuming) && !plaudSnapshot && (
                         <div className="empty-state">{plaudLoading ? "正在读取 PLAUD 最近录音" : "正在检查 PLAUD 最近录音"}</div>
                       )}
-                      {!plaudLoading && plaudSnapshot?.ok && !(plaudSnapshot.items || []).length && (
+                      {!plaudLoading && plaudSnapshot?.ok && !plaudSnapshot.stale && plaudSnapshot.remoteStatus === "connected" && !(plaudSnapshot.items || []).length && (
                         <div className="empty-state">PLAUD 中暂无录音</div>
                       )}
                       {(plaudSnapshot?.items || []).map((item) => {
@@ -14527,6 +14526,21 @@ function App() {
             return ++connectionAttemptRevisionRef.current;
           }}
           onConnectionSettled={refreshSavedCodexConnection}
+          onPlaudSessionChange={(phase) => {
+            if (phase === "connected") { void refreshPlaudAfterIdle({ automatic: true }); return; }
+            // Explicit login/logout can change accounts without changing the
+            // browser setting. Invalidate old rows and all in-flight results.
+            plaudSnapshotRevisionRef.current += 1;
+            plaudScopeVersionRef.current += 1;
+            plaudNeedsFreshListRef.current = true;
+            plaudSnapshotRef.current = null;
+            cancelPlaudSyncIntent();
+            setPlaudSnapshot(null);
+            setPlaudInitializing(false);
+            setPlaudError("");
+            setPlaudNotice("");
+            setPlaudResumePendingCount(null);
+          }}
           required={!appSettings.onboardingComplete}
           onClose={() => setSettingsOpen(false)}
           onDirtyChange={(dirty) => {

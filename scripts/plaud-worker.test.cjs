@@ -305,6 +305,18 @@ test("structured worker diagnostics retain vendor Retry-After without private re
   assert.deepEqual(plaudErrorDetails(error, "list"), { code: "PLAUD_RATE_LIMITED", stage: "list", httpStatus: 429, retryAfterMs: 120000 });
 });
 
+test("business auth-context rejection retains numeric diagnostics without repeating recovery", () => {
+  const { plaudErrorDetails, isRetryableReadError, safeError } = require("../electron/plaud-worker.cjs");
+  const error = Object.assign(new Error("List files failed: HTTP 200; API status -3901"),
+    { status: 200, apiStatus: -3901 });
+  assert.deepEqual(plaudErrorDetails(error, "list"), {
+    code: "PLAUD_AUTH_CONTEXT_MISMATCH", stage: "list", httpStatus: 200, apiStatus: -3901
+  });
+  assert.equal(isRetryableReadError(error), false, "vendor owns the bounded credential recovery");
+  assert.match(safeError(error), /会话尚未完成验证/);
+  assert.equal(Object.hasOwn(plaudErrorDetails({ apiStatus: "private value" }), "apiStatus"), false);
+});
+
 test("server rebuilds failed tab compaction within one deadline and never replays a started write", async t => {
   const { runServerCommand, closeServerClient } = require("../electron/plaud-worker.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-compaction-"));

@@ -279,6 +279,168 @@ test("a first failed PLAUD read never imports legacy unscoped rows or another br
   }
 });
 
+function persistentPlaudFixture(t) {
+  const { execFileSync, spawn } = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-persisted-plaud-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const childScript = path.join(root, "fixture.cjs");
+  fs.writeFileSync(childScript, `
+    const fs = require("node:fs"), path = require("node:path");
+    const { DomiIntegration } = require(${JSON.stringify(path.join(__dirname, "../electron/domi-integration.cjs"))});
+    const { WorkbenchStateStore } = require(${JSON.stringify(path.join(__dirname, "../electron/state-store.cjs"))});
+    const [mode, browser = "chrome"] = process.argv.slice(2);
+    const root = __dirname;
+    const store = new WorkbenchStateStore({ databasePath: path.join(root, "fixture.sqlite3"), projectsDir: path.join(root, "projects") });
+    const integration = new DomiIntegration({ stateStore: store,
+      configProvider: () => ({ plaudConnectionMode: mode === "disabled" ? "disabled" : "enabled", plaudBrowser: browser }),
+      domiConfigPath: path.join(root, "config.json"), plaudStateDir: root });
+    integration.findPlugin = () => {
+      if (["cache", "disabled", "legacy-only"].includes(mode)) throw new Error("Cache-only must not resolve a plugin");
+      if (mode === "plugin-missing") throw new Error("Synthetic plugin unavailable");
+      return { root: "/synthetic/plugin" };
+    };
+    integration.loadPlaudWorkflowRecords = () => [{ fileId: "unbound-private-queue", fileName: "Synthetic unbound", stage: "generating" },
+      ...(mode === "seed-new-account" ? [{ fileId: browser + "-new-account", stage: "generating" }] : [])];
+    integration.plaudDoctor = async () => { if (mode === "login-fail") throw new Error("Synthetic doctor failed"); return { ok: true }; };
+    integration.runPlaudConnectionCommand = async command => ({ ok: true, connected: command === "login" });
+    integration.runPlaudWorker = async () => {
+      if (["cache", "disabled", "legacy-only"].includes(mode)) throw new Error("Cache-only must not start a worker");
+      if (mode === "fail") throw Object.assign(new Error("Synthetic initialization failure"), { code: "PLAUD_READ_FAILED", stage: "init" });
+      if (mode === "auth-fail") throw Object.assign(new Error("PLAUD_AUTH_REQUIRED: synthetic signed-out response"), { code: "PLAUD_AUTH_REQUIRED" });
+      if (mode === "context-fail") throw Object.assign(new Error("Synthetic context mismatch"), { code: "PLAUD_AUTH_CONTEXT_MISMATCH", httpStatus: 200, apiStatus: -3901, stage: "list" });
+      if (mode === "context-payload") return { ok: false, items: [], error: "Synthetic context mismatch", httpStatus: 200, apiStatus: -3901 };
+      if (mode === "failed-payload") return { ok: false, items: [], error: "Synthetic failure response", errorCode: "PLAUD_READ_FAILED" };
+      if (mode === "malformed-payload") return { ok: true, items: null };
+      if (mode === "inflight") {
+        fs.writeFileSync(path.join(root, "read-started"), "started");
+        const deadline = Date.now() + 8000;
+        while (!fs.existsSync(path.join(root, "release-read"))) {
+          if (Date.now() >= deadline) throw new Error("Synthetic read release timed out");
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+      }
+      return { ok: true, pendingCount: 1, items: mode === "seed-empty" ? [] : [{
+        fileId: browser + (mode === "seed-new-account" ? "-new-account" : "-known"), fileName: "Synthetic verified recording"
+      }] };
+    };
+    (async () => {
+      try {
+        if (mode === "legacy-only") store.saveCache("plaud:list:v1", { syncedAt: 123, items: [{ fileId: "legacy", fileName: "Synthetic legacy" }] });
+        const result = mode.startsWith("login") ? await integration.loginPlaud({ browser })
+          : mode === "logout" ? await integration.disconnectPlaud({ browser })
+          : await integration.plaudQueue({ cacheOnly: ["cache", "disabled", "legacy-only"].includes(mode), fresh: true });
+        const stored = store.loadCache(integration.plaudListCacheKey(integration.plaudSnapshotScope()));
+        console.log(JSON.stringify({ result, storedUpdatedAt: stored?.updatedAt || 0, storedSuccessAt: stored?.value?.syncedAt || 0,
+          storedItemIds: stored?.value?.items?.map(item => item.fileId) || [] }));
+      } finally { store.close(); }
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `);
+  const run = (mode, browser = "chrome") => JSON.parse(execFileSync(process.execPath, [childScript, mode, browser], {
+    encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"]
+  }));
+  return { root, run, startInFlight: () => {
+    const child = spawn(process.execPath, [childScript, "inflight"], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk; }); child.stderr.on("data", chunk => { stderr += chunk; });
+    const result = new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", code => { if (code !== 0) reject(new Error(stderr)); else resolve(JSON.parse(stdout)); });
+    });
+    t.after(() => { if (child.exitCode === null) child.kill(); });
+    return result;
+  } };
+}
+
+test("PLAUD startup restores verified scoped rows across real processes without plugin or browser access", t => {
+  const f = persistentPlaudFixture(t);
+  const legacy = f.run("legacy-only").result;
+  assert.equal(legacy.cached, false); assert.equal(legacy.remoteStatus, "not_loaded");
+  assert.equal(legacy.syncedAt, 0); assert.deepEqual(legacy.items, []);
+  const seeded = f.run("seed");
+  const restored = f.run("cache");
+  assert.equal(restored.result.cached, true); assert.equal(restored.result.cacheVerified, true);
+  assert.equal(restored.result.stale, true); assert.equal(restored.result.remoteStatus, "verification_pending");
+  assert.equal(restored.result.syncedAt, seeded.result.syncedAt);
+  assert.equal(restored.result.lastSuccessfulAt, seeded.result.syncedAt);
+  assert.deepEqual(restored.result.items.map(item => item.fileId), ["chrome-known"], "Unscoped local queue rows must not be added to the cache");
+  assert.equal(restored.storedUpdatedAt, seeded.storedUpdatedAt);
+  assert.deepEqual(f.run("cache", "tabbit").result.items, []);
+  assert.deepEqual(f.run("disabled").result.items, []);
+  f.run("seed", "tabbit");
+  assert.deepEqual(f.run("cache").result.items.map(item => item.fileId), ["chrome-known"]);
+});
+
+test("PLAUD failed refreshes and malformed fulfilled responses cannot replace persisted successful rows or timestamps", t => {
+  const f = persistentPlaudFixture(t);
+  const seeded = f.run("seed");
+  for (const failure of ["fail", "auth-fail", "context-fail", "context-payload", "failed-payload", "malformed-payload", "plugin-missing"]) {
+    const failed = f.run(failure);
+    assert.equal(failed.result.ok, false, failure); assert.equal(failed.result.stale, true, failure);
+    assert.equal(failed.result.cacheVerified, true, failure); assert.equal(failed.result.cacheInvalidated, false, failure);
+    assert.deepEqual(failed.result.items.map(item => item.fileId), ["chrome-known"], failure);
+    assert.equal(failed.result.syncedAt, seeded.result.syncedAt, failure);
+    assert.equal(failed.result.lastSuccessfulAt, seeded.result.syncedAt, failure);
+    assert.equal(failed.storedUpdatedAt, seeded.storedUpdatedAt, failure);
+    assert.equal(failed.storedSuccessAt, seeded.storedSuccessAt, failure);
+    assert.deepEqual(failed.storedItemIds, ["chrome-known"], failure);
+    if (failure.startsWith("context-")) {
+      assert.equal(failed.result.errorCode, "PLAUD_AUTH_CONTEXT_MISMATCH");
+      assert.equal(failed.result.remoteStatus, "authorization_pending");
+      assert.equal(failed.result.retryable, false);
+      assert.equal(failed.result.apiStatus, -3901); assert.equal(failed.result.httpStatus, 200);
+      assert.equal(failed.result.lastSuccessfulSnapshot.apiStatus, -3901);
+    }
+  }
+  assert.deepEqual(f.run("cache").result.items.map(item => item.fileId), ["chrome-known"]);
+  const empty = f.run("seed-empty");
+  assert.equal(empty.result.ok, true); assert.equal(empty.result.stale, false);
+  assert.deepEqual(f.run("cache").result.items, [], "A genuinely successful empty remote list supersedes old rows");
+  assert.doesNotMatch(f.run("fail").result.warning, /已显示上次成功读取/);
+});
+
+test("PLAUD explicit login and logout persist account isolation across restart without clearing another Profile", t => {
+  const f = persistentPlaudFixture(t);
+  const legacy = f.run("seed").result; f.run("seed", "tabbit");
+  assert(legacy.items.some(item => item.fileId === "unbound-private-queue"), "Before an explicit account action, legacy workflow display stays unchanged");
+  assert.equal(f.run("login").result.cacheInvalidated, true);
+  for (const mode of ["cache", "fail"]) {
+    const current = f.run(mode).result;
+    assert.equal(current.cacheInvalidated, true); assert.deepEqual(current.items, []);
+    assert.equal(current.syncedAt, 0); assert.equal(current.lastSuccessfulAt, undefined);
+  }
+  assert.deepEqual(f.run("cache", "tabbit").result.items.map(item => item.fileId), ["tabbit-known"]);
+  const switched = f.run("seed-new-account").result;
+  assert.deepEqual(switched.items.map(item => item.fileId), ["chrome-new-account"], "Fresh reads after switching accounts must not append unscoped old workflow rows");
+  assert.equal(switched.items[0].queueStage, "generating", "Matching remote IDs still receive local workflow state");
+  const current = f.run("cache").result;
+  assert.equal(current.cacheInvalidated, false);
+  assert.deepEqual(current.items.map(item => item.fileId), ["chrome-new-account"]);
+  assert.deepEqual(f.run("seed-empty").result.items, [], "A verified empty new account cannot display an old queue");
+  assert.equal(f.run("logout").result.cacheInvalidated, true);
+  assert.deepEqual(f.run("cache").result.items, []);
+  f.run("seed-new-account");
+  assert.equal(f.run("login-fail").result.cacheInvalidated, true, "Even failed login cannot authorize old-account rows");
+  assert.deepEqual(f.run("cache").result.items, []);
+});
+
+test("an in-flight old-account response cannot repopulate the cache after another process invalidates login", async t => {
+  const f = persistentPlaudFixture(t);
+  f.run("seed");
+  const pending = f.startInFlight();
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(path.join(f.root, "read-started"))) {
+    assert(Date.now() < deadline, "Synthetic worker must start");
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  f.run("login");
+  fs.writeFileSync(path.join(f.root, "release-read"), "release");
+  const old = await pending;
+  assert.equal(old.result.superseded, true); assert.deepEqual(old.result.items, []);
+  const restored = f.run("cache");
+  assert.equal(restored.result.cacheInvalidated, true); assert.deepEqual(restored.result.items, []);
+  assert.equal(restored.storedUpdatedAt, 0, "No successful cache was written under the new account epoch");
+});
+
 test("unexpected broker exits are recoverable reader failures while intentional ownership is neutral", () => {
   const exited = classifyPlaudConnectionFailure("PLAUD_WORKER_EXITED: PLAUD 后台会话已结束（SIGTERM）。", "chrome");
   assert.equal(exited.status, "browser_unavailable");
@@ -390,6 +552,23 @@ test("PLAUD connection errors request login only for confirmed authentication fa
   );
   assert.equal(incompleteNetworkProbe.status, "network_error");
   assert.match(incompleteNetworkProbe.error, /确认网络后重试/);
+});
+
+test("PLAUD auth-context failures retain bounded diagnostics without requesting login or blindly retrying", () => {
+  for (const fields of [{ code: "PLAUD_AUTH_CONTEXT_MISMATCH", apiStatus: -3901 }, { apiStatus: -3901 }]) {
+    const error = Object.assign(new Error("Synthetic context mismatch"), { ...fields, httpStatus: 200, stage: "list" });
+    const result = classifyPlaudConnectionFailure(error, "chrome");
+    assert.equal(result.status, "authorization_pending");
+    assert.equal(result.errorCode, "PLAUD_AUTH_CONTEXT_MISMATCH");
+    assert.equal(result.apiStatus, -3901); assert.equal(result.httpStatus, 200);
+    assert.equal(result.errorStage, "list"); assert.equal(result.retryable, false);
+    assert.equal(isRetryablePlaudReadFailure(error), false);
+    assert.doesNotMatch(result.error, /登录已失效|请(?:在设置中)?重新登录|请点击.*登录|Synthetic/);
+  }
+  const unsafe = classifyPlaudConnectionFailure(Object.assign(new Error("Synthetic"), {
+    code: "PLAUD_READ_FAILED", apiStatus: Number.MAX_SAFE_INTEGER + 1, httpStatus: 700
+  }), "chrome");
+  assert.equal(unsafe.apiStatus, undefined); assert.equal(unsafe.httpStatus, undefined);
 });
 
 test("PLAUD list IPC leaves retry ownership to the worker and forwards fresh reads", () => {
@@ -3856,7 +4035,7 @@ test("PLAUD queue preserves the last successful remote list when a later refresh
   const failedFresh = await integration.plaudQueue({ fresh: true });
   assert.equal(failedFresh.ok, false);
   assert.equal(failedFresh.stale, true);
-  assert.deepEqual(failedFresh.items, []);
+  assert.deepEqual(failedFresh.items.map(item => item.fileId), ["cached-recording"]);
   assert.equal(failedFresh.remoteStatus, "network_error");
   assert.equal(failedFresh.lastSuccessfulSnapshot.ok, true);
   assert.equal(failedFresh.lastSuccessfulSnapshot.stale, true);
@@ -4773,6 +4952,7 @@ test("PLAUD legacy recovery has one 30 second read budget per round and fairly r
 test("PLAUD cached preflight preserves refusal, rate limit and owner-lock causes without submitting", async t => {
   for (const [code, status, retryable, delay] of [
     ["PLAUD_ACCESS_DENIED", "access_denied", false, undefined],
+    ["PLAUD_AUTH_CONTEXT_MISMATCH", "authorization_pending", false, undefined],
     ["PLAUD_RATE_LIMITED", "rate_limited", true, 120000],
     ["PLAUD_PROFILE_LOCKED", "profile_locked", true, 5000]
   ]) {
@@ -4784,7 +4964,8 @@ test("PLAUD cached preflight preserves refusal, rate limit and owner-lock causes
     await integration.plaudQueue();
     let reads = 0;
     integration.runPlaudWorker = async () => { reads++; throw Object.assign(new Error(code), {
-      code, stage: "list", ...(code === "PLAUD_RATE_LIMITED" ? { retryAfterMs: delay } : {})
+      code, stage: "list", ...(code === "PLAUD_AUTH_CONTEXT_MISMATCH" ? { httpStatus: 200, apiStatus: -3901 } : {}),
+      ...(code === "PLAUD_RATE_LIMITED" ? { retryAfterMs: delay } : {})
     }); };
     integration.runJson = integration.stopPlaudBackgroundSession = async () => { throw new Error("must not submit or take another owner's browser"); };
     const result = await integration.syncPlaud();
@@ -4800,6 +4981,11 @@ test("PLAUD cached preflight preserves refusal, rate limit and owner-lock causes
     assert.equal(result.retryable, retryable);
     assert.equal(result.recoveryScope, integration.plaudRecoveryScope());
     assert.equal(result.retryAfterMs, delay);
+    if (code === "PLAUD_AUTH_CONTEXT_MISMATCH") {
+      assert.equal(result.apiStatus, -3901); assert.equal(result.httpStatus, 200);
+      assert.equal(result.snapshot.apiStatus, -3901);
+      assert.equal(integration.plaudRemoteHealth.apiStatus, -3901);
+    }
     assert.doesNotMatch(result.error, /本轮远端读取未完成/);
     if (delay !== undefined) assert.ok(result.retryAt >= Date.now() + delay - 1000);
   }
