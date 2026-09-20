@@ -28,6 +28,11 @@ export function plaudAccessForRequest(userInstructionText: string, fileId?: stri
 }
 
 export function plaudSnapshotForScope(snapshot: DomiPlaudSnapshot, scopeVerified: boolean): DomiPlaudSnapshot {
+  if (snapshot.cacheInvalidated) return { ...snapshot, items: [], syncedAt: undefined,
+    lastSuccessfulAt: undefined, lastSuccessfulSnapshot: undefined, cacheVerified: false };
+  // Only the backend can attest that persisted rows belong to this Profile
+  // and have not been invalidated by a login/account change.
+  scopeVerified ||= snapshot.cacheVerified === true;
   if (snapshot.paused) return { ...snapshot, items: scopeVerified ? snapshot.items : [],
     syncedAt: scopeVerified ? snapshot.syncedAt : undefined, lastSuccessfulSnapshot: undefined, warning: "", error: "" };
   if (scopeVerified || (!snapshot.stale && !snapshot.lastSuccessfulSnapshot)) return snapshot;
@@ -37,6 +42,7 @@ export function plaudSnapshotForScope(snapshot: DomiPlaudSnapshot, scopeVerified
     ok: false, stale: true, items: [], pendingCount: 0, queueCount: 0,
     remoteStatus: snapshot.remoteStatus, retryable: snapshot.retryable,
     errorCode: snapshot.errorCode, errorStage: snapshot.errorStage,
+    ...(Number.isSafeInteger(snapshot.apiStatus) ? { apiStatus: snapshot.apiStatus } : {}),
     retryAt: snapshot.retryAt, retryAfterMs: snapshot.retryAfterMs,
     error: plaudSafeError(snapshot.error, snapshot.remoteStatus === "auth_required"
       ? "PLAUD 登录已失效，请在设置中重新登录。"
@@ -44,9 +50,38 @@ export function plaudSnapshotForScope(snapshot: DomiPlaudSnapshot, scopeVerified
   };
 }
 
+/** A failed background read cannot erase the list already shown for this scope. */
+export function mergePlaudSnapshot(current: DomiPlaudSnapshot | null, incoming: DomiPlaudSnapshot): DomiPlaudSnapshot {
+  if (incoming.cacheInvalidated) return plaudSnapshotForScope(incoming, false);
+  if (incoming.ok && !incoming.stale) return incoming;
+  const fallback = current?.items?.length ? current
+    : incoming.lastSuccessfulSnapshot?.items?.length ? incoming.lastSuccessfulSnapshot : null;
+  if (!fallback) return incoming;
+  // The backend may have completed local transcript/notes work even when its
+  // final remote list failed. Keep those refreshed row states and extra pages
+  // already on screen; an absent failed-page row is not evidence of deletion.
+  const updates = new Map((incoming.items || []).map(item => [item.fileId, item]));
+  const items = updates.size ? fallback.items!.map(item => updates.get(item.fileId) || item) : fallback.items;
+  return { ...incoming, items, syncedAt: fallback.syncedAt,
+    lastSuccessfulAt: fallback.lastSuccessfulAt || fallback.syncedAt,
+    pendingCount: fallback.pendingCount, queueCount: fallback.queueCount,
+    pageOffset: fallback.pageOffset, pageSize: fallback.pageSize,
+    hasMore: fallback.hasMore, nextOffset: fallback.nextOffset,
+    cached: fallback.cached, cacheVerified: fallback.cacheVerified, stale: true };
+}
+
+export function plaudConnectionSummary(snapshot: DomiPlaudSnapshot | null, retryPending: boolean) {
+  if (snapshot?.remoteStatus === "auth_required") return "PLAUD 登录已失效";
+  if (snapshot?.remoteStatus === "access_denied") return "PLAUD 访问受限";
+  if (snapshot?.remoteStatus === "runtime_unavailable") return "PLAUD 连接组件暂不可用";
+  if (retryPending) return snapshot?.items?.length ? "已保留录音，正在后台重连" : "正在自动恢复最近录音";
+  return snapshot?.items?.length ? "已保留录音，暂未更新" : "暂时无法读取录音";
+}
+
 export function plaudReadRetryDelay(snapshot: DomiPlaudSnapshot | null, attempt: number, now = Date.now()) {
   const delays = [2_000, 5_000, 15_000];
   if (!snapshot || snapshot.paused || !snapshot.retryable || (snapshot.ok && !snapshot.stale)
+    || (snapshot.cached && snapshot.cacheVerified && !snapshot.errorCode && !snapshot.error && !snapshot.warning)
     || !["verification_pending", "authorization_pending", "profile_locked", "browser_unavailable", "network_error", "rate_limited", "service_unavailable"].includes(snapshot.remoteStatus || "")
     || attempt < 0 || attempt >= delays.length) return null;
   return Math.max(delays[attempt], snapshot.remoteStatus === "rate_limited" ? 30_000 : 0,

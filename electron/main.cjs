@@ -4768,9 +4768,15 @@ ipcMain.handle("domi:plaud-disconnect", async (_event, request) => {
 ipcMain.handle("domi:plaud-list", async (_event, request) => {
   try {
     const integration = getDomiIntegration();
+    // Startup restoration is pure local I/O. It must never join a remote read
+    // already in progress or wait for Codex/plugin activation.
+    if (request?.cacheOnly === true) {
+      return await integration.plaudQueue({ cacheOnly: true,
+        offset: Math.min(Math.max(Number(request?.offset) || 0, 0), 10_000),
+        limit: Math.min(Math.max(Number(request?.limit) || 50, 1), 100) });
+    }
     if (integration.plaudReaderPaused()) return integration.pausedPlaudSnapshot();
-    const readerSettings = getAppSettings().load().settings;
-    const readerScope = `${readerSettings.plaudConnectionMode}:${integration.normalizePlaudBrowser(readerSettings.plaudBrowser)}`;
+    const readerScope = integration.plaudRecoveryScope();
     const fresh = request?.fresh === true;
     const limit = Math.min(Math.max(Number(request?.limit) || 50, 1), 100);
     const offset = Math.min(Math.max(Number(request?.offset) || 0, 0), 10_000);

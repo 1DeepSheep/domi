@@ -1275,6 +1275,7 @@ export type DomiPlaudConnectionRequest = {
 
 export type DomiPlaudRemoteStatus =
   | "connected"
+  | "not_loaded"
   | "workflow_in_use"
   | "auth_required"
   | "authorization_pending"
@@ -1291,6 +1292,8 @@ export type DomiPlaudRemoteStatus =
 
 export type DomiPlaudConnectionResult = {
   ok: boolean;
+  apiStatus?: number;
+  cacheInvalidated?: boolean;
   connected?: boolean;
   browser?: "chrome" | "tabbit";
   browserLabel?: string;
@@ -1301,6 +1304,7 @@ export type DomiPlaudConnectionResult = {
 };
 
 export type DomiPlaudListRequest = {
+  cacheOnly?: boolean;
   fresh?: boolean;
   offset?: number;
   limit?: number;
@@ -1324,6 +1328,10 @@ export type DomiPlaudWorkflowCompletion = {
 
 export type DomiPlaudSnapshot = {
   ok: boolean;
+  apiStatus?: number;
+  cached?: boolean;
+  cacheVerified?: boolean;
+  cacheInvalidated?: boolean;
   paused?: boolean;
   superseded?: boolean;
   stale?: boolean;

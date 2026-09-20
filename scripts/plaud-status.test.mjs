@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback } from "../src/plaud-status.ts";
+import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback } from "../src/plaud-status.ts";
 import { restorePlaudOnStartup } from "../src/plaud-startup.ts";
 import { planPlaudSyncContinuation } from "../src/plaud-sync-intent.ts";
 
@@ -355,4 +355,66 @@ test("explicit user remote actions take precedence over a recording's local tran
     assert.deepEqual(plaudAccessForRequest(request, "a", "/local/a.md"), { kind: "recording", fileId: "a", transcriptPath: "/local/a.md" });
     assert.equal(plaudAccessForRequest(request), undefined);
   }
+});
+
+
+test("verified persisted snapshots can render at startup, while unknown old caches remain hidden", () => {
+  const cached = { ok: true, cached: true, cacheVerified: true, stale: true, items: [item()], syncedAt: 123,
+    remoteStatus: "verification_pending" };
+  assert.equal(plaudSnapshotForScope(cached, false), cached);
+  assert.deepEqual(plaudSnapshotForScope({ ...cached, cacheVerified: false }, false).items, []);
+});
+
+test("failed list and recovery snapshots retain visible recordings but a successful empty list clears them", () => {
+  const cached = { ok: true, cacheVerified: true, stale: true, items: [item()], syncedAt: 123 };
+  const failed = { ok: false, items: [], remoteStatus: "auth_required", errorCode: "PLAUD_AUTH_REQUIRED", errorStage: "init" };
+  const merged = mergePlaudSnapshot(cached, plaudSnapshotForScope(failed, false));
+  assert.equal(merged.items, cached.items);
+  assert.equal(merged.syncedAt, 123);
+  assert.equal(merged.errorCode, "PLAUD_AUTH_REQUIRED");
+  assert.equal(merged.ok, false);
+  const empty = { ok: true, items: [], remoteStatus: "connected", syncedAt: 456 };
+  assert.equal(mergePlaudSnapshot(merged, empty), empty);
+});
+
+test("connection status only promises retained recordings when it actually has rows", () => {
+  for (const snapshot of [null, { items: [] }, { items: [], cached: true }]) {
+    assert.doesNotMatch(plaudConnectionSummary(snapshot, false), /已保留|已显示|上次/);
+  }
+  assert.match(plaudConnectionSummary({ items: [item()] }, true), /已保留录音/);
+  assert.equal(plaudConnectionSummary({ items: [item()], remoteStatus: "auth_required" }, false), "PLAUD 登录已失效");
+});
+
+
+test("an explicit account-cache invalidation clears prior rows, including a paused or failed response", () => {
+  const previous = { ok: true, cached: true, cacheVerified: true, items: [item()], syncedAt: 123 };
+  for (const paused of [true, false]) {
+    const invalidated = { ...previous, ok: false, paused, cacheInvalidated: true, remoteStatus: "auth_required" };
+    const merged = mergePlaudSnapshot(previous, invalidated);
+    assert.deepEqual(merged.items, []);
+    assert.equal(merged.syncedAt, undefined);
+    assert.equal(merged.cacheVerified, false);
+  }
+});
+
+test("loading a trusted local cache does not start another retry timer before background startup checks", () => {
+  assert.equal(plaudReadRetryDelay({ ok: true, cached: true, cacheVerified: true, stale: true,
+    retryable: true, remoteStatus: "verification_pending", items: [item()] }, 0), null);
+});
+
+test("a failed remote refresh still incorporates newly completed local transcript work", () => {
+  const previous = { ok: true, items: [item(), item({ fileId: 'older-page' })], syncedAt: 123 };
+  const ready = item({ queueStage: 'transcript_ready', transcriptPath: '/synthetic/ready.md', hasTranscript: true });
+  const result = mergePlaudSnapshot(previous, { ok: false, stale: true, cacheVerified: true, items: [ready], remoteStatus: 'network_error' });
+  assert.equal(result.items[0].transcriptPath, ready.transcriptPath);
+  assert.equal(result.items[1].fileId, 'older-page');
+});
+
+
+test("unverified-scope failures retain only the numeric vendor status for diagnosis", () => {
+  const failure = { ok: false, stale: true, remoteStatus: 'authorization_pending', errorCode: 'PLAUD_AUTH_CONTEXT_MISMATCH',
+    errorStage: 'init', apiStatus: -3901, items: [] };
+  assert.equal(plaudSnapshotForScope(failure, false).apiStatus, -3901);
+  assert.equal(plaudSnapshotForScope({ ...failure, apiStatus: 'private response' }, false).apiStatus, undefined);
+  assert.equal(plaudReadRetryDelay(failure, 0), null);
 });

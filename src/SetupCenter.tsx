@@ -54,6 +54,7 @@ type SetupCenterProps = {
   codexChecking?: boolean;
   onConnectionAttempt?: (invalidateConnection: boolean) => number;
   onConnectionSettled?: (attemptRevision?: number) => Promise<void>;
+  onPlaudSessionChange?: (phase: "starting" | "connected") => void;
   required: boolean;
   onClose: () => void;
   onDirtyChange?: (dirty: boolean) => void;
@@ -168,6 +169,7 @@ export default function SetupCenter({
   codexChecking = false,
   onConnectionAttempt,
   onConnectionSettled,
+  onPlaudSessionChange,
   required,
   onClose,
   onDirtyChange,
@@ -675,6 +677,7 @@ export default function SetupCenter({
         setError(saved.error || "无法保存 PLAUD 设置。");
         return;
       }
+      onPlaudSessionChange?.("starting");
       const result = await workbench.loginPlaud({ browser });
       setPlaudCheckedAt(result.checkedAt || Date.now());
       setPlaudStatus(result.status || (result.connected ? "connected" : "unknown"));
@@ -689,6 +692,7 @@ export default function SetupCenter({
       };
       setPlaudCheck(check);
       if (check.ok) {
+        onPlaudSessionChange?.("connected");
         setPlaudAssistMessage("");
         setNotice(`${check.detail}。`);
       }
@@ -706,6 +710,7 @@ export default function SetupCenter({
     setNotice("");
     try {
       const browser = draft.plaudBrowser === "tabbit" ? "tabbit" : "chrome";
+      onPlaudSessionChange?.("starting");
       const result = await workbench.disconnectPlaud({ browser });
       if (!result.ok) {
         setError(result.error || "PLAUD 本地登录清理失败。");

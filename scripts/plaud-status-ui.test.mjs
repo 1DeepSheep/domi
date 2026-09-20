@@ -21,7 +21,7 @@ import "/src/styles.css";
 import "/src/appearance/index.css";
 import "@fontsource-variable/instrument-sans/wght.css";
 import "@fontsource-variable/newsreader/standard.css";
-const state = window.__plaudStatusTest = { calls: [], plans: { list: [], sync: [], resume: [] }, pending: {}, issues: [], settings: null };
+const state = window.__plaudStatusTest = { calls: [], plans: { cache: [], list: [], sync: [], resume: [] }, pending: {}, issues: [], settings: null };
 state.readerListeners = [];
 const startup = window.__plaudStartupConfig || {};
 const fallback = (await import("/src/bridge?plaud-status-fallback")).workbench;
@@ -34,6 +34,7 @@ state.snapshot = startup.snapshot || { ok: true, syncedAt: Date.now(), items: []
 // the list after this response without a manual refresh or generate request.
 state.plans.resume.push(startup.resume || { result: { ok: true, status: "complete", resumePendingCount: 0 } });
 if (startup.list) state.plans.list.push(startup.list);
+state.plans.cache.push(startup.cache || { result: { ok: false, cached: false, cacheVerified: false, items: [], remoteStatus: "not_loaded" } });
 const invoke = async (kind, payload) => {
   state.calls.push({ kind, payload });
   const plan = state.plans[kind].shift();
@@ -50,6 +51,7 @@ if (startup.allowRun) workbench.checkCodex = async () => ({
   pluginSetup: { ok: true, status: "ready", version: "7.0.9" },
   models: startup.models || [{ id: "gpt-5.6-sol", name: "Synthetic model", supportedReasoningEfforts: [{ id: "max" }], serviceTiers: [{ id: "priority" }] }]
 });
+if (startup.holdCodex) workbench.checkCodex = () => new Promise(resolve => { state.pending.codex = resolve; });
 if (startup.allowRun) workbench.syncDomi = async () => ({ ok: true });
 workbench.saveSettings = async request => {
   state.calls.push({ kind: "settings", payload: request });
@@ -62,7 +64,7 @@ workbench.loadState = async defaults => ({ ok: true, state: { ...defaults, threa
     { id: "fixture-assistant", role: "assistant", content: "合成测试已准备", status: "done" }
   ]
 }] }, updatedAt: Date.now(), isNew: false });
-workbench.listPlaud = request => invoke("list", request);
+workbench.listPlaud = request => invoke(request?.cacheOnly ? "cache" : "list", request);
 workbench.syncPlaud = request => invoke("sync", request);
 workbench.resumePlaudTranscripts = () => invoke("resume");
 workbench.onPlaudReaderAvailability = callback => {
@@ -74,7 +76,11 @@ workbench.plaudWorkflowCompletion = async ({ fileId }) => {
   state.calls.push({ kind: "completion", payload: { fileId } });
   return { ok: false, fileId, stage: "", ...startup.completion };
 };
-workbench.loginPlaud = async () => { throw new Error("Automatic login is forbidden in this fixture"); };
+workbench.loginPlaud = async () => {
+  if (!startup.allowLogin) throw new Error("Automatic login is forbidden in this fixture");
+  state.calls.push({ kind: "login" });
+  return new Promise(resolve => { state.pending.login = resolve; });
+};
 workbench.checkPlaudConnection = async ({ browser }) => ({ ok: true, connected: true, browser, status: "connected", checkedAt: Date.now() });
 workbench.renamePlaud = async request => {
   state.calls.push({ kind: "rename", payload: request });
@@ -362,6 +368,84 @@ try {
     } finally { await isolated.close(); }
   };
   const startupReady = item("startup-ready", { hasTranscript: true, queueStage: "", resumeEligible: false });
+  const trustedCache = snapshot([item("saved-recording", { hasTranscript: true, queueStage: "" })], {
+    cached: true, cacheVerified: true, stale: true, remoteStatus: "verification_pending", syncedAt: 1700000000000
+  });
+  const readFailure = { ok: false, stale: true, items: [], remoteStatus: "network_error", retryable: true,
+    errorCode: "PLAUD_NETWORK_TIMEOUT", errorStage: "init", error: "PLAUD_NETWORK_TIMEOUT: synthetic read timeout" };
+  await startupScenario({ holdCodex: true, cache: { result: trustedCache }, resume: { hold: true },
+    list: { result: readFailure }, snapshot: readFailure }, async ({ page, count, wait, release }) => {
+    await page.getByText("合成录音 saved-recording", { exact: true }).waitFor();
+    await wait("resume", 1);
+    assert.equal(await count("cache"), 1, "StrictMode reads the local cache once before background recovery");
+    assert.equal(await count("list"), 0, "Cached rows appear while remote recovery and Codex readiness remain held");
+    await release("resume", { ok: true, resumePendingCount: 0 });
+    await wait("list", 1);
+    await page.getByText("已保留录音，正在后台重连", { exact: true }).waitFor();
+    assert.equal(await page.locator(".domi-inline-error").count(), 0);
+    assert.equal(await page.getByText("合成录音 saved-recording", { exact: true }).count(), 1);
+    for (const delay of [2001, 5001, 15001]) { await page.clock.fastForward(delay); await page.waitForTimeout(20); }
+    await wait("list", 4);
+    await page.getByText("已保留录音，暂未更新", { exact: true }).waitFor();
+    await page.clock.fastForward(120000);
+    assert.equal(await count("list"), 4, "Startup recovery has a finite read-only retry budget");
+    await page.locator(".plaud-connection-status summary").click();
+    assert.match(await page.locator(".plaud-connection-status").innerText(), /PLAUD_NETWORK_TIMEOUT.*init/);
+    if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, "startup-cached-recordings.png") });
+    await page.evaluate(() => { window.__plaudStatusTest.snapshot = { ok: true, remoteStatus: "connected", items: [], syncedAt: Date.now() }; });
+    await page.getByRole("button", { name: "刷新 PLAUD 最近录音", exact: true }).click();
+    await page.getByText("PLAUD 中暂无录音", { exact: true }).waitFor();
+    assert.equal(await page.getByText("合成录音 saved-recording", { exact: true }).count(), 0,
+      "A confirmed fresh empty response replaces older cached recordings");
+  });
+  await startupScenario({ cache: { result: trustedCache }, resume: { result: { ok: false, snapshot: {
+    ...readFailure, retryable: false, remoteStatus: "auth_required", errorCode: "PLAUD_AUTH_REQUIRED", error: "PLAUD_AUTH_REQUIRED: expired"
+  } } } }, async ({ page, count }) => {
+    await page.getByText("合成录音 saved-recording", { exact: true }).waitFor();
+    await page.getByText("PLAUD 登录已失效", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "重新登录", exact: true }).count(), 1);
+    assert.equal(await page.locator(".domi-inline-error").count(), 0);
+    await page.clock.fastForward(120000);
+    assert.equal(await count("list"), 0, "A confirmed expired login must not trigger automatic remote requests");
+  });
+  await startupScenario({ cache: { result: trustedCache }, allowLogin: true, list: { hold: true } }, async ({ page, count, wait, release }) => {
+    await page.getByText("合成录音 saved-recording", { exact: true }).waitFor();
+    await wait("list", 1);
+    await page.getByTitle("打开 Codex 设置", { exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "domi 设置", exact: true });
+    await settings.getByRole("button", { name: "录音转写", exact: true }).click();
+    await settings.getByRole("button", { name: "登录并验证", exact: true }).click();
+    await wait("login", 1);
+    assert.equal(await page.getByText("合成录音 saved-recording", { exact: true }).count(), 0,
+      "Explicit same-browser login immediately clears the previous account's displayed recordings");
+    await release("list", trustedCache);
+    await page.waitForTimeout(20);
+    assert.equal(await page.getByText("合成录音 saved-recording", { exact: true }).count(), 0,
+      "An old read finishing after login starts must not repopulate the old account's cache");
+    await page.evaluate(() => { window.__plaudStatusTest.snapshot = { ok: false, items: [], cacheInvalidated: true,
+      remoteStatus: "auth_required", error: "PLAUD_AUTH_REQUIRED: synthetic new account" }; });
+    await release("login", { ok: true, connected: true, browser: "chrome", status: "connected" });
+    await wait("list", 2);
+    assert.equal(await count("sync"), 0);
+  });
+  await startupScenario({ cache: { result: trustedCache }, list: { result: {
+    ok: false, items: [], stale: true, retryable: false, remoteStatus: "authorization_pending",
+    errorCode: "PLAUD_AUTH_CONTEXT_MISMATCH", errorStage: "init", apiStatus: -3901,
+    error: "PLAUD 本轮账号验证未完成，请稍后重新检测。"
+  } } }, async ({ page, count }) => {
+    await page.getByText("已保留录音，暂未更新", { exact: true }).waitFor();
+    await page.locator(".plaud-connection-status summary").click();
+    assert.match(await page.locator(".plaud-connection-status").innerText(), /PLAUD_AUTH_CONTEXT_MISMATCH · init · API -3901/);
+    assert.equal(await page.getByRole("button", { name: "重新登录", exact: true }).count(), 0,
+      "A vendor auth-context mismatch is not proof that the user logged out");
+    await page.clock.fastForward(120000);
+    assert.equal(await count("list"), 1, "An unknown/unsupported vendor context failure must not gain generic retries");
+  });
+  await startupScenario({ snapshot: { ...readFailure, retryable: false } }, async ({ page }) => {
+    await page.getByText("暂时无法读取录音", { exact: true }).waitFor();
+    assert.equal(await page.getByText("PLAUD 中暂无录音", { exact: true }).count(), 0);
+    assert.doesNotMatch(await page.locator(".plaud-connection-status").innerText(), /已保留录音|已显示|上次成功/);
+  });
   await startupScenario({ holdSettings: true, snapshot: snapshot([startupReady]) }, async ({ page, count, wait, release }) => {
     assert.equal(await count("resume"), 0);
     assert.equal(await count("list"), 0, "No PLAUD access is allowed before settings finish loading");
@@ -425,7 +509,7 @@ try {
       assert.equal(await page.getByText("合成录音 unverified-cache", { exact: true }).count(), 0);
       const health = await page.locator(".plaud-queue-health").innerText();
       assert.equal(health, remoteStatus === "auth_required" ? "需要登录" : "连接待检查");
-      if (remoteStatus !== "auth_required") assert.doesNotMatch(await page.locator(".domi-inline-error").innerText(), /重新登录|失效/);
+      if (remoteStatus !== "auth_required") assert.doesNotMatch(await page.locator(".plaud-connection-status").innerText(), /重新登录|失效/);
       await page.evaluate(value => { window.__plaudStatusTest.snapshot = value; }, snapshot([startupReady]));
       await page.getByRole("button", { name: "刷新 PLAUD 最近录音", exact: true }).click();
       await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();

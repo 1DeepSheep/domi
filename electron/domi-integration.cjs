@@ -280,8 +280,10 @@ function plaudBrowserLabel(browser) {
 }
 
 function plaudFailureStatus(error) {
+  if (error?.apiStatus === -3901) return "authorization_pending";
   const codedStatus = {
     PLAUD_AUTH_REQUIRED: "auth_required", PLAUD_UNAUTHORIZED: "authorization_pending",
+    PLAUD_AUTH_CONTEXT_MISMATCH: "authorization_pending",
     PLAUD_ACCESS_DENIED: "access_denied", PLAUD_RATE_LIMITED: "rate_limited",
     PLAUD_SESSION_PROBE_INCOMPLETE: "verification_pending", PLAUD_PROFILE_LOCKED: "profile_locked",
     PLAUD_BROWSER_UNAVAILABLE: "browser_unavailable", PLAUD_WORKER_EXITED: "browser_unavailable",
@@ -297,6 +299,7 @@ function plaudFailureStatus(error) {
   if (httpStatus >= 500 && httpStatus <= 599) return "service_unavailable";
   const message = error instanceof Error ? error.message : String(error || "");
   const normalized = message.toLocaleLowerCase("en-US");
+  if (/plaud_auth_context_mismatch/.test(normalized)) return "authorization_pending";
   if (/plaud_workflow_in_use/.test(normalized)) return "workflow_in_use";
   if (/音频运行时|ffmpeg|ffprobe/.test(normalized)) return "runtime_unavailable";
   if (/singleton|profile.*(?:lock|use)|already in use|ebusy|process.*running|专用浏览器.*(?:另一个任务使用|被占用)/.test(normalized)) {
@@ -331,6 +334,9 @@ function plaudFailureStatus(error) {
 }
 
 function isRetryablePlaudReadFailure(error) {
+  // The vendor already attempted one verified credential refresh. Reopening
+  // the browser cannot resolve an incompatible API authentication context.
+  if (plaudErrorDetails(error).code === "PLAUD_AUTH_CONTEXT_MISMATCH" || error?.apiStatus === -3901) return false;
   return new Set([
     "verification_pending",
     "authorization_pending",
@@ -372,7 +378,7 @@ function classifyPlaudConnectionFailure(error, browser) {
   const details = plaudErrorDetails(error);
   const retryAfterMs = status === "rate_limited" ? Math.max(30_000, details.retryAfterMs || 0)
     : status === "profile_locked" ? Math.max(5_000, details.retryAfterMs || 0) : details.retryAfterMs;
-  let guidance = `PLAUD 最近录音读取未完成（${details.code}）。已保留本地列表；可在“系统诊断”查看读取阶段和错误码。`;
+  let guidance = `PLAUD 最近录音读取未完成（${details.code}）。本轮未获得新的录音列表；可在“系统诊断”查看读取阶段和错误码。`;
   if (status === "workflow_in_use") {
     guidance = "PLAUD 正由录音任务使用，任务结束后将自动恢复最近录音。";
   } else if (status === "runtime_unavailable") {
@@ -381,6 +387,8 @@ function classifyPlaudConnectionFailure(error, browser) {
     guidance = "PLAUD 专用浏览器正被其他任务或另一个 domi 实例占用；请等待当前操作完成，如有重复实例请关闭后重试。";
   } else if (status === "verification_pending") {
     guidance = "PLAUD 登录数据仍在，但本轮未及时完成会话验证；请重新检测以重建后台会话，无需重新登录。";
+  } else if (details.code === "PLAUD_AUTH_CONTEXT_MISMATCH" || details.apiStatus === -3901) {
+    guidance = "PLAUD 录音接口的会话验证未完成，本轮读取已停止。请检查插件更新或查看系统诊断，无需反复重新登录。";
   } else if (status === "authorization_pending") {
     guidance = "PLAUD 本轮授权未完成自动续期；请重试。只有确认进入登录页时，domi 才会要求重新登录。";
   } else if (status === "access_denied") {
@@ -405,6 +413,9 @@ function classifyPlaudConnectionFailure(error, browser) {
     browserLabel: plaudBrowserLabel(browser),
     status,
     errorCode: details.code,
+    retryable: isRetryablePlaudReadFailure(error),
+    ...(details.httpStatus !== undefined ? { httpStatus: details.httpStatus } : {}),
+    ...(details.apiStatus !== undefined ? { apiStatus: details.apiStatus } : {}),
     ...(details.stage ? { errorStage: details.stage } : {}),
     ...(retryAfterMs !== undefined ? { retryAfterMs, retryAt: Date.now() + retryAfterMs } : {}),
     checkedAt: Date.now(),
@@ -1239,6 +1250,7 @@ class DomiIntegration {
     this.plaudReaderGeneration = 0;
     this.onPlaudReaderAvailability = onPlaudReaderAvailability || (() => {});
     this.plaudVerifiedSnapshot = null;
+    this.plaudAccountEpochs = new Map();
     this.plaudConfigFingerprint = "";
     this.plaudConfigGeneration = 0;
     this.plaudRecoveryEpoch = crypto.randomUUID();
@@ -1954,9 +1966,35 @@ class DomiIntegration {
     if (this.plaudReaderPaused()) throw new Error("PLAUD_WORKFLOW_IN_USE: PLAUD 正由录音任务使用。");
   }
 
+  plaudAccountScopeKey(browser) {
+    const profile = [this.normalizePlaudBrowser(browser), this.domiConfigPath].join("\0");
+    return `plaud:account-epoch:v1:${crypto.createHash("sha256").update(profile).digest("hex")}`;
+  }
+
+  invalidatePlaudAccountSnapshot(browser) {
+    const key = this.plaudAccountScopeKey(browser);
+    const epoch = crypto.randomUUID();
+    // Persist before login/logout can change the Profile. Old successful rows
+    // remain unreachable even if login fails or the app restarts mid-operation.
+    this.stateStore?.saveCache?.(key, { epoch });
+    this.plaudAccountEpochs.set(key, epoch);
+    this.plaudVerifiedSnapshot = null;
+    this.plaudRecoveryEpoch = crypto.randomUUID();
+  }
+
+  plaudAccountEpoch(browser = this.configProvider().plaudBrowser) {
+    const key = this.plaudAccountScopeKey(browser);
+    return this.stateStore?.loadCache?.(key)?.value?.epoch || this.plaudAccountEpochs.get(key) || "";
+  }
+
   plaudSnapshotScope() {
     const settings = this.configProvider();
-    return [settings.plaudConnectionMode, this.normalizePlaudBrowser(settings.plaudBrowser), this.domiConfigPath].join("\0");
+    const browser = this.normalizePlaudBrowser(settings.plaudBrowser);
+    const epoch = this.plaudAccountEpoch(browser);
+    const profile = [settings.plaudConnectionMode, browser, this.domiConfigPath].join("\0");
+    // Existing scoped v1 snapshots remain usable for the selected Profile.
+    // Once an explicit account action occurs, its durable epoch is mandatory.
+    return typeof epoch === "string" && epoch ? `${profile}\0${epoch}` : profile;
   }
 
   plaudRecoveryScope() {
@@ -1970,16 +2008,46 @@ class DomiIntegration {
     return `${PLAUD_LIST_CACHE_KEY}:${crypto.createHash("sha256").update(scope).digest("hex")}`;
   }
 
+  loadPlaudSuccessfulSnapshot(scope = this.plaudSnapshotScope()) {
+    const cached = this.stateStore?.loadCache?.(this.plaudListCacheKey(scope))?.value;
+    if (!cached || cached.ok === false || cached.stale === true || !Array.isArray(cached.items) || !Number.isFinite(cached.syncedAt) || cached.syncedAt <= 0) return null;
+    if (cached.items.some(item => !item || typeof item.fileId !== "string" || !item.fileId)) return null;
+    return cached;
+  }
+
+  cachedPlaudSnapshot(request = {}) {
+    const scope = this.plaudSnapshotScope();
+    const previous = this.plaudEnabled() ? this.loadPlaudSuccessfulSnapshot(scope) : null;
+    const limit = Math.min(Math.max(Number(request.limit) || 50, 1), 100);
+    const offset = Math.min(Math.max(Number(request.offset) || 0, 0), 10_000);
+    const workflowById = new Map(this.loadPlaudWorkflowRecords().map(item => [String(item.fileId), item]));
+    // Local workflow records alone do not establish account ownership. Only
+    // enrich IDs in this Profile's successful remote snapshot, never add rows.
+    const items = (previous?.items || []).slice(offset, offset + limit).map(item => {
+      const record = workflowById.get(item.fileId);
+      return { ...item, hasTranscript: Boolean(item.hasTranscript) || plaudRecordReady(record),
+        processing: plaudRecordReady(record) ? false : Boolean(item.processing), ...this.plaudWorkflowFields(record) };
+    }).sort(comparePlaudItems);
+    return {
+      ok: Boolean(previous), cached: Boolean(previous), cacheVerified: Boolean(previous), stale: true,
+      cacheInvalidated: !previous && Boolean(this.plaudAccountEpoch()),
+      syncedAt: previous?.syncedAt || 0, lastSuccessfulAt: previous?.syncedAt || undefined,
+      pendingCount: Number(previous?.pendingCount) || 0,
+      queueCount: items.filter(item => item.queueStage && !PLAUD_FINAL_WORKFLOW_STAGES.has(item.queueStage)).length,
+      pageOffset: offset, pageSize: limit, hasMore: false, nextOffset: offset,
+      items, remoteStatus: previous ? "verification_pending" : "not_loaded",
+      retryable: false, recoveryScope: this.plaudRecoveryScope(), warning: "", error: ""
+    };
+  }
+
   pausedPlaudSnapshot() {
+    const cached = this.cachedPlaudSnapshot();
     const previous = this.plaudVerifiedSnapshot?.scope === this.plaudSnapshotScope()
       ? this.plaudVerifiedSnapshot.snapshot : null;
-    // A task reservation never falls back to the old global disk cache. Only
-    // this process's successful read of the selected Profile may supply rows.
     return {
-      ...(previous || {}), ok: true, paused: true, stale: true,
-      items: previous?.items || [], pendingCount: previous?.pendingCount || 0,
-      queueCount: previous?.queueCount || 0, hasMore: false, nextOffset: 0,
-      remoteStatus: "workflow_in_use", retryable: false, warning: "", error: ""
+      ...(previous || cached), ok: true, paused: true, stale: true,
+      hasMore: false, nextOffset: 0, remoteStatus: "workflow_in_use",
+      retryable: false, warning: "", error: ""
     };
   }
 
@@ -2264,11 +2332,10 @@ class DomiIntegration {
 
   async loginPlaud(request = {}) {
     if (this.plaudReaderPaused()) return { ...classifyPlaudConnectionFailure("PLAUD_WORKFLOW_IN_USE", this.normalizePlaudBrowser(request.browser || this.configProvider().plaudBrowser)), paused: true };
-    this.plaudVerifiedSnapshot = null;
-    this.plaudRecoveryEpoch = crypto.randomUUID();
     const browser = this.normalizePlaudBrowser(
       request.browser || this.configProvider().plaudBrowser
     );
+    this.invalidatePlaudAccountSnapshot(browser);
     let result;
     try {
       await this.plaudDoctor({ ...request, browser });
@@ -2288,9 +2355,11 @@ class DomiIntegration {
       ok: Boolean(result?.connected),
       status: result.status,
       error: result?.connected ? "" : String(result?.error || ""),
-      checkedAt: result.checkedAt
+      checkedAt: result.checkedAt,
+      ...(Number.isSafeInteger(result.apiStatus) ? { apiStatus: result.apiStatus } : {}),
+      ...(Number.isInteger(result.httpStatus) && result.httpStatus >= 100 && result.httpStatus <= 599 ? { httpStatus: result.httpStatus } : {})
     };
-    return result;
+    return { ...result, cacheInvalidated: true, recoveryScope: this.plaudRecoveryScope() };
   }
 
   async plaudConnection(request = {}) {
@@ -2312,7 +2381,9 @@ class DomiIntegration {
         ok: Boolean(result?.connected),
         status: result.status,
         error: result?.connected ? "" : String(result?.error || ""),
-        checkedAt: result.checkedAt
+        checkedAt: result.checkedAt,
+        ...(Number.isSafeInteger(result.apiStatus) ? { apiStatus: result.apiStatus } : {}),
+        ...(Number.isInteger(result.httpStatus) && result.httpStatus >= 100 && result.httpStatus <= 599 ? { httpStatus: result.httpStatus } : {})
       };
       return result;
     } catch (error) {
@@ -2322,7 +2393,9 @@ class DomiIntegration {
         ok: false,
         status: result.status,
         error: result.error,
-        checkedAt: result.checkedAt
+        checkedAt: result.checkedAt,
+        ...(Number.isSafeInteger(result.apiStatus) ? { apiStatus: result.apiStatus } : {}),
+        ...(Number.isInteger(result.httpStatus) && result.httpStatus >= 100 && result.httpStatus <= 599 ? { httpStatus: result.httpStatus } : {})
       };
       return result;
     }
@@ -2334,11 +2407,10 @@ class DomiIntegration {
 
   async disconnectPlaud(request = {}) {
     this.assertPlaudReaderAvailable();
-    this.plaudVerifiedSnapshot = null;
-    this.plaudRecoveryEpoch = crypto.randomUUID();
+    this.invalidatePlaudAccountSnapshot(request.browser || this.configProvider().plaudBrowser);
     const result = await this.runPlaudConnectionCommand("logout", request.browser);
     this.plaudRemoteHealth = null;
-    return result;
+    return { ...result, cacheInvalidated: true, recoveryScope: this.plaudRecoveryScope() };
   }
 
   normalizePlaudQueueItem(item) {
@@ -2393,10 +2465,11 @@ class DomiIntegration {
   }
 
   async plaudQueue(request = {}) {
+    const requested = typeof request === "number" ? { limit: request } : request || {};
+    if (requested.cacheOnly === true) return this.cachedPlaudSnapshot(requested);
     if (this.plaudReaderPaused()) return this.pausedPlaudSnapshot();
     const requestedScope = this.plaudSnapshotScope();
     const cacheKey = this.plaudListCacheKey(requestedScope);
-    const requested = typeof request === "number" ? { limit: request } : request || {};
     const limit = Math.min(Math.max(Number(requested.limit) || 50, 1), 100);
     const offset = Math.min(Math.max(Number(requested.offset) || 0, 0), 10_000);
     const fresh = requested.fresh === true;
@@ -2415,9 +2488,21 @@ class DomiIntegration {
         error: ""
       };
     }
-    const { plugin } = this.plaudPaths();
     const [remoteResult] = await Promise.allSettled([
-      this.runPlaudWorker("list", [String(limit), String(offset)], plugin, { deadlineAt: requested.deadlineAt })
+      Promise.resolve().then(async () => {
+        const { plugin } = this.plaudPaths();
+        const result = await this.runPlaudWorker("list", [String(limit), String(offset)], plugin, { deadlineAt: requested.deadlineAt });
+        if (result?.ok === false || !Array.isArray(result?.items)
+          || result.items.some(item => !item || typeof item.fileId !== "string" || !item.fileId)) {
+          throw Object.assign(new Error(result?.error || "PLAUD_READ_FAILED: 本轮录音列表未成功读取。"), {
+            code: result?.errorCode || "PLAUD_READ_FAILED", stage: result?.errorStage || "list",
+            ...(Number.isInteger(result?.httpStatus) && result.httpStatus >= 100 && result.httpStatus <= 599 ? { httpStatus: result.httpStatus } : {}),
+            ...(Number.isSafeInteger(result?.apiStatus) ? { apiStatus: result.apiStatus } : {}),
+            ...(result?.retryAfterMs !== undefined ? { retryAfterMs: result.retryAfterMs } : {})
+          });
+        }
+        return result;
+      })
     ]);
     if (requestedScope !== this.plaudSnapshotScope()) {
       return this.supersededPlaudSnapshot();
@@ -2437,11 +2522,8 @@ class DomiIntegration {
     if (remoteSnapshot && offset === 0) {
       this.stateStore.saveCache(cacheKey, remoteSnapshot);
     } else if (!remoteSnapshot && offset === 0) {
-      const cached = this.stateStore.loadCache(cacheKey)?.value;
-      if (cached && Array.isArray(cached.items)) {
-        cachedSnapshot = cached;
-        if (!fresh) remoteSnapshot = cached;
-      }
+      cachedSnapshot = this.loadPlaudSuccessfulSnapshot(requestedScope);
+      if (cachedSnapshot) remoteSnapshot = cachedSnapshot;
     }
     const stale = remoteResult.status === "rejected" && Boolean(cachedSnapshot);
     if (remoteResult.status === "rejected" && plaudFailureStatus(remoteResult.reason) === "workflow_in_use") return this.pausedPlaudSnapshot();
@@ -2460,6 +2542,8 @@ class DomiIntegration {
       ok: remoteResult.status === "fulfilled",
       status: remoteFailure?.status || "connected",
       error: remoteFailure?.error || "",
+      ...(remoteFailure?.httpStatus !== undefined ? { httpStatus: remoteFailure.httpStatus } : {}),
+      ...(remoteFailure?.apiStatus !== undefined ? { apiStatus: remoteFailure.apiStatus } : {}),
       checkedAt
     };
     const mergeWorkflowState = (sourceItems, includeWorkflowOnly) => {
@@ -2483,24 +2567,26 @@ class DomiIntegration {
       merged.sort(comparePlaudItems);
       return merged;
     };
-    const items = remoteResult.status === "fulfilled" || (!fresh && stale)
-      ? mergeWorkflowState(remoteSnapshot?.items || [], offset === 0)
+    const items = remoteResult.status === "fulfilled" || stale
+      ? mergeWorkflowState(remoteSnapshot?.items || [], remoteResult.status === "fulfilled" && offset === 0)
       : [];
     const remoteError = remoteFailure?.error || "";
     const warning = stale
-      ? `${remoteError || "PLAUD 暂时无法刷新。"} ${fresh ? "本轮刷新失败；界面仍保留上次成功读取的录音列表。" : "已显示上次成功读取的录音列表。"}`
+      ? `${remoteError || "PLAUD 暂时无法刷新。"}${items.length ? " 已显示上次成功读取的录音列表。" : ""}`
       : "";
     const remoteStatus = remoteFailure?.status || "connected";
     const retryable = Boolean(remoteFailure && isRetryablePlaudReadFailure(remoteResult.reason));
     const failureDetails = remoteFailure ? {
       errorCode: remoteFailure.errorCode, errorStage: remoteFailure.errorStage || "list",
+      ...(remoteFailure.httpStatus !== undefined ? { httpStatus: remoteFailure.httpStatus } : {}),
+      ...(remoteFailure.apiStatus !== undefined ? { apiStatus: remoteFailure.apiStatus } : {}),
       ...(remoteFailure.retryAfterMs !== undefined ? { retryAfterMs: remoteFailure.retryAfterMs, retryAt: remoteFailure.retryAt } : {})
     } : {};
     const lastSuccessfulSnapshot = fresh && stale
       ? {
           ok: true,
           stale: true,
-          syncedAt: Number(cachedSnapshot?.syncedAt) || checkedAt,
+          syncedAt: Number(cachedSnapshot?.syncedAt) || 0,
           lastSuccessfulAt: Number(cachedSnapshot?.syncedAt) || undefined,
           pendingCount: Number(cachedSnapshot?.pendingCount) || 0,
           queueCount: queueItems.length,
@@ -2508,7 +2594,7 @@ class DomiIntegration {
           pageSize: Number(cachedSnapshot?.pageSize) || limit,
           hasMore: false,
           nextOffset: 0,
-          items: mergeWorkflowState(cachedSnapshot?.items || [], true),
+          items: mergeWorkflowState(cachedSnapshot?.items || [], false),
           remoteStatus,
           retryable,
           ...failureDetails,
@@ -2519,9 +2605,13 @@ class DomiIntegration {
     const result = {
       ok: remoteResult.status === "fulfilled" || (!fresh && stale),
       stale,
+      cached: stale,
+      cacheVerified: stale,
+      cacheInvalidated: remoteResult.status === "rejected" && offset === 0 && !cachedSnapshot && Boolean(this.plaudAccountEpoch()),
+      checkedAt,
       syncedAt: remoteResult.status === "fulfilled"
         ? Number(remoteSnapshot?.syncedAt) || checkedAt
-        : Number(cachedSnapshot?.syncedAt) || checkedAt,
+        : Number(cachedSnapshot?.syncedAt) || 0,
       lastSuccessfulAt: Number(remoteSnapshot?.syncedAt || cachedSnapshot?.syncedAt) || undefined,
       pendingCount: Number(remoteSnapshot?.pendingCount) || 0,
       queueCount: queueItems.length,
@@ -2540,7 +2630,7 @@ class DomiIntegration {
       warning,
       error: remoteResult.status === "fulfilled" || (!fresh && stale) ? "" : remoteError
     };
-    if (result.ok && !result.stale && requestedScope === this.plaudSnapshotScope()) {
+    if (result.ok && !result.stale && offset === 0 && requestedScope === this.plaudSnapshotScope()) {
       this.plaudVerifiedSnapshot = { scope: requestedScope, snapshot: result };
     }
     return result;
@@ -2747,6 +2837,8 @@ class DomiIntegration {
         preflight: true, submissionStarted: false, retryable: current.retryable === true,
         recoveryScope: requestedRecoveryScope, errorCode: current.errorCode || "PLAUD_READ_FAILED",
         errorStage: current.errorStage || "list",
+        ...(current.httpStatus !== undefined ? { httpStatus: current.httpStatus } : {}),
+        ...(current.apiStatus !== undefined ? { apiStatus: current.apiStatus } : {}),
         ...(current.retryAfterMs !== undefined ? { retryAfterMs: current.retryAfterMs, retryAt: current.retryAt } : {}),
         error: current.error || current.warning || (current.remoteStatus === "auth_required"
           ? "PLAUD 登录已失效，请在设置中重新登录并验证。"
@@ -4582,6 +4674,8 @@ class DomiIntegration {
         disabled: plaudDisabled,
         queueCount: queue?.count || 0,
         queueStages,
+        ...(this.plaudRemoteHealth?.httpStatus !== undefined ? { httpStatus: this.plaudRemoteHealth.httpStatus } : {}),
+        ...(this.plaudRemoteHealth?.apiStatus !== undefined ? { apiStatus: this.plaudRemoteHealth.apiStatus } : {}),
         error: plaudDisabled
           ? ""
           : this.plaudRemoteHealth?.error

@@ -38,6 +38,9 @@ function safeError(error) {
   if (/PLAUD_AUTH_REQUIRED|account sign-in is required/i.test(message)) {
     return "PLAUD 登录已失效，请在设置中重新登录并验证。";
   }
+  if (error?.code === "PLAUD_AUTH_CONTEXT_MISMATCH" || Number(error?.apiStatus) === -3901) {
+    return "PLAUD 录音接口的会话尚未完成验证，已保留本地录音。";
+  }
   if (/PLAUD_RATE_LIMITED|(?:HTTP|status)\s*429|too many requests|rate.?limit|请求过于频繁/i.test(message)) {
     return "PLAUD 服务暂时限流。domi 未修改任何录音，请稍后重新同步，无需重新登录。";
   }
@@ -64,10 +67,12 @@ function safeError(error) {
 function plaudErrorDetails(error, stage = "") {
   const message = typeof error?.message === "string" ? error.message : String(error || "");
   const status = Number(error?.httpStatus || error?.status || message.match(/(?:HTTP|status)\s*(\d{3})/i)?.[1]);
+  const apiStatus = typeof error?.apiStatus === "number" ? error.apiStatus : undefined;
   let code = String(error?.code || message.match(/\bPLAUD_[A-Z_]+\b/)?.[0] || "");
   if (!/^PLAUD_[A-Z_]{1,70}$/.test(code)) code = "";
   if (!code) {
-    if (/account sign-in is required|登录已失效/i.test(message)) code = "PLAUD_AUTH_REQUIRED";
+    if (apiStatus === -3901) code = "PLAUD_AUTH_CONTEXT_MISMATCH";
+    else if (/account sign-in is required|登录已失效/i.test(message)) code = "PLAUD_AUTH_REQUIRED";
     else if (status === 401 || /unauthori/i.test(message)) code = "PLAUD_UNAUTHORIZED";
     else if (status === 403) code = "PLAUD_ACCESS_DENIED";
     else if (status === 429 || /too many requests|rate.?limit/i.test(message)) code = "PLAUD_RATE_LIMITED";
@@ -82,7 +87,8 @@ function plaudErrorDetails(error, stage = "") {
   const errorStage = ["init", "connection", "list", "download", "rename", "trash", "cleanup"].includes(error?.stage)
     ? error.stage : ["init", "connection", "list", "download", "rename", "trash", "cleanup"].includes(stage) ? stage : "";
   return { code, ...(errorStage ? { stage: errorStage } : {}),
-    ...(Number.isInteger(status) && status >= 400 && status <= 599 ? { httpStatus: status } : {}),
+    ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { httpStatus: status } : {}),
+    ...(Number.isSafeInteger(apiStatus) ? { apiStatus } : {}),
     ...(Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? { retryAfterMs: Math.min(retryAfterMs, Number.MAX_SAFE_INTEGER) } : {}) };
 }
 
@@ -111,7 +117,7 @@ function isTransientNavigationError(error) {
 }
 
 function isRetryableReadError(error) {
-  if (["PLAUD_AUTH_REQUIRED", "PLAUD_UNAUTHORIZED", "PLAUD_ACCESS_DENIED", "PLAUD_RATE_LIMITED", "PLAUD_PROFILE_LOCKED"].includes(error?.code)) return false;
+  if (["PLAUD_AUTH_REQUIRED", "PLAUD_AUTH_CONTEXT_MISMATCH", "PLAUD_UNAUTHORIZED", "PLAUD_ACCESS_DENIED", "PLAUD_RATE_LIMITED", "PLAUD_PROFILE_LOCKED"].includes(error?.code) || Number(error?.apiStatus) === -3901) return false;
   if (["PLAUD_NETWORK_TIMEOUT", "PLAUD_READ_TRANSIENT", "PLAUD_BROWSER_UNAVAILABLE", "PLAUD_SESSION_PROBE_INCOMPLETE", "PLAUD_SERVICE_UNAVAILABLE"].includes(error?.code)) return true;
   const message = error instanceof Error ? error.message : String(error);
   if (/PLAUD_AUTH_REQUIRED|PLAUD_UNAUTHORIZED|PLAUD_ACCESS_DENIED|(?:HTTP|status)\s*(?:401|403)|unauthori|account sign-in is required/i.test(message)) {
