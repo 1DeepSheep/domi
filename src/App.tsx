@@ -9844,7 +9844,7 @@ function App() {
     if (!await navigateWorkspace(view)) return;
     setDocumentLibrarySidebarExpanded(false);
     setThreadMenuId(null);
-    if (view === "industries") { setRightPanelOpen(false); setIndustryRefreshKey((key) => key + 1); return; }
+    if (view === "industries") { setRightPanelOpen(false); setIndustryRefreshKey((key) => key + 1); void refreshDatabase({ preserveSelection: true }); return; }
     if (view !== "data") return;
     setRightPanelOpen(false);
     void refreshDatabase({ preserveSelection: true });
@@ -13587,6 +13587,15 @@ function App() {
             </span>
           </button>
           <button
+            className={`sidebar-nav-item ${workspaceView === "industries" ? "active" : ""}`}
+            type="button"
+            onClick={() => void openPrimaryWorkspace("industries")}
+          >
+            <LayoutDashboard className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
+            <strong>行业看板</strong>
+            <span className="sidebar-nav-meta" />
+          </button>
+          <button
             className={`sidebar-nav-item ${workspaceView === "news" ? "active" : ""}`}
             type="button"
             onClick={() => {
@@ -13595,15 +13604,6 @@ function App() {
           >
             <Newspaper className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
             <strong>行业动态</strong>
-            <span className="sidebar-nav-meta" />
-          </button>
-          <button
-            className={`sidebar-nav-item ${workspaceView === "industries" ? "active" : ""}`}
-            type="button"
-            onClick={() => void openPrimaryWorkspace("industries")}
-          >
-            <LayoutDashboard className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
-            <strong>行业速览</strong>
             <span className="sidebar-nav-meta" />
           </button>
           <button
@@ -13909,7 +13909,7 @@ function App() {
               : workspaceView === "news"
                 ? "行业动态"
                 : workspaceView === "industries"
-                  ? "行业速览"
+                  ? "行业看板"
                 : workspaceView === "data"
                   ? "投资档案"
                 : workspaceView === "documents"
@@ -13941,7 +13941,7 @@ function App() {
                 : workspaceView === "news"
                   ? scanWeeklyNews()
                   : workspaceView === "industries"
-                    ? setIndustryRefreshKey((key) => key + 1)
+                    ? Promise.all([Promise.resolve(setIndustryRefreshKey((key) => key + 1)), refreshDatabase({ preserveSelection: true })])
                   : workspaceView === "data"
                     ? refreshDatabase({ preserveSelection: true })
                   : workspaceView === "documents"
@@ -13959,7 +13959,7 @@ function App() {
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
                   : workspaceView === "industries"
-                    ? "刷新行业速览"
+                    ? "刷新行业看板"
                   : workspaceView === "data"
                     ? "刷新投资档案"
                   : workspaceView === "documents"
@@ -13970,7 +13970,7 @@ function App() {
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
                   : workspaceView === "industries"
-                    ? "刷新行业速览"
+                    ? "刷新行业看板"
                   : workspaceView === "data"
                     ? "刷新投资档案"
                   : workspaceView === "documents"
@@ -14018,7 +14018,7 @@ function App() {
                 : workspaceView === "news"
                   ? renderNewsWorkspace()
                   : workspaceView === "industries"
-                    ? <IndustryOverview refreshKey={industryRefreshKey} onOpenAttachment={openDocument} />
+                    ? <IndustryOverview refreshKey={industryRefreshKey} news={databaseSnapshot?.news || weeklyNews?.items || []} onOpenAttachment={openDocument} />
                   : workspaceView === "data"
                     ? renderDatabaseWorkspace()
                   : workspaceView === "documents"

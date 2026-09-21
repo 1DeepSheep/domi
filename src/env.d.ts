@@ -1916,4 +1916,4 @@ export type CodexEventItem = {
 };
 
 export type IndustryOverviewEntry = { domain: string; subdomain: string; title: string; path: string; projectCount: number };
-export type IndustryOverviewResult = { ok: boolean; entries: IndustryOverviewEntry[]; indexPath?: string; conflicts?: unknown[]; warnings?: unknown[]; error?: string };
+export type IndustryOverviewResult = { ok: boolean; entries: IndustryOverviewEntry[]; indexPath?: string; projectCount?: number; conflicts?: unknown[]; warnings?: unknown[]; error?: string };
