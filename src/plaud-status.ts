@@ -118,19 +118,19 @@ function hasPlaudPermanentError(item: DomiPlaudItem) {
 export function canGeneratePlaudNotes(item: DomiPlaudItem) {
   if (hasPlaudArtifactError(item)) return false;
   if (!item.transcriptPath && ((item.syncOutcome === "failed" && item.errorCode !== "PLAUD_GENERATION_NOT_SUBMITTED") || hasPlaudPermanentError(item))) return false;
-  if (["managed", "notes_non_project"].includes(item.queueStage)) return false;
+  if (["managed", "notes_non_project", "discussion_complete"].includes(item.queueStage)) return false;
   return Boolean(item.hasTranscript || item.hasSummary || item.transcriptPath
     || ["transcript_ready", "context_pending", "context_ready", "notes_project", "reviewed", "documented"].includes(item.queueStage));
 }
 
 export function plaudItemPresentation(item: DomiPlaudItem): PlaudItemPresentation {
   if (hasPlaudArtifactError(item)) return {
-    label: ["managed", "notes_non_project"].includes(item.queueStage) ? "纪要已生成 · 原文需处理" : "原文文件需处理",
+    label: ["managed", "notes_non_project", "discussion_complete"].includes(item.queueStage) ? "纪要已生成 · 原文需处理" : "原文文件需处理",
     tone: "attention",
     detail: "本地原始文字稿文件缺失，已有纪要和归档保留。请恢复原文件，不会重新生成。"
   };
   if (item.queueStage === "managed") return { label: "已生成并入库", tone: "complete", detail: "" };
-  if (item.queueStage === "notes_non_project") return { label: "纪要已生成", tone: "complete", detail: "" };
+  if (["notes_non_project", "discussion_complete"].includes(item.queueStage)) return { label: "纪要已生成", tone: "complete", detail: "" };
   if (item.transcriptPath || ["transcript_ready", "context_pending", "context_ready", "notes_project", "reviewed", "documented"].includes(item.queueStage)) {
     return { label: "文字稿待整理", tone: "neutral", detail: "" };
   }
@@ -189,7 +189,7 @@ export function plaudItemPresentation(item: DomiPlaudItem): PlaudItemPresentatio
 
 export function hasRecoverablePlaudItems(snapshot: DomiPlaudSnapshot | null) {
   return (snapshot?.items || []).some(item => {
-    if (item.transcriptPath || hasPlaudArtifactError(item) || hasPlaudPermanentError(item) || item.errorCode === "PLAUD_GENERATION_NOT_SUBMITTED" || item.syncOutcome === "failed" || ["managed", "notes_non_project"].includes(item.queueStage)) return false;
+    if (item.transcriptPath || hasPlaudArtifactError(item) || hasPlaudPermanentError(item) || item.errorCode === "PLAUD_GENERATION_NOT_SUBMITTED" || item.syncOutcome === "failed" || ["managed", "notes_non_project", "discussion_complete"].includes(item.queueStage)) return false;
     if (typeof item.resumeEligible === "boolean") return item.resumeEligible;
     return item.queueStage !== "uploaded" && plaudItemPresentation(item).tone === "waiting";
   });

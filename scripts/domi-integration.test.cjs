@@ -5412,3 +5412,189 @@ test("conflicting new folder aliases enter review without rolling back unrelated
   assert.equal(resolved.projects.needsNameReview, 0);
   assert.equal(repository.listProjects().length, 3);
 });
+
+function plaudContextDownloadFixture(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-context-download-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const cache = new Map(), reads = [];
+  const fileId = "synthetic-remote-recording";
+  const settings = { plaudConnectionMode: "enabled", plaudBrowser: "chrome" };
+  const digest = bytes => require("node:crypto").createHash("sha256").update(bytes).digest("hex");
+  const f = { directory, fileId, cache, reads, digest, settings, source: "医院排班系统讨论私有化部署与护理科室订阅，完整原文不应被裁剪。\n" };
+  class IsolatedIntegration extends DomiIntegration {
+    resolveLarkCli() { return ""; }
+    findPlugin() { return { root: directory }; }
+  }
+  f.integration = new IsolatedIntegration({ stateStore: {
+    loadCache: key => cache.get(key), saveCache: (key, value) => cache.set(key, { value })
+  }, plaudStateDir: path.join(directory, "state"), plaudOutputDir: path.join(directory, "output"),
+  domiConfigPath: path.join(directory, "config.json"), configProvider: () => settings,
+  mediaRuntime: {}, playwrightNodeModules: directory, radarSourceService: {},
+  plaudBroker: { request: async (command, args, _root, options) => {
+    reads.push({ command, args, options });
+    assert.equal(command, "download"); assert.equal(args[0], fileId); assert.equal(options.timeoutMs, 30_000);
+    f.entered?.resolve(); if (f.hold) await f.hold;
+    if (f.error) throw f.error;
+    fs.mkdirSync(args[1], { recursive: true });
+    const transcriptPath = path.join(args[1], "transcript.md"); fs.writeFileSync(transcriptPath, f.source);
+    return { ok: true, fileId, transcriptPath, fileName: "Synthetic downloaded recording" };
+  }, stop: async () => {} } });
+  f.write = records => {
+    fs.mkdirSync(path.dirname(f.integration.plaudStateFile), { recursive: true });
+    fs.writeFileSync(f.integration.plaudStateFile, JSON.stringify({ version: 1, records: Object.fromEntries(records.map(record => [record.fileId, record])) }));
+  };
+  f.record = () => f.integration.loadPlaudWorkflowRecords().find(record => record.fileId === fileId);
+  f.verifyList = (overrides = {}) => cache.set(f.integration.plaudListCacheKey(f.integration.plaudSnapshotScope()),
+    { value: { syncedAt: 1, items: [{ fileId, fileName: "Synthetic list recording", hasTranscript: true, ...overrides }] } });
+  f.verifyList();
+  f.integration.getPlaudContextService().runCommand = async (_command, id, payload) => {
+    const record = f.integration.loadPlaudWorkflowRecords().find(item => item.fileId === id);
+    if (!record) return { ok: false, fileId: id, errorCode: "PLAUD_CONTEXT_RECORD_NOT_FOUND" };
+    let bytes;
+    try { bytes = fs.readFileSync(record.transcriptPath); }
+    catch { return { ok: false, fileId: id, errorCode: "PLAUD_CONTEXT_TRANSCRIPT_REQUIRED" }; }
+    return { ok: true, fileId: id, accountScope: payload.accountScope, stage: record.stage,
+      disposition: "needs_input", context: record, recordRevision: digest(JSON.stringify(record)),
+      transcript: { path: record.transcriptPath, sha256: digest(bytes), bytes: bytes.length } };
+  };
+  return f;
+}
+
+test("native context downloads one exact verified remote transcript and atomically creates a missing queue", async t => {
+  const f = plaudContextDownloadFixture(t);
+  const first = f.integration.preparePlaudContext({ fileId: f.fileId });
+  const second = f.integration.preparePlaudContext({ fileId: f.fileId });
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.ok, true); assert.deepEqual(a, b); assert.equal(f.reads.length, 1);
+  assert.equal(a.transcript.sha256, f.digest(f.source));
+  assert.equal(f.record().stage, "transcript_ready");
+  assert.equal(f.integration.loadPlaudWorkflowRecords().length, 1);
+  assert.equal(f.integration.criticalOperationSnapshot().total, 0);
+  assert.equal((await f.integration.preparePlaudContext({ fileId: f.fileId })).ok, true);
+  assert.equal(f.reads.length, 1, "a complete local transcript never triggers remote work");
+});
+
+test("native transcript recovery preserves partial context, generation receipts and unrelated records", async t => {
+  const f = plaudContextDownloadFixture(t);
+  const untouched = { fileId: "unrelated-recording", stage: "managed", projectName: "Unchanged fixture" };
+  f.write([{ fileId: f.fileId, stage: "context_pending", transcriptPath: path.join(f.directory, "missing.md"),
+    participants: ["合成甲"], extraContext: "尚未提交的背景", generationAttemptId: "synthetic-attempt" }, untouched]);
+  const result = await f.integration.preparePlaudContext({ fileId: f.fileId });
+  assert.equal(result.ok, true); assert.equal(f.record().stage, "context_pending");
+  assert.equal(result.context.participants, "合成甲"); assert.equal(f.record().extraContext, "尚未提交的背景");
+  assert.equal(f.record().generationAttemptId, "synthetic-attempt");
+  assert.deepEqual(f.integration.loadPlaudWorkflowRecords().find(row => row.fileId === untouched.fileId), untouched);
+});
+
+test("native preparation cannot download without remote artifacts, current ownership or a matching scope", async t => {
+  for (const mode of ["no-artifacts", "owner-cache-only", "old-scope"]) {
+    const f = plaudContextDownloadFixture(t);
+    if (mode === "no-artifacts") f.verifyList({ hasTranscript: false, hasSummary: false });
+    if (mode === "owner-cache-only") {
+      f.cache.clear();
+      f.integration.getPlaudContextService().store("owner", f.integration.plaudContextAccountScope(), f.fileId, "", { fileId: f.fileId });
+    }
+    const request = { fileId: f.fileId, ...(mode === "old-scope" ? { accountScope: f.digest("old-scope"), expectedTranscriptSha256: f.digest(f.source) } : {}) };
+    const result = await f.integration.preparePlaudContext(request);
+    assert.equal(result.ok, false, mode); assert.equal(f.reads.length, 0, mode);
+    assert.equal(fs.existsSync(f.integration.plaudStateFile), false);
+  }
+});
+
+test("native missing-transcript recovery never replaces confirmed or advanced workflow artifacts", async t => {
+  for (const extra of [{ stage: "context_ready" }, { stage: "managed" }, { stage: "notes_project" },
+    { stage: "context_pending", contextStatus: "provided" }, { stage: "context_pending", contextReceipt: { schema: "synthetic" } }]) {
+    const f = plaudContextDownloadFixture(t);
+    const original = { fileId: f.fileId, transcriptPath: path.join(f.directory, "missing.md"), participants: ["合成甲"], ...extra };
+    f.write([original]);
+    assert.equal((await f.integration.preparePlaudContext({ fileId: f.fileId })).ok, false);
+    assert.equal(f.reads.length, 0); assert.deepEqual(f.record(), original);
+  }
+});
+
+test("queued native download rechecks account scope before touching the browser", async t => {
+  const f = plaudContextDownloadFixture(t), gate = plaudDeferred();
+  const held = f.integration.enqueuePlaudOperation(() => gate.promise);
+  const prepared = f.integration.preparePlaudContext({ fileId: f.fileId });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.integration.plaudCommandQueue.pending.length, 1);
+  f.integration.invalidatePlaudAccountSnapshot("chrome"); gate.resolve(); await held;
+  assert.equal((await prepared).errorCode, "PLAUD_CONTEXT_SCOPE_CHANGED");
+  assert.equal(f.reads.length, 0); assert.equal(fs.existsSync(f.integration.plaudStateFile), false);
+});
+
+test("account changes during an exact download cannot commit its transcript to the queue", async t => {
+  const f = plaudContextDownloadFixture(t), gate = plaudDeferred(); f.entered = plaudDeferred(); f.hold = gate.promise;
+  const prepared = f.integration.preparePlaudContext({ fileId: f.fileId });
+  await f.entered.promise; f.integration.invalidatePlaudAccountSnapshot("chrome"); gate.resolve();
+  assert.equal((await prepared).errorCode, "PLAUD_CONTEXT_SCOPE_CHANGED");
+  assert.equal(fs.existsSync(f.integration.plaudStateFile), false);
+  assert.equal(f.integration.criticalOperationSnapshot().total, 0);
+});
+
+test("native download queue commit retains a concurrent completed context", async t => {
+  const f = plaudContextDownloadFixture(t), gate = plaudDeferred(); f.entered = plaudDeferred(); f.hold = gate.promise;
+  const prepared = f.integration.preparePlaudContext({ fileId: f.fileId });
+  await f.entered.promise;
+  const transcriptPath = path.join(f.directory, "concurrent-original.md"); fs.writeFileSync(transcriptPath, "Concurrent complete transcript.");
+  const complete = { fileId: f.fileId, stage: "managed", transcriptPath, extraContext: "已确认背景", contextReceipt: { schema: "synthetic" } };
+  f.write([complete]); gate.resolve();
+  assert.equal((await prepared).ok, true); assert.deepEqual(f.record(), complete);
+});
+
+test("native download failures are shared without clearing queue or retrying a remote command", async t => {
+  const f = plaudContextDownloadFixture(t), gate = plaudDeferred(); f.entered = plaudDeferred(); f.hold = gate.promise;
+  f.error = Object.assign(new Error("PLAUD_RATE_LIMITED"), { code: "PLAUD_RATE_LIMITED", retryAfterMs: 30000 });
+  const original = { fileId: f.fileId, stage: "context_pending", extraContext: "背景应保留" }; f.write([original]);
+  const first = f.integration.preparePlaudContext({ fileId: f.fileId }); await f.entered.promise;
+  const second = f.integration.preparePlaudContext({ fileId: f.fileId }); await new Promise(resolve => setImmediate(resolve));
+  gate.resolve(); const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.ok, false); assert.equal(a.errorCode, "PLAUD_RATE_LIMITED"); assert.deepEqual(a, b);
+  assert.equal(f.reads.length, 1); assert.deepEqual(f.record(), original);
+});
+
+test("native preparation respects an existing workflow owner and preserves expected transcript binding", async t => {
+  const f = plaudContextDownloadFixture(t);
+  await f.integration.reservePlaudForWorkflow("synthetic-owner");
+  assert.equal((await f.integration.preparePlaudContext({ fileId: f.fileId })).ok, false);
+  assert.equal(f.reads.length, 0); f.integration.releasePlaudWorkflow("synthetic-owner");
+  const result = await f.integration.preparePlaudContext({ fileId: f.fileId, expectedTranscriptSha256: f.digest("different transcript") });
+  assert.equal(result.errorCode, "PLAUD_CONTEXT_TRANSCRIPT_CHANGED");
+  assert.equal(fs.existsSync(f.integration.plaudStateFile), false);
+});
+
+test("summary-only native recordings attempt only an existing transcript download and never generate", async t => {
+  const f = plaudContextDownloadFixture(t); f.verifyList({ hasTranscript: false, hasSummary: true });
+  assert.equal((await f.integration.preparePlaudContext({ fileId: f.fileId })).ok, true);
+  assert.equal(f.reads.length, 1);
+  const missing = plaudContextDownloadFixture(t); missing.verifyList({ hasTranscript: false, hasSummary: true });
+  missing.error = Object.assign(new Error("PLAUD_TRANSCRIPT_PENDING: 现有文字稿尚未就绪。"), { code: "PLAUD_TRANSCRIPT_PENDING" });
+  const result = await missing.integration.preparePlaudContext({ fileId: missing.fileId });
+  assert.equal(result.ok, false); assert.equal(missing.reads.length, 1);
+  assert.equal(fs.existsSync(missing.integration.plaudStateFile), false);
+});
+
+test("scope is checked again inside the native transcript queue write lock", async t => {
+  const f = plaudContextDownloadFixture(t), enteredLock = plaudDeferred();
+  const original = { fileId: f.fileId, stage: "context_pending", extraContext: "填写内容仍保留" }; f.write([original]);
+  const lock = path.join(path.dirname(f.integration.plaudStateFile), "plaud-workflow.lock");
+  const mutate = f.integration.mutatePlaudQueue.bind(f.integration);
+  f.integration.mutatePlaudQueue = async (...args) => {
+    fs.writeFileSync(lock, ""); enteredLock.resolve(); return mutate(...args);
+  };
+  const prepared = f.integration.preparePlaudContext({ fileId: f.fileId });
+  await enteredLock.promise; f.integration.invalidatePlaudAccountSnapshot("chrome"); fs.unlinkSync(lock);
+  assert.equal((await prepared).errorCode, "PLAUD_CONTEXT_SCOPE_CHANGED");
+  assert.deepEqual(f.record(), original);
+});
+
+test("joined native downloads still enforce each caller's expected transcript hash", async t => {
+  const f = plaudContextDownloadFixture(t), gate = plaudDeferred(); f.entered = plaudDeferred(); f.hold = gate.promise;
+  const first = f.integration.preparePlaudContext({ fileId: f.fileId }); await f.entered.promise;
+  const oldForm = f.integration.preparePlaudContext({ fileId: f.fileId, expectedTranscriptSha256: f.digest("old source binding") });
+  await new Promise(resolve => setImmediate(resolve)); gate.resolve();
+  assert.equal((await first).ok, true);
+  assert.equal((await oldForm).errorCode, "PLAUD_CONTEXT_TRANSCRIPT_CHANGED");
+  assert.equal(f.reads.length, 1);
+  assert.equal(f.digest(fs.readFileSync(f.record().transcriptPath)), f.digest(f.source));
+});

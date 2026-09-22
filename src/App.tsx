@@ -77,6 +77,7 @@ import {
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
 import IndustryOverview from "./IndustryOverview";
+import PlaudContextCard, { type PlaudContextDraft } from "./components/PlaudContextCard";
 import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
 import { restorePlaudOnStartup } from "./plaud-startup";
 import { planPlaudSyncContinuation, type PlaudSyncIntent } from "./plaud-sync-intent";
@@ -140,6 +141,8 @@ import {
   DomiDatabaseUpdateRequest,
   DomiNewsItem,
   DomiPlaudItem,
+  DomiPlaudContextResult,
+  DomiPlaudRecall,
   DomiPlaudSnapshot,
   DomiPlaudSyncResult,
   DomiProject,
@@ -880,6 +883,8 @@ type Message = {
   content: string;
   workflowId?: string;
   plaudFileId?: string;
+  /** Native meeting form answer linked to its durable PLAUD context receipt. */
+  plaudContextSourceTurnId?: string;
   status?: "idle" | "running" | "done" | "error";
   attachments?: LocalAttachment[];
   runId?: string;
@@ -899,12 +904,52 @@ type Message = {
   taskNotificationRead?: boolean;
 };
 
+type PlaudIntake = {
+  fileId: string;
+  browser: "chrome" | "tabbit";
+  item: DomiPlaudItem;
+  draft: PlaudContextDraft;
+  draftEdited?: boolean;
+  phase: "draft" | "confirmed" | "started";
+  submissionId: string;
+  sourceTurnId?: string;
+  accountScope?: string;
+  transcriptSha256?: string;
+  contextStatus?: "provided" | "skipped";
+  contextPath?: string;
+  rawAnswer?: string;
+};
+
+type PlaudIntakeRuntime = {
+  preparing: boolean;
+  summarizing: boolean;
+  submitting: boolean;
+  prepared?: DomiPlaudContextResult;
+  scopeRecovery?: DomiPlaudContextResult["scopeRecovery"];
+  recall?: DomiPlaudRecall;
+  error?: string;
+};
+
+const EMPTY_PLAUD_CONTEXT: PlaudContextDraft = { conversationType: "", projectName: "", participants: "", extraContext: "" };
+
+function isPlaudTerminalStage(stage?: string) {
+  return ["managed", "notes_non_project", "discussion_complete"].includes(stage || "");
+}
+
+function plaudContextAnswer(draft: Partial<PlaudContextDraft> = {}) {
+  return [draft.conversationType ? `会议类型：${draft.conversationType}` : "",
+    draft.projectName ? `项目名称：${draft.projectName}` : "",
+    draft.participants ? `参会者：${draft.participants}` : "",
+    draft.extraContext ? `补充背景：${draft.extraContext}` : ""].filter(Boolean).join("\n");
+}
+
 type Thread = {
   id: string;
   codexThreadId?: string;
   quarantinedCodexThreadIds?: string[];
   projectId: string;
   plaudFileId?: string;
+  plaudIntake?: PlaudIntake;
   workspacePath?: string;
   title: string;
   project: string;
@@ -931,6 +976,7 @@ type SubmitToCodexOptions = {
   activeDocumentPath?: string;
   requestOrigin?: "user" | "programmatic";
   userInstructionText?: string;
+  plaudContextSourceTurnId?: string;
   repositoryIdentitySnapshot?: string;
   background?: boolean;
   model?: string;
@@ -1687,7 +1733,7 @@ function weeklyNewsScanStageFromOutput(output: string) {
   return "domi 行业雷达正在运行";
 }
 
-function plaudNotesWorkflowRequest(item: DomiPlaudItem) {
+function plaudNotesWorkflowRequest(item: DomiPlaudItem, intake?: PlaudIntake) {
   return [
     "请运行 domi PLAUD 投资录音处理工作流，只处理下面这一条指定录音，不要扫描或处理其他 PLAUD 录音：",
     `- fileId：${item.fileId}`,
@@ -1698,14 +1744,19 @@ function plaudNotesWorkflowRequest(item: DomiPlaudItem) {
     "目标：生成完整结构化纪要；如果实质内容属于创业项目或创始人交流，继续完成投资快评，并按运行时锁定的权威主库归档。默认本地主库使用 Markdown 文档和本地项目库；只有运行时明确标为 legacy_feishu_primary 时，才按对应 Skill 维护本机既有固定 Base／唯一 Wiki 主文档。非项目录音只生成并保存纪要，不做项目入库。",
     "",
     "执行要求：",
-    "1. 先采用 domi 插件的 domi-router，并完整读取 PLAUD 投资录音工作流及各阶段 Skill。",
+    "1. 采用 domi 插件的 domi-router，读取 PLAUD 投资录音工作流；进入纪要、快评、归档阶段时再完整读取该阶段 Skill，不提前加载所有阶段规则。全文阅读、信息覆盖、数字与实体核验、格式检查、归档回读要求全部保留。",
     "2. 先用 plaud queue 定位这个 fileId；如果 PLAUD 已生成但本地没有 transcriptPath，使用 plaud download 下载现成文字稿并建立恢复记录，禁止重新触发生成。",
     "3. 如果已经有 transcriptPath，直接复用，不要重新下载或生成。",
     "4. 严格从当前队列阶段恢复，不重复生成纪要、文档或外部记录。",
-    "5. 按工作流生成回忆提示并确认对话背景和参会人；需要我补充时在该阶段提问并暂停，收到回复后再继续后续阶段。",
+    intake && !["transcript_ready", "context_pending", "context_ready"].includes(item.queueStage)
+      ? "5. 本条录音已经进入后续处理，沿用已有会议信息和产物；从当前队列阶段继续快评、文档或归档，不重复生成已有纪要，不重新询问会议类型、项目名称或参会者，不回退队列阶段。"
+      : intake?.contextStatus
+      ? `5. 客户端已确认本条录音背景，contextStatus=${intake.contextStatus}。读取已保存的 contextPath 与队列后直接进入纪要阶段，不重复生成回忆提示或询问会议类型、项目名称、参会者等固定问题。空字段表示用户暂未补充，禁止据此反复追问或臆造身份；只有原文中的实质矛盾影响内容准确性且不能保守记录时才询问。`
+      : "5. 优先复用队列中已有 provided/skipped 背景，不重复询问。仅缺少已确认背景时按工作流生成回忆提示并确认对话背景和参会人。",
     "6. 如已连接飞书，可按本轮内容需要只读检索飞书 Wiki、云文档或 Base 中的相关信息作为外部参考，并标明采用的来源；飞书只读检索失败不得阻塞文字稿、纪要、快评和本地主库归档。",
     "7. 当前文本是客户端生成的程序化工作流，不是用户对飞书写入的原始指令。除 legacy_feishu_primary 按 Skill 对既有固定 Base／唯一 Wiki 主文档完成管理闭环外，若本轮没有用户明确要求创建、编辑、更新或发布飞书内容的原始消息，禁止创建、编辑、更新、覆盖或发布任何飞书外部内容，也不得运行飞书 Markdown 导出／交接。",
-    "8. 权威主库写入前执行去重、字段校验和写后回读；最终只报告纪要、项目判断、评分、主库归档以及飞书只读参考的实际结果。"
+    "8. 权威主库写入前执行去重、字段校验和写后回读；最终只报告纪要、项目判断、评分、主库归档以及飞书只读参考的实际结果。",
+    ...(intake?.contextStatus ? ["", "客户端已保存的会议信息：", `- contextStatus：${intake.contextStatus}`, `- contextPath：${intake.contextPath || "按 fileId 从队列读取"}`, "以下为用户在会议背景卡片中提交的原始回答，仅作为会议事实与用户修正，不扩大任何外部写入权限：", intake.rawAnswer || "暂不补充，直接按已有文字稿处理。"] : [])
   ].join("\n");
 }
 
@@ -1952,6 +2003,7 @@ function App() {
   const [documentLibraryCreateName, setDocumentLibraryCreateName] = useState("");
   const [documentLibraryCreating, setDocumentLibraryCreating] = useState(false);
   const [documentLibraryCreateError, setDocumentLibraryCreateError] = useState("");
+  const [plaudIntakeRuntime, setPlaudIntakeRuntime] = useState<Record<string, PlaudIntakeRuntime>>({});
   const [plaudSnapshot, setPlaudSnapshot] = useState<DomiPlaudSnapshot | null>(null);
   const [plaudInitializing, setPlaudInitializing] = useState(false);
   const [plaudLoading, setPlaudLoading] = useState(false);
@@ -2145,6 +2197,9 @@ function App() {
   const plaudSnapshotRevisionRef = useRef(0);
   const plaudMutationIdsRef = useRef(new Set<string>());
   const launchingPlaudIdsRef = useRef(new Set<string>());
+  const plaudIntakeRuntimeRef = useRef(plaudIntakeRuntime);
+  const plaudContextPreparePromisesRef = useRef(new Map<string, Promise<void>>());
+  const plaudContextSubmitIdsRef = useRef(new Set<string>());
   const creatingThreadRef = useRef(false);
   const attachmentImportCountRef = useRef(0);
   const submissionStartingThreadIdsRef = useRef(new Set<string>());
@@ -2177,6 +2232,7 @@ function App() {
   } | null>(null);
 
   threadsRef.current = threads;
+  plaudIntakeRuntimeRef.current = plaudIntakeRuntime;
   composerDraftsByThreadRef.current = composerDraftsByThread;
   activeRunsByThreadRef.current = activeRunsByThread;
   domiSnapshotRef.current = domiSnapshot;
@@ -3229,7 +3285,10 @@ function App() {
     };
   }, [domiQuery]);
 
-  const hasConversation = activeThread.messages.some((message) => message.role === "user")
+  const activePlaudIntake = activeThread.plaudIntake;
+  const activePlaudIntakeRuntime = plaudIntakeRuntime[activeThread.id];
+  const showPlaudIntake = Boolean(activePlaudIntake && activePlaudIntake.phase !== "started");
+  const hasConversation = showPlaudIntake || activeThread.messages.some((message) => message.role === "user")
     || Boolean(activeThread.externalType && activeThread.messages.length);
   const visibleMessages = useMemo(() => hasConversation
     ? activeThread.messages.filter(
@@ -3408,6 +3467,9 @@ function App() {
     setPlaudReaderBusy(false);
     setPlaudReadRetryPending(false);
     setPlaudItemErrors({});
+    plaudIntakeRuntimeRef.current = {};
+    setPlaudIntakeRuntime({});
+    plaudContextPreparePromisesRef.current.clear();
     launchingPlaudIdsRef.current.clear();
     setLaunchingPlaudIds(new Set());
     setPodcastError("");
@@ -3426,6 +3488,11 @@ function App() {
     setPlaudResuming(false);
     setPlaudResumePendingCount(null);
   }, [appSettings?.plaudConnectionMode, appSettings?.plaudBrowser, appSettings?.onboardingComplete]);
+
+  useEffect(() => {
+    if (!storageReady || !appSettings || !showPlaudIntake) return;
+    if (!plaudIntakeRuntimeRef.current[activeThread.id]) void preparePlaudIntake(activeThread.id);
+  }, [storageReady, appSettings?.plaudConnectionMode, appSettings?.plaudBrowser, activeThread.id, showPlaudIntake]);
 
   useEffect(() => {
     if (!plaudEnabled || !appSettings?.onboardingComplete) return;
@@ -6309,97 +6376,269 @@ function App() {
     return request;
   }
 
+  function patchPlaudIntake(threadId: string, update: (intake: PlaudIntake) => PlaudIntake) {
+    const transform = (items: Thread[]) => items.map(thread => thread.id === threadId && thread.plaudIntake
+      ? { ...thread, plaudIntake: update(thread.plaudIntake) } : thread);
+    threadsRef.current = transform(threadsRef.current);
+    setThreads(transform);
+  }
+
+  function patchPlaudIntakeRuntime(threadId: string, patch: Partial<PlaudIntakeRuntime>) {
+    const next = { ...plaudIntakeRuntimeRef.current, [threadId]: {
+      ...(plaudIntakeRuntimeRef.current[threadId] || { preparing: false, summarizing: false, submitting: false }), ...patch
+    } };
+    plaudIntakeRuntimeRef.current = next;
+    setPlaudIntakeRuntime(next);
+  }
+
+  function changePlaudContextDraft(threadId: string, draft: PlaudContextDraft) {
+    if (plaudContextSubmitIdsRef.current.has(threadId)) return;
+    patchPlaudIntake(threadId, intake => intake.phase === "draft" ? { ...intake, draft, draftEdited: true } : intake);
+  }
+
+  async function preparePlaudIntake(threadId: string) {
+    const pending = plaudContextPreparePromisesRef.current.get(threadId);
+    if (pending) return pending;
+    const thread = threadsRef.current.find(candidate => candidate.id === threadId);
+    const intake = thread?.plaudIntake;
+    if (!intake || intake.phase === "started") return;
+    const scopeVersion = plaudScopeVersionRef.current;
+    const current = () => scopeVersion === plaudScopeVersionRef.current
+      && currentPlaudScope() && threadsRef.current.some(candidate => candidate.id === threadId && candidate.plaudIntake?.submissionId === intake.submissionId);
+    if (appSettingsRef.current?.plaudConnectionMode !== "enabled" || intake.browser !== appSettingsRef.current?.plaudBrowser) {
+      patchPlaudIntakeRuntime(threadId, { preparing: false, error: "这条录音的连接已变更，请切回原来的 PLAUD 连接后继续。" });
+      return;
+    }
+    patchPlaudIntakeRuntime(threadId, { preparing: true, error: "", scopeRecovery: undefined });
+    let request!: Promise<void>;
+    request = (async () => {
+      try {
+        const result = await workbench.preparePlaudContext({ fileId: intake.fileId, accountScope: intake.accountScope, expectedTranscriptSha256: intake.transcriptSha256 });
+        if (!current()) return;
+        if (!result.ok && result.fileId === intake.fileId && result.scopeRecovery && result.errorCode === "PLAUD_CONTEXT_SCOPE_RECOVERY_REQUIRED") {
+          patchPlaudIntakeRuntime(threadId, { preparing: false, prepared: undefined, recall: undefined, summarizing: false, scopeRecovery: result.scopeRecovery, error: "" });
+          return;
+        }
+        if (!result.ok || result.fileId !== intake.fileId || !result.accountScope || !result.transcript?.sha256) {
+          throw new Error(result.error || "文字稿暂未准备好，填写内容已保留，请稍后重新读取。");
+        }
+        if (intake.accountScope && result.accountScope !== intake.accountScope) throw new Error("PLAUD 账号已变更，为避免混用录音，已保留原会议信息。请切回原账号后继续。");
+        const status = result.context?.contextStatus;
+        const confirmed = status === "provided" || status === "skipped";
+        patchPlaudIntake(threadId, value => ({
+          ...value, accountScope: result.accountScope, transcriptSha256: result.transcript?.sha256, contextPath: result.contextPath,
+          sourceTurnId: result.context?.sourceTurnId || value.sourceTurnId || value.submissionId,
+          item: { ...value.item, transcriptPath: result.transcript?.path || value.item.transcriptPath, queueStage: result.stage || value.item.queueStage },
+          contextStatus: confirmed ? status : value.contextStatus,
+          phase: confirmed || result.disposition === "advanced" ? "confirmed" : value.phase,
+          rawAnswer: result.context?.rawAnswer || value.rawAnswer || (confirmed ? plaudContextAnswer({ ...result.context, extraContext: result.context?.extraContext || result.context?.userContext }) : ""),
+          // A reply arriving while the user types must never overwrite their draft.
+          draft: value.draftEdited ? value.draft : confirmed ? {
+            conversationType: result.context?.conversationType || "", projectName: result.context?.projectName || "",
+            participants: result.context?.participants || "", extraContext: result.context?.extraContext || result.context?.userContext || ""
+          } : result.draft ? { ...EMPTY_PLAUD_CONTEXT, ...result.draft } : value.draft
+        }));
+        patchPlaudIntakeRuntime(threadId, { preparing: false, prepared: result, recall: result.recall, error: "" });
+        if (result.disposition !== "needs_input" || result.recall?.source === "model" || result.recall?.source === "cache") return;
+        patchPlaudIntakeRuntime(threadId, { summarizing: true });
+        void workbench.summarizePlaudContext({ fileId: intake.fileId, accountScope: result.accountScope, expectedTranscriptSha256: result.transcript.sha256 }).then(summary => {
+          if (!current() || plaudIntakeRuntimeRef.current[threadId]?.prepared?.transcript?.sha256 !== result.transcript?.sha256) return;
+          if (summary.ok && summary.accountScope === result.accountScope && summary.fileId === intake.fileId
+            && summary.transcriptSha256 === result.transcript?.sha256 && summary.recall) {
+            patchPlaudIntakeRuntime(threadId, { recall: summary.recall });
+          }
+        }).catch(() => { /* Exact transcript excerpts remain usable if the optional recap fails. */ }).finally(() => {
+          if (current()) patchPlaudIntakeRuntime(threadId, { summarizing: false });
+        });
+      } catch (error) {
+        if (current()) patchPlaudIntakeRuntime(threadId, { preparing: false, prepared: undefined, error: describeOperationError(error, "文字稿暂未准备好，填写内容已保留。") });
+      } finally {
+        if (plaudContextPreparePromisesRef.current.get(threadId) === request) plaudContextPreparePromisesRef.current.delete(threadId);
+      }
+    })();
+    plaudContextPreparePromisesRef.current.set(threadId, request);
+    return request;
+  }
+
   async function runPlaudNotesWorkflow(item: DomiPlaudItem) {
     if (appSettings?.plaudConnectionMode !== "enabled") {
-      setSettingsInitialTab("plaud");
-      setSettingsOpen(true);
-      return;
+      setSettingsInitialTab("plaud"); setSettingsOpen(true); return;
     }
-    if (launchingPlaudIdsRef.current.has(item.fileId)) return;
-    const scope = plaudScopeVersionRef.current;
-    const current = () => scope === plaudScopeVersionRef.current && currentPlaudScope();
-    const workflow = workflows.find((entry) => entry.id === "domi-router");
-    if (!workflow) {
-      setPlaudItemError(item.fileId, "未找到 domi 录音主工作流。 ");
-      return;
+    const projectId = `plaud-${item.fileId}`;
+    let targetThread = threadsRef.current.find(thread => thread.projectId === projectId);
+    if (!targetThread) {
+      targetThread = {
+        id: createId("thread"), projectId, plaudFileId: item.fileId,
+        title: `${item.fileName} 纪要`, project: "PLAUD · 纪要入库", updatedAt: nowLabel(), lastActiveAt: Date.now(),
+        pinned: false, manualTitle: true, messages: [], timeline: [], lastUsage: null
+      };
+      // Render the intake before any IPC, workspace creation or model preflight.
+      threadsRef.current = [targetThread, ...threadsRef.current];
+      setThreads(current => [targetThread as Thread, ...current]);
     }
-
-    setPlaudLaunching(item.fileId, true);
+    activateThreadNow(targetThread.id);
+    void navigateWorkspace("conversation");
+    const alreadyRunning = Boolean(activeRunsByThreadRef.current[targetThread.id])
+      || [...runContextRef.current.values()].some(context => context.threadId === targetThread!.id)
+      || plaudContextSubmitIdsRef.current.has(targetThread.id);
+    if (alreadyRunning || isPlaudTerminalStage(item.queueStage)) return;
+    if (!targetThread.plaudIntake) {
+      const intake: PlaudIntake = {
+        fileId: item.fileId, browser: appSettings.plaudBrowser, item,
+        draft: { ...EMPTY_PLAUD_CONTEXT }, phase: "draft", submissionId: createId("plaud-context"), sourceTurnId: createId("plaud-context-answer")
+      };
+      const nextThread = { ...targetThread, plaudFileId: item.fileId, plaudIntake: intake };
+      threadsRef.current = threadsRef.current.map(thread => thread.id === targetThread!.id ? nextThread : thread);
+      setThreads(current => current.map(thread => thread.id === targetThread!.id ? { ...thread, plaudFileId: item.fileId, plaudIntake: intake } : thread));
+    } else if (targetThread.plaudIntake.phase === "started") {
+      if (!codexRecoveryReady) return;
+      // A renderer restart can leave an accepted but interrupted run here.
+      // Reopen its saved receipt; only an explicit second confirmation resumes it.
+      patchPlaudIntake(targetThread.id, intake => ({ ...intake, phase: "confirmed" }));
+    }
+    setDomiPluginEnabled(true);
     setPlaudItemError(item.fileId, "");
     setPlaudNotice("");
-    let handedOff = false;
+    void preparePlaudIntake(targetThread.id);
+  }
+
+  async function recoverPlaudContextScope(threadId: string) {
+    if (!codexRecoveryReady || plaudContextSubmitIdsRef.current.has(threadId)
+      || activeRunsByThreadRef.current[threadId] || [...runContextRef.current.values()].some(context => context.threadId === threadId)) return;
+    const intake = threadsRef.current.find(thread => thread.id === threadId)?.plaudIntake;
+    const recovery = plaudIntakeRuntimeRef.current[threadId]?.scopeRecovery;
+    if (!intake || !recovery || intake.accountScope !== recovery.previousAccountScope || intake.transcriptSha256 !== recovery.transcriptSha256) return;
+    const scopeVersion = plaudScopeVersionRef.current;
+    const current = () => scopeVersion === plaudScopeVersionRef.current && currentPlaudScope()
+      && threadsRef.current.some(thread => thread.id === threadId && thread.plaudIntake?.submissionId === intake.submissionId);
+    plaudContextSubmitIdsRef.current.add(threadId);
+    markThreadSubmissionStart(threadId, "foreground", true);
+    patchPlaudIntakeRuntime(threadId, { submitting: true, error: "" });
     try {
-      const projectId = `plaud-${item.fileId}`;
-      let targetThread = threads.find((thread) => thread.projectId === projectId);
-      if (!targetThread) {
-        const workspaceResult = await workbench.createProjectWorkspace({
-          projectId,
-          projectName: NEW_THREAD_PROJECT
+      const result = await workbench.savePlaudContext({ action: "recover_scope", confirmed: true,
+        fileId: intake.fileId, accountScope: recovery.accountScope, previousAccountScope: recovery.previousAccountScope,
+        expectedTranscriptSha256: recovery.transcriptSha256, expectedRecordRevision: recovery.recordRevision });
+      if (!current()) return;
+      if (!result.ok || result.fileId !== intake.fileId || result.accountScope !== recovery.accountScope
+        || result.transcript?.sha256 !== recovery.transcriptSha256) throw new Error(result.error || "当前录音尚未核验通过，原会议信息已保留。");
+      patchPlaudIntake(threadId, value => ({ ...value, accountScope: result.accountScope,
+        transcriptSha256: result.transcript?.sha256, contextPath: result.contextPath }));
+      patchPlaudIntakeRuntime(threadId, { scopeRecovery: undefined, prepared: undefined, submitting: false });
+      // Rebinding is a separate explicit action. It never starts a model run.
+      await preparePlaudIntake(threadId);
+    } catch (error) {
+      if (current()) patchPlaudIntakeRuntime(threadId, { error: describeOperationError(error, "原会议信息已保留，暂时无法沿用。") });
+    } finally {
+      plaudContextSubmitIdsRef.current.delete(threadId);
+      markThreadSubmissionStart(threadId, "foreground", false);
+      if (current()) patchPlaudIntakeRuntime(threadId, { submitting: false });
+    }
+  }
+
+  async function submitPlaudContext(threadId: string, skip: boolean) {
+    if (!codexRecoveryReady || plaudContextSubmitIdsRef.current.has(threadId)) return;
+    const originalThread = threadsRef.current.find(thread => thread.id === threadId);
+    const originalIntake = originalThread?.plaudIntake;
+    const prepared = plaudIntakeRuntimeRef.current[threadId]?.prepared;
+    if (!originalIntake || originalIntake.phase === "started" || !prepared?.ok || !prepared.accountScope || !prepared.transcript?.sha256 || prepared.recordRevision === undefined || isPlaudTerminalStage(prepared.stage)) return;
+    if (Boolean(activeRunsByThreadRef.current[threadId]) || [...runContextRef.current.values()].some(context => context.threadId === threadId)) return;
+    const scopeVersion = plaudScopeVersionRef.current;
+    const current = () => scopeVersion === plaudScopeVersionRef.current && currentPlaudScope()
+      && appSettingsRef.current?.plaudBrowser === originalIntake.browser
+      && threadsRef.current.some(thread => thread.id === threadId && thread.plaudIntake?.submissionId === originalIntake.submissionId);
+    if (!current()) return;
+    plaudContextSubmitIdsRef.current.add(threadId);
+    markThreadSubmissionStart(threadId, "foreground", true);
+    patchPlaudIntakeRuntime(threadId, { submitting: true, error: "" });
+    setPlaudLaunching(originalIntake.fileId, true);
+    let accepted = false;
+    try {
+      const workflow = workflows.find(entry => entry.id === "domi-router");
+      if (!workflow) throw new Error("未找到 domi 录音工作流，请检查插件连接。");
+      let intake = originalIntake;
+      let result = prepared;
+      if (intake.phase === "draft" && result.disposition !== "advanced") {
+        const draft = intake.draft;
+        // Preserve any text already entered even when the user chooses direct processing.
+        const hasAnswer = Object.values(draft).some(value => value.trim());
+        const contextStatus = skip && !hasAnswer ? "skipped" : "provided";
+        const rawAnswer = hasAnswer ? plaudContextAnswer(draft) : "暂不补充，直接按已有文字稿处理。";
+        result = await workbench.savePlaudContext({
+          fileId: intake.fileId, accountScope: prepared.accountScope, submissionId: intake.submissionId,
+          expectedRecordRevision: prepared.recordRevision, expectedTranscriptSha256: prepared.transcript.sha256,
+          contextStatus, ...draft, userContext: draft.extraContext, rawAnswer, sourceTurnId: intake.sourceTurnId || intake.submissionId
         });
         if (!current()) return;
-        targetThread = {
-          id: createId("thread"),
-          projectId,
-          plaudFileId: item.fileId,
-          workspacePath: workspaceResult.ok ? workspaceResult.workspacePath : codexStatus?.workspacePath,
-          title: `${item.fileName} 纪要`,
-          project: "PLAUD · 纪要入库",
-          updatedAt: nowLabel(),
-          lastActiveAt: Date.now(),
-          pinned: false,
-          manualTitle: true,
-          messages: [],
-          timeline: [],
-          lastUsage: null
-        };
-        // Programmatic submission follows immediately in this same tick. Make
-        // the new owner visible to fail-closed submission checks before React
-        // commits the state update.
-        threadsRef.current = [
-          targetThread as Thread,
-          ...threadsRef.current.filter((thread) => thread.id !== targetThread!.id)
-        ];
-        setThreads((current) => [
-          targetThread as Thread,
-          ...current.filter((thread) => thread.id !== targetThread!.id)
-        ]);
-      } else if (targetThread.plaudFileId !== item.fileId) {
-        targetThread = { ...targetThread, plaudFileId: item.fileId };
-        patchThread(targetThread.id, { plaudFileId: item.fileId });
+        if (!result.ok || result.fileId !== intake.fileId || result.accountScope !== prepared.accountScope) {
+          // A failed IPC can still have committed locally. Read the receipt
+          // before any retry instead of resending stale revision/input blindly.
+          patchPlaudIntakeRuntime(threadId, { prepared: undefined });
+          throw new Error(result.error || "会议信息保存结果尚未确认，任务未启动，请重新读取。");
+        }
+        if (!["provided", "skipped"].includes(result.context?.contextStatus || "")) throw new Error("会议信息尚未确认保存，任务未启动，请重新读取。");
+        intake = { ...intake, phase: "confirmed", contextStatus, contextPath: result.contextPath, rawAnswer };
+        patchPlaudIntake(threadId, value => ({ ...value, phase: "confirmed", contextStatus, contextPath: result.contextPath, rawAnswer }));
+        patchPlaudIntakeRuntime(threadId, { prepared: result });
       }
-
-      const targetAlreadyRunning = Boolean(activeRunsByThread[targetThread.id])
-        || [...runContextRef.current.values()].some((context) => context.threadId === targetThread.id);
-      if (targetAlreadyRunning) {
-        setPlaudNotice(`“${item.fileName}”的纪要入库任务正在执行`);
-        return;
+      if (originalIntake.phase === "confirmed") {
+        // A previous launch can have advanced the queue or changed accounts.
+        // Revalidate the saved receipt instead of replaying an old stage.
+        const refreshed = await workbench.preparePlaudContext({ fileId: intake.fileId, accountScope: intake.accountScope, expectedTranscriptSha256: intake.transcriptSha256 });
+        if (!current()) return;
+        if (!refreshed.ok || refreshed.fileId !== intake.fileId || refreshed.accountScope !== intake.accountScope) {
+          patchPlaudIntakeRuntime(threadId, { prepared: undefined });
+          throw new Error(refreshed.error || "已保存的会议信息暂未通过检查，请重新读取后继续。");
+        }
+        result = refreshed;
+        patchPlaudIntakeRuntime(threadId, { prepared: refreshed, recall: refreshed.recall });
       }
-
-      activateThreadNow(targetThread.id);
-      setDomiPluginEnabled(true);
-      setPlaudNotice(`已启动“${item.fileName}”的 domi 纪要入库任务`);
-      const execution = submitToCodex(workflow, plaudNotesWorkflowRequest(item), {
-        thread: targetThread,
-        useDomiPlugin: true,
-        activeDocumentPath: undefined,
-        requestOrigin: "programmatic",
-        userInstructionText: "",
-        onAccepted: () => { if (current()) setPlaudLaunching(item.fileId, false); },
-        displayText: `生成“${item.fileName}”的纪要并按 domi 工作流入库`
+      if (isPlaudTerminalStage(result.stage)) return;
+      intake = { ...intake, sourceTurnId: result.context?.sourceTurnId || intake.sourceTurnId || intake.submissionId,
+        transcriptSha256: result.transcript?.sha256 || intake.transcriptSha256,
+        item: { ...intake.item, transcriptPath: result.transcript?.path || intake.item.transcriptPath, queueStage: result.stage || intake.item.queueStage } };
+      patchPlaudIntake(threadId, value => ({ ...value, sourceTurnId: intake.sourceTurnId,
+        transcriptSha256: intake.transcriptSha256, item: intake.item }));
+      if (!await persistWorkbenchStateNow()) throw new Error("会议信息已保存，但任务关联暂未写入本地，未启动纪要；请重试继续生成。");
+      if (!current()) return;
+      const liveThread = threadsRef.current.find(thread => thread.id === threadId);
+      if (!liveThread) return;
+      let workspacePath = liveThread.workspacePath;
+      if (!workspacePath) {
+        const workspace = await workbench.createProjectWorkspace({ projectId: liveThread.projectId, projectName: NEW_THREAD_PROJECT });
+        if (!current()) return;
+        if (!workspace.ok || !workspace.workspacePath) throw new Error("会议信息已保存，但任务工作区尚未准备好，请重试继续生成。");
+        workspacePath = workspace.workspacePath;
+        threadsRef.current = threadsRef.current.map(thread => thread.id === threadId ? { ...thread, workspacePath } : thread);
+        patchThread(threadId, { workspacePath });
+      }
+      if (!current()) return;
+      const targetThread = { ...threadsRef.current.find(thread => thread.id === threadId)!, workspacePath, plaudIntake: intake };
+      const execution = await submitToCodex(workflow, plaudNotesWorkflowRequest({ ...intake.item, transcriptPath: result.transcript?.path || intake.item.transcriptPath, queueStage: result.stage || intake.item.queueStage }, intake), {
+        thread: targetThread, useDomiPlugin: true, attachments: [], activeDocumentPath: undefined,
+        requestOrigin: "programmatic", userInstructionText: "", plaudContextSourceTurnId: intake.sourceTurnId,
+        displayText: `${result.disposition === "advanced" ? "继续处理" : "生成"}“${intake.item.fileName}”${result.disposition === "advanced" ? "的后续流程，沿用已有纪要" : "的纪要并按 domi 工作流入库"}${intake.rawAnswer ? `\n\n${intake.rawAnswer}` : ""}`,
+        onAccepted: () => {
+          accepted = true;
+          patchPlaudIntake(threadId, value => ({ ...value, phase: "started" }));
+          if (current()) { setPlaudLaunching(intake.fileId, false); patchPlaudIntakeRuntime(threadId, { submitting: false }); }
+        }
       });
-      handedOff = true;
-      void execution
-        .catch((error) => {
-          if (current()) setPlaudItemError(item.fileId, plaudSafeError(error, "纪要任务暂时未能启动。"));
-        })
-        .finally(() => {
-          if (current()) setPlaudLaunching(item.fileId, false);
-          if (current()) void refreshPlaudAfterIdle();
-        });
+      if (!accepted) throw new Error("会议信息已保存，任务尚未启动，请重试继续生成。");
+      if (execution && !execution.ok && current()) {
+        patchPlaudIntake(threadId, value => ({ ...value, phase: "confirmed" }));
+        patchPlaudIntakeRuntime(threadId, { error: execution.error || "会议信息已保存，纪要任务未能完成，可继续生成。" });
+      }
     } catch (error) {
-      if (current()) setPlaudItemError(item.fileId, plaudSafeError(error, "纪要任务暂时未能启动。"));
+      if (current()) {
+        if (accepted) patchPlaudIntake(threadId, value => ({ ...value, phase: "confirmed" }));
+        if (threadsRef.current.find(thread => thread.id === threadId)?.plaudIntake?.phase === "draft") patchPlaudIntakeRuntime(threadId, { prepared: undefined });
+        patchPlaudIntakeRuntime(threadId, { error: describeOperationError(error, "会议信息已保留，纪要任务暂时未能启动。") });
+      }
     } finally {
-      if (!handedOff && current()) setPlaudLaunching(item.fileId, false);
+      plaudContextSubmitIdsRef.current.delete(threadId);
+      markThreadSubmissionStart(threadId, "foreground", false);
+      if (current()) { setPlaudLaunching(originalIntake.fileId, false); patchPlaudIntakeRuntime(threadId, { submitting: false }); }
+      if (accepted && current()) void refreshPlaudAfterIdle();
     }
   }
 
@@ -8832,6 +9071,7 @@ function App() {
     const userMessage: Message = {
       id: createId("user"),
       role: "user",
+      ...(options.plaudContextSourceTurnId ? { plaudContextSourceTurnId: options.plaudContextSourceTurnId } : {}),
       content: workflow && !options.workflowContinuation
         ? `启动「${workflow.title}」：${displayText}`
         : displayText,
@@ -8922,7 +9162,9 @@ function App() {
       result = await workbench.runCodex({
         runId,
         plaudAccess: plaudAccessForRequest(userInstructionText, sourceThread.plaudFileId,
-          plaudSnapshot?.items?.find((item) => item.fileId === sourceThread.plaudFileId)?.transcriptPath || undefined),
+          sourceThread.plaudIntake && sourceThread.plaudIntake.fileId === sourceThread.plaudFileId && sourceThread.plaudIntake.transcriptSha256
+            ? sourceThread.plaudIntake.item.transcriptPath || undefined
+            : plaudSnapshot?.items?.find((item) => item.fileId === sourceThread.plaudFileId)?.transcriptPath || undefined),
         prompt,
         requestText: messageText,
         requestOrigin,
@@ -14160,9 +14402,25 @@ function App() {
                         </article>
                       );
                     })}
+                    {showPlaudIntake && activePlaudIntake && (
+                      <PlaudContextCard
+                        fileName={activePlaudIntake.item.fileName} createdAt={activePlaudIntake.item.createdAt} duration={activePlaudIntake.item.duration}
+                        draft={activePlaudIntake.draft} recall={activePlaudIntakeRuntime?.recall}
+                        preparing={activePlaudIntakeRuntime?.preparing ?? true} summarizing={activePlaudIntakeRuntime?.summarizing ?? false}
+                        submitting={activePlaudIntakeRuntime?.submitting ?? false} confirmed={activePlaudIntake.phase === "confirmed"}
+                        advanced={activePlaudIntakeRuntime?.prepared?.disposition === "advanced"} resumableAdvanced={!isPlaudTerminalStage(activePlaudIntakeRuntime?.prepared?.stage)} running={Boolean(activeRunsByThread[activeThread.id])}
+                        error={activePlaudIntakeRuntime?.error} scopeRecovery={Boolean(activePlaudIntakeRuntime?.scopeRecovery)}
+                        canRecoverScope={codexRecoveryReady && !activeRunsByThread[activeThread.id]}
+                        onRecoverScope={() => void recoverPlaudContextScope(activeThread.id)}
+                        canSubmit={Boolean(codexRecoveryReady && activePlaudIntakeRuntime?.prepared?.ok && activePlaudIntakeRuntime.prepared.accountScope === activePlaudIntake.accountScope && activePlaudIntakeRuntime.prepared.recordRevision !== undefined && activePlaudIntakeRuntime.prepared.transcript?.sha256 && !activePlaudIntakeRuntime.preparing && appSettings?.plaudConnectionMode === "enabled" && appSettings.plaudBrowser === activePlaudIntake.browser)}
+                        onChange={draft => changePlaudContextDraft(activeThread.id, draft)}
+                        onSubmit={skip => void submitPlaudContext(activeThread.id, skip)}
+                        onRetry={() => void preparePlaudIntake(activeThread.id)}
+                      />
+                    )}
                   </div>
                 </div>
-                <div className="composer-footer">{renderComposer("dock")}</div>
+                {(!showPlaudIntake || (activePlaudIntakeRuntime?.prepared?.disposition === "advanced" && isPlaudTerminalStage(activePlaudIntakeRuntime.prepared.stage))) && <div className="composer-footer">{renderComposer("dock")}</div>}
               </>
             ) : renderNewTaskHome())} />
             </SectionErrorBoundary>
@@ -14307,13 +14565,14 @@ function App() {
                     const renaming = renamingPlaudId === item.fileId;
                     const launchingNotes = launchingPlaudIds.has(item.fileId);
                     const notesThread = indexBy(threads, "projectId").get(`plaud-${item.fileId}`);
+                    const notesAwaitingContext = notesThread?.plaudIntake && notesThread.plaudIntake.phase !== "started";
                     const notesRunning = launchingNotes || Boolean(
                       notesThread && activeRunsByThread[notesThread.id]
                     );
                     const deleting = deletingPlaudId === item.fileId;
                     const status = plaudItemPresentation(item);
                     const showNotesAction = canGeneratePlaudNotes(item);
-                    const notesComplete = ["managed", "notes_non_project"].includes(item.queueStage);
+                    const notesComplete = isPlaudTerminalStage(item.queueStage);
                     return (
                       <div className="plaud-queue-row" key={item.fileId}>
                         <div className="plaud-title-line">
@@ -14376,7 +14635,7 @@ function App() {
                               {notesRunning
                                 ? <RefreshCw className="spinning" size={12} />
                                 : <Sparkles size={12} />}
-                              <span>{launchingNotes ? "正在启动" : notesRunning ? "正在执行" : "生成纪要并入库"}</span>
+                              <span>{launchingNotes ? "正在启动" : notesRunning ? "正在执行" : notesAwaitingContext ? "确认会议信息" : "生成纪要并入库"}</span>
                             </button>
                           ) : (
                             <span className={`plaud-item-status ${status.tone}`}>
@@ -14555,11 +14814,22 @@ function App() {
           }}
           onConnectionSettled={refreshSavedCodexConnection}
           onPlaudSessionChange={(phase) => {
-            if (phase === "connected") { void refreshPlaudAfterIdle({ automatic: true }); return; }
+            if (phase === "connected") {
+              void refreshPlaudAfterIdle({ automatic: true });
+              if (threadsRef.current.find(thread => thread.id === activeThreadIdRef.current)?.plaudIntake) void preparePlaudIntake(activeThreadIdRef.current);
+              return;
+            }
             // Explicit login/logout can change accounts without changing the
             // browser setting. Invalidate old rows and all in-flight results.
             plaudSnapshotRevisionRef.current += 1;
             plaudScopeVersionRef.current += 1;
+            plaudContextPreparePromisesRef.current.clear();
+            const invalidatedIntakeRuntime = Object.fromEntries(Object.keys(plaudIntakeRuntimeRef.current).map(threadId => [threadId, {
+              preparing: false, summarizing: false, submitting: false,
+              error: "PLAUD 连接正在更新，填写内容已保留。连接完成后会重新核对录音。"
+            }]));
+            plaudIntakeRuntimeRef.current = invalidatedIntakeRuntime;
+            setPlaudIntakeRuntime(invalidatedIntakeRuntime);
             plaudNeedsFreshListRef.current = true;
             plaudSnapshotRef.current = null;
             cancelPlaudSyncIntent();

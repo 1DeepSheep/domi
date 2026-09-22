@@ -29,6 +29,8 @@ const { CodexRuntimeManager } = require("./codex-runtime.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DesktopNotificationService } = require("./desktop-notifications.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
+const { PlaudRecallService } = require("./plaud-recall-model.cjs");
+const plaudRecallService = new PlaudRecallService();
 const { resolveLarkCliForChild } = require("./lark-runtime.cjs");
 const { resolveEntityWorkspaceWithRecovery } = require("./entity-workspace-recovery.cjs");
 const {
@@ -1665,6 +1667,7 @@ async function attemptSafeUpdateInstall() {
     }
 
     updateRestartPreparing = true;
+    plaudRecallService.close();
     try {
       // Seal the task-start gate for one event-loop turn, then check once more
       // so an IPC request that arrived alongside the update click can finish
@@ -4341,6 +4344,7 @@ app.on("before-quit", (event) => {
 
     const remaining = await drainRunPostProcessing();
     appendRuntimeLog("app-postprocess-drained", { remaining });
+    plaudRecallService.close();
     await domiIntegration?.shutdownAllPlaudOperations("app-quit");
     await documentSearchService?.close();
     updateService?.stop();
@@ -4824,6 +4828,7 @@ ipcMain.handle("domi:task-update", async (_event, request) => {
   }
 });
 ipcMain.handle("domi:plaud-login", async (_event, request) => {
+  plaudRecallService.close();
   try {
     return await getDomiIntegration().loginPlaud(request);
   } catch (error) {
@@ -4838,6 +4843,7 @@ ipcMain.handle("domi:plaud-connection", async (_event, request) => {
   }
 });
 ipcMain.handle("domi:plaud-disconnect", async (_event, request) => {
+  plaudRecallService.close();
   try {
     const result = await getDomiIntegration().disconnectPlaud(request);
     serviceCoordinator.invalidate("domi:plaud-list");
@@ -4847,6 +4853,72 @@ ipcMain.handle("domi:plaud-disconnect", async (_event, request) => {
     return { ok: false, connected: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
+function plaudContextFailure(request, error) {
+  return { ok: false, fileId: String(request?.fileId || ""),
+    errorCode: /^PLAUD_[A-Z_]+$/.test(String(error?.code || "")) ? error.code : "PLAUD_CONTEXT_UNAVAILABLE",
+    error: error instanceof Error ? error.message : "暂时无法读取会议信息，已保留填写内容。" };
+}
+
+ipcMain.handle("domi:plaud-context-prepare", async (_event, request) => {
+  try {
+    return await getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().preparePlaudContext(request));
+  } catch (error) { return plaudContextFailure(request, error); }
+});
+ipcMain.handle("domi:plaud-context-draft", async (_event, request) => {
+  if (updateRestartPreparing) return { ok: false, fileId: String(request?.fileId || ""), error: "正在安全重启，填写内容会在重新打开后恢复。" };
+  try {
+    return await getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().savePlaudContextDraft(request));
+  } catch (error) { return plaudContextFailure(request, error); }
+});
+ipcMain.handle("domi:plaud-context-submit", async (_event, request) => {
+  if (updateRestartPreparing) return { ok: false, fileId: String(request?.fileId || ""), error: "正在安全重启，填写内容会在重新打开后恢复。" };
+  try {
+    const result = await getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().savePlaudContext(request));
+    if (result.ok) {
+      plaudRecallService.cancel(`${request.accountScope}:${request.fileId}:${request.expectedTranscriptSha256}`);
+      serviceCoordinator.invalidate("domi:plaud-list");
+    }
+    return result;
+  } catch (error) { return plaudContextFailure(request, error); }
+});
+ipcMain.handle("domi:plaud-context-recall", async (_event, request) => {
+  const startedAt = Date.now();
+  if (updateRestartPreparing || applicationQuitFlushStarted) return { ok: false, fileId: String(request?.fileId || "") };
+  try {
+    const integration = getDomiIntegration();
+    const binding = { fileId: request?.fileId, accountScope: request?.accountScope,
+      transcriptSha256: request?.expectedTranscriptSha256 };
+    const key = `${binding.accountScope}:${binding.fileId}:${binding.transcriptSha256}`;
+    return await plaudRecallService.runTask(key, async ({ signal, generate }) => {
+      const prepared = await getDomiPluginActivationGate().withStableClient(() => {
+        signal.throwIfAborted();
+        return integration.preparePlaudRecall(binding);
+      });
+      signal.throwIfAborted();
+      if (!prepared.ok) return prepared;
+      if (prepared.cachedRecall?.summary) {
+        return { ok: true, ...binding, recall: prepared.cachedRecall };
+      }
+      const recall = await generate({
+        sourceText: prepared.sourceText, runtimeProvider: () => getPreparedCodexRuntime(), version: app.getVersion()
+      });
+      signal.throwIfAborted();
+      const saved = await getDomiPluginActivationGate().withStableClient(() => {
+        signal.throwIfAborted();
+        return integration.savePlaudRecall({ ...binding, recallSummary: recall.summary, recall });
+      });
+      signal.throwIfAborted();
+      if (!saved.ok) return saved;
+      appendRuntimeLog("plaud-recall-performance", { durationMs: Date.now() - startedAt, outcome: "ready" });
+      return { ok: true, ...binding, recall };
+    });
+  } catch (error) {
+    appendRuntimeLog("plaud-recall-performance", { durationMs: Date.now() - startedAt,
+      outcome: "source-fallback", errorCode: /^PLAUD_[A-Z_]+$/.test(String(error?.code || "")) ? error.code : "PLAUD_RECALL_UNAVAILABLE" });
+    return plaudContextFailure(request, error);
+  }
+});
+
 ipcMain.handle("domi:plaud-list", async (_event, request) => {
   try {
     const integration = getDomiIntegration();

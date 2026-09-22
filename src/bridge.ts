@@ -535,6 +535,10 @@ const browserFallback: Window["workbench"] = {
   }),
   onPlaudReaderAvailability: () => () => undefined,
   plaudWorkflowCompletion: async ({ fileId }) => ({ ok: false, fileId, stage: "", error: "浏览器预览模式不能核验本地 PLAUD 工作流。" }),
+  preparePlaudContext: async ({ fileId }) => ({ ok: false, fileId, error: "请在 domi 客户端中读取这条录音的会议信息。" }),
+  savePlaudContext: async ({ fileId }) => ({ ok: false, fileId, error: "浏览器预览模式不能保存真实会议信息。" }),
+  savePlaudContextDraft: async ({ fileId }) => ({ ok: false, fileId, error: "浏览器预览模式不能保存真实会议信息。" }),
+  summarizePlaudContext: async ({ fileId }) => ({ ok: false, fileId, error: "浏览器预览模式不能生成真实录音的回忆提示。" }),
   renamePlaud: async () => ({
     ok: false,
     error: "浏览器预览模式不能修改 PLAUD 录音标题。"
