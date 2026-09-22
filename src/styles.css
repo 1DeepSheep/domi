@@ -11631,3 +11631,67 @@ body.panel-resizing .main-grid {
   }
 }
 .workflow-mini.selected { background: var(--accent-soft, #ecdfd8); color: var(--accent, #c8694a); box-shadow: inset 2px 0 currentColor; }
+
+/* Native PLAUD intake: recall clues stay above editable meeting context. */
+.plaud-context { max-width: 740px; margin: 8px auto 24px; width: 100%; }
+.plaud-context-intro { display: flex; align-items: flex-start; gap: 12px; margin: 0 0 20px; }
+.plaud-context-intro > svg { flex: 0 0 auto; color: var(--accent); margin-top: 3px; }
+.plaud-context-intro h2 { font-size: 17px; font-weight: 550; line-height: 1.55; margin: 0 0 4px; }
+.plaud-context-intro p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.plaud-context-card { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-panel); overflow: hidden; }
+.plaud-context-recall { padding: 22px 24px 20px; background: var(--context); border-bottom: 1px solid var(--line); }
+.plaud-context-recall-meta { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 13px; font-size: 11px; color: var(--muted); }
+.plaud-context-recall-meta > span:first-child { display: inline-flex; align-items: center; gap: 7px; }
+.plaud-context-recall h3 { font-size: 17px; line-height: 1.55; font-weight: 550; margin: 0 0 10px; overflow-wrap: anywhere; }
+.plaud-context-summary { font-size: 13px; line-height: 1.9; color: var(--text); margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.plaud-context-pending { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.plaud-context-keywords { display: flex; gap: 10px; align-items: baseline; font-size: 11px; margin-top: 14px; line-height: 1.8; }
+.plaud-context-keywords > span:first-child { flex: 0 0 auto; color: var(--muted); }
+.plaud-context-excerpts { font-size: 12px; color: var(--muted); margin-top: 14px; }
+.plaud-context-excerpts summary { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; list-style: none; }
+.plaud-context-excerpts summary::-webkit-details-marker { display: none; }
+.plaud-context-excerpts[open] summary svg { transform: rotate(90deg); }
+.plaud-context-excerpts blockquote { border-left: 2px solid var(--line-strong); margin: 12px 0 0; padding-left: 12px; color: var(--text); font-size: 12px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
+.plaud-context-refining { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 11px; margin: 13px 0 0; }
+.plaud-context-fields { padding: 21px 24px 0; }
+.plaud-context-fields label { display: block; min-width: 0; margin: 0 0 19px; }
+.plaud-context-fields label > span { display: block; font-size: 12px; font-weight: 550; margin-bottom: 8px; }
+.plaud-context-fields label > span small { font-size: 11px; font-weight: 400; color: var(--muted); margin-left: 5px; }
+.plaud-context-fields input, .plaud-context-fields select, .plaud-context-fields textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; line-height: 1.55; padding: 10px 12px; }
+.plaud-context-fields textarea { resize: vertical; display: block; min-height: 76px; }
+.plaud-context-fields input::placeholder, .plaud-context-fields textarea::placeholder { color: var(--muted); opacity: .85; }
+.plaud-context-fields :is(input, select, textarea):focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 2px; }
+.plaud-context-fields :is(input, select, textarea):disabled { background: var(--context); opacity: 1; }
+.plaud-context-field-row { display: grid; grid-template-columns: 1.08fr 1fr; gap: 14px; }
+.plaud-context-field-help { display: block; font-size: 11px; color: var(--muted); margin-top: 7px; line-height: 1.65; }
+.plaud-context-extra { font-size: 12px; color: var(--muted); padding-bottom: 18px; }
+.plaud-context-extra summary { cursor: pointer; display: flex; align-items: center; gap: 6px; list-style: none; width: fit-content; }
+.plaud-context-extra summary::-webkit-details-marker { display: none; }
+.plaud-context-extra textarea { margin-top: 10px; }
+.plaud-context-actions { padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 1px solid var(--line); }
+.plaud-context-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: 7px; padding: 10px 0; font: inherit; font-size: 12px; cursor: pointer; }
+.plaud-context-actions button:disabled { opacity: .55; cursor: default; }
+.plaud-context-actions button.plaud-context-skip { color: var(--muted); background: transparent; }
+.plaud-context-actions button.plaud-context-submit { color: white; background: var(--accent); font-weight: 550; padding: 10px 15px; white-space: nowrap; }
+.plaud-context-actions button.plaud-context-submit:hover:enabled { background: var(--accent-strong); }
+.plaud-context-confirmed { display: inline-flex; align-items: center; gap: 7px; color: var(--green); font-size: 11px; line-height: 1.7; }
+.plaud-context-footer { text-align: center; font-size: 11px; color: var(--muted); margin: 12px 0 0; }
+.plaud-context-error { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin: 0 24px 16px; color: var(--danger); font-size: 12px; line-height: 1.7; }
+.plaud-context-error button { flex: 0 0 auto; border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 10px; color: var(--text); background: var(--surface); cursor: pointer; }
+.plaud-context-saved { padding: 24px; display: flex; align-items: flex-start; gap: 10px; color: var(--green); font-size: 13px; line-height: 1.7; }
+.plaud-context-saved svg { flex: 0 0 auto; margin-top: 2px; }
+.plaud-context-saved p { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+@media (max-width: 1100px) {
+  .plaud-context-recall { padding: 18px 20px; }
+  .plaud-context-fields { padding: 18px 20px 0; }
+  .plaud-context-actions { padding: 14px 20px; flex-wrap: wrap; }
+}
+@media (max-width: 720px) {
+  .plaud-context-field-row { grid-template-columns: 1fr; gap: 0; }
+}
+
+.plaud-context-scope { margin: 0 24px 18px; padding: 15px 17px; background: var(--context); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; line-height: 1.75; }
+.plaud-context-scope strong { font-weight: 550; }
+.plaud-context-scope p { color: var(--muted); margin: 6px 0 12px; }
+.plaud-context-scope button { border: 1px solid var(--line-strong); color: var(--text); border-radius: 6px; background: var(--surface); font: inherit; padding: 7px 11px; cursor: pointer; }
+.plaud-context-scope button:disabled { opacity: .55; cursor: default; }

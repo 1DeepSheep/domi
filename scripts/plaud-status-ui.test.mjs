@@ -90,6 +90,10 @@ workbench.deletePlaud = async request => {
   state.calls.push({ kind: "delete", payload: request });
   return { ok: true, fileId: request.fileId, trashed: true };
 };
+workbench.preparePlaudContext = async ({ fileId }) => ({ ok: true, fileId, accountScope: "synthetic-account", stage: "context_pending", recordRevision: "synthetic-revision",
+  transcript: { path: "/synthetic/transcript.md", sha256: "synthetic-sha", bytes: 100 }, disposition: "needs_input", context: { contextStatus: "pending" },
+  recall: { summary: "合成录音讨论产品进展。", keywords: [], excerpts: ["这是匿名合成文字稿。"], source: "cache" } });
+workbench.savePlaudContext = async request => ({ ...await workbench.preparePlaudContext(request), disposition: "ready", contextPath: "/synthetic/context.json", context: request });
 workbench.runCodex = async request => {
   if (!startup.allowRun) throw new Error("Model calls are forbidden in this fixture");
   state.calls.push({ kind: "run", payload: request });
@@ -797,11 +801,12 @@ try {
   await startupScenario({ allowRun: true, models: [], snapshot: snapshot([startupReady]) }, async ({ page, count, wait }) => {
     await wait("list", 1);
     await page.getByRole("button", { name: "生成纪要并入库", exact: true }).click();
-    await page.locator(".plaud-item-detail.attention").filter({ hasText: "model/list" }).waitFor();
+    await page.getByRole("button", { name: "暂不补充，直接处理", exact: true }).click();
+    await page.locator(".plaud-context-error").filter({ hasText: "model/list" }).waitFor();
     assert.equal(await count("run"), 0);
     assert.equal(await page.locator(".domi-inline-error").count(), 0, "A notes preflight failure belongs to the recording, not the connection banner");
     await page.getByRole("button", { name: "刷新 PLAUD 最近录音", exact: true }).click();
-    await page.locator(".plaud-item-detail.attention").filter({ hasText: "model/list" }).waitFor();
+    await page.locator(".plaud-context-error").filter({ hasText: "model/list" }).waitFor();
     assert.equal(await page.locator(".domi-inline-error").count(), 0);
   });
   for (const completion of [
@@ -813,6 +818,7 @@ try {
     await startupScenario({ allowRun: true, snapshot: snapshot([startupReady]), completion }, async ({ page, wait, release }) => {
       await wait("list", 1);
       await page.getByRole("button", { name: "生成纪要并入库", exact: true }).click();
+      await page.getByRole("button", { name: "暂不补充，直接处理", exact: true }).click();
       await wait("run", 1);
       await page.getByRole("button", { name: "正在执行", exact: true }).waitFor();
       assert.equal(await page.getByRole("button", { name: "正在启动", exact: true }).count(), 0, "Accepted tasks must not remain labelled starting for their entire run");

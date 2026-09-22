@@ -17,6 +17,7 @@ const { resolveBundledLarkRuntime } = require("./lark-runtime.cjs");
 const { resolveMediaRuntime } = require("./media-runtime.cjs");
 const { PlaudSessionBroker } = require("./plaud-browser-broker.cjs");
 const { readPlaudWorkflowCompletion } = require("./plaud-workflow-completion.cjs");
+const { PlaudContextService, runPlaudContextCommand } = require("./plaud-context.cjs");
 const { RadarSourceService } = require("./radar-sources.cjs");
 const { localTaskReceipt } = require("./task-receipt.cjs");
 const { PodcastProgress } = require("./podcast-progress.cjs");
@@ -1250,6 +1251,9 @@ class DomiIntegration {
     this.plaudReaderGeneration = 0;
     this.onPlaudReaderAvailability = onPlaudReaderAvailability || (() => {});
     this.plaudVerifiedSnapshot = null;
+    this.plaudContextSeenRecords = { scope: "", items: new Map() };
+    this.plaudContextService = null;
+    this.plaudContextDownloads = new Map();
     this.plaudAccountEpochs = new Map();
     this.plaudConfigFingerprint = "";
     this.plaudConfigGeneration = 0;
@@ -1913,6 +1917,12 @@ class DomiIntegration {
   }
 
   async runPlaudWorker(command, args = [], pluginInput, options = {}) {
+    const assertScope = () => {
+      if (options.expectedScope && options.expectedScope !== this.plaudSnapshotScope()) {
+        throw Object.assign(new Error("录音连接已变化，已取消旧连接的文字稿读取。"), { code: "PLAUD_CONTEXT_SCOPE_CHANGED" });
+      }
+    };
+    assertScope();
     this.assertPlaudReaderAvailable();
     if (!this.plaudEnabled()) {
       throw new Error("PLAUD 未启用。请先在 domi 设置的“录音转写”中开启。");
@@ -1922,6 +1932,7 @@ class DomiIntegration {
     const browser = this.normalizePlaudBrowser(settings.plaudBrowser);
     const sessionKey = this.plaudBrokerSessionKey(plugin, browser, settings);
     return this.enqueuePlaudOperation(() => {
+      assertScope();
       this.assertPlaudReaderAvailable();
       if (this.plaudShuttingDown) {
         throw new Error("domi 正在退出，已取消尚未开始的 PLAUD 操作。");
@@ -2168,17 +2179,135 @@ class DomiIntegration {
     });
   }
 
+  plaudContextAccountScope() {
+    return this.plaudEnabled() ? crypto.createHash("sha256").update(this.plaudSnapshotScope()).digest("hex") : "";
+  }
+
+  getPlaudContextService() {
+    if (!this.plaudContextService) this.plaudContextService = new PlaudContextService({
+      stateStore: this.stateStore,
+      currentScope: () => this.plaudContextAccountScope(),
+      metadataForRecording: (scope, fileId) => {
+        if (scope !== this.plaudContextAccountScope()) return null;
+        const cached = this.loadPlaudSuccessfulSnapshot()?.items?.find(item => item.fileId === fileId);
+        if (cached) return cached;
+        return this.plaudContextSeenRecords.scope === this.plaudSnapshotScope()
+          ? this.plaudContextSeenRecords.items.get(fileId) : null;
+      },
+      runCommand: (command, fileId, payload) => runPlaudContextCommand({
+        execFile: this.execFileFactory, executable: process.execPath, script: this.plaudPaths().script,
+        command, fileId, payload,
+        env: { ...process.env, ...this.plaudRuntimeEnv(), DOMI_PLAUD_STATE_DIR: path.dirname(this.plaudStateFile) }
+      })
+    });
+    return this.plaudContextService;
+  }
+
+  async preparePlaudContext(request = {}) {
+    const service = this.getPlaudContextService();
+    const prepared = await service.prepare(request);
+    if (!["PLAUD_CONTEXT_TRANSCRIPT_REQUIRED", "PLAUD_CONTEXT_RECORD_NOT_FOUND"].includes(prepared.errorCode)) return prepared;
+    const scope = this.plaudSnapshotScope();
+    const accountScope = this.plaudContextAccountScope();
+    if (!accountScope || (request.accountScope && request.accountScope !== accountScope)) return prepared;
+    const fileId = request.fileId;
+    // Only this connection's successful list can authorize trying an existing
+    // remote transcript/summary. Workflow-only rows and old owner caches cannot.
+    const remote = this.loadPlaudSuccessfulSnapshot(scope)?.items.find(item => item.fileId === fileId)
+      || (this.plaudContextSeenRecords.scope === scope ? this.plaudContextSeenRecords.items.get(fileId) : null);
+    if (!(remote?.hasTranscript === true || remote?.hasSummary === true) || !/^[A-Za-z0-9_-]{12,80}$/.test(fileId || "")) return prepared;
+    const key = `${accountScope}:${fileId}`;
+    const downloadFailure = error => {
+      const details = plaudErrorDetails(error);
+      return { ok: false, fileId, errorCode: details.code,
+        error: ["PLAUD_TRANSCRIPT_NOT_READY", "PLAUD_TRANSCRIPT_PENDING", "PLAUD_TRANSCRIPT_EMPTY"].includes(details.code)
+          ? "这条录音的文字稿尚未就绪，请稍后重新读取，填写内容已保留。" : safePlaudWorkerError(error),
+        errorStage: "download" };
+    };
+    const reprepare = async () => {
+      const result = await service.prepare(request);
+      if (result.ok && request.expectedTranscriptSha256 && result.transcript?.sha256 !== request.expectedTranscriptSha256) {
+        return downloadFailure(Object.assign(new Error("文字稿已更新，请重新打开这条录音，填写内容已保留。"), { code: "PLAUD_CONTEXT_TRANSCRIPT_CHANGED" }));
+      }
+      return result;
+    };
+    if (this.plaudContextDownloads.has(key)) {
+      try {
+        await this.plaudContextDownloads.get(key);
+        return await reprepare();
+      } catch (error) { return downloadFailure(error); }
+    }
+    const assertScope = () => {
+      if (scope !== this.plaudSnapshotScope() || accountScope !== this.plaudContextAccountScope()) {
+        throw Object.assign(new Error("录音账号或连接设置已变化，请重新打开当前录音。"), { code: "PLAUD_CONTEXT_SCOPE_CHANGED" });
+      }
+      if (this.plaudShuttingDown) throw Object.assign(new Error("domi 正在退出，已保留填写内容。"), { code: "PLAUD_CONTEXT_UNAVAILABLE" });
+    };
+    const protectedRecord = record => record && (record.contextReceipt
+      || ["provided", "skipped"].includes(record.contextStatus)
+      || (record.stage && !["transcript_ready", "context_pending"].includes(record.stage) && !PLAUD_RECOVERY_STAGES.has(record.stage)));
+    const download = (async () => {
+      assertScope();
+      const existing = this.loadPlaudWorkflowRecords().find(item => item.fileId === fileId);
+      if (plaudRecordReady(existing) || protectedRecord(existing)) return;
+      const outputDir = path.join(this.plaudOutputDir, "context-intake", accountScope, fileId, crypto.randomUUID());
+      const downloaded = await this.runPlaudWorker("download", [fileId, outputDir], undefined,
+        { timeoutMs: 30_000, expectedScope: scope });
+      assertScope();
+      const insideOutput = file => typeof file === "string" && path.isAbsolute(file)
+        && path.relative(outputDir, file) && path.relative(outputDir, file) !== ".." && !path.relative(outputDir, file).startsWith(`..${path.sep}`)
+        && !path.isAbsolute(path.relative(outputDir, file));
+      if (downloaded?.ok !== true || downloaded.fileId !== fileId || !insideOutput(downloaded.transcriptPath)) {
+        throw Object.assign(new Error("文字稿下载未返回这条录音的有效文件，已保留填写内容。"), { code: "PLAUD_CONTEXT_TRANSCRIPT_REQUIRED" });
+      }
+      const stat = fs.lstatSync(downloaded.transcriptPath);
+      if (!stat.isFile() || stat.size <= 0 || stat.size > 32 * 1024 * 1024) {
+        throw Object.assign(new Error("下载的文字稿不可读取，已保留填写内容。"), { code: "PLAUD_CONTEXT_TRANSCRIPT_REQUIRED" });
+      }
+      if (request.expectedTranscriptSha256
+        && crypto.createHash("sha256").update(fs.readFileSync(downloaded.transcriptPath)).digest("hex") !== request.expectedTranscriptSha256) {
+        throw Object.assign(new Error("文字稿已更新，未覆盖之前的会议信息，请重新打开这条录音。"), { code: "PLAUD_CONTEXT_TRANSCRIPT_CHANGED" });
+      }
+      await this.mutatePlaudQueue(state => {
+        assertScope();
+        const current = state.records?.[fileId];
+        if (plaudRecordReady(current) || protectedRecord(current)) return false;
+        if (!state.records || typeof state.records !== "object" || Array.isArray(state.records)) throw new Error("Invalid PLAUD queue");
+        state.records[fileId] = { fileId, fileName: remote.fileName || "", createdAt: remote.createdAt,
+          duration: remote.duration, ...current, transcriptPath: downloaded.transcriptPath,
+          ...(insideOutput(downloaded.transcriptRawPath) ? { transcriptRawPath: downloaded.transcriptRawPath } : {}),
+          stage: current?.stage === "context_pending" ? "context_pending" : "transcript_ready",
+          syncOutcome: "ready", retryable: false, errorCode: "", error: "", updatedAt: new Date().toISOString() };
+        return true;
+      }, { createIfMissing: true });
+      assertScope();
+    })();
+    this.plaudContextDownloads.set(key, download);
+    try {
+      await download;
+      return await reprepare();
+    } catch (error) {
+      return downloadFailure(error);
+    } finally {
+      if (this.plaudContextDownloads.get(key) === download) this.plaudContextDownloads.delete(key);
+    }
+  }
+  savePlaudContext(request = {}) { return this.getPlaudContextService().save(request); }
+  savePlaudContextDraft(request = {}) { return this.getPlaudContextService().saveDraft(request); }
+  preparePlaudRecall(request = {}) { return this.getPlaudContextService().prepareRecall(request); }
+  savePlaudRecall(request = {}) { return this.getPlaudContextService().saveRecall(request); }
+
   criticalOperationSnapshot() {
     const plaudQueue = this.plaudCommandQueue.snapshot();
     const larkQueue = this.larkCommandQueue.snapshot();
     const snapshot = {
       plaud: plaudQueue.activeCount + plaudQueue.pendingCount + this.plaudChildProcesses.size
-        + (this.plaudSyncPromise ? 1 : 0),
+        + (this.plaudSyncPromise ? 1 : 0) + this.plaudContextDownloads.size,
       lark: larkQueue.activeCount
         + larkQueue.pendingCount
         + (this.feishuAppConfiguration && !this.feishuAppConfiguration.settled ? 1 : 0),
       podcasts: this.podcastProcessPromises.size,
-      databaseWrites: this.databaseMaterializationQueues.size
+      databaseWrites: this.databaseMaterializationQueues.size + (this.plaudContextService?.activeWrites || 0)
     };
     return {
       ...snapshot,
@@ -2506,6 +2635,12 @@ class DomiIntegration {
     ]);
     if (requestedScope !== this.plaudSnapshotScope()) {
       return this.supersededPlaudSnapshot();
+    }
+    if (remoteResult.status === "fulfilled") {
+      if (this.plaudContextSeenRecords.scope !== requestedScope) this.plaudContextSeenRecords = { scope: requestedScope, items: new Map() };
+      // Only successful remote rows prove membership. Unscoped workflow-only
+      // rows must never authorize a native context read for a different account.
+      for (const item of remoteResult.value.items) this.plaudContextSeenRecords.items.set(item.fileId, item);
     }
     const checkedAt = Date.now();
     let remoteSnapshot = remoteResult.status === "fulfilled"
@@ -2966,11 +3101,11 @@ class DomiIntegration {
       error: operationError || (listRefreshFailed ? safePlaudSyncError(snapshot.error || snapshot.warning || "PLAUD 列表暂时不可用。") : "") };
   }
 
-  async mutatePlaudQueue(mutator) {
+  async mutatePlaudQueue(mutator, { createIfMissing = false } = {}) {
     const statePath = this.plaudStateFile;
     const stateDir = path.dirname(statePath);
     const lockPath = path.join(stateDir, "plaud-workflow.lock");
-    if (!fs.existsSync(statePath)) return false;
+    if (!createIfMissing && !fs.existsSync(statePath)) return false;
     fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     let lockHandle;
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -2987,7 +3122,7 @@ class DomiIntegration {
     }
     if (lockHandle === undefined) throw new Error("等待 PLAUD 队列写入锁超时。 ");
     try {
-      const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8")) : { version: 1, records: {} };
       if (!mutator(state)) return false;
       const temporaryPath = `${statePath}.${process.pid}.${Date.now()}.tmp`;
       fs.writeFileSync(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });

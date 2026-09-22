@@ -65,11 +65,22 @@ test("confirmed generation, uncertain submission and unsubmitted recordings have
 });
 
 test("a local transcript or final workflow result wins over obsolete errors", () => {
-  for (const patch of [{ transcriptPath: "/synthetic/transcript.md" }, { queueStage: "managed" }, { queueStage: "notes_non_project" }]) {
+  for (const patch of [{ transcriptPath: "/synthetic/transcript.md" }, { queueStage: "managed" }, { queueStage: "notes_non_project" }, { queueStage: "discussion_complete" }]) {
     const value = item({ ...patch, error: "old failure", syncOutcome: "failed", resumeEligible: true });
     assert.equal(plaudItemPresentation(value).detail, "");
     assert.equal(hasRecoverablePlaudItems({ items: [value] }), false);
   }
+});
+
+test("completed discussions never offer regeneration or background transcript recovery", () => {
+  const completed = item({ queueStage: "discussion_complete", hasTranscript: true, resumeEligible: true });
+  assert.equal(canGeneratePlaudNotes(completed), false);
+  assert.deepEqual(plaudItemPresentation(completed), { label: "纪要已生成", tone: "complete", detail: "" });
+  assert.equal(hasRecoverablePlaudItems({ items: [completed] }), false);
+  assert.equal(hasImmediatelyRecoverablePlaudItems({ ok: true, items: [completed] }), false);
+  const missing = { ...completed, errorCode: "PLAUD_TRANSCRIPT_ARTIFACT_MISSING" };
+  assert.equal(canGeneratePlaudNotes(missing), false);
+  assert.match(plaudItemPresentation(missing).label, /纪要已生成/);
 });
 
 test("remote transcript readiness wins over a stale processing flag without promising unqueued downloads", () => {

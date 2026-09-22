@@ -153,6 +153,10 @@ declare global {
       resumePlaudTranscripts: () => Promise<DomiPlaudSyncResult>;
       onPlaudReaderAvailability?: (callback: (status: DomiPlaudReaderAvailability) => void) => () => void;
       plaudWorkflowCompletion: (request: { fileId: string }) => Promise<DomiPlaudWorkflowCompletion>;
+      preparePlaudContext: (request: { fileId: string; accountScope?: string; expectedTranscriptSha256?: string }) => Promise<DomiPlaudContextResult>;
+      savePlaudContext: (request: DomiPlaudContextSubmitRequest) => Promise<DomiPlaudContextResult>;
+      savePlaudContextDraft: (request: DomiPlaudContextDraftRequest) => Promise<DomiPlaudContextResult>;
+      summarizePlaudContext: (request: DomiPlaudRecallRequest) => Promise<DomiPlaudRecallResult>;
       renamePlaud: (request: DomiPlaudRenameRequest) => Promise<DomiPlaudRenameResult>;
       deletePlaud: (request: DomiPlaudDeleteRequest) => Promise<DomiPlaudDeleteResult>;
       loadDomiEntityWorkspace: (
@@ -1272,6 +1276,81 @@ export type DomiPlaudItem = {
 
 export type DomiPlaudConnectionRequest = {
   browser?: "chrome" | "tabbit";
+};
+
+export type DomiPlaudContextDraft = {
+  conversationType: string;
+  projectName: string;
+  participants: string;
+  extraContext: string;
+  userContext?: string;
+};
+
+export type DomiPlaudRecall = {
+  summary: string;
+  keywords: string[];
+  excerpts: string[];
+  source: "cache" | "extract" | "model";
+  conversationType?: string;
+};
+
+export type DomiPlaudContextResult = {
+  ok: boolean;
+  fileId: string;
+  accountScope?: string;
+  stage?: string;
+  transcript?: { path: string; sha256: string; bytes: number };
+  recordRevision?: string;
+  recallSummary?: string;
+  recall?: DomiPlaudRecall;
+  context?: Partial<DomiPlaudContextDraft> & {
+    contextStatus?: "provided" | "skipped" | "pending" | "";
+    rawAnswer?: string;
+    sourceTurnId?: string;
+  };
+  contextPath?: string;
+  draft?: DomiPlaudContextDraft;
+  disposition?: "needs_input" | "ready" | "advanced";
+  duplicate?: boolean;
+  errorCode?: string;
+  error?: string;
+  scopeRecovery?: { previousAccountScope: string; accountScope: string; transcriptSha256: string; recordRevision: string };
+};
+
+export type DomiPlaudContextSubmitRequest = DomiPlaudContextDraft & {
+  action?: "submit";
+  fileId: string;
+  accountScope: string;
+  submissionId: string;
+  expectedRecordRevision: string;
+  expectedTranscriptSha256: string;
+  contextStatus: "provided" | "skipped";
+  rawAnswer: string;
+  sourceTurnId: string;
+} | { action: "recover_scope"; confirmed: true; fileId: string; accountScope: string; previousAccountScope: string;
+  expectedRecordRevision: string; expectedTranscriptSha256: string };
+
+export type DomiPlaudContextDraftRequest = {
+  fileId: string;
+  accountScope: string;
+  transcriptSha256: string;
+  draft: DomiPlaudContextDraft;
+};
+
+export type DomiPlaudRecallRequest = {
+  fileId: string;
+  accountScope: string;
+  expectedTranscriptSha256: string;
+};
+
+export type DomiPlaudRecallResult = {
+  ok: boolean;
+  fileId: string;
+  accountScope?: string;
+  transcriptSha256?: string;
+  recall?: DomiPlaudRecall;
+  errorCode?: string;
+  error?: string;
 };
 
 export type DomiPlaudRemoteStatus =
