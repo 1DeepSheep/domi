@@ -4588,8 +4588,8 @@ ipcMain.handle("workspace:open", async (_event, requestedWorkspacePath) => {
 });
 
 ipcMain.handle("domi:cache", () => getDomiIntegration().loadCache());
-ipcMain.handle("domi:industry-overviews", () => require("./industry-overview-service.cjs").loadIndustryOverviews(
-  serviceCoordinator, () => getDomiIntegration().refreshIndustryOverviews()
+ipcMain.handle("domi:industry-overviews", (_event, request = {}) => require("./industry-overview-service.cjs").loadIndustryOverviews(
+  () => getDomiIntegration().refreshIndustryOverviews(request)
 ));
 ipcMain.handle("domi:database-list", async (_event, request = {}) => {
   try {

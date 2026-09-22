@@ -1925,6 +1925,11 @@ function App() {
     lastIndexedAt: 0
   });
   const [industryRefreshKey, setIndustryRefreshKey] = useState(0);
+  // Private, in-memory identity only: a library switch must never reuse another
+  // library's catalog or archived news, even while its old request is finishing.
+  const industryCacheKey = appSettings
+    ? JSON.stringify(DATA_CONNECTION_SETTING_KEYS.map(key => appSettings[key]))
+    : "";
   const [databaseSnapshot, setDatabaseSnapshot] = useState<DomiDatabaseSnapshot | null>(null);
   const [databaseWorkspaceTab, setDatabaseWorkspaceTab] = useState<DatabaseWorkspaceTab>("project");
   const [databaseEntityType, setDatabaseEntityType] = useState<DatabaseEntityType>("project");
@@ -10092,7 +10097,7 @@ function App() {
     if (!await navigateWorkspace(view)) return;
     setDocumentLibrarySidebarExpanded(false);
     setThreadMenuId(null);
-    if (view === "industries") { setRightPanelOpen(false); setIndustryRefreshKey((key) => key + 1); void refreshDatabase({ preserveSelection: true }); return; }
+    if (view === "industries") { setRightPanelOpen(false); return; }
     if (view !== "data") return;
     setRightPanelOpen(false);
     void refreshDatabase({ preserveSelection: true });
@@ -14189,7 +14194,7 @@ function App() {
                 : workspaceView === "news"
                   ? scanWeeklyNews()
                   : workspaceView === "industries"
-                    ? Promise.all([Promise.resolve(setIndustryRefreshKey((key) => key + 1)), refreshDatabase({ preserveSelection: true })])
+                    ? setIndustryRefreshKey((key) => key + 1)
                   : workspaceView === "data"
                     ? refreshDatabase({ preserveSelection: true })
                   : workspaceView === "documents"
@@ -14266,7 +14271,7 @@ function App() {
                 : workspaceView === "news"
                   ? renderNewsWorkspace()
                   : workspaceView === "industries"
-                    ? <IndustryOverview refreshKey={industryRefreshKey} news={databaseSnapshot?.news || weeklyNews?.items || []} onOpenAttachment={openDocument} />
+                    ? (appSettings && <IndustryOverview key={industryCacheKey} cacheKey={industryCacheKey} refreshKey={industryRefreshKey} onOpenAttachment={openDocument} />)
                   : workspaceView === "data"
                     ? renderDatabaseWorkspace()
                   : workspaceView === "documents"

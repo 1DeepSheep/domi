@@ -65,13 +65,13 @@ const docs = ${JSON.stringify(docs)};
 const news = ${JSON.stringify(news)};
 const indexPath = ${JSON.stringify(indexPath)};
 const mode = new URL(location.href).searchParams.get("mode") || "ready";
-const state = window.__industryTest = { calls: [], entries, docs, news, mode, failPaths: [], refreshFailure: mode === "initial-refresh-failure", pending: {}, deferredPaths: [], deferRefresh: mode === "initial-catalog-delay", pendingRefresh: [], refresh: null };
+const state = window.__industryTest = { calls: [], entries, docs, news, mode, failPaths: [], refreshFailure: mode === "initial-refresh-failure", pending: {}, deferredPaths: [], deferRefresh: mode === "initial-catalog-delay", pendingRefresh: [], refresh: null, leave: null, enter: null, selectLibrary: null, metrics: {} };
 const bridge = {
-  refreshIndustryOverviews: async () => {
-    const call = { kind: "refreshIndustryOverviews", settled: false }; state.calls.push(call);
+  refreshIndustryOverviews: async options => {
+    const call = { kind: "refreshIndustryOverviews", options, settled: false }; state.calls.push(call);
     const response = state.refreshFailure ? { ok: false, entries: [], error: "合成刷新失败，原资料仍保留" }
-      : mode === "conflict" ? { ok: false, entries: [...state.entries], indexPath, conflicts: [{ path: entries[0].path }], warnings: ["合成资料缺口"] }
-      : { ok: true, entries: mode === "empty-library" ? [] : [...state.entries], indexPath, projectCount: 4 };
+      : mode === "conflict" ? { ok: false, entries: [...state.entries], news: [...state.news], indexPath, conflicts: [{ path: entries[0].path }], warnings: ["合成资料缺口"] }
+      : { ok: true, entries: mode === "empty-library" ? [] : [...state.entries], news: [...state.news], indexPath, projectCount: 4 };
     if (state.deferRefresh) await new Promise(resolve => state.pendingRefresh.push(resolve));
     call.settled = true; return response;
   },
@@ -94,8 +94,13 @@ state.localMarkdownTarget = localMarkdownTarget;
 state.industryNews = industryNews;
 function Harness() {
   const [refreshKey, setRefreshKey] = useState(0);
+  const [visible, setVisible] = useState(true);
+  const [cacheKey, setCacheKey] = useState("synthetic-library-a");
   state.refresh = () => setRefreshKey(key => key + 1);
-  return <IndustryOverview refreshKey={refreshKey} news={news} onOpenAttachment={resource => { state.calls.push({ kind: "onOpenAttachment", resource }); }} />;
+  state.leave = () => setVisible(false);
+  state.enter = () => setVisible(true);
+  state.selectLibrary = setCacheKey;
+  return visible ? <IndustryOverview key={cacheKey} cacheKey={cacheKey} refreshKey={refreshKey} onOpenAttachment={resource => { state.calls.push({ kind: "onOpenAttachment", resource }); }} /> : <p>合成其他页面</p>;
 }
 createRoot(document.getElementById("root")).render(<Harness />);
 `;
@@ -142,7 +147,8 @@ try {
       assert.deepEqual(ui.externalRequests, [], "The reader must not call external services");
       const calls = await ui.page.evaluate(() => window.__industryTest.calls);
       assert.deepEqual(calls.filter(call => !["readMarkdown", "refreshIndustryOverviews", "openResource", "onOpenAttachment"].includes(call.kind)), [], "Reading must not save Markdown, edit records, or invoke a model");
-      results.push({ name, passed: true });
+      const metrics = await ui.page.evaluate(() => window.__industryTest.metrics);
+      results.push({ name, passed: true, ...(Object.keys(metrics).length ? { metrics } : {}) });
     } catch (error) {
       results.push({ name, passed: false, error: error.stack || String(error) });
       if (screenshotDir) await ui.page.screenshot({ path: path.join(screenshotDir, `${name}-failed.png`), fullPage: true, animations: "disabled" });
@@ -177,6 +183,7 @@ try {
     const previous = await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").length);
     await page.evaluate(() => window.__industryTest.refresh());
     await page.waitForFunction(previous => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").length > previous, previous);
+    await page.waitForFunction(() => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").at(-1).settled);
     await idle(page);
   }
   async function releaseRead(page, resource) {
@@ -187,6 +194,14 @@ try {
       delete state.pending[resource];
     }, resource);
     await page.waitForFunction(resource => window.__industryTest.calls.filter(call => call.kind === "readMarkdown" && call.resource === resource).every(call => call.settled), resource);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  }
+  async function leaveBoard(page) {
+    await page.evaluate(() => window.__industryTest.leave());
+    await page.getByRole("region", { name: "行业看板", exact: true }).waitFor({ state: "detached" });
+  }
+  async function releaseCatalog(page, index = 0) {
+    await page.evaluate(index => window.__industryTest.pendingRefresh.splice(index, 1)[0]?.(), index);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   }
   await scenario("all-industries-start-page-and-counts", async page => {
@@ -265,7 +280,7 @@ try {
   });
   await scenario("home-navigation-does-not-cancel-initial-catalog", async page => {
     await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 1);
-    await home(page);
+    await breadcrumb(page).getByRole("button", { name: "全行业总览", exact: true }).click();
     await page.evaluate(() => {
       const state = window.__industryTest; state.deferRefresh = false;
       for (const resolve of state.pendingRefresh.splice(0)) resolve();
@@ -505,6 +520,166 @@ try {
     assert.equal(await page.getByRole("button", { name: /^查看.+行业$/ }).count(), 0);
     assert.equal(await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "readMarkdown").length), 0);
   }, { mode: "empty-library" });
+  await scenario("cached-return-renders-before-background-catalog-settles", async page => {
+    assert.deepEqual(await page.evaluate(() => window.__industryTest.calls[0].options), { force: false });
+    await leaveBoard(page);
+    await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.deferRefresh = true; state.returnStarted = performance.now(); state.enter();
+    });
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 1);
+    assert.equal(await page.locator(".industry-overview-reader").getAttribute("aria-busy"), "false", "Known catalog remains interactive during background validation");
+    const pending = await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.metrics.returnCatalogMs = Math.round(performance.now() - state.returnStarted);
+      return state.calls.filter(call => call.kind === "refreshIndustryOverviews").at(-1);
+    });
+    assert.equal(pending.settled, false, "Cached cards render without waiting for the native bridge");
+    assert.deepEqual(pending.options, { force: false });
+    await enterSubdomain(page);
+    await releaseCatalog(page);
+    await page.getByRole("heading", { name: "AI 数据行业概况", exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "readMarkdown").length), 2,
+      "Background validation must not introduce duplicate reads or undo the new route");
+  });
+  await scenario("cold-catalog-latency-and-warm-return-latency", async page => {
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 1);
+    await page.evaluate(() => { window.__industryTest.coldStarted = performance.now(); });
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 250)));
+    assert.equal(await page.getByRole("button", { name: "查看AI行业", exact: true }).count(), 0);
+    await releaseCatalog(page);
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.metrics.coldCatalogWithInjected250msDelay = Math.round(performance.now() - state.coldStarted);
+    });
+    await leaveBoard(page);
+    await page.evaluate(() => { const state = window.__industryTest; state.warmStarted = performance.now(); state.enter(); });
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    await page.evaluate(() => {
+      const state = window.__industryTest; state.metrics.returnCatalogMs = Math.round(performance.now() - state.warmStarted);
+    });
+    assert.equal(await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").at(-1).settled), false);
+    await releaseCatalog(page);
+  }, { mode: "initial-catalog-delay" });
+  await scenario("background-failure-preserves-catalog-and-explicit-retry-forces", async page => {
+    await leaveBoard(page);
+    await page.evaluate(() => { const state = window.__industryTest; state.refreshFailure = true; state.enter(); });
+    await page.getByRole("alert").filter({ hasText: "已保留上次内容" }).waitFor();
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    await enterDomain(page);
+    await page.evaluate(() => { window.__industryTest.refreshFailure = false; });
+    await page.getByRole("button", { name: "重试", exact: true }).click();
+    await page.getByRole("alert").waitFor({ state: "detached" });
+    await idle(page);
+    assert.deepEqual(await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").at(-1).options), { force: true });
+    await page.getByRole("heading", { name: "AI行业概况", exact: true }).waitFor();
+    await home(page);
+    await refresh(page);
+    assert.deepEqual(await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").at(-1).options), { force: true });
+  });
+  await scenario("library-switch-hides-previous-catalog-news-and-empty-result-is-cached", async page => {
+    await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.entries = []; state.news = []; state.deferRefresh = true; state.selectLibrary("synthetic-library-empty");
+    });
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 1);
+    assert.equal(await page.getByRole("button", { name: /^查看.+行业$/ }).count(), 0, "A new library cannot show another library's project cards");
+    await releaseCatalog(page);
+    await page.getByText("当前资料库尚无行业资料。", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("region", { name: "近期行业动态", exact: true }).getByRole("link").count(), 0,
+      "Explicit empty catalog news cannot fall back to stale news props");
+    await leaveBoard(page);
+    await page.evaluate(() => window.__industryTest.enter());
+    await page.getByText("当前资料库尚无行业资料。", { exact: true }).waitFor();
+    assert.equal(await page.locator(".industry-overview-reader").getAttribute("aria-busy"), "false", "Empty successful catalogs are valid cache entries");
+    assert.equal(await page.getByRole("region", { name: "近期行业动态", exact: true }).getByRole("link").count(), 0);
+    await releaseCatalog(page);
+    await page.evaluate(() => window.__industryTest.selectLibrary("synthetic-library-a"));
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    assert.equal(await page.getByRole("region", { name: "近期行业动态", exact: true }).getByRole("link").count(), 4,
+      "Switching back restores only the original library's cached news");
+  });
+  await scenario("late-catalog-cannot-pollute-current-library-or-newer-cache", async page => {
+    await leaveBoard(page);
+    await page.evaluate(() => { const state = window.__industryTest; state.deferRefresh = true; state.enter(); });
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 1);
+    await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.entries = [{ domain: "合成新库", subdomain: "", projectCount: 8, title: "合成新库行业速览", path: "/synthetic/library-b/行业速览.md" }];
+      state.news = []; state.selectLibrary("synthetic-library-b");
+    });
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 2);
+    await releaseCatalog(page, 1);
+    await page.getByRole("button", { name: "查看合成新库行业", exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "查看AI行业", exact: true }).count(), 0);
+    await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.entries = [{ ...state.entries[0], domain: "合成更新库", path: "/synthetic/library-a-updated/行业速览.md" }];
+      state.selectLibrary("synthetic-library-a");
+    });
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 2);
+    await releaseCatalog(page, 1);
+    await page.getByRole("button", { name: "查看合成更新库行业", exact: true }).waitFor();
+    await releaseCatalog(page);
+    assert.equal(await page.getByRole("button", { name: "查看AI行业", exact: true }).count(), 0,
+      "The old library request cannot overwrite a newer result after returning");
+    await leaveBoard(page);
+    await page.evaluate(() => window.__industryTest.enter());
+    await page.getByRole("button", { name: "查看合成更新库行业", exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "查看AI行业", exact: true }).count(), 0,
+      "The renderer cache must reject the old response as well as the visible component");
+    await releaseCatalog(page);
+  });
+  await scenario("latest-explicit-refresh-wins-over-slower-background-result", async page => {
+    await leaveBoard(page);
+    await page.evaluate(() => { const state = window.__industryTest; state.deferRefresh = true; state.enter(); });
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 1);
+    await page.evaluate(() => { const state = window.__industryTest; state.entries = []; state.news = []; state.refresh(); });
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 2);
+    await releaseCatalog(page, 1);
+    await page.getByText("当前资料库尚无行业资料。", { exact: true }).waitFor();
+    await releaseCatalog(page);
+    assert.equal(await page.getByRole("button", { name: "查看AI行业", exact: true }).count(), 0);
+    await leaveBoard(page);
+    await page.evaluate(() => window.__industryTest.enter());
+    await page.getByText("当前资料库尚无行业资料。", { exact: true }).waitFor();
+    assert.equal(await page.locator(".industry-overview-reader").getAttribute("aria-busy"), "false");
+    await releaseCatalog(page);
+  });
+  await scenario("late-background-error-cannot-replace-newer-success", async page => {
+    await leaveBoard(page);
+    await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.refreshFailure = true; state.deferRefresh = true; state.enter();
+    });
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 1);
+    await page.evaluate(() => {
+      const state = window.__industryTest; state.refreshFailure = false; state.refresh();
+    });
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 2);
+    await releaseCatalog(page, 1);
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    await releaseCatalog(page);
+    assert.equal(await page.getByRole("alert").count(), 0, "Obsolete failures must not attach an error to the current catalog");
+    await enterDomain(page);
+    await page.getByRole("heading", { name: "研究依据", exact: true }).waitFor();
+  });
+  await scenario("cached-catalog-does-not-cache-human-edited-markdown", async page => {
+    await enterDomain(page);
+    await leaveBoard(page);
+    await page.evaluate(resource => {
+      const state = window.__industryTest;
+      state.docs[resource] += "\n\n## 刚修改的人工研究\n\n这段外部修改必须立即可见。\n";
+      state.deferRefresh = true; state.enter();
+    }, ai.path);
+    await enterDomain(page);
+    await page.getByRole("heading", { name: "刚修改的人工研究", exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").at(-1).settled), false,
+      "Opening fresh Markdown must not wait for background catalog validation");
+    await releaseCatalog(page);
+  });
   for (const width of [320, 390, 744]) await scenario(`narrow-${width}`, async page => {
     const homeDimensions = await page.evaluate(() => ({ viewport: innerWidth, page: document.documentElement.scrollWidth, body: document.body.scrollWidth }));
     assert(homeDimensions.page <= width + 1 && homeDimensions.body <= width + 1, "Home cards fit narrow windows: " + JSON.stringify(homeDimensions));
