@@ -284,10 +284,26 @@ body.panel-resizing .main-grid {
   margin-top: 9px;
 }
 
+.sidebar-scroll-content {
+  display: contents;
+}
+
+.sidebar-scroll-content.documents-open {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+}
+
 .sidebar-primary-nav.documents-open {
-  /* Keep all four 40px navigation rows visible; only the document tree shrinks. */
-  min-height: 160px;
-  flex: 0 1 auto;
+  /* Expanded sections scroll as a whole instead of squeezing the tree to zero. */
+  min-height: 0;
+  flex: 0 0 auto;
 }
 
 .sidebar-primary-nav > .sidebar-nav-item,
@@ -555,16 +571,14 @@ body.panel-resizing .main-grid {
 }
 
 .sidebar-document-section.open {
-  min-height: 40px;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
 }
 
 .sidebar-document-library {
   display: flex;
   min-width: 0;
   min-height: 0;
-  max-height: min(430px, 48vh);
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   flex-direction: column;
   overflow: hidden;
   margin: 1px 2px 7px 15px;
@@ -575,6 +589,7 @@ body.panel-resizing .main-grid {
 .sidebar-document-toolbar {
   display: flex;
   min-height: 28px;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 4px;
@@ -603,17 +618,20 @@ body.panel-resizing .main-grid {
 
 .sidebar-document-library .document-library-search {
   min-height: 31px;
+  flex: 0 0 auto;
   margin: 0 2px 6px;
   border-radius: 7px;
 }
 
 .sidebar-document-library .document-library-create {
   min-height: 33px;
+  flex: 0 0 auto;
   margin: 0 2px 6px;
 }
 
 .sidebar-document-library .document-library-root-row {
   min-height: 30px;
+  flex: 0 0 auto;
   margin: 0 1px 2px;
   padding-right: 6px;
   padding-left: 6px;
@@ -621,14 +639,15 @@ body.panel-resizing .main-grid {
 }
 
 .sidebar-document-library .document-library-tree {
-  min-height: 0;
-  max-height: min(318px, 34vh);
-  flex: 1 1 auto;
+  min-height: 116px;
+  max-height: clamp(116px, 28vh, 232px);
+  flex: 0 0 auto;
   overflow-x: auto;
   overflow-y: auto;
   overscroll-behavior-x: contain;
   padding: 1px 1px 7px;
   scrollbar-gutter: auto;
+  scroll-margin-block: 8px;
 }
 
 .sidebar-document-library .document-library-node-row {
@@ -680,6 +699,15 @@ body.panel-resizing .main-grid {
   overflow: hidden;
 }
 
+.sidebar-scroll-content.documents-open .sidebar-workflow-section {
+  flex: 0 0 auto;
+}
+
+.sidebar-scroll-content.documents-open .sidebar-thread-section {
+  min-height: 150px;
+  flex: 1 0 150px;
+}
+
 .thread-list {
   min-height: 0;
   flex: 1 1 auto;
@@ -717,6 +745,7 @@ body.panel-resizing .main-grid {
 }
 
 .thread-list::-webkit-scrollbar,
+.sidebar-scroll-content::-webkit-scrollbar,
 .sidebar-workflows::-webkit-scrollbar,
 .chat-scroll::-webkit-scrollbar,
 .right-panel::-webkit-scrollbar {
@@ -724,6 +753,7 @@ body.panel-resizing .main-grid {
 }
 
 .thread-list::-webkit-scrollbar-thumb,
+.sidebar-scroll-content::-webkit-scrollbar-thumb,
 .sidebar-workflows::-webkit-scrollbar-thumb,
 .chat-scroll::-webkit-scrollbar-thumb,
 .right-panel::-webkit-scrollbar-thumb {
@@ -732,6 +762,7 @@ body.panel-resizing .main-grid {
 }
 
 .thread-list::-webkit-scrollbar-track,
+.sidebar-scroll-content::-webkit-scrollbar-track,
 .sidebar-workflows::-webkit-scrollbar-track,
 .chat-scroll::-webkit-scrollbar-track,
 .right-panel::-webkit-scrollbar-track {

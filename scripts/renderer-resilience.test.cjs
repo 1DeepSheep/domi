@@ -735,17 +735,17 @@ assert.match(
 assert.match(
   app,
   /<nav className=\{`sidebar-primary-nav \$\{documentLibrarySidebarExpanded \? "documents-open" : ""\}`\}/,
-  "The navigation shrink boundary must follow the actual document tree state."
+  "The navigation layout must follow the actual document tree state."
 );
 assert.match(
   styles,
-  /\.sidebar-primary-nav\.documents-open \{[^}]*?min-height: 160px;[^}]*?flex: 0 1 auto;/,
-  "Expanded navigation can shrink its tree, but must preserve all four navigation rows."
+  /\.sidebar-scroll-content\.documents-open \{[^}]*?min-height: 0;[^}]*?overflow-y: auto;/,
+  "Expanded sidebar sections must remain reachable through outer scrolling when space is limited."
 );
 assert.match(
   styles,
-  /\.sidebar-document-section\.open \{[\s\S]*?flex: 1 1 auto;[\s\S]*?\.sidebar-document-library \{[\s\S]*?min-height: 0;[\s\S]*?flex: 1 1 auto;/,
-  "An expanded document library must consume only the available sidebar height."
+  /\.sidebar-primary-nav\.documents-open \{[^}]*?flex: 0 0 auto;/,
+  "An expanded document library must not shrink its tree away behind the toolbar."
 );
 assert.match(
   styles,

@@ -2786,6 +2786,16 @@ function App() {
   useEffect(() => {
     if (skillsExpanded) selectedSkillButtonRef.current?.scrollIntoView({ block: "nearest" });
   }, [skillsExpanded, selectedWorkflowId]);
+  useEffect(() => {
+    if (!documentLibrarySidebarExpanded) return;
+    const frame = window.requestAnimationFrame(() => {
+      const tree = documentLibraryTreeRef.current;
+      const library = tree?.closest(".sidebar-document-library");
+      if (document.activeElement?.matches("input, textarea") && library?.contains(document.activeElement)) return;
+      tree?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [documentLibrarySidebarExpanded]);
   const allWorkflows = useMemo(
     () => [...workflows, ...userSkillWorkflows],
     [userSkillWorkflows]
@@ -13823,6 +13833,7 @@ function App() {
           )}
         </div>
 
+        <div className={`sidebar-scroll-content ${documentLibrarySidebarExpanded ? "documents-open" : ""}`}>
         <nav className={`sidebar-primary-nav ${documentLibrarySidebarExpanded ? "documents-open" : ""}`} aria-label="工作台导航">
           <button
             className={`sidebar-nav-item ${workspaceView === "tasks" ? "active" : ""}`}
@@ -14100,6 +14111,8 @@ function App() {
               </div>
             )}
           </div>
+        </div>
+
         </div>
 
         {visibleUpdateEntry && (

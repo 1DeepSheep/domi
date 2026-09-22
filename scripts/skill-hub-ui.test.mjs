@@ -68,6 +68,15 @@ workbench.runCodex = async (request) => {
   state.runs.push(request);
   return { ok: true, runId: request.runId, output: "请告诉我这个 Skill 想完成什么任务；我们会通过对话逐步完善。", workspacePath: "/synthetic/workspace", eventCount: 0 };
 };
+const libraryRoot = "/synthetic/documents";
+const makeDocument = (name, parent = libraryRoot) => ({ name, path: parent + "/" + name, relativePath: name, kind: "markdown", size: 64, mtimeMs: 1 });
+const libraryNodes = [{ name: "合成文件夹", path: libraryRoot + "/合成文件夹", relativePath: "合成文件夹", kind: "folder",
+  children: [makeDocument("目录内纪要.md", libraryRoot + "/合成文件夹")] },
+  ...Array.from({ length: 36 }, (_, index) => makeDocument("合成文档 " + String(index + 1).padStart(2, "0") + ".md"))];
+workbench.listDocumentLibrary = async () => ({ ok: true, rootPath: libraryRoot, rootName: "合成资料库", nodes: libraryNodes,
+  documentCount: 37, folderCount: 1, truncated: false, scannedAt: Date.now() });
+workbench.readMarkdown = async ({resource}) => ({ ok: true, document: { path: resource, name: resource.split("/").pop(),
+  content: "# 合成文档正文\\n\\n目录中的文档可以正常打开。", mtimeMs: 1 } });
 workbench.reportRendererIssue = report => state.issues.push(report);
 const { default: App } = await import("/src/App");
 createRoot(document.getElementById("root")).render(<App />);
@@ -207,6 +216,53 @@ try {
     await page.waitForFunction(() => document.querySelector(".sidebar-document-section > .sidebar-nav-item").getAttribute("aria-expanded") === "false");
     await assertNavigationVisible(width, height, false);
   }
+
+  // Previously this suite opened an unavailable/empty library, so it never
+  // verified that real rows had a usable viewport below the search/root controls.
+  const documentLayouts = [];
+  for (const [width, height] of [[1440, 900], [1144, 768], [1120, 720], [960, 640], [960, 512], [960, 426]]) {
+    await page.setViewportSize({ width, height });
+    await documentsNav.click();
+    await page.waitForFunction(() => document.querySelector(".sidebar-document-section > .sidebar-nav-item").getAttribute("aria-expanded") === "true");
+    const tree = page.locator(".sidebar-document-library [role=tree]");
+    await tree.getByRole("treeitem", { name: "合成文档 01.md", exact: true }).waitFor();
+    const geometry = await tree.evaluate(element => {
+      const bounds = element.getBoundingClientRect();
+      let top = Math.max(0, bounds.top), bottom = Math.min(innerHeight, bounds.bottom);
+      for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+        if (/auto|scroll|hidden|clip/.test(getComputedStyle(parent).overflowY)) {
+          const rect = parent.getBoundingClientRect(); top = Math.max(top, rect.top); bottom = Math.min(bottom, rect.bottom);
+        }
+      }
+      const footer = document.querySelector(".codex-card").getBoundingClientRect();
+      return { height: bounds.height, visible: Math.max(0, bottom - top), scrollable: element.scrollHeight > element.clientHeight,
+        footerTop: footer.top, footerBottom: footer.bottom };
+    });
+    assert.ok(geometry.height >= 110 && geometry.visible >= 100, `Document tree must show several rows immediately at ${width}x${height}: ${JSON.stringify(geometry)}`);
+    assert.ok(geometry.scrollable, "Long document lists must retain their own scrollbar");
+    assert.ok(geometry.footerTop >= 0 && geometry.footerBottom <= height, "Codex settings remain visible while sidebar content scrolls");
+    const folder = tree.locator('[data-document-library-path="/synthetic/documents/合成文件夹"]');
+    if (await folder.getAttribute("aria-expanded") !== "true") await folder.click();
+    await tree.getByRole("treeitem", { name: "目录内纪要.md", exact: true }).waitFor();
+    await tree.hover(); await page.mouse.wheel(0, 10000);
+    await page.waitForFunction(() => {
+      const tree = document.querySelector(".sidebar-document-library [role=tree]");
+      return tree.scrollTop >= tree.scrollHeight - tree.clientHeight - 2;
+    });
+    const last = tree.getByRole("treeitem", { name: "合成文档 36.md", exact: true });
+    await last.click();
+    await page.locator(".document-library-content .markdown-title-button").getByText("合成文档 36.md", { exact: true }).waitFor();
+    await page.locator(".thread-section-heading").scrollIntoViewIfNeeded();
+    const recent = await page.locator(".thread-section-heading").boundingBox();
+    assert.ok(recent.y >= 0 && recent.y + recent.height <= height, "Recent conversations remain reachable by scrolling");
+    await manage.scrollIntoViewIfNeeded();
+    await manage.click(); await page.getByRole("dialog", { name: "管理 Skill Hub" }).waitFor();
+    await page.keyboard.press("Escape"); await page.getByRole("dialog").waitFor({ state: "hidden" });
+    await documentsNav.click();
+    await page.waitForFunction(() => document.querySelector(".sidebar-document-section > .sidebar-nav-item").getAttribute("aria-expanded") === "false");
+    documentLayouts.push({ width, height, treeHeight: Math.round(geometry.height), visible: Math.round(geometry.visible) });
+  }
+  console.log("Document sidebar geometry:", JSON.stringify(documentLayouts));
 
   await page.setViewportSize({ width: 1120, height: 720 });
   await toggle.click();
