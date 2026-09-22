@@ -216,8 +216,6 @@ test("DomiIntegration honors force and captures the currently configured library
   settings = { ...settings, localDatabasePath: second.source.localDatabasePath, localRepositoryDir: second.source.localLibraryDir };
   assert.equal(integration.refreshIndustryOverviews().projectCount, 2);
   assert.equal(integration.refreshIndustryOverviews().cached, true);
-  settings = { ...settings, storageBackend: "feishu", projectBaseToken: "test-base", projectTableId: "test-table", wikiSpaceId: "test-space" };
-  const remote = integration.refreshIndustryOverviews();
-  assert.equal(remote.ok, false);
-  assert.deepEqual(remote.entries, []);
+  settings = { ...settings, storageBackend: "feishu" };
+  assert.throws(() => integration.refreshIndustryOverviews(), /项目库连接尚未配置/);
 });
