@@ -3,6 +3,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowUpRight, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { workbench } from "./bridge";
+import { beginIndustryOverviewRequest, finishIndustryOverviewRequest, getIndustryOverviewSnapshot, saveIndustryOverviewSnapshot } from "./industry-overview-cache";
 import type { DomiNewsItem, IndustryOverviewEntry, MarkdownDocument } from "./env";
 
 function remarkSafeLineBreaks() {
@@ -48,22 +49,28 @@ const newsDate = (value: number | null) => value ? new Intl.DateTimeFormat("zh-C
   timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit"
 }).format(value) : "日期待核";
 
-export default function IndustryOverview({ refreshKey, news = [], onOpenAttachment }: {
+export default function IndustryOverview({ cacheKey, refreshKey, onOpenAttachment }: {
+  cacheKey: string;
   refreshKey: number;
-  news?: DomiNewsItem[];
   onOpenAttachment: (path: string) => void;
 }) {
-  const [entries, setEntries] = useState<IndustryOverviewEntry[]>([]);
-  const [projectCount, setProjectCount] = useState<number>();
+  const initialCatalog = useRef(getIndustryOverviewSnapshot(cacheKey));
+  const [entries, setEntries] = useState<IndustryOverviewEntry[]>(() => initialCatalog.current?.result.entries || []);
+  const [projectCount, setProjectCount] = useState<number | undefined>(() => initialCatalog.current?.result.projectCount);
+  const [catalogNews, setCatalogNews] = useState<DomiNewsItem[] | undefined>(() => initialCatalog.current?.result.news);
+  const [hasCatalog, setHasCatalog] = useState(Boolean(initialCatalog.current));
+  const [catalogLoading, setCatalogLoading] = useState(!initialCatalog.current);
+  const [catalogError, setCatalogError] = useState("");
   const [route, setRoute] = useState<BoardRoute>(HOME);
   const [page, setPage] = useState<MarkdownDocument | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState(() => initialCatalog.current?.result.conflicts?.length
+    ? `${initialCatalog.current.result.conflicts.length} 页有人工修改，已保留，待合并后再更新。` : "");
   const [retryKey, setRetryKey] = useState(0);
   const routeRef = useRef<BoardRoute>(HOME);
   const requestRef = useRef(0);
-  const catalogRequestRef = useRef(0);
+  const lastRefreshRef = useRef(refreshKey);
   const readerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef(new Map<string, number>());
   const failedRouteRef = useRef<BoardRoute | null>(null);
@@ -79,7 +86,7 @@ export default function IndustryOverview({ refreshKey, news = [], onOpenAttachme
       if (readerRef.current) readerRef.current.scrollTop = scrollRef.current.get(routeKey(next)) || 0;
     });
   }
-  async function readRoute(next: BoardRoute) {
+  async function readRoute(next: BoardRoute, retainDocument = false) {
     const request = ++requestRef.current;
     failedRouteRef.current = null;
     setError("");
@@ -87,7 +94,7 @@ export default function IndustryOverview({ refreshKey, news = [], onOpenAttachme
     setLoading(true);
     // Keep the industry breadcrumb available even if its document cannot be read.
     // Failed company/material reads retain the last readable page instead.
-    if (!next.detailPath) showRoute(next, null);
+    if (!next.detailPath && !retainDocument) showRoute(next, null);
     try {
       const result = await workbench.readMarkdown({ resource: next.detailPath || next.entry.path });
       if (request !== requestRef.current) return;
@@ -105,39 +112,48 @@ export default function IndustryOverview({ refreshKey, news = [], onOpenAttachme
   function navigate(next: BoardRoute) { rememberScroll(); void readRoute(next); }
 
   useEffect(() => {
-    const request = ++catalogRequestRef.current;
+    const request = beginIndustryOverviewRequest(cacheKey);
+    const snapshot = getIndustryOverviewSnapshot(cacheKey);
+    const force = retryKey > 0 || lastRefreshRef.current !== refreshKey || Boolean(snapshot && snapshot.refreshKey !== refreshKey);
+    lastRefreshRef.current = refreshKey;
     const pageRequestAtStart = requestRef.current;
     let disposed = false;
     rememberScroll();
-    setLoading(true);
-    setError("");
-    failedRouteRef.current = null;
+    setCatalogLoading(true);
+    setCatalogError("");
     void (async () => {
       try {
-        const result = await workbench.refreshIndustryOverviews();
-        if (disposed || request !== catalogRequestRef.current) return;
+        const result = await workbench.refreshIndustryOverviews({ force });
         if (!result.ok && !result.entries?.length) throw new Error(result.error || "行业看板暂时无法刷新。");
+        if (!saveIndustryOverviewSnapshot(cacheKey, request, { result, refreshKey }) || disposed) return;
         const available = result.entries || [];
         setEntries(available);
         setProjectCount(result.projectCount);
+        setCatalogNews(result.news);
+        setHasCatalog(true);
         const messages = [];
         if (result.conflicts?.length) messages.push(`${result.conflicts.length} 页有人工修改，已保留，待合并后再更新。`);
         setNotice(messages.join(" "));
-        // A fresh visit always starts at the all-industry board. Refresh only
-        // preserves a route chosen during this visit, never the old dropdown preference.
-        if (requestRef.current !== pageRequestAtStart) return;
+        // Background catalog validation must not start a competing document
+        // read or replace navigation the user performed while it was pending.
+        if (!force || requestRef.current !== pageRequestAtStart) return;
         const current = routeRef.current;
         const entry = available.find(item => item.path === current.entry?.path);
-        await readRoute(entry ? { ...current, entry } : HOME);
+        await readRoute(entry ? { ...current, entry } : HOME, true);
       } catch (cause) {
-        if (disposed || request !== catalogRequestRef.current) return;
-        setError(cause instanceof Error ? cause.message : "行业看板暂时无法刷新。");
-        setLoading(false);
+        if (disposed) return;
+        setCatalogError(cause instanceof Error ? cause.message : "行业看板暂时无法刷新。");
+      } finally {
+        finishIndustryOverviewRequest(cacheKey, request);
+        if (!disposed) setCatalogLoading(false);
       }
     })();
-    return () => { disposed = true; catalogRequestRef.current += 1; requestRef.current += 1; };
-  }, [refreshKey, retryKey]);
+    return () => { disposed = true; };
+  }, [cacheKey, refreshKey, retryKey]);
 
+  useEffect(() => () => { requestRef.current += 1; }, []);
+
+  const news = catalogNews ?? [];
   const entry = route.entry;
   const isDetail = Boolean(route.detailPath);
   const parent = entry?.subdomain ? entries.find(item => item.domain === entry.domain && !item.subdomain) : null;
@@ -205,14 +221,14 @@ export default function IndustryOverview({ refreshKey, news = [], onOpenAttachme
         <span><strong>{entries.filter(item => item.subdomain).length}</strong> 个子行业</span>
         {projectCount !== undefined && <span><strong>{projectCount}</strong> 个入库项目</span>}
       </div>}
-      {loading && <span role="status"><RefreshCw className="spinning" size={14} />正在读取</span>}
+      {(loading || catalogLoading) && <span role="status"><RefreshCw className="spinning" size={14} />{loading || !hasCatalog ? "正在读取" : "后台更新中"}</span>}
     </div>
     {error && <div className="industry-overview-notice" role="alert">{error} <button type="button" onClick={() => {
       if (failedRouteRef.current) void readRoute(failedRouteRef.current);
-      else setRetryKey(value => value + 1);
     }}>重试</button></div>}
+    {catalogError && <div className="industry-overview-notice" role="alert">{catalogError}{hasCatalog ? "，已保留上次内容。" : ""} <button type="button" onClick={() => setRetryKey(value => value + 1)}>重试</button></div>}
     {notice && <div className="industry-overview-notice">{notice}</div>}
-    <div className={`industry-overview-reader${!entry ? " industry-board-home" : ""}`} ref={readerRef} aria-busy={loading}>
+    <div className={`industry-overview-reader${!entry ? " industry-board-home" : ""}`} ref={readerRef} aria-busy={loading || (catalogLoading && !hasCatalog)}>
       {!entry ? <>
         <div className="industry-board-grid">
           {domains.map(domain => {
@@ -228,7 +244,7 @@ export default function IndustryOverview({ refreshKey, news = [], onOpenAttachme
             </button>;
           })}
         </div>
-        {!loading && !entries.length && !error && <p className="industry-board-empty">当前资料库尚无行业资料。</p>}
+        {hasCatalog && !entries.length && <p className="industry-board-empty">当前资料库尚无行业资料。</p>}
         {renderNews()}
       </> : isDetail ? <>
         <button className="industry-board-back" type="button" onClick={() => navigate({ entry })}><ChevronLeft size={16} />返回{entry.subdomain || entry.domain}</button>

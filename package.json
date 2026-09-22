@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "7.0.19",
+  "version": "7.0.20",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -55,7 +55,7 @@
     "test:message-followups-ui": "node scripts/message-followups-ui.test.mjs && node scripts/message-followup-app-ui.test.mjs",
     "test:onboarding": "node --test scripts/codex-network.test.cjs scripts/codex-onboarding.test.cjs scripts/application-installation.test.cjs scripts/diagnostic-report.test.cjs",
     "test:onboarding-ui": "node scripts/setup-onboarding-ui.test.mjs",
-    "test:industry-overview": "node --test scripts/industry-overview.test.cjs scripts/industry-overview-service.test.cjs && node scripts/industry-overview-ui.test.mjs",
+    "test:industry-overview": "node --test scripts/industry-overview.test.cjs scripts/industry-overview-service.test.cjs && node scripts/industry-overview-ui.test.mjs && node scripts/industry-overview-app-ui.test.mjs",
     "test:plaud-context": "node --test scripts/plaud-context.test.cjs scripts/plaud-recall-model.test.cjs",
     "test:plaud-context-ui": "node scripts/plaud-context-ui.test.mjs"
   },

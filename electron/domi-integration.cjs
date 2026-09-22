@@ -4936,12 +4936,19 @@ class DomiIntegration {
     });
   }
 
-  refreshIndustryOverviews() {
+  refreshIndustryOverviews(request = {}) {
     const source = this.readProjectConfig();
     if (source.backend !== "local") {
       return { ok: false, entries: [], error: "行业速览需要本地资料库；当前资料库保持不变。" };
     }
-    return this.withLocalRepository(source, (repository) => repository.refreshIndustryOverviews());
+    if (!this.industryOverviewCache) {
+      const { IndustryOverviewCache } = require("./industry-overview-service.cjs");
+      this.industryOverviewCache = new IndustryOverviewCache({
+        stateStore: this.stateStore,
+        refresh: capturedSource => this.withLocalRepository(capturedSource, repository => repository.refreshIndustryOverviews())
+      });
+    }
+    return this.industryOverviewCache.read(source, { force: request?.force === true });
   }
 
   databaseSnapshot() {
