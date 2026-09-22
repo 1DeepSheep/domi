@@ -34,6 +34,7 @@ if (mode === "provider") ready.account = null;
 const initialStatus = mode.startsWith("login") ? { ...ready, ok: false, connectionOk: false, account: null, requiresOpenaiAuth: true }
   : mode.startsWith("network") ? { ...ready, ok: false, connectionOk: false, error: "Synthetic network timeout" }
   : mode === "plugin" ? { ...ready, ok: false, pluginSetup: { ok: false, status: "missing", error: "Synthetic plugin missing" } }
+  : mode === "plugin-pending" ? { ...ready, ok: false, pluginSetup: { ok: false, status: "deferred", deferred: true, reason: "activation-pending", version: "7.0.13", bundledVersion: "7.0.14" } }
   : mode === "install" ? { ...ready, ok: false, connectionOk: false, path: "", account: null, requiresOpenaiAuth: true }
   : ready;
 state.settings = baseSettings; state.status = initialStatus; state.ready = ready;
@@ -69,6 +70,7 @@ function Harness() {
   const [status, setStatus] = useState(initialStatus);
   const [closed, setClosed] = useState(false);
   const [checking, setChecking] = useState(false);
+  state.finishPluginPreparation = () => { state.status = structuredClone(ready); setStatus(state.status); };
   const refresh = async (verified, readOnly = false) => {
     record(readOnly ? "readonly-check" : "check", { verified: Boolean(verified) });
     setChecking(true);
@@ -202,10 +204,26 @@ try {
     await ui.close();
   }
   {
-    const ui = await open("plugin"); await ui.page.getByText("Codex 已连接，domi 组件待准备", { exact: true }).waitFor();
+    const ui = await open("plugin"); await ui.page.getByText("Codex 已连接，domi 组件未就绪", { exact: true }).waitFor();
     await ui.page.getByRole("button", { name: "重新准备 domi 组件", exact: true }).click();
     await ui.page.getByText("已登录，可以开始使用", { exact: true }).waitFor();
     assert.equal((await ui.calls("login")).length, 0); await ui.close();
+  }
+  {
+    const ui = await open("plugin-pending");
+    await ui.page.getByText("Codex 已连接，正在准备 domi 组件", { exact: true }).waitFor();
+    await ui.page.getByText("账号连接正常，domi 正在自动准备组件，完成后即可使用。", { exact: true }).waitFor();
+    assert.equal(await ui.page.locator(".setup-feedback.error").count(), 0,
+      "A safely queued plugin upgrade must show progress instead of an installation error");
+    assert.equal((await ui.calls("login")).length, 0);
+    assert.equal((await ui.calls("full-test")).length, 0);
+    await ui.page.evaluate(() => window.__setupTest.finishPluginPreparation());
+    await ui.page.getByText("已登录，可以开始使用", { exact: true }).waitFor();
+    assert.equal((await ui.calls("check")).length, 0,
+      "A verified parent status update requires no extra manual preparation check");
+    assert.equal((await ui.calls("login")).length, 0);
+    assert.equal((await ui.calls("full-test")).length, 0);
+    await ui.close();
   }
   {
     const ui = await open("existing"); await ui.page.getByRole("button", { name: "资料连接", exact: true }).click();

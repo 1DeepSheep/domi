@@ -237,7 +237,7 @@ async function verifyActivationGate() {
     resolveCodexBinary: () => "codex", codexEnvironment: () => ({}),
     getDomiPluginActivationGate: () => gate,
     getDomiPluginManager: () => ({ checkInstalled: async () => {
-      assert.equal(gate.readers, 1, "busy check reads actual registry under a reader lease");
+      assert(gate.readers >= 1, "busy check reads actual registry under the full health-probe lease");
       return { ok: Boolean(current) && registered, status: registered ? "ready" : "missing" };
     } }),
     execFileAsync: async () => ({ stdout: "codex test" }),
@@ -254,7 +254,8 @@ async function verifyActivationGate() {
   const notReady = await context.runCodexCheck({});
   assert.equal(notReady.ok, false);
   assert.equal(notReady.pluginSetup.ok, false);
-  assert.match(notReady.error, /尚未安装/);
+  assert.match(notReady.error, /自动更新/);
+  assert.equal(notReady.pluginSetup.reason, "activation-pending");
   current = { manifest: { version: "0.3.20" } };
   const readyWithExisting = await context.runCodexCheck({});
   assert.equal(readyWithExisting.ok, true);
@@ -263,12 +264,14 @@ async function verifyActivationGate() {
   const filesWithoutRegistration = await context.runCodexCheck({});
   assert.equal(filesWithoutRegistration.ok, false, "source files alone do not prove plugin activation");
   assert.equal(filesWithoutRegistration.connectionOk, true);
-  assert.equal(filesWithoutRegistration.pluginSetup.status, "missing");
+  assert.equal(filesWithoutRegistration.pluginSetup.status, "deferred");
+  assert.equal(filesWithoutRegistration.pluginSetup.reason, "activation-pending");
   assert.equal(ensureCalls, 1, "busy connection checks do not install/remove plugins");
   assert.equal(resetCalls, 1);
   const realRun = main.slice(main.indexOf("async function runCodex(sender, payload)"), main.indexOf("async function stopCodex("));
   assert(realRun.indexOf("await getDomiPluginActivationGate().waitForActivation();") < realRun.indexOf("const client = getCodexClient();"));
-  assert.match(main, /isBusy: \(\) => updateRestartPreparing\s*\|\| !codexClientIdleForSkillReload\(activeRuns, startingCodexRunIds\)/);
+  assert.match(main, /isBusy: \(\) => updateRestartPreparing\s*\|\| applicationQuitFlushStarted\s*\|\| !codexClientIdleForSkillReload\(activeRuns, startingCodexRunIds\)/);
+  gate.dispose();
 }
 
 async function verifyRecoveryReaderLease() {
@@ -911,8 +914,11 @@ async function verifyLongPluginOperationLeases() {
     const context = {
       crypto: require("node:crypto"), DomiPluginActivationGate, domiPluginActivationGate: null,
       domiIntegration: integration, getDomiIntegration: () => integration,
-      updateRestartPreparing: false, activeRuns: new Map(), startingCodexRunIds: new Set(),
+      updateRestartPreparing: false, applicationQuitFlushStarted: false,
+      activeRuns: new Map(), startingCodexRunIds: new Set(),
       codexClientIdleForSkillReload: () => true, resetCodexClient() {},
+      codexCheckRuntimeKey: () => undefined, getCodexClient: () => ({ start: async () => {} }),
+      appendRuntimeLog() {}, BrowserWindow: { getAllWindows: () => [] },
       serviceCoordinator: new ServiceCoordinator(),
       ipcMain: { handle: (_name, callback) => { handler = callback; } },
       getDomiPluginManager: () => ({ installedInfo: () => ({ manifest: { version: "1.0.0" } }),
@@ -942,6 +948,9 @@ async function verifyLongPluginOperationLeases() {
       assert.equal(gate.pending, null, "An old long operation must not occupy activation's global pending slot");
       await within(gate.waitForActivation());
       assert.equal(mutationCount, 0, "Ordinary Codex preparation can proceed without waiting for old background work");
+      // Cancel this diagnostic request so each ordering below has an independent
+      // fixture. Automatic replay after release has its own upgrade regression.
+      gate.cancelDeferred();
       finishOperation.resolve();
       assert.equal((await within(existing)).ok, true);
       if (queuedBlock) await queuedBlock;
@@ -957,6 +966,7 @@ async function verifyLongPluginOperationLeases() {
         assert.equal((await gate.ensureWhenIdle({ enabled: true })).deferred, true,
           "isBusy protects internal long operations before an IPC lease exists");
         assert.equal(gate.pending, null);
+        gate.cancelDeferred();
         finishOperation.resolve(); await within(internal);
       }
 
@@ -984,7 +994,407 @@ async function verifyLongPluginOperationLeases() {
   }
 }
 
-Promise.all([verifyLongPluginOperationLeases(), verifyLocalPlaudCompletionLease(), verifyPlaudPluginActivationLease(), verifyBoundedRemoteStartup(), verifyActivationGate(), verifyRecoveryReaderLease(),
+async function verifyDeferredUpgradeAndReadback() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-deferred-plugin-upgrade-"));
+  const bundle = path.join(root, "bundle"), lock = path.join(root, "lock.json");
+  const registryPath = path.join(root, "registry.json"), behaviorPath = path.join(root, "behavior.json");
+  const commandLog = path.join(root, "commands.jsonl"), binary = path.join(root, "codex-fixture");
+  const writeBundle = version => {
+    fs.mkdirSync(path.join(bundle, ".codex-plugin"), { recursive: true });
+    fs.writeFileSync(path.join(bundle, ".codex-plugin/plugin.json"), JSON.stringify({ name: "domi", version }));
+    fs.writeFileSync(lock, JSON.stringify({ pluginVersion: version, gitCommit: version, sha256: version }));
+  };
+  const manager = new DomiPluginManager({ userDataPath: root, bundledPluginRoot: bundle,
+    bundledLockPath: lock, remoteUpdateEnabled: false });
+  const managed = version => ({ name: "domi", pluginId: "domi@domi-managed", enabled: true, version });
+  fs.writeFileSync(behaviorPath, "{}");
+  fs.writeFileSync(registryPath, JSON.stringify({ installed: [managed("7.0.13")],
+    marketplaces: [{ name: "domi-managed", root: manager.marketplaceRoot }] }));
+  fs.writeFileSync(binary, `#!${process.execPath}
+    const fs = require("node:fs"), path = require("node:path");
+    const registryPath = ${JSON.stringify(registryPath)}, behaviorPath = ${JSON.stringify(behaviorPath)};
+    const args = process.argv.slice(2), registry = JSON.parse(fs.readFileSync(registryPath));
+    const behavior = JSON.parse(fs.readFileSync(behaviorPath));
+    fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify(args) + "\\n");
+    let result = {};
+    if (args[1] === "marketplace") result = { marketplaces: registry.marketplaces };
+    else if (args[1] === "list") result = { installed: registry.installed };
+    else if (args[1] === "remove") registry.installed = registry.installed.filter(p => p.pluginId !== args[2]);
+    else if (args[1] === "add") {
+      const manifest = JSON.parse(fs.readFileSync(path.join(registry.marketplaces[0].root, "plugins/domi/.codex-plugin/plugin.json")));
+      if (manifest.version !== behavior.ignoreVersion) registry.installed = [{name:"domi",pluginId:"domi@domi-managed",enabled:true,version:manifest.version}];
+    } else process.exit(2);
+    fs.writeFileSync(registryPath, JSON.stringify(registry));
+    console.log(JSON.stringify(result));
+  `, { mode: 0o700 });
+  let finishReader, finishReset, settled;
+  const readerMayFinish = new Promise(resolve => { finishReader = resolve; });
+  const resetMayFinish = new Promise(resolve => { finishReset = resolve; });
+  const backgroundSettled = new Promise(resolve => { settled = resolve; });
+  const events = [];
+  const gate = new DomiPluginActivationGate({ isBusy: () => false,
+    installedInfo: () => manager.installedInfo(), ensure: request => manager.ensure(request),
+    onActivated: async () => { events.push("reset"); await resetMayFinish; },
+    onSettled: result => { events.push("settled"); settled(result); } });
+  const within = async promise => {
+    let timer;
+    try { return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Deferred plugin upgrade did not finish")), 5000);
+    })]); } finally { clearTimeout(timer); }
+  };
+  try {
+    writeBundle("7.0.13");
+    manager.writeManagedMarketplace(manager.bundledInfo());
+    writeBundle("7.0.14");
+    const reader = gate.withStableClient(async () => { await readerMayFinish; events.push("reader-finished"); });
+    const request = { binary, env: process.env, enabled: true };
+    assert.equal((await gate.ensureWhenIdle(request)).deferred, true);
+    assert.equal((await manager.checkInstalled(request)).reason, "plugin-outdated");
+    assert.equal(manager.installedInfo().manifest.version, "7.0.13");
+    finishReader(); await reader;
+    assert.ok(gate.pending, "Last reader release automatically claims activation without another user check");
+    const nextReader = gate.withStableClient(() => events.push("next-reader"));
+    // New reads queue behind the upgrade and its App Server reset.
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(events.includes("next-reader"), false);
+    finishReset();
+    const result = await within(backgroundSettled);
+    assert.equal(result.ok, true);
+    assert.equal(result.version, "7.0.14");
+    await within(nextReader);
+    assert.equal((await manager.checkInstalled(request)).status, "ready");
+    assert.equal(manager.installedInfo().manifest.version, "7.0.14");
+    assert(events.indexOf("reader-finished") < events.indexOf("reset"));
+    assert(events.indexOf("reset") < events.indexOf("next-reader"));
+    assert.equal(gate.deferredRequest, null);
+    assert.equal(gate.retryTimer, null);
+    const commands = fs.readFileSync(commandLog, "utf8").trim().split("\n").map(JSON.parse);
+    const addIndex = commands.findIndex(args => args[1] === "add");
+    assert.equal(commands[addIndex + 1][1], "list", "Successful CLI exit requires a real registry readback");
+
+    // A CLI that exits successfully without enabling the target version must
+    // never turn readiness green or commit the new source version.
+    writeBundle("7.0.15");
+    fs.writeFileSync(behaviorPath, JSON.stringify({ ignoreVersion: "7.0.15" }));
+    const failed = await manager.ensure(request);
+    assert.equal(failed.ok, false);
+    assert.equal(failed.diagnostic.code, "DOMI_PLUGIN_ACTIVATION_VERIFY_FAILED");
+    assert.equal(failed.diagnostic.stage, "plugin/verify");
+    assert.equal(manager.installedInfo().manifest.version, "7.0.14", "Failed activation rolls back source files");
+    assert.equal(JSON.parse(fs.readFileSync(registryPath)).installed[0].version, "7.0.14", "Rollback re-registers the previous version");
+    assert.equal(fs.existsSync(manager.transactionStatePath), false);
+  } finally {
+    gate.dispose(); finishReader(); finishReset();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function verifyDeferredIdleAndCancellation() {
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  let busy = true, currentRuntime = "first", calls = 0, settled = 0;
+  const gate = new DomiPluginActivationGate({ isBusy: () => busy,
+    installedInfo: () => ({ manifest: { version: "7.0.13" } }), retryDelayMs: 25,
+    isRequestCurrent: request => request.runtimeKey === currentRuntime,
+    ensure: async () => { calls++; return { ok: false, reason: "synthetic-permanent-failure" }; },
+    onActivated: () => assert.fail("Failed install must not reset"), onSettled: () => { settled++; } });
+  try {
+    await gate.ensureWhenIdle({ enabled: true, runtimeKey: "first" });
+    await sleep(60);
+    assert.equal(calls, 0, "Active model work must never be interrupted by automatic activation");
+    assert.equal(await gate.withStableClient(async () => "completion"), "completion",
+      "Reads needed to complete the active task must not deadlock behind its own upgrade");
+    busy = false;
+    await sleep(80);
+    assert.equal(calls, 1, "External busy state becoming idle automatically resumes installation");
+    assert.equal(settled, 1);
+    await sleep(60);
+    assert.equal(calls, 1, "A permanent failure is surfaced once and never creates a retry loop");
+
+    busy = true;
+    await gate.ensureWhenIdle({ enabled: true, runtimeKey: "first" });
+    currentRuntime = "changed"; busy = false;
+    await sleep(60);
+    assert.equal(calls, 1, "A queued request cannot replay stale account/runtime configuration");
+    assert.equal(gate.deferredRequest, null);
+
+    busy = true;
+    await gate.ensureWhenIdle({ enabled: true, runtimeKey: "changed" });
+    gate.cancelDeferred(); busy = false;
+    await sleep(60);
+    assert.equal(calls, 1);
+    busy = true;
+    await gate.ensureWhenIdle({ enabled: true, runtimeKey: "changed" });
+    gate.dispose(); busy = false;
+    await sleep(60);
+    assert.equal(calls, 1, "Shutdown cannot start a background installation");
+    assert.equal(gate.retryTimer, null);
+  } finally { gate.dispose(); }
+}
+
+async function verifyHealthProbeDuringDeferredUpgrade() {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const implementation = main.match(/async function runCodexCheck\([\s\S]*?\n\}\n/)[0];
+  let busy = true, upgraded = false, healthStarted, finishHealth, activationSettled;
+  const healthEntered = new Promise(resolve => { healthStarted = resolve; });
+  const healthMayFinish = new Promise(resolve => { finishHealth = resolve; });
+  const backgroundFinished = new Promise(resolve => { activationSettled = resolve; });
+  const events = [];
+  const gate = new DomiPluginActivationGate({ isBusy: () => busy,
+    installedInfo: () => ({ manifest: { version: upgraded ? "7.0.14" : "7.0.13" } }),
+    ensure: async () => { events.push("install"); upgraded = true; return { ok: true, updated: true }; },
+    onActivated: () => events.push("reset"), onSettled: activationSettled });
+  const client = { initialized: true, child: { killed: false }, intentionalClose: false,
+    request: async method => {
+      healthStarted(); await healthMayFinish; events.push(`health:${method}`);
+      return method === "account/read" ? { account: { type: "chatgpt" }, requiresOpenaiAuth: false }
+        : method === "model/list" ? { data: [] } : { config: {} };
+    } };
+  const context = {
+    process: { env: {} }, app: { isPackaged: true },
+    codexCheckRuntimeKey: () => "test-runtime", codexCheckGeneration: 0,
+    // Match networkFingerprint so this test isolates plugin activation.
+    codexClient: client, codexNetworkDiagnostic: { ok: true, status: "direct" },
+    codexCheckFailureDetails, pluginCheckFailure,
+    ensureDemoWorkspace() {}, ensureCodexRuntimeReady: async () => {},
+    throwIfCodexCheckAborted() {}, codexCheckTimeout: (_deadline, maximum) => maximum,
+    getAppSettings: () => ({ load: () => ({ settings: { codexPath: "codex" } }) }),
+    getCodexRuntime: () => ({ authMode: "chatgpt", codexPath: "codex", env: {} }),
+    getPreparedCodexRuntime: async () => ({ authMode: "chatgpt", codexPath: "codex", env: {} }),
+    resolveCodexBinary: () => "codex", codexEnvironment: () => ({}),
+    getDomiPluginActivationGate: () => gate,
+    getDomiPluginManager: () => ({ checkInstalled: async () => ({
+      ok: upgraded, status: upgraded ? "ready" : "missing",
+      reason: upgraded ? "installed-verified" : "plugin-outdated", version: upgraded ? "7.0.14" : "7.0.13"
+    }) }),
+    execFileAsync: async () => ({ stdout: "codex test" }),
+    CODEX_VERSION_CHECK_TIMEOUT_MS: 100, CODEX_HEALTH_REQUEST_TIMEOUT_MS: 100,
+    demoWorkspace: "/isolated-test-workspace", appendRuntimeLog() {},
+    isSelectedCodexConnectionReady: () => true,
+    resetCodexClient: () => assert.fail("Connection check cannot reset outside activation"),
+    getCodexClient: () => client
+  };
+  vm.createContext(context); vm.runInContext(implementation, context);
+  try {
+    const checking = context.runCodexCheck({});
+    await healthEntered;
+    busy = false; gate.resumeDeferred();
+    assert.equal(upgraded, false, "Transport health requests retain the read lease after registry verification");
+    assert.equal(events.includes("reset"), false);
+    finishHealth();
+    const first = await checking;
+    assert.equal(first.connectionOk, true);
+    assert.equal(first.pluginSetup.reason, "activation-pending");
+    assert.equal((await backgroundFinished).ok, true);
+    const lastHealth = Math.max(...events.map((event, index) => event.startsWith("health:") ? index : -1));
+    assert(lastHealth < events.indexOf("install"), "All health requests finish before automatic mutation/reset");
+    assert.equal((await context.runCodexCheck({ readOnly: true })).ok, true,
+      "The automatic activation result can be confirmed by a read-only UI refresh");
+  } finally { finishHealth(); gate.dispose(); }
+}
+
+async function verifyMainAutomaticActivationWiring() {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const functions = ["getDomiPluginActivationGate", "resetCodexClient", "runCodexCheck"].map(name =>
+    main.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n\\}\\n`))[0]).join("\n");
+  const events = [], invalidated = [], notifications = [], logs = [];
+  let registryVersion = "7.0.13", runtimeKey = "original-runtime", allowStart, startFailures = 1;
+  const startMayComplete = new Promise(resolve => { allowStart = resolve; });
+  const response = method => method === "account/read" ? { account: { type: "chatgpt" }, requiresOpenaiAuth: false }
+    : method === "model/list" ? { data: [] } : { config: {} };
+  const oldClient = { initialized: true, child: { killed: false }, intentionalClose: false,
+    request: async method => response(method), close: () => { events.push("old-close"); } };
+  const activeRuns = new Map([["existing-task", {}]]);
+  const context = {
+    process: { env: {} }, app: { isPackaged: true }, DomiPluginActivationGate,
+    domiPluginActivationGate: null, domiIntegration: null, updateRestartPreparing: false,
+    applicationQuitFlushStarted: false, activeRuns, startingCodexRunIds: new Set(),
+    codexClientIdleForSkillReload: runs => runs.size === 0,
+    codexNetworkReloadPending: false, codexCheckGeneration: 0,
+    liveCodexThreads: new Map(), codexThreadTurnIds: new Map(), resolvedCodexUserInputs: new Map(),
+    codexCheckRuntimeKey: () => runtimeKey, codexClient: oldClient,
+    codexNetworkDiagnostic: { ok: true, status: "direct" }, codexCheckFailureDetails, pluginCheckFailure,
+    serviceCoordinator: { invalidate: key => invalidated.push(key) },
+    BrowserWindow: { getAllWindows: () => [
+      { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (...args) => notifications.push(args) } },
+      { isDestroyed: () => true, webContents: { isDestroyed: () => true, send: () => assert.fail("Destroyed window") } }
+    ] },
+    appendRuntimeLog: (...args) => logs.push(args),
+    getDomiPluginManager: () => ({
+      installedInfo: () => ({ manifest: { version: registryVersion } }),
+      ensure: async request => {
+        assert.equal(request.runtimeKey, runtimeKey); events.push("install"); registryVersion = "7.0.14";
+        return { ok: true, updated: true, version: registryVersion, env: { secret: "must-not-be-published" } };
+      },
+      checkInstalled: async () => ({ ok: registryVersion === "7.0.14", updated: false,
+        status: registryVersion === "7.0.14" ? "ready" : "missing",
+        reason: registryVersion === "7.0.14" ? "installed-verified" : "plugin-outdated", version: registryVersion })
+    }),
+    getCodexClient: () => {
+      if (!context.codexClient) context.codexClient = {
+        initialized: false, child: null, intentionalClose: false,
+        start: async () => {
+          events.push("new-start");
+          if (startFailures-- > 0) throw new Error("Synthetic local handshake failure");
+          await startMayComplete;
+          context.codexClient.initialized = true; context.codexClient.child = { killed: false };
+          events.push("new-initialized");
+        },
+        request: async method => { assert.equal(context.codexClient.initialized, true); return response(method); },
+        close: () => events.push("new-close")
+      };
+      return context.codexClient;
+    },
+    ensureDemoWorkspace() {}, ensureCodexRuntimeReady: async () => {}, throwIfCodexCheckAborted() {},
+    codexCheckTimeout: (_deadline, maximum) => maximum,
+    getAppSettings: () => ({ load: () => ({ settings: { codexPath: "codex" } }) }),
+    getCodexRuntime: () => ({ authMode: "chatgpt", codexPath: "codex", env: {} }),
+    getPreparedCodexRuntime: async () => ({ authMode: "chatgpt", codexPath: "codex", env: {} }),
+    resolveCodexBinary: () => "codex", codexEnvironment: () => ({}),
+    execFileAsync: async () => ({ stdout: "codex test" }),
+    CODEX_VERSION_CHECK_TIMEOUT_MS: 100, CODEX_HEALTH_REQUEST_TIMEOUT_MS: 100,
+    demoWorkspace: "/isolated-test-workspace", isSelectedCodexConnectionReady: () => true
+  };
+  vm.createContext(context); vm.runInContext(functions, context);
+  const gate = context.getDomiPluginActivationGate();
+  try {
+    const first = await context.runCodexCheck({});
+    assert.equal(first.connectionOk, true);
+    assert.equal(first.ok, false);
+    assert.equal(first.pluginSetup.reason, "activation-pending");
+    assert.equal(events.length, 0, "No activation/reset while the model is busy");
+    activeRuns.clear(); gate.resumeDeferred();
+    const background = gate.pending;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events, ["install", "old-close", "new-start", "new-start"],
+      "A failed local handshake is retried once before announcing readiness");
+    assert.equal(notifications.length, 0, "Do not announce ready before the replacement transport starts");
+    assert.equal(context.codexCheckGeneration, 1);
+    let readFinished = false;
+    const recheck = context.runCodexCheck({ readOnly: true }).then(result => { readFinished = true; return result; });
+    await Promise.resolve();
+    assert.equal(readFinished, false, "A read-only observer waits for activation and new transport initialization");
+    allowStart(); await background;
+    const refreshed = await recheck;
+    assert.equal(refreshed.ok, true);
+    assert.equal(refreshed.pluginSetup.version, "7.0.14");
+    assert.equal(context.codexClient.initialized, true);
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0][0], "codex:plugin-state");
+    assert.deepEqual(JSON.parse(JSON.stringify(notifications[0][1])), {
+      ok: true, updated: true, status: "ready", reason: "", version: "7.0.14"
+    });
+    assert(invalidated.includes("codex:check"));
+    assert(invalidated.includes("domi:status"));
+    assert.equal(logs.filter(([event]) => event === "domi-plugin-activation").length, 1);
+    assert.equal(logs.filter(([event]) => event === "domi-plugin-transport-retry").length, 1);
+    assert.doesNotMatch(JSON.stringify([notifications, logs]), /must-not-be-published/);
+
+    // The actual main factory discards a queued request from a replaced
+    // connection before it can install, reset or notify the new account.
+    activeRuns.set("next-task", {});
+    await gate.ensureWhenIdle({ enabled: true, runtimeKey });
+    const queuedBeforeReset = gate.deferredRequest;
+    context.resetCodexClient();
+    assert.equal(gate.deferredRequest, queuedBeforeReset,
+      "A same-runtime skill/network reset cannot discard the queued upgrade");
+    runtimeKey = "replacement-runtime"; activeRuns.clear(); gate.resumeDeferred();
+    assert.equal(gate.deferredRequest, null);
+    assert.equal(events.filter(event => event === "install").length, 1);
+    assert.equal(notifications.length, 1);
+
+    // Exercise the actual main hook during accepted quit/update. It may close
+    // the old client but must not start a new process or notify an exiting UI.
+    const startCount = events.filter(event => event === "new-start").length;
+    context.applicationQuitFlushStarted = true;
+    assert.equal((await gate.ensureWhenIdle({ enabled: true, runtimeKey })).deferred, true);
+    await gate.onActivated();
+    gate.onSettled({ ok: true, updated: true, version: "7.0.14" }, { runtimeKey });
+    assert.equal(events.filter(event => event === "new-start").length, startCount);
+    assert.equal(notifications.length, 1);
+    gate.cancelDeferred();
+    context.applicationQuitFlushStarted = false; context.updateRestartPreparing = true;
+    assert.equal((await gate.ensureWhenIdle({ enabled: true, runtimeKey })).deferred, true);
+    await gate.onActivated();
+    gate.onSettled({ ok: true, updated: true, version: "7.0.14" }, { runtimeKey });
+    assert.equal(events.filter(event => event === "new-start").length, startCount);
+    assert.equal(notifications.length, 1);
+  } finally { allowStart(); gate.dispose(); }
+}
+
+async function verifyMainShutdownActivationDrain() {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const registration = main.match(/app\.on\("before-quit", \(event\) => \{[\s\S]*?\n\}\);/)[0];
+  for (const rejectActivation of [false, true]) {
+    const events = [], logs = [];
+    let quitHandler, finishActivation, failActivation, didQuit;
+    const pending = new Promise((resolve, reject) => { finishActivation = resolve; failActivation = reject; });
+    const quitFinished = new Promise(resolve => { didQuit = resolve; });
+    const context = {
+      app: { on: (_event, handler) => { quitHandler = handler; }, quit: () => { events.push("quit"); didQuit(); } },
+      appendRuntimeLog: (...args) => logs.push(args), codexCheckFailureDetails,
+      applicationQuitFlushComplete: false, applicationQuitFlushStarted: false, activeRuns: new Map(),
+      BrowserWindow: { getAllWindows: () => [] },
+      dialog: { showMessageBox: () => assert.fail("No live tasks or unsaved renderer") },
+      requestRendererFlush: () => assert.fail("No renderer"), drainRunPostProcessing: async () => 0,
+      domiPluginActivationGate: { pending, dispose: () => events.push("dispose") },
+      plaudRecallService: { close: () => events.push("recall-close") },
+      domiIntegration: { shutdownAllPlaudOperations: async () => events.push("plaud-close") },
+      documentSearchService: { close: async () => events.push("documents-close") },
+      updateService: { stop: () => events.push("updates-stop") },
+      codexClient: { close: () => events.push("codex-close") },
+      stateStore: { close: () => events.push("state-close") }
+    };
+    vm.createContext(context); vm.runInContext(registration, context);
+    quitHandler({ preventDefault: () => events.push("prevent") });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(context.applicationQuitFlushStarted, true);
+    assert.deepEqual(events, ["prevent", "dispose"]);
+    events.push("activation-drained");
+    if (rejectActivation) failActivation(new Error("Synthetic completed rollback")); else finishActivation({ ok: true });
+    await quitFinished;
+    assert.deepEqual(events, ["prevent", "dispose", "activation-drained", "recall-close", "plaud-close",
+      "documents-close", "updates-stop", "codex-close", "state-close", "quit"]);
+    assert.equal(context.applicationQuitFlushComplete, true);
+    assert.equal(logs.filter(([event]) => event === "domi-plugin-shutdown-drain").length, Number(rejectActivation));
+  }
+
+  // A canceled quit must retain the live gate and its valid deferred request.
+  for (const reason of ["user-cancel", "flush-failed"]) {
+    let quitHandler, dialogs = 0;
+    const context = {
+      app: { on: (_event, handler) => { quitHandler = handler; }, quit: () => assert.fail("Quit was canceled") },
+      appendRuntimeLog() {}, applicationQuitFlushComplete: false, applicationQuitFlushStarted: false,
+      activeRuns: reason === "user-cancel" ? new Map([["running", {}]]) : new Map(),
+      BrowserWindow: { getAllWindows: () => [{ isDestroyed: () => false }] },
+      dialog: { showMessageBox: async () => { dialogs++; return { response: 0 }; } },
+      requestRendererFlush: async () => ({ ok: false, error: "Synthetic unsaved work" }),
+      drainRunPostProcessing: () => assert.fail("Quit not accepted"),
+      domiPluginActivationGate: { dispose: () => assert.fail("Canceling quit must not dispose the live gate") }
+    };
+    vm.createContext(context); vm.runInContext(registration, context);
+    quitHandler({ preventDefault() {} });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(dialogs, 1);
+    assert.equal(context.applicationQuitFlushStarted, false);
+  }
+
+  // The update-specific will-quit path bypasses ordinary before-quit flushing.
+  const updateClose = main.match(/const closeUpdateResources = \(\) => \{[\s\S]*?\n      \};/)[0];
+  const closed = [];
+  const updateContext = {
+    updateInstallFailureHandler: () => {}, installQuitWatchdog: null, clearTimeout,
+    updateService: { stop: () => closed.push("updates") },
+    domiPluginActivationGate: { dispose: () => closed.push("gate") },
+    codexClient: { close: () => closed.push("codex") }, stateStore: { close: () => closed.push("state") },
+    appendRuntimeLog() {}, boundedRuntimeText: text => text
+  };
+  vm.createContext(updateContext); vm.runInContext(`${updateClose}\ncloseUpdateResources();`, updateContext);
+  assert(closed.includes("gate"));
+  assert(closed.indexOf("gate") < closed.indexOf("codex"));
+  assert(closed.indexOf("gate") < closed.indexOf("state"));
+}
+
+Promise.all([verifyMainShutdownActivationDrain(), verifyMainAutomaticActivationWiring(), verifyHealthProbeDuringDeferredUpgrade(), verifyDeferredUpgradeAndReadback(), verifyDeferredIdleAndCancellation(), verifyLongPluginOperationLeases(), verifyLocalPlaudCompletionLease(), verifyPlaudPluginActivationLease(), verifyBoundedRemoteStartup(), verifyActivationGate(), verifyRecoveryReaderLease(),
   verifyReadOnlyInstalledCheck(), verifyReadinessDiagnostics()])
   .then(() => console.log("domi plugin manager tests passed."))
   .catch((error) => {

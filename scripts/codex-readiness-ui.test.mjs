@@ -26,7 +26,7 @@ import "@fontsource-variable/newsreader/standard.css";
 // expose it as the synthetic native bridge before App imports the real bridge.
 const fallback = (await import("/src/bridge?readiness-fixture-fallback")).workbench;
 const state = window.__readinessTest = {
-  calls: [], plans: [{ hold: true }], pending: [], issues: [], listeners: [],
+  calls: [], plans: [{ hold: true }], pending: [], issues: [], listeners: [], pluginListeners: [],
   mode: new URL(location.href).searchParams.get("mode") || "default"
 };
 const settings = { ...(await fallback.loadSettings()).settings,
@@ -75,6 +75,7 @@ const workbench = window.workbench = { ...fallback,
     if (plan.hold) return new Promise(resolve => state.pending.push(resolve));
     return structuredClone(plan.result || ready);
   },
+  onDomiPluginState: listener => { state.pluginListeners.push(listener); return () => { state.pluginListeners = state.pluginListeners.filter(item => item !== listener); }; },
   onCodexEvent: listener => { state.listeners.push(listener); return () => { state.listeners = state.listeners.filter(item => item !== listener); }; },
   runCodex: async request => {
     state.calls.push({ kind: "run", request });
@@ -89,6 +90,7 @@ const workbench = window.workbench = { ...fallback,
   getCodexRuntimeStatus: async () => ({ ok: true, managed: true, path: "/synthetic/codex", version: "synthetic", bundledVersion: "synthetic", rollbackAvailable: false })
 };
 state.emit = event => state.listeners.forEach(listener => listener(event));
+state.emitPlugin = event => state.pluginListeners.forEach(listener => listener(event));
 const { default: App } = await import("/src/App");
 createRoot(document.getElementById("root")).render(<App />);
 `;
@@ -159,6 +161,33 @@ try {
     await ui.context.close();
   }
 
+  // A queued upgrade completes without a click, but its event alone cannot
+  // enable submissions or advertise a version not yet checked in the registry.
+  {
+    const ui = await open("plugin-version", { nativeTimers: true });
+    await ui.release({ ok: false, connectionOk: true, pluginSetup: { ok: false,
+      status: "deferred", deferred: true, reason: "active-tasks", version: "7.0.10", bundledVersion: "7.0.11" } });
+    await ui.status.getByText("正在准备 domi 组件", { exact: true }).waitFor();
+    assert.equal(await ui.status.locator(".status-dot.neutral").count(), 1);
+    await ui.page.getByRole("textbox", { name: "输入投资任务", exact: true }).fill("Synthetic pending plugin instruction");
+    assert.equal(await ui.page.locator(".send-button").isDisabled(), true);
+    await ui.plan({ hold: true });
+    await ui.page.evaluate(() => window.__readinessTest.emitPlugin({ ok: true, updated: true, version: "7.0.11" }));
+    await ui.waitCount("check", 2);
+    assert.equal(await ui.page.locator(".send-button").isDisabled(), true);
+    await ui.release({ pluginSetup: { ok: true, status: "ready", version: "7.0.11" } });
+    await ui.status.getByText("Codex 已就绪", { exact: true }).waitFor();
+    const pluginHealth = ui.page.locator(".domi-health-list > div").filter({ has: ui.page.getByText("插件", { exact: true }) }).locator("strong");
+    assert.equal(await pluginHealth.innerText(), "v7.0.11");
+    assert.equal(await ui.page.locator(".send-button").isDisabled(), false);
+    const lastProbe = await ui.page.evaluate(() => window.__readinessTest.calls.filter(call => call.kind === "check").at(-1));
+    assert.deepEqual(lastProbe.options, { readOnly: true, force: true });
+    assert.equal(await ui.count("run"), 0);
+    assert.equal(await ui.count("full-test"), 0);
+    assert.deepEqual(ui.errors, []);
+    await ui.context.close();
+  }
+
   // Run the actual browser timer path once, without Playwright's clock. A
   // fake timer accepts arbitrary receivers and cannot catch Window timer APIs
   // accidentally invoked as methods of the readiness controller.
@@ -187,8 +216,8 @@ try {
     const missing = { ...pluginFailure, pluginSetup: { ...pluginFailure.pluginSetup, status: "missing" } };
     await ui.release(missing);
     await ui.status.getByText("Codex 已连接", { exact: true }).waitFor();
-    assert.match(await ui.status.innerText(), /domi 插件待检查/);
-    assert.doesNotMatch(await ui.status.innerText(), /Command failed|\/private|未就绪/);
+    assert.match(await ui.status.innerText(), /domi 组件未就绪/);
+    assert.doesNotMatch(await ui.status.innerText(), /Command failed|\/private|Codex 未就绪/);
     assert.equal(await ui.status.locator(".status-dot.warning").count(), 1);
     if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, "plugin-warning-sidebar.png"), fullPage: true, animations: "disabled" });
     const model = page.getByRole("button", { name: "选择模型、推理强度和速度", exact: true });
@@ -209,7 +238,7 @@ try {
     await page.clock.fastForward(20_000);
     assert.equal(await ui.count("check"), 1, "Unknown run IDs cannot establish readiness or trigger recovery");
     const dialog = await ui.setup();
-    assert.match(await dialog.innerText(), /Codex 已连接，domi 组件待准备/);
+    assert.match(await dialog.innerText(), /Codex 已连接，domi 组件未就绪/);
     assert.match(await dialog.innerText(), /账号连接正常[\s\S]*无需重新登录/);
     assert.equal(await dialog.getByRole("button", { name: "重新准备 domi 组件", exact: true }).isEnabled(), true);
     assert.doesNotMatch(await dialog.innerText(), /Command failed|\/private\/synthetic/);

@@ -164,6 +164,7 @@ declare global {
       ) => Promise<DomiEntityWorkspaceResult>;
       loadDomiEntityMaterials: (request: DomiEntityMaterialsRequest) => Promise<DomiEntityMaterialsResult>;
       onCodexEvent: (callback: (payload: CodexEventPayload) => void) => () => void;
+      onDomiPluginState: (callback: (state: DomiPluginState) => void) => () => void;
       onUpdateStatus: (callback: (status: UpdateStatus) => void) => () => void;
     };
   }
@@ -1532,6 +1533,14 @@ export type DomiEntityMaterialsResult = {
   error?: string;
 };
 
+export type DomiPluginState = {
+  ok: boolean;
+  updated?: boolean;
+  status?: string;
+  reason?: string;
+  version?: string;
+};
+
 export type CodexCheckResult = {
   ok: boolean;
   connectionOk?: boolean;
@@ -1555,6 +1564,7 @@ export type CodexCheckResult = {
     reason?: string;
     updated?: boolean;
     skipped?: boolean;
+    deferred?: boolean;
     pluginId?: string;
     version?: string;
     bundledVersion?: string;

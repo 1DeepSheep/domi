@@ -2,6 +2,11 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("workbench", {
   checkCodex: (options) => ipcRenderer.invoke("codex:check", options),
+  onDomiPluginState: (callback) => {
+    const handler = (_event, state) => callback(state);
+    ipcRenderer.on("codex:plugin-state", handler);
+    return () => ipcRenderer.removeListener("codex:plugin-state", handler);
+  },
   loadSettings: () => ipcRenderer.invoke("settings:load"),
   saveSettings: (request) => ipcRenderer.invoke("settings:save", request),
   selectDirectory: (currentPath) => ipcRenderer.invoke("settings:select-directory", currentPath),

@@ -3323,7 +3323,13 @@ function App() {
 
   useEffect(() => {
     codexReadinessController.activate();
-    return () => codexReadinessController.dispose();
+    // Deferred upgrades finish independently after repository/PLAUD readers
+    // release their leases. Verify the actual registry before enabling tasks.
+    const unsubscribe = workbench.onDomiPluginState?.(() => codexReadinessController.observePluginState());
+    return () => {
+      unsubscribe?.();
+      codexReadinessController.dispose();
+    };
   }, []);
 
   useEffect(() => {
