@@ -188,10 +188,12 @@ export default function IndustryOverview({ refreshKey, news = [], onOpenAttachme
     </section>;
   }
 
+  const homeButton = <button type="button" aria-current={!entry ? "page" : undefined} onClick={() => navigate(HOME)}>全行业总览</button>;
+
   return <section className="industry-overview-workspace" aria-label="行业看板">
-    <div className="industry-overview-toolbar">
+    <div className={`industry-overview-toolbar${!entry ? " industry-board-home-toolbar" : ""}`}>
       <nav aria-label="行业浏览路径" className="industry-board-breadcrumb">
-        <button type="button" aria-current={!entry ? "page" : undefined} onClick={() => navigate(HOME)}>全行业总览</button>
+        {!entry ? <h1>{homeButton}</h1> : homeButton}
         {entry && <><ChevronRight size={14} aria-hidden="true" />
           <button type="button" aria-current={!entry.subdomain && !isDetail ? "page" : undefined}
             onClick={() => navigate({ entry: parent || entry })}>{entry.domain || "未分类"}</button></>}
@@ -199,6 +201,10 @@ export default function IndustryOverview({ refreshKey, news = [], onOpenAttachme
           <button type="button" aria-current={!isDetail ? "page" : undefined} onClick={() => navigate({ entry })}>{entry.subdomain}</button></>}
         {isDetail && <><ChevronRight size={14} aria-hidden="true" /><span aria-current="page">项目资料</span></>}
       </nav>
+      {!entry && <div className="industry-board-stats"><span><strong>{domains.length}</strong> 个行业</span>
+        <span><strong>{entries.filter(item => item.subdomain).length}</strong> 个子行业</span>
+        {projectCount !== undefined && <span><strong>{projectCount}</strong> 个入库项目</span>}
+      </div>}
       {loading && <span role="status"><RefreshCw className="spinning" size={14} />正在读取</span>}
     </div>
     {error && <div className="industry-overview-notice" role="alert">{error} <button type="button" onClick={() => {
@@ -206,27 +212,19 @@ export default function IndustryOverview({ refreshKey, news = [], onOpenAttachme
       else setRetryKey(value => value + 1);
     }}>重试</button></div>}
     {notice && <div className="industry-overview-notice">{notice}</div>}
-    <div className="industry-overview-reader" ref={readerRef} aria-busy={loading}>
+    <div className={`industry-overview-reader${!entry ? " industry-board-home" : ""}`} ref={readerRef} aria-busy={loading}>
       {!entry ? <>
-        <header className="industry-board-heading">
-          <p className="industry-board-eyebrow">行业看板</p>
-          <h1>全行业总览</h1>
-          <p>先看行业全貌，再逐层了解细分方向、近期动态和重点项目。</p>
-          <div className="industry-board-stats"><span><strong>{domains.length}</strong> 个行业</span>
-            <span><strong>{entries.filter(item => item.subdomain).length}</strong> 个子行业</span>
-            {projectCount !== undefined && <span><strong>{projectCount}</strong> 个入库项目</span>}
-          </div>
-        </header>
         <div className="industry-board-grid">
           {domains.map(domain => {
             const subdomains = entries.filter(item => item.domain === domain.domain && item.subdomain);
             const latest = industryNews(news, domain)[0];
+            const directions = subdomains.slice(0, 4).map(item => item.subdomain).join(" · ") || "查看行业概况与项目";
             return <button className="industry-board-card" type="button" key={domain.path}
               aria-label={`查看${domain.domain}行业`} onClick={() => navigate({ entry: domain })}>
               <div className="industry-board-card-title"><h2>{domain.domain || "未分类"}</h2><ChevronRight size={19} aria-hidden="true" /></div>
               <div className="industry-board-card-counts"><span>{domain.projectCount} 个项目</span><span>{subdomains.length} 个子行业</span></div>
-              <p>{subdomains.slice(0, 4).map(item => item.subdomain).join(" · ") || "查看行业概况与项目"}{subdomains.length > 4 ? ` 等 ${subdomains.length} 个方向` : ""}</p>
-              {latest && <div className="industry-board-card-news"><small>{newsDate(latest.publishedAt)} · {latest.source || "已归档动态"}</small><span>{latest.title}</span></div>}
+              <p title={subdomains.map(item => item.subdomain).join(" · ") || directions}>{directions}{subdomains.length > 4 ? ` 等 ${subdomains.length} 个方向` : ""}</p>
+              {latest && <div className="industry-board-card-news"><small title={latest.source || "已归档动态"}>{newsDate(latest.publishedAt)} · {latest.source || "已归档动态"}</small><span title={latest.title}>{latest.title}</span></div>}
             </button>;
           })}
         </div>
