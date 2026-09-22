@@ -408,14 +408,44 @@ function domiOfficialSkillNames() {
 function getDomiPluginActivationGate() {
   if (!domiPluginActivationGate) {
     domiPluginActivationGate = new DomiPluginActivationGate({
-      isBusy: () => updateRestartPreparing
+      isBusy: () => updateRestartPreparing || applicationQuitFlushStarted
         || !codexClientIdleForSkillReload(activeRuns, startingCodexRunIds)
         // Internal long operations may predate their IPC read lease. Defer
         // activation instead of holding its global slot while they finish.
         || Boolean(domiIntegration?.plaudSyncPromise || domiIntegration?.podcastProcessPromises.size),
       installedInfo: () => getDomiPluginManager().installedInfo(),
       ensure: (request) => getDomiPluginManager().ensure(request),
-      onActivated: () => resetCodexClient()
+      isRequestCurrent: (request) => request.runtimeKey === codexCheckRuntimeKey(),
+      onActivated: async () => {
+        resetCodexClient();
+        // Reopen the local transport before notifying read-only observers.
+        // They must never need to reset the client or start a model task.
+        if (!applicationQuitFlushStarted && !updateRestartPreparing) {
+          try {
+            await getCodexClient().start();
+          } catch (error) {
+            // A transient local handshake failure must not strand read-only
+            // observers with no live transport after a successful upgrade.
+            appendRuntimeLog("domi-plugin-transport-retry", codexCheckFailureDetails(error, "plugin/transport"));
+            if (!applicationQuitFlushStarted && !updateRestartPreparing) await getCodexClient().start();
+          }
+        }
+      },
+      onSettled: (result, request) => {
+        if (applicationQuitFlushStarted || updateRestartPreparing
+          || request.runtimeKey !== codexCheckRuntimeKey()) return;
+        serviceCoordinator.invalidate("codex:check");
+        serviceCoordinator.invalidate("domi:status");
+        const state = {
+          ok: result.ok === true, updated: result.updated === true,
+          status: result.status || (result.ok ? "ready" : "check-failed"),
+          reason: result.reason || "", version: result.version || ""
+        };
+        appendRuntimeLog("domi-plugin-activation", state);
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send("codex:plugin-state", state);
+        }
+      }
     });
   }
   return domiPluginActivationGate;
@@ -1713,6 +1743,7 @@ async function attemptSafeUpdateInstall() {
 
       let installQuitWatchdog = null;
       const closeUpdateResources = () => {
+        domiPluginActivationGate?.dispose();
         updateInstallFailureHandler = null;
         if (installQuitWatchdog !== null) clearTimeout(installQuitWatchdog);
         installQuitWatchdog = null;
@@ -2711,6 +2742,8 @@ function getCodexClient() {
 }
 
 function resetCodexClient() {
+  // Preserve queued upgrades across skill/network reloads. The activation
+  // gate rejects an obsolete runtime before resuming its deferred request.
   codexNetworkReloadPending = false;
   codexCheckGeneration += 1;
   codexClient?.close();
@@ -2804,6 +2837,7 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY, re
     const pluginRequest = {
       binary,
       env: environment,
+      runtimeKey,
       enabled: app.isPackaged || process.env.DOMI_INSTALL_BUNDLED_PLUGIN === "1"
     };
     const pluginSetupPromise = (readOnly
@@ -2832,135 +2866,143 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY, re
     }
     pluginSetup = pluginSettlement.status === "fulfilled"
       ? pluginSettlement.value : pluginCheckFailure(pluginSettlement.reason);
-    if (pluginSetup.deferred && pluginSetup.ok) {
-      // A source manifest on disk does not prove Codex enabled the plugin.
-      // Busy/manual checks verify the registry without activating or resetting.
-      const verified = await getDomiPluginActivationGate().withStableClient(
-        () => getDomiPluginManager({ readOnly: true }).checkInstalled(pluginRequest),
-        { allowFailedActivation: true }
-      ).catch(pluginCheckFailure);
-      pluginSetup = verified.ok
-        ? { ...verified, deferred: true, status: "deferred", reason: "active-tasks" }
-        : verified;
-    }
-    if (pluginSetup.ok === false) {
-      if (!pluginSetup.status) pluginSetup.status = "missing";
-      diagnosticWarnings.push(pluginSetup.error || "domi 插件状态暂未确认。");
-      if (pluginSetup.diagnostic) appendRuntimeLog("codex-check-diagnostic", {
-        ...pluginSetup.diagnostic, readOnly
-      });
-    }
-    const pluginReadyAt = Date.now();
-    throwIfCodexCheckAborted(signal);
-    if (runtimeKey !== codexCheckRuntimeKey()) {
-      const error = new Error("连接配置已变更，请重新检查。");
-      error.code = "DOMI_CODEX_CHECK_SUPERSEDED";
-      throw error;
-    }
-    checkStage = "app-server/health";
-    const healthGeneration = codexCheckGeneration;
-    const client = readOnly ? codexClient : getCodexClient();
-    if (readOnly && (!client?.initialized || !client.child || client.child.killed || client.intentionalClose)) {
-      const error = new Error("尚无可供只读复查的 Codex 连接。");
-      error.code = "DOMI_CODEX_NO_LIVE_CONNECTION";
-      throw error;
-    }
-    const healthTimeoutMs = codexCheckTimeout(deadlineAt, CODEX_HEALTH_REQUEST_TIMEOUT_MS);
-    const healthSettlements = await Promise.allSettled([
-      runtime.authMode === "chatgpt"
-        ? client.request("account/read", { refreshToken: false }, {
-            timeoutMs: healthTimeoutMs
-          })
-        : Promise.resolve({ account: null, requiresOpenaiAuth: false }),
-      client.request("model/list", {
-        cursor: null,
-        limit: 50,
-        includeHidden: false
-      }, { timeoutMs: healthTimeoutMs }),
-      client.request("config/read", { includeLayers: false }, {
-        timeoutMs: healthTimeoutMs
-      })
-    ]);
-    throwIfCodexCheckAborted(signal);
-    if (healthGeneration !== codexCheckGeneration || runtimeKey !== codexCheckRuntimeKey()) {
-      const error = new Error("连接配置已变更，请重新检查。");
-      error.code = "DOMI_CODEX_CHECK_SUPERSEDED";
-      throw error;
-    }
-    const rejectedHealthIndex = healthSettlements.findIndex((result) => result.status === "rejected");
-    if (rejectedHealthIndex >= 0) {
-      const error = healthSettlements[rejectedHealthIndex].reason;
-      if (error && typeof error === "object") {
-        error.domiCheckStage = ["account/read", "model/list", "config/read"][rejectedHealthIndex];
+    // Keep registry verification and the local transport probe under one
+    // lease. A queued upgrade must not reset the client halfway through them.
+    return await getDomiPluginActivationGate().withStableClient(async () => {
+      if (pluginSetup.deferred) {
+        // A source manifest on disk does not prove Codex enabled the plugin.
+        // Busy/manual checks verify the registry without activating or resetting.
+        const verified = await getDomiPluginManager({ readOnly: true })
+          .checkInstalled(pluginRequest).catch(pluginCheckFailure);
+        pluginSetup = verified.ok
+          ? { ...verified, deferred: true, status: "deferred", reason: "active-tasks" }
+          : getDomiPluginActivationGate().deferredRequest
+            ? { ...verified, deferred: true, status: "deferred", reason: "activation-pending",
+                error: "domi 组件将在当前后台操作结束后自动更新。" }
+            : verified;
       }
-      throw error;
-    }
-    const [accountResult, modelResult, configResult] = healthSettlements.map((result) => result.value);
-    const account = accountResult?.account || null;
-    const config = configResult?.config || {};
-    const requiresOpenaiAuth = runtime.authMode === "chatgpt"
-      && Boolean(accountResult?.requiresOpenaiAuth);
-    const authenticated = isSelectedCodexConnectionReady({
-      authMode: runtime.authMode,
-      requiresOpenaiAuth,
-      account,
-      relayCredentialStored: runtime.hasApiKey
-    });
+      if (pluginSetup.ok === false) {
+        if (!pluginSetup.status) pluginSetup.status = "missing";
+        diagnosticWarnings.push(pluginSetup.error || "domi 插件状态暂未确认。");
+        if (pluginSetup.diagnostic) appendRuntimeLog("codex-check-diagnostic", {
+          ...pluginSetup.diagnostic, readOnly
+        });
+      }
+      const pluginReadyAt = Date.now();
+      throwIfCodexCheckAborted(signal);
+      if (runtimeKey !== codexCheckRuntimeKey()) {
+        const error = new Error("连接配置已变更，请重新检查。");
+        error.code = "DOMI_CODEX_CHECK_SUPERSEDED";
+        throw error;
+      }
+      checkStage = "app-server/health";
+      const healthGeneration = codexCheckGeneration;
+      const client = readOnly ? codexClient : getCodexClient();
+      if (readOnly && (!client?.initialized || !client.child || client.child.killed || client.intentionalClose)) {
+        const error = new Error("尚无可供只读复查的 Codex 连接。");
+        error.code = "DOMI_CODEX_NO_LIVE_CONNECTION";
+        throw error;
+      }
+      const healthTimeoutMs = codexCheckTimeout(deadlineAt, CODEX_HEALTH_REQUEST_TIMEOUT_MS);
+      const healthSettlements = await Promise.allSettled([
+        runtime.authMode === "chatgpt"
+          ? client.request("account/read", { refreshToken: false }, {
+              timeoutMs: healthTimeoutMs
+            })
+          : Promise.resolve({ account: null, requiresOpenaiAuth: false }),
+        client.request("model/list", {
+          cursor: null,
+          limit: 50,
+          includeHidden: false
+        }, { timeoutMs: healthTimeoutMs }),
+        client.request("config/read", { includeLayers: false }, {
+          timeoutMs: healthTimeoutMs
+        })
+      ]);
+      throwIfCodexCheckAborted(signal);
+      if (healthGeneration !== codexCheckGeneration || runtimeKey !== codexCheckRuntimeKey()) {
+        const error = new Error("连接配置已变更，请重新检查。");
+        error.code = "DOMI_CODEX_CHECK_SUPERSEDED";
+        throw error;
+      }
+      const rejectedHealthIndex = healthSettlements.findIndex((result) => result.status === "rejected");
+      if (rejectedHealthIndex >= 0) {
+        const error = healthSettlements[rejectedHealthIndex].reason;
+        if (error && typeof error === "object") {
+          error.domiCheckStage = ["account/read", "model/list", "config/read"][rejectedHealthIndex];
+        }
+        throw error;
+      }
+      const [accountResult, modelResult, configResult] = healthSettlements.map((result) => result.value);
+      const account = accountResult?.account || null;
+      const config = configResult?.config || {};
+      const requiresOpenaiAuth = runtime.authMode === "chatgpt"
+        && Boolean(accountResult?.requiresOpenaiAuth);
+      const authenticated = isSelectedCodexConnectionReady({
+        authMode: runtime.authMode,
+        requiresOpenaiAuth,
+        account,
+        relayCredentialStored: runtime.hasApiKey
+      });
 
-    const result = {
-      ok: authenticated && pluginSetup.ok !== false,
-      connectionOk: authenticated,
-      diagnosticWarnings,
-      network: codexNetworkDiagnostic,
-      path: binary,
-      version: detectedVersion,
-      transport: "app-server",
-      workspacePath: demoWorkspace,
-      account,
-      authMode: runtime.authMode,
-      providerLabel: runtime.authMode === "chatgpt" && !requiresOpenaiAuth && !account ? "已有 Codex 连接" : runtime.providerLabel,
-      apiBaseUrl: runtime.apiBaseUrl,
-      credentialStored: Boolean(account || runtime.hasApiKey || !requiresOpenaiAuth),
-      requiresOpenaiAuth,
-      configuredModel: config.model || "",
-      configuredReasoningEffort: config.model_reasoning_effort || "medium",
-      configuredServiceTier: config.service_tier || "standard",
-      pluginSetup,
-      models: (modelResult?.data || []).map((item) => ({
-        id: item.id || item.model,
-        name: item.displayName || item.model || item.id,
-        description: item.description || "",
-        isDefault: Boolean(item.isDefault),
-        defaultReasoningEffort: item.defaultReasoningEffort || "medium",
-        supportedReasoningEfforts: (item.supportedReasoningEfforts || []).map((option) => ({
-          id: option.reasoningEffort,
-          description: option.description || ""
+      const result = {
+        ok: authenticated && pluginSetup.ok !== false,
+        connectionOk: authenticated,
+        diagnosticWarnings,
+        network: codexNetworkDiagnostic,
+        path: binary,
+        version: detectedVersion,
+        transport: "app-server",
+        workspacePath: demoWorkspace,
+        account,
+        authMode: runtime.authMode,
+        providerLabel: runtime.authMode === "chatgpt" && !requiresOpenaiAuth && !account ? "已有 Codex 连接" : runtime.providerLabel,
+        apiBaseUrl: runtime.apiBaseUrl,
+        credentialStored: Boolean(account || runtime.hasApiKey || !requiresOpenaiAuth),
+        requiresOpenaiAuth,
+        configuredModel: config.model || "",
+        configuredReasoningEffort: config.model_reasoning_effort || "medium",
+        configuredServiceTier: config.service_tier || "standard",
+        pluginSetup,
+        models: (modelResult?.data || []).map((item) => ({
+          id: item.id || item.model,
+          name: item.displayName || item.model || item.id,
+          description: item.description || "",
+          isDefault: Boolean(item.isDefault),
+          defaultReasoningEffort: item.defaultReasoningEffort || "medium",
+          supportedReasoningEfforts: (item.supportedReasoningEfforts || []).map((option) => ({
+            id: option.reasoningEffort,
+            description: option.description || ""
+          })),
+          serviceTiers: (item.serviceTiers || []).map((tier) => ({
+            id: tier.id,
+            name: tier.name,
+            description: tier.description || ""
+          }))
         })),
-        serviceTiers: (item.serviceTiers || []).map((tier) => ({
-          id: tier.id,
-          name: tier.name,
-          description: tier.description || ""
-        }))
-      })),
-      error: !authenticated
-        ? runtime.authMode === "relay"
-          ? "中转站凭据未就绪，请重新保存配置并测试；无需登录 ChatGPT。"
-          : "请先登录 ChatGPT Codex。"
-        : pluginSetup.ok === false
-          ? pluginSetup.error || "domi 插件尚未就绪，请重新检查连接。"
-          : ""
-    };
-    appendRuntimeLog("codex-check-performance", {
-      outcome: result.ok ? "ready" : "not-ready",
-      connectionOk: authenticated,
-      pluginStatus: pluginSetup.status || (pluginSetup.ok ? "ready" : "check-failed"),
-      readOnly,
-      runtimeMs: runtimeReadyAt - startedAt,
-      pluginMs: pluginReadyAt - runtimeReadyAt,
-      appServerMs: Date.now() - pluginReadyAt,
-      totalMs: Date.now() - startedAt
-    });
-    return result;
+        error: !authenticated
+          ? runtime.authMode === "relay"
+            ? "中转站凭据未就绪，请重新保存配置并测试；无需登录 ChatGPT。"
+            : "请先登录 ChatGPT Codex。"
+          : pluginSetup.ok === false
+            ? pluginSetup.error || "domi 插件尚未就绪，请重新检查连接。"
+            : ""
+      };
+      appendRuntimeLog("codex-check-performance", {
+        outcome: result.ok ? "ready" : "not-ready",
+        connectionOk: authenticated,
+        pluginStatus: pluginSetup.status || (pluginSetup.ok ? "ready" : "check-failed"),
+        pluginReason: pluginSetup.reason || "",
+        pluginVersion: pluginSetup.version || "",
+        bundledPluginVersion: pluginSetup.bundledVersion || "",
+        readOnly,
+        runtimeMs: runtimeReadyAt - startedAt,
+        pluginMs: pluginReadyAt - runtimeReadyAt,
+        appServerMs: Date.now() - pluginReadyAt,
+        totalMs: Date.now() - startedAt
+      });
+      return result;
+    }, { allowFailedActivation: true });
   } catch (error) {
     throwIfCodexCheckAborted(signal);
     appendRuntimeLog("codex-check-performance", {
@@ -4344,6 +4386,10 @@ app.on("before-quit", (event) => {
 
     const remaining = await drainRunPostProcessing();
     appendRuntimeLog("app-postprocess-drained", { remaining });
+    domiPluginActivationGate?.dispose();
+    await domiPluginActivationGate?.pending?.catch((error) => {
+      appendRuntimeLog("domi-plugin-shutdown-drain", codexCheckFailureDetails(error, "plugin/shutdown"));
+    });
     plaudRecallService.close();
     await domiIntegration?.shutdownAllPlaudOperations("app-quit");
     await documentSearchService?.close();

@@ -131,21 +131,36 @@ function selectPreferredCandidate(candidates) {
 }
 
 class DomiPluginActivationGate {
-  constructor({ isBusy, installedInfo, ensure, onActivated }) {
+  constructor({ isBusy, installedInfo, ensure, onActivated,
+    onSettled = () => {}, isRequestCurrent = () => true, retryDelayMs = 1_000 }) {
     this.isBusy = isBusy;
     this.installedInfo = installedInfo;
     this.ensure = ensure;
     this.onActivated = onActivated;
+    this.onSettled = onSettled;
+    this.isRequestCurrent = isRequestCurrent;
+    this.retryDelayMs = Math.max(25, Number(retryDelayMs) || 1_000);
     this.pending = null;
     this.readers = 0;
+    this.deferredRequest = null;
+    this.retryTimer = null;
+    this.disposed = false;
   }
 
   ensureWhenIdle(request) {
     if (this.pending) return this.pending;
+    if (this.disposed) return Promise.resolve({ ok: false, updated: false,
+      status: "check-failed", reason: "shutdown", error: "应用正在关闭。" });
     if (request?.enabled === false) {
+      this.cancelDeferred();
       return Promise.resolve({ ok: true, updated: false, skipped: true, reason: "development" });
     }
     if (this.readers > 0 || this.isBusy()) {
+      // A busy check used to discard this request. On an app upgrade that left
+      // the old plugin registered indefinitely, until a manual check happened
+      // to win the startup race against library/PLAUD background work.
+      this.deferredRequest = request;
+      this.scheduleDeferred();
       const current = this.installedInfo();
       return Promise.resolve({
         ok: Boolean(current),
@@ -154,9 +169,57 @@ class DomiPluginActivationGate {
         status: current ? "deferred" : "missing",
         reason: "active-tasks",
         version: current?.manifest?.version || "",
-        error: current ? "" : "当前仍有任务正在准备或执行，尚未安装 domi 插件；请等待任务结束后重新检查连接。"
+        error: current ? "" : "domi 插件尚未安装；当前任务结束后会自动完成安装。"
       });
     }
+    this.cancelDeferred();
+    return this.activate(request);
+  }
+
+  cancelDeferred() {
+    this.deferredRequest = null;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+  }
+
+  dispose() {
+    this.disposed = true;
+    this.cancelDeferred();
+  }
+
+  scheduleDeferred() {
+    if (this.retryTimer || !this.deferredRequest || this.disposed) return;
+    // This timer only observes idle state. It never repeatedly retries a
+    // failed installation, nor keeps the app alive during shutdown.
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      this.resumeDeferred();
+    }, this.retryDelayMs);
+    this.retryTimer.unref?.();
+  }
+
+  resumeDeferred() {
+    const request = this.deferredRequest;
+    if (!request || this.pending || this.disposed) return;
+    if (!this.isRequestCurrent(request)) {
+      this.cancelDeferred();
+      return;
+    }
+    if (this.readers > 0 || this.isBusy()) {
+      this.scheduleDeferred();
+      return;
+    }
+    this.cancelDeferred();
+    // Claim synchronously when the final reader exits. A stream of refreshes
+    // cannot repeatedly overtake the already-requested plugin upgrade.
+    const activation = this.activate(request);
+    void activation.then(
+      result => this.onSettled(result, request),
+      error => this.onSettled(pluginCheckFailure(error), request)
+    ).catch(() => undefined);
+  }
+
+  activate(request) {
     // Claim the slot synchronously before ensure() can yield. A task that
     // arrives afterwards waits below, and cannot use the client being reset.
     this.pending = Promise.resolve()
@@ -179,6 +242,7 @@ class DomiPluginActivationGate {
   }
 
   async withStableClient(operation, { allowFailedActivation = false } = {}) {
+    this.resumeDeferred();
     // Claim the read lease before yielding. If activation already owns the
     // slot, wait for it; otherwise new activations defer until this read ends.
     this.readers += 1;
@@ -193,6 +257,7 @@ class DomiPluginActivationGate {
       return await operation();
     } finally {
       this.readers -= 1;
+      this.resumeDeferred();
     }
   }
 }
@@ -537,6 +602,16 @@ class DomiPluginManager {
           await this.runCodex(binary, ["plugin", "remove", PLUGIN_ID], env);
         }
         await this.runCodex(binary, ["plugin", "add", PLUGIN_ID, "--json"], env);
+        const activated = await this.runCodex(binary, ["plugin", "list", "--json"], env);
+        const registered = activated?.installed?.find?.((plugin) => plugin.name === "domi"
+          && plugin.pluginId === PLUGIN_ID && plugin.enabled === true
+          && plugin.version === info.manifest.version);
+        if (!registered) {
+          const error = new Error("domi 插件安装后未通过启用状态与版本核验。");
+          error.code = "DOMI_PLUGIN_ACTIVATION_VERIFY_FAILED";
+          error.domiCheckStage = "plugin/verify";
+          throw error;
+        }
         for (const plugin of installedDomi) {
           if (plugin.pluginId !== PLUGIN_ID && compareVersions(plugin.version, info.manifest.version) <= 0) {
             await this.runCodex(binary, ["plugin", "remove", plugin.pluginId], env);

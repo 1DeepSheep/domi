@@ -16,7 +16,7 @@ test("plugin health displays the verified active version before an older reposit
   assert.equal(domiPluginVersionLabel({ ok: true, version: "7.0.11" }, cached), "v7.0.11");
   assert.equal(domiPluginVersionLabel({ ok: true, version: "7.0.10", bundledVersion: "7.0.11" }, cached), "v7.0.10",
     "A bundled but not activated update is not the active plugin version");
-  assert.equal(domiPluginVersionLabel({ ok: false, status: "missing" }, cached), "等待检测");
+  assert.equal(domiPluginVersionLabel({ ok: false, status: "missing" }, cached), "未就绪");
   assert.equal(domiPluginVersionLabel({ ok: true }, cached), "已就绪");
   assert.equal(domiPluginVersionLabel(undefined, cached), "v7.0.10");
   assert.equal(domiPluginVersionLabel(null, { ok: true, version: "" }), "等待检测");
@@ -49,7 +49,7 @@ test("connection and plugin readiness are independent; explicit failed connectio
 test("checking is neutral, plugin failure is not a Codex outage, command paths never reach the card", () => {
   assert.equal(codexReadinessPresentation({ status: null, checking: true }).tone, "neutral");
   assert.deepEqual(codexReadinessPresentation({ status: transient, checking: false }),
-    { tone: "warning", title: "Codex 已连接", detail: "domi 插件待检查" });
+    { tone: "warning", title: "Codex 已连接", detail: "domi 组件未就绪" });
   const text = JSON.stringify(codexReadinessPresentation({ status: { ...failed, error: "Command failed: " + "/Users/" + "fixture/path" }, checking: false }));
   assert.doesNotMatch(text, /Users|secret|Command failed/);
   assert.equal(codexReadinessPresentation({ status: { ...failed, account: null, requiresOpenaiAuth: true }, checking: false }).title, "Codex 需要登录");
@@ -182,4 +182,111 @@ test("only actual connection identity changes invalidate a connection", () => {
   assert.equal(codexConnectionSettingsChanged(settings, { ...settings, updateChannel: "stable" }), false);
   assert.equal(codexConnectionSettingsChanged(settings, { codexPath: "/other" }), true);
   assert.equal(codexConnectionSettingsChanged(settings, { apiModel: "changed" }), true);
+});
+
+
+test("queued plugin activation shows progress while the required version remains blocked", () => {
+  const pending = { ...transient, pluginSetup: { ok: false, status: "deferred", deferred: true,
+    reason: "active-tasks", version: "7.0.13", bundledVersion: "7.0.14" } };
+  assert.deepEqual(codexReadinessPresentation({ status: pending, checking: false }),
+    { tone: "neutral", title: "Codex 已连接", detail: "正在准备 domi 组件" });
+  assert.equal(domiPluginVersionLabel(pending.pluginSetup, { ok: true, version: "7.0.13" }), "正在准备");
+  assert.equal(codexTaskReady(pending, true), false);
+  assert.equal(codexTaskReady(pending, false), true);
+});
+
+test("activation events verify the current registry once without trusting old readiness or event success", async () => {
+  for (const initial of [ready, { ...transient, pluginSetup: { ok: false, status: "deferred" } }]) {
+    const h = harness(); await h.controller.refresh(initial);
+    for (let i = 0; i < 20; i++) h.controller.observePluginState();
+    assert.equal(codexTaskReady(h.controller.snapshot.status, true), false);
+    assert.equal(h.scheduled.size, 1);
+    h.plans.push({ ...ready, pluginSetup: { ok: true, status: "ready", version: "7.0.14" } });
+    await h.tick();
+    assert.deepEqual(h.calls, [{ readOnly: true, force: true }]);
+    assert.equal(h.controller.snapshot.status.pluginSetup.version, "7.0.14");
+    assert.equal(codexTaskReady(h.controller.snapshot.status, true), true);
+    assert.equal(h.scheduled.size, 0);
+  }
+});
+
+test("a failed activation settles into a real missing state without an endless poll", async () => {
+  const h = harness(); await h.controller.refresh(ready);
+  h.plans.push({ ...transient, pluginSetup: { ok: false, status: "missing", reason: "plugin-outdated" } });
+  h.controller.observePluginState(); await h.tick();
+  assert.equal(h.calls.length, 1);
+  assert.equal(codexTaskReady(h.controller.snapshot.status, true), false);
+  assert.equal(h.controller.snapshot.status.pluginSetup.reason, "plugin-outdated");
+  assert.equal(h.scheduled.size, 0);
+});
+
+test("activation during an explicit probe waits for that probe then verifies instead of accepting its old version", async () => {
+  const h = harness(), old = deferred(); h.plans.push(old.promise);
+  const refresh = h.controller.refresh();
+  h.controller.observePluginState();
+  assert.equal(h.scheduled.size, 0);
+  old.resolve(ready); await refresh;
+  assert.equal(codexTaskReady(h.controller.snapshot.status, true), false);
+  assert.equal(h.scheduled.size, 1);
+  await h.tick();
+  assert.equal(h.calls.length, 2);
+  assert.equal(codexTaskReady(h.controller.snapshot.status, true), true);
+});
+
+test("activation during a settings save never supersedes its identity and verifies after the save", async () => {
+  for (const saved of [true, false]) {
+    const h = harness(); await h.controller.refresh(ready);
+    const revision = h.controller.beginSave(true);
+    h.controller.observePluginState();
+    assert.equal(h.scheduled.size, 0);
+    assert.equal(codexConnectionReady(h.controller.snapshot.status), false);
+    if (saved) h.controller.acceptSaved(revision, ready);
+    else h.controller.failSave(revision);
+    assert.equal(h.scheduled.size, 1);
+    assert.equal(codexTaskReady(h.controller.snapshot.status, true), false);
+    await h.tick();
+    assert.deepEqual(h.calls, [{ readOnly: true, force: true }]);
+    assert.equal(codexTaskReady(h.controller.snapshot.status, true), true);
+  }
+});
+
+test("activation arriving during verification is coalesced into one subsequent check", async () => {
+  const h = harness(), old = deferred(); await h.controller.refresh(ready);
+  h.plans.push(old.promise); h.controller.observePluginState(); await h.tick();
+  for (let i = 0; i < 20; i++) h.controller.observePluginState();
+  assert.equal(h.scheduled.size, 0);
+  old.resolve(ready); await settle();
+  assert.equal(codexTaskReady(h.controller.snapshot.status, true), false);
+  assert.equal(h.scheduled.size, 1);
+  await h.tick();
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.scheduled.size, 0);
+});
+
+test("configuration changes and disposal invalidate queued activation checks", async () => {
+  const h = harness(); await h.controller.refresh(ready);
+  h.controller.observePluginState();
+  const save = h.controller.beginSave(true);
+  h.controller.acceptSaved(save, failed);
+  assert.equal(h.scheduled.size, 0);
+  assert.equal(h.controller.snapshot.status, failed);
+  h.controller.dispose(); h.controller.observePluginState();
+  assert.equal(h.scheduled.size, 0);
+});
+
+
+test("an unrelated settings save cannot cancel the outstanding plugin verification", async () => {
+  for (const verificationAlreadyStarted of [true, false]) {
+    const h = harness(), pending = deferred(); await h.controller.refresh(ready);
+    h.controller.observePluginState();
+    if (verificationAlreadyStarted) { h.plans.push(pending.promise); await h.tick(); }
+    const revision = h.controller.beginSave(false);
+    h.controller.acceptSaved(revision);
+    assert.equal(codexTaskReady(h.controller.snapshot.status, true), false);
+    assert.equal(h.scheduled.size, 1);
+    if (verificationAlreadyStarted) { pending.resolve(ready); await settle(); }
+    assert.equal(codexTaskReady(h.controller.snapshot.status, true), false);
+    await h.tick();
+    assert.equal(codexTaskReady(h.controller.snapshot.status, true), true);
+  }
 });

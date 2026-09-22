@@ -11,7 +11,8 @@ export function codexTaskReady(status: CodexCheckResult | null | undefined, need
 export function domiPluginVersionLabel(current: CodexCheckResult["pluginSetup"], cached?: DomiHealth["plugin"]) {
   // Repository health predates runtime activation after an app/plugin update.
   // Use it only until an actual plugin check has supplied the current state.
-  if (current) return current.ok ? current.version?.trim() ? `v${current.version.trim()}` : "已就绪" : "等待检测";
+  if (current) return current.ok ? current.version?.trim() ? `v${current.version.trim()}` : "已就绪"
+    : current.status === "deferred" ? "正在准备" : "未就绪";
   return cached?.ok && cached.version?.trim() ? `v${cached.version.trim()}` : "等待检测";
 }
 
@@ -32,7 +33,9 @@ export function codexReadinessPresentation(snapshot: CodexReadinessSnapshot, nat
   if (!native) return { tone: "neutral", title: "浏览器预览", detail: "" };
   if (codexConnectionReady(status)) {
     if (status?.pluginSetup?.ok !== true) {
-      return { tone: "warning", title: "Codex 已连接", detail: checking ? "正在检查 domi 插件" : "domi 插件待检查" };
+      const preparing = status?.pluginSetup?.status === "deferred";
+      return { tone: preparing || checking ? "neutral" : "warning", title: "Codex 已连接",
+        detail: preparing ? "正在准备 domi 组件" : checking ? "正在检查 domi 组件" : "domi 组件未就绪" };
     }
     return { tone: "ok", title: "Codex 已就绪", detail: status?.diagnosticWarnings?.length ? "连接正常，有诊断提示" : "" };
   }
@@ -59,6 +62,7 @@ export class CodexReadinessController {
   private savePending = false;
   private explicitProbeRevision: number | null = null;
   private pendingRuntimeGeneration: number | null = null;
+  private pendingPluginCheck = false;
   private disposed = false;
   private readonly check: (options?: CheckOptions) => Promise<CodexCheckResult>;
   private readonly publish: (state: CodexReadinessSnapshot) => void;
@@ -92,10 +96,13 @@ export class CodexReadinessController {
   }
 
   invalidate(invalidateConnection = false) {
+    const preservePluginCheck = !invalidateConnection && (this.pendingPluginCheck
+      || this.snapshot.status?.pluginSetup?.reason === "activation-verification");
     this.clearAutomatic();
     this.savePending = false;
     this.explicitProbeRevision = null;
     this.pendingRuntimeGeneration = null;
+    this.pendingPluginCheck = preservePluginCheck;
     const revision = ++this.revision;
     if (invalidateConnection) {
       this.configurationGeneration += 1;
@@ -119,7 +126,8 @@ export class CodexReadinessController {
   acceptSaved(revision: number, status?: CodexCheckResult) {
     if (!this.isCurrent(revision)) return false;
     this.savePending = false;
-    if (status) this.update({ status, checking: false, checkFailed: false });
+    if (status) this.update({ status: this.pendingPluginCheck ? this.awaitPluginVerification(status) : status,
+      checking: false, checkFailed: false });
     else this.update({ checking: false });
     this.scheduleRecovery();
     return true;
@@ -134,6 +142,7 @@ export class CodexReadinessController {
       // revoked the old generation. Verify what remains active without
       // trusting the old green light or waiting for now-obsolete run events.
       if (needsCheck) this.startAutomatic(this.configurationGeneration);
+      else this.scheduleRecovery();
     }
   }
 
@@ -143,13 +152,14 @@ export class CodexReadinessController {
     const revision = ++this.revision;
     this.explicitProbeRevision = revision;
     this.pendingRuntimeGeneration = null;
+    this.pendingPluginCheck = false;
     await this.probe(revision, verifiedStatus, options);
     if (this.isCurrent(revision)) {
       this.explicitProbeRevision = null;
       const pendingGeneration = this.pendingRuntimeGeneration;
       this.pendingRuntimeGeneration = null;
       if (pendingGeneration !== null) this.startAutomatic(pendingGeneration);
-      else this.scheduleRecovery();
+      this.scheduleRecovery();
     }
   }
 
@@ -158,7 +168,8 @@ export class CodexReadinessController {
     this.update({ checking: true });
     try {
       const status = verifiedStatus || await this.check(options);
-      if (this.isCurrent(revision)) this.update({ status, checking: false, checkFailed: false });
+      if (this.isCurrent(revision)) this.update({ status: this.pendingPluginCheck ? this.awaitPluginVerification(status) : status,
+        checking: false, checkFailed: false });
     } catch {
       if (this.isCurrent(revision)) this.update({ status: null, checking: false, checkFailed: true });
     }
@@ -173,7 +184,26 @@ export class CodexReadinessController {
     this.startAutomatic(configurationGeneration);
   }
 
+  private awaitPluginVerification(status: CodexCheckResult) {
+    return codexConnectionReady(status) ? { ...status, ok: false,
+      pluginSetup: { ...status.pluginSetup, ok: false, status: "deferred" as const,
+        deferred: true, reason: "activation-verification" } } : status;
+  }
+
+  observePluginState() {
+    if (this.disposed) return;
+    this.pendingPluginCheck = true;
+    if (!this.savePending && this.snapshot.status) {
+      this.update({ status: this.awaitPluginVerification(this.snapshot.status) });
+    }
+    this.scheduleRecovery();
+  }
+
   scheduleRecovery() {
+    if (this.pendingPluginCheck) {
+      this.startAutomatic(this.configurationGeneration, true);
+      return;
+    }
     const { status, checkFailed } = this.snapshot;
     if (status?.requiresOpenaiAuth && status.account === null) return;
     const transient = checkFailed || status?.pluginSetup?.status === "check-failed"
@@ -181,16 +211,18 @@ export class CodexReadinessController {
     if (transient) this.startAutomatic(this.configurationGeneration);
   }
 
-  private startAutomatic(configurationGeneration: number) {
+  private startAutomatic(configurationGeneration: number, verifyPluginChange = false) {
     if (this.disposed || configurationGeneration !== this.configurationGeneration
-      || codexTaskReady(this.snapshot.status, true) || this.timer !== null || this.automaticPending
-      || this.savePending || this.explicitProbeRevision !== null || this.automaticAttempts >= 3) return;
+      || (!verifyPluginChange && codexTaskReady(this.snapshot.status, true)) || this.timer !== null || this.automaticPending
+      || this.savePending || this.explicitProbeRevision !== null || (!verifyPluginChange && this.automaticAttempts >= 3)) return;
+    if (verifyPluginChange) this.automaticAttempts = 0;
     const delay = [0, 2_000, 8_000][this.automaticAttempts];
     const generation = this.configurationGeneration;
     this.timer = this.schedule(() => {
       this.timer = null;
       if (this.disposed || generation !== this.configurationGeneration) return;
       this.automaticAttempts += 1;
+      this.pendingPluginCheck = false;
       this.automaticPending = true;
       const revision = ++this.revision;
       void this.probe(revision, undefined, { readOnly: true, force: true }).finally(() => {

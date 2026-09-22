@@ -746,6 +746,7 @@ const browserFallback: Window["workbench"] = {
     projects: []
   }),
   onCodexEvent: () => () => undefined,
+  onDomiPluginState: () => () => undefined,
   onUpdateStatus: () => () => undefined
 };
 

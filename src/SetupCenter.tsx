@@ -1398,6 +1398,7 @@ export default function SetupCenter({
   const needsChatGPTLogin = draft.authMode === "chatgpt"
     && codexStatus?.requiresOpenaiAuth === true && !codexStatus.account;
   const pluginNeedsPreparation = selectedConnectionReady && codexStatus?.pluginSetup?.ok !== true;
+  const pluginPreparationPending = pluginNeedsPreparation && codexStatus?.pluginSetup?.status === "deferred";
   const connectionDetail = selectedConnectionReady
     ? required ? codexStatus?.account?.email || "沿用这台电脑现有的 Codex 设置。" : draft.authMode === "relay"
       ? [codexStatus?.configuredModel, codexStatus?.apiBaseUrl, codexStatus?.version].filter(Boolean).join(" · ")
@@ -1528,7 +1529,7 @@ export default function SetupCenter({
                   <div>
                     <small>{draft.authMode === "relay" ? "Responses 中转站" : "ChatGPT / Codex"}</small>
                     <strong>{selectedConnectionReady
-                      ? pluginNeedsPreparation ? "Codex 已连接，domi 组件待准备" : codexStatus?.account ? "已登录，可以开始使用" : "已找到可用的 Codex 连接"
+                      ? pluginNeedsPreparation ? pluginPreparationPending ? "Codex 已连接，正在准备 domi 组件" : "Codex 已连接，domi 组件未就绪" : codexStatus?.account ? "已登录，可以开始使用" : "已找到可用的 Codex 连接"
                       : codexChecking ? "正在检查 Codex 连接" : "连接待检查"}</strong>
                     <span>{connectionDetail}</span>
                   </div>
@@ -1576,7 +1577,9 @@ export default function SetupCenter({
                   }}>取消等待</button>
                 </div>}
                 {selectedConnectionReady && codexStatus?.pluginSetup?.ok !== true && (
-                  <p className="codex-readiness-note" role="status">账号连接正常，domi 组件尚未准备好。点击“重新检查连接”可继续准备，无需重新登录。</p>
+                  <p className="codex-readiness-note" role="status">{pluginPreparationPending
+                    ? "账号连接正常，domi 正在自动准备组件，完成后即可使用。"
+                    : "账号连接正常，domi 组件尚未准备好。点击“重新检查连接”可继续准备，无需重新登录。"}</p>
                 )}
                 {!!codexStatus?.diagnosticWarnings?.length && (
                   <p className="codex-readiness-note">{selectedConnectionReady ? "连接正常，部分辅助检查未完成。" : "部分辅助检查未完成。"}<button type="button" onClick={() => setTab("diagnostics")}>查看系统诊断</button></p>
