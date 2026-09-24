@@ -11699,6 +11699,26 @@ body.panel-resizing .main-grid {
 .plaud-context-extra summary { cursor: pointer; display: flex; align-items: center; gap: 6px; list-style: none; width: fit-content; }
 .plaud-context-extra summary::-webkit-details-marker { display: none; }
 .plaud-context-extra textarea { margin-top: 10px; }
+.plaud-context-materials { margin: 0 0 21px; }
+.plaud-context-materials-heading { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 9px; font-size: 12px; font-weight: 550; }
+.plaud-context-materials-heading small, .plaud-context-materials-heading > span:last-child { color: var(--muted); font-size: 11px; font-weight: 400; }
+.plaud-context-materials-heading small { margin-left: 5px; }
+.plaud-context-materials-drop { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 15px; border: 1px dashed var(--line-strong); border-radius: 8px; background: var(--context); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; transition: border-color .15s, background .15s; }
+.plaud-context-materials-drop > span { flex: 1; min-width: 0; }
+.plaud-context-materials-drop small { display: block; margin-top: 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
+.plaud-context-materials-drop > svg { flex: 0 0 auto; color: var(--muted); }
+.plaud-context-materials-drop:hover:enabled, .plaud-context-materials-drop.is-dragging { border-color: var(--accent); background: var(--accent-soft); }
+.plaud-context-materials button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.plaud-context-materials button:disabled { opacity: .55; cursor: default; }
+.plaud-context-materials-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.plaud-context-materials-list li { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 7px; padding: 9px 11px; font-size: 12px; }
+.plaud-context-materials-list li > svg { color: var(--muted); flex: 0 0 auto; }
+.plaud-context-materials-list li > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.plaud-context-materials-list small { flex: 0 0 auto; font-size: 10px; color: var(--muted); }
+.plaud-context-materials-list button { flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: 4px; color: var(--muted); background: transparent; width: 26px; height: 26px; cursor: pointer; }
+.plaud-context-materials-list button:hover:enabled { background: var(--context); color: var(--text); }
+.plaud-context-materials .plaud-context-field-help { margin-bottom: 0; }
+.plaud-context-materials-error { color: var(--danger); font-size: 12px; line-height: 1.65; margin: 8px 0 0; }
 .plaud-context-actions { padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 1px solid var(--line); }
 .plaud-context-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: 7px; padding: 10px 0; font: inherit; font-size: 12px; cursor: pointer; }
 .plaud-context-actions button:disabled { opacity: .55; cursor: default; }

@@ -65,6 +65,14 @@ window.workbench = { ...fallback,
       disposition: "ready", stage: "context_ready", recordRevision: "saved-revision", contextPath: "/synthetic/context.json", context: request });
     if (result.ok) state.prepared = result; return result; },
   savePlaudContextDraft: request => invoke("draft", request, { ok: true }),
+  selectFiles: workspace => invoke("selectFiles", { workspace }, { ok: true, canceled: false, files: [
+    { name: "示例公司BP.pdf", path: "/synthetic/staging/101-0-示例公司BP.pdf", size: 3145728 },
+    { name: "产品数据.xlsx", path: "/synthetic/staging/101-1-产品数据.xlsx", size: 24576 }
+  ] }),
+  getPathForFile: file => config.filePaths?.[file.name] || "",
+  importFiles: (paths, workspace) => invoke("importFiles", { paths, workspace }, { ok: true, files: paths.map((path, i) => ({ name: path.split("/").at(-1), path: "/synthetic/staging/path-" + i + "-" + path.split("/").at(-1), size: 200 })) }),
+  importFileData: (files, workspace) => invoke("importFileData", { names: files.map(file => file.name), bytes: files.map(file => file.data.byteLength), workspace }, { ok: true, files: files.map((file, i) => ({ name: file.name, path: "/synthetic/staging/drop-" + i + "-" + file.name, size: file.data.byteLength })) }),
+  discardStagedAttachment: path => invoke("discard", { path }, { ok: true }),
   createProjectWorkspace: request => invoke("workspace", request, { ok: true, workspacePath: "/synthetic/thread" }),
   loginPlaud: request => invoke("login", request, { ok: true, connected: true, browser: "chrome", status: "connected" }),
   checkPlaudConnection: async () => ({ ok: true, connected: true, browser: "chrome", status: "connected" }),
@@ -306,7 +314,84 @@ try {
     assert.equal((await calls("save")).length, 1, "A failed run resumes with its original saved answer");
   });
 
-  console.log("PLAUD intake UI passed: immediate editable card; scoped preparation; recall update without draft overwrite; original excerpts; reload recovery; double-submit guard; save-before-run; saved-context launch retry; skipped/provided continuation; advanced-stage protection.");
+  await scenario({}, async ({ page, calls, wait, start, card }) => {
+    await start(); await card.getByRole("button", { name: /添加公司材料或 BP/ }).click();
+    await card.getByText("示例公司BP.pdf", { exact: true }).waitFor();
+    assert.equal((await calls("selectFiles"))[0].payload.workspace, undefined, "Intake materials are staged before project identity is known");
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("intake-fixture-state")).threads.some(thread => thread.plaudIntake?.attachments?.length === 2));
+    await page.reload({ waitUntil: "networkidle" }); await card.getByText("示例公司BP.pdf", { exact: true }).waitFor();
+    assert.equal(await card.getByRole("listitem").count(), 2, "Materials survive a renderer restart");
+    if (screenshots) await card.screenshot({ path: path.join(screenshots, "meeting-materials.png"), animations: "disabled" });
+    await card.getByRole("button", { name: "移除材料 产品数据.xlsx", exact: true }).click(); await wait("discard", 1);
+    assert.equal((await calls("discard"))[0].payload.path, "/synthetic/staging/101-1-产品数据.xlsx");
+    await card.getByRole("button", { name: "按已有信息处理", exact: true }).click(); await wait("run", 1);
+    assert.equal((await calls("save"))[0].payload.contextStatus, "provided", "Materials-only context must not be marked skipped");
+    assert.match((await calls("save"))[0].payload.rawAnswer, /补充材料：示例公司BP.pdf/);
+    const run = (await calls("run"))[0].payload;
+    assert.deepEqual(run.attachmentPaths, ["/synthetic/staging/101-0-示例公司BP.pdf"]);
+    assert.match(run.prompt, /不得把仅出现在 BP 的内容写成会上已讨论的事实/);
+    assert.match(run.prompt, /"name":"示例公司BP.pdf","path":"\/synthetic\/staging\/101-0-示例公司BP.pdf"/);
+    assert.doesNotMatch(run.prompt, /产品数据.xlsx/);
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("intake-fixture-state")).threads.some(thread => thread.messages?.some(message => message.role === "user" && message.attachments?.[0]?.name === "示例公司BP.pdf")));
+  });
+
+  await scenario({ selectFiles: { hold: true } }, async ({ page, calls, wait, release, start, card }) => {
+    await start(); await card.getByRole("button", { name: /添加公司材料或 BP/ }).click(); await wait("selectFiles", 1);
+    assert.equal(await card.getByRole("button", { name: "确认并生成纪要", exact: true }).isDisabled(), true);
+    assert.equal((await calls("run")).length, 0);
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await release("selectFiles", { ok: true, files: [{ name: "原会议BP.pdf", path: "/synthetic/staging/original.pdf", size: 1024 }] });
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("intake-fixture-state")).threads.some(thread => thread.plaudIntake?.attachments?.[0]?.name === "原会议BP.pdf"));
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("intake-fixture-state")));
+    assert.notEqual(saved.threads.find(thread => thread.plaudIntake).id, saved.activeThreadId, "Late picker results stay on the original meeting");
+    assert.equal((await calls("run")).length, 0);
+    await page.getByRole("button", { name: /09-22 仓储机器人产品与融资交流 纪要/ }).first().click();
+    await card.getByText("原会议BP.pdf", { exact: true }).waitFor();
+  });
+
+  const drop = async (card, names) => {
+    await card.locator(".plaud-context-materials-drop").evaluate((target, names) => {
+      const transfer = new DataTransfer();
+      for (const name of names) transfer.items.add(new File(["synthetic material"], name, { type: "text/plain" }));
+      target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    }, names);
+  };
+  await scenario({}, async ({ calls, wait, start, card }) => {
+    await start(); await card.getByRole("button", { name: /添加公司材料或 BP/ }).waitFor();
+    await drop(card, ["公司简介.txt", "产品补充.txt"]); await wait("importFileData", 1);
+    await card.getByText("公司简介.txt", { exact: true }).waitFor();
+    assert.deepEqual((await calls("importFileData"))[0].payload.names, ["公司简介.txt", "产品补充.txt"]);
+    await card.getByRole("button", { name: "确认并生成纪要", exact: true }).click(); await wait("run", 1);
+    assert.equal((await calls("run"))[0].payload.attachmentPaths.length, 2);
+  });
+  await scenario({ filePaths: { "拖入BP.pdf": "/synthetic/source/拖入BP.pdf" }, importFileData: { error: "合成文件读取失败" } }, async ({ calls, wait, start, card }) => {
+    await start(); await card.getByRole("textbox", { name: /参会者/ }).fill("保留参会者信息");
+    await drop(card, ["拖入BP.pdf", "失败的补充.txt"]);
+    await card.getByRole("alert").filter({ hasText: "合成文件读取失败" }).waitFor(); await wait("discard", 1);
+    assert.equal(await card.getByRole("listitem").count(), 0, "A partial batch failure is rolled back");
+    assert.equal(await card.getByRole("textbox", { name: /参会者/ }).inputValue(), "保留参会者信息");
+    assert.equal((await calls("run")).length, 0);
+  });
+  await scenario({ selectFiles: { result: { ok: true, canceled: true, files: [] } } }, async ({ calls, wait, start, card }) => {
+    await start(); await card.getByRole("button", { name: /添加公司材料或 BP/ }).click(); await wait("selectFiles", 1);
+    assert.equal(await card.getByRole("listitem").count(), 0);
+    assert.equal(await card.getByRole("alert").count(), 0);
+    assert.equal((await calls("run")).length, 0);
+  });
+  await scenario({ workspace: { result: { ok: false } } }, async ({ page, calls, wait, plan, start, card }) => {
+    await start(); await card.getByRole("button", { name: /添加公司材料或 BP/ }).click();
+    await card.getByText("示例公司BP.pdf", { exact: true }).waitFor();
+    await card.getByRole("button", { name: "确认并生成纪要", exact: true }).click();
+    await card.getByRole("alert").filter({ hasText: "任务工作区" }).waitFor();
+    await page.reload({ waitUntil: "networkidle" }); await card.getByText("示例公司BP.pdf", { exact: true }).waitFor();
+    await plan("workspace", { result: { ok: true, workspacePath: "/synthetic/retry" } });
+    await plan("workspace", { result: { ok: true, workspacePath: "/synthetic/retry-stage" } });
+    await card.getByRole("button", { name: "继续生成纪要", exact: true }).click(); await wait("run", 1);
+    assert.equal((await calls("save")).length, 0, "Restarted launch uses the already confirmed receipt");
+    assert.equal((await calls("run"))[0].payload.attachmentPaths.length, 2, "Retry retains all submitted materials");
+  });
+
+  console.log("PLAUD intake UI passed: context recovery; materials selection/drop/removal; materials-only context; durable attachments; source-thread isolation; copy failure rollback; import-before-submit; saved-context attachment retry.");
 } finally {
   await browser?.close(); await server?.close(); await fs.rm(cache, { recursive: true, force: true });
 }
