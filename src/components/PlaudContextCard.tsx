@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ArrowRight, AudioLines, CheckCircle2, ChevronRight, FileText, Paperclip, Plus, RefreshCw, Sparkles, X } from "lucide-react";
 import type { LocalAttachment } from "../env";
+import { filesFromClipboardData, filePathsFromClipboardData } from "../clipboard-files";
 
 export type PlaudContextDraft = {
   conversationType: string;
@@ -19,7 +20,7 @@ export type PlaudRecall = {
 export default function PlaudContextCard({
   fileName, createdAt, duration, draft, recall, preparing, summarizing, submitting,
   confirmed, advanced, resumableAdvanced, running, error, canSubmit, scopeRecovery, canRecoverScope, onRecoverScope, onChange, onSubmit, onRetry,
-  attachments = [], importingAttachments = false, attachmentError, onAddAttachments, onDropAttachments, onRemoveAttachment
+  attachments = [], importingAttachments = false, attachmentError, onAddAttachments, onDropAttachments, onPasteAttachments, onRemoveAttachment
 }: {
   fileName: string;
   createdAt: number | null;
@@ -46,6 +47,7 @@ export default function PlaudContextCard({
   attachmentError?: string;
   onAddAttachments: () => void;
   onDropAttachments: (files: File[]) => void;
+  onPasteAttachments: (files: File[], paths: string[]) => void;
   onRemoveAttachment: (path: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
@@ -62,7 +64,14 @@ export default function PlaudContextCard({
   const excerpts = (recall?.excerpts || []).filter(Boolean);
   const change = (field: keyof PlaudContextDraft, value: string) => onChange({ ...draft, [field]: value });
   return (
-    <section className="plaud-context" aria-label="会议背景确认">
+    <section className="plaud-context" aria-label="会议背景确认" onPaste={event => {
+      const files = filesFromClipboardData(event.clipboardData);
+      const paths = files.length ? [] : filePathsFromClipboardData(event.clipboardData);
+      if (!files.length && !paths.length) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!materialsDisabled) onPasteAttachments(files, paths);
+    }}>
       <div className="plaud-context-intro">
         <Sparkles size={21} aria-hidden="true" />
         <div><h2>{confirmed ? "会议信息已保存" : "先回忆一下，这场会聊了什么"}</h2>
@@ -99,7 +108,8 @@ export default function PlaudContextCard({
               <label><span>参会者 <small>姓名、公司或职位</small></span><textarea value={draft.participants} disabled={disabled} maxLength={6000} onChange={event => change("participants", event.target.value)} placeholder="例如：项目方创始人、我和同事；也可以直接粘贴名单" rows={3} />
                 <small className="plaud-context-field-help">知道多少填多少；文字稿中被提到的人不一定是参会者。</small>
               </label>
-              <div className="plaud-context-materials" role="group" aria-label="公司材料 / BP">
+              <div className="plaud-context-materials" role="group" aria-label="公司材料 / BP" tabIndex={materialsDisabled ? -1 : 0}
+                onClick={event => { if (!(event.target as HTMLElement).closest("button")) event.currentTarget.focus(); }}>
                 <div className="plaud-context-materials-heading"><span>公司材料 / BP <small>选填</small></span><span>{attachments.length ? `${attachments.length} 份材料` : ""}</span></div>
                 {!confirmed && <button type="button" className={`plaud-context-materials-drop${dragging && !materialsDisabled ? " is-dragging" : ""}`}
                   disabled={materialsDisabled} onClick={onAddAttachments}
@@ -107,7 +117,7 @@ export default function PlaudContextCard({
                   onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
                   onDrop={event => { event.preventDefault(); event.stopPropagation(); setDragging(false); if (!materialsDisabled) onDropAttachments(Array.from(event.dataTransfer.files)); }}>
                   {importingAttachments ? <RefreshCw size={18} className="spinning" aria-hidden="true" /> : <Paperclip size={18} aria-hidden="true" />}
-                  <span>{importingAttachments ? "正在添加材料…" : "添加公司材料或 BP"}<small>也可拖入文件 · PDF、PPT、Word、Excel、图片等</small></span>
+                  <span>{importingAttachments ? "正在添加材料…" : "添加公司材料或 BP"}<small>支持拖入或 ⌘V 粘贴 · PDF、PPT、Word、Excel、图片等</small></span>
                   {!importingAttachments && <Plus size={16} aria-hidden="true" />}
                 </button>}
                 {attachments.length > 0 && <ul className="plaud-context-materials-list">{attachments.map(file => <li key={file.path}>

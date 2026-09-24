@@ -92,6 +92,7 @@ import {
   type TaskNotificationOutcome
 } from "./task-notifications";
 import { filesFromClipboardData } from "./clipboard-files";
+import { filePathsFromClipboardData } from "./clipboard-files";
 import { isLocalPdfResource } from "./document-resources";
 import {
   automaticallyRoutedProject,
@@ -6423,12 +6424,12 @@ function App() {
     patchPlaudIntake(threadId, intake => intake.phase === "draft" ? { ...intake, draft, draftEdited: true } : intake);
   }
 
-  async function addPlaudContextAttachments(threadId: string, droppedFiles?: File[]) {
+  async function addPlaudContextAttachments(threadId: string, droppedFiles?: File[], pastedPaths: string[] = []) {
     const intake = threadsRef.current.find(thread => thread.id === threadId)?.plaudIntake;
     const runtime = plaudIntakeRuntimeRef.current[threadId];
     if (!intake || intake.phase !== "draft" || plaudAttachmentImportsRef.current.has(threadId) || runtime?.scopeRecovery
       || plaudContextSubmitIdsRef.current.has(threadId) || activeRunsByThreadRef.current[threadId]) return;
-    if (droppedFiles && !droppedFiles.length) return;
+    if (droppedFiles && !droppedFiles.length && !pastedPaths.length) return;
     const scopeVersion = plaudScopeVersionRef.current;
     // Capture the destination before any picker/copy await; changing conversations
     // must never attach this batch to whichever conversation happens to be active.
@@ -6441,7 +6442,7 @@ function App() {
     patchPlaudIntakeRuntime(threadId, { importingAttachments: true, attachmentError: "" });
     changeAttachmentImportCount(1);
     try {
-      if (!droppedFiles) {
+      if (!droppedFiles && !pastedPaths.length) {
         // No entity directory yet: keep a managed copy until the workflow verifies
         // the actual project. Never copy into an inferred company at intake time.
         const result = await workbench.selectFiles();
@@ -6449,25 +6450,25 @@ function App() {
         if (result.canceled) return;
         imported.push(...result.files);
       } else {
-        const paths: string[] = [], memoryFiles: File[] = [];
-        for (const file of droppedFiles) {
+        const paths = new Set(pastedPaths), memoryFiles: File[] = [];
+        for (const file of droppedFiles || []) {
           let sourcePath = "";
           try { sourcePath = workbench.getPathForFile(file); } catch { /* Browser File fallback below. */ }
-          if (sourcePath) paths.push(sourcePath); else memoryFiles.push(file);
+          if (sourcePath) paths.add(sourcePath); else memoryFiles.push(file);
         }
         if (memoryFiles.reduce((sum, file) => sum + file.size, 0) > 100 * 1024 * 1024) {
           throw new Error("这批文件较大，请使用“添加公司材料或 BP”从本地选择。");
         }
-        if (paths.length) {
-          const result = await workbench.importFiles(paths);
-          if (!result.ok) throw new Error(result.error || "无法导入拖入的材料，请重试。");
+        if (paths.size) {
+          const result = await workbench.importFiles([...paths]);
+          if (!result.ok) throw new Error(result.error || "无法导入材料，请重试。");
           imported.push(...result.files);
         }
         if (memoryFiles.length) {
           const payloads: ClipboardAttachmentPayload[] = [];
-          for (const file of memoryFiles) payloads.push({ name: file.name, type: file.type, data: await file.arrayBuffer() });
+          for (const [index, file] of memoryFiles.entries()) payloads.push({ name: file.name || `clipboard-file-${index + 1}`, type: file.type, data: await file.arrayBuffer() });
           const result = await workbench.importFileData(payloads);
-          if (!result.ok) throw new Error(result.error || "无法读取拖入的材料，请重试。");
+          if (!result.ok) throw new Error(result.error || "无法读取材料，请重试。");
           imported.push(...result.files);
         }
       }
@@ -9749,18 +9750,7 @@ function App() {
   function handleComposerPaste(event: ReactClipboardEvent<HTMLFormElement>) {
     const files = filesFromClipboardData(event.clipboardData);
     if (files.length === 0) {
-      const fileUrlPaths = event.clipboardData.getData("text/uri-list")
-        .split(/\r?\n/)
-        .map((value) => value.trim())
-        .filter((value) => value && !value.startsWith("#"))
-        .flatMap((value) => {
-          try {
-            const url = new URL(value);
-            return url.protocol === "file:" ? [decodeURIComponent(url.pathname)] : [];
-          } catch {
-            return [];
-          }
-        });
+      const fileUrlPaths = filePathsFromClipboardData(event.clipboardData);
       if (fileUrlPaths.length === 0) return;
       event.preventDefault();
       event.stopPropagation();
@@ -14519,6 +14509,7 @@ function App() {
                         attachmentError={activePlaudIntakeRuntime?.attachmentError}
                         onAddAttachments={() => void addPlaudContextAttachments(activeThread.id)}
                         onDropAttachments={files => void addPlaudContextAttachments(activeThread.id, files)}
+                        onPasteAttachments={(files, paths) => void addPlaudContextAttachments(activeThread.id, files, paths)}
                         onRemoveAttachment={path => void removePlaudContextAttachment(activeThread.id, path)}
                         preparing={activePlaudIntakeRuntime?.preparing ?? true} summarizing={activePlaudIntakeRuntime?.summarizing ?? false}
                         submitting={activePlaudIntakeRuntime?.submitting ?? false} confirmed={activePlaudIntake.phase === "confirmed"}

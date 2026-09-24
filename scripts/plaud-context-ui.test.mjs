@@ -356,6 +356,59 @@ try {
       target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
     }, names);
   };
+  const paste = (target, data) => target.evaluate((element, data) => {
+    const transfer = new DataTransfer();
+    for (const name of data.names || []) transfer.items.add(new File(["synthetic material"], name, { type: name.endsWith(".png") ? "image/png" : "application/pdf" }));
+    if (data.uris) transfer.setData("text/uri-list", data.uris);
+    if (data.text) transfer.setData("text/plain", data.text);
+    const event = new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer });
+    element.dispatchEvent(event);
+    return event.defaultPrevented;
+  }, data);
+  await scenario({ filePaths: { "粘贴 BP.pdf": "/synthetic/source/粘贴 BP.pdf" } }, async ({ page, calls, wait, start, card }) => {
+    await start();
+    const participants = card.getByRole("textbox", { name: /参会者/ });
+    await participants.fill("已有参会者");
+    assert.equal(await paste(participants, { text: "补充姓名和职位" }), false, "Ordinary text paste stays with the focused field");
+    assert.equal(await paste(participants, { names: ["粘贴 BP.pdf", "截图.png"], uris: "file:///synthetic/duplicate.pdf", text: "不应填入参会者" }), true);
+    await wait("importFiles", 1); await wait("importFileData", 1);
+    await card.getByText("截图.png", { exact: true }).waitFor();
+    assert.deepEqual((await calls("importFiles"))[0].payload.paths, ["/synthetic/source/粘贴 BP.pdf"]);
+    assert.deepEqual((await calls("importFileData"))[0].payload.names, ["截图.png"], "Direct clipboard files and item views are imported only once");
+    assert.equal(await participants.inputValue(), "已有参会者");
+    assert.equal(await card.getByRole("listitem").count(), 2);
+    assert.equal((await calls("run")).length, 0, "Pasting files never launches the model");
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("intake-fixture-state")).threads.some(thread => thread.plaudIntake?.attachments?.length === 2));
+    await page.reload({ waitUntil: "networkidle" }); await card.getByText("粘贴 BP.pdf", { exact: true }).waitFor();
+    await card.getByRole("button", { name: "确认并生成纪要", exact: true }).click(); await wait("run", 1);
+    assert.equal((await calls("run"))[0].payload.attachmentPaths.length, 2, "Pasted files survive reload and enter the minutes workflow");
+  });
+  await scenario({ importFiles: { hold: true } }, async ({ page, calls, wait, release, start, card }) => {
+    await start();
+    const materials = card.getByRole("group", { name: "公司材料 / BP", exact: true });
+    await materials.getByText("公司材料 / BP 选填", { exact: true }).click();
+    assert.equal(await materials.evaluate(element => document.activeElement === element), true, "Clicking the materials heading prepares keyboard paste without opening a picker");
+    const uri = "file:///synthetic/" + encodeURIComponent("示例公司 BP.pdf");
+    assert.equal(await paste(materials, { uris: `${uri}\n${uri}\nfile:///synthetic/data.xlsx` }), true);
+    await wait("importFiles", 1);
+    assert.deepEqual((await calls("importFiles"))[0].payload.paths, ["/synthetic/示例公司 BP.pdf", "/synthetic/data.xlsx"]);
+    assert.equal(await card.getByRole("button", { name: "确认并生成纪要", exact: true }).isDisabled(), true);
+    assert.equal(await paste(card.getByRole("textbox", { name: /参会者/ }), { names: ["忙碌时不重复导入.pdf"] }), true);
+    assert.equal((await calls("importFileData")).length, 0, "Busy imports cannot be bypassed by pasting into a text field");
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await release("importFiles", { ok: true, files: [{ name: "示例公司 BP.pdf", path: "/synthetic/staging/pasted.pdf", size: 200 }] });
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("intake-fixture-state")).threads.some(thread => thread.plaudIntake?.attachments?.[0]?.path === "/synthetic/staging/pasted.pdf"));
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("intake-fixture-state")));
+    assert.notEqual(saved.threads.find(thread => thread.plaudIntake).id, saved.activeThreadId, "Delayed paste stays on its original meeting");
+  });
+  await scenario({ importFileData: { error: "合成剪贴板读取失败" } }, async ({ calls, start, card }) => {
+    await start(); await card.getByRole("textbox", { name: /参会者/ }).fill("保留已填信息");
+    await paste(card.getByRole("group", { name: "公司材料 / BP", exact: true }), { names: ["失败的截图.png"] });
+    await card.getByRole("alert").filter({ hasText: "合成剪贴板读取失败" }).waitFor();
+    assert.equal(await card.getByRole("textbox", { name: /参会者/ }).inputValue(), "保留已填信息");
+    assert.equal(await card.getByRole("listitem").count(), 0);
+    assert.equal((await calls("run")).length, 0);
+  });
   await scenario({ selectFiles: { hold: true } }, async ({ page, calls, wait, release, start, card }) => {
     await start(); await card.getByRole("button", { name: /添加公司材料或 BP/ }).click(); await wait("selectFiles", 1);
     await page.getByTitle("打开 Codex 设置", { exact: true }).click();
@@ -407,7 +460,7 @@ try {
     assert.equal((await calls("run"))[0].payload.attachmentPaths.length, 2, "Retry retains all submitted materials");
   });
 
-  console.log("PLAUD intake UI passed: context recovery; materials selection/drop/removal; materials-only context; durable attachments; source-thread isolation; copy failure rollback; import-before-submit; saved-context attachment retry.");
+  console.log("PLAUD intake UI passed: context recovery; materials selection/drop/paste/removal; Finder URLs, screenshots and text paste; materials-only context; durable attachments; source-thread isolation; copy failure rollback; import-before-submit; saved-context attachment retry.");
 } finally {
   await browser?.close(); await server?.close(); await fs.rm(cache, { recursive: true, force: true });
 }

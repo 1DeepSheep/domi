@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filesFromClipboardData } from "../src/clipboard-files.ts";
+import { filesFromClipboardData, filePathsFromClipboardData } from "../src/clipboard-files.ts";
 
 function clipboardData(files, itemFiles) {
   return {
@@ -11,6 +11,19 @@ function clipboardData(files, itemFiles) {
     }))
   };
 }
+
+test("file URL paste preserves names and spaces and deduplicates Finder paths", () => {
+  const uri = "file:///synthetic/" + encodeURIComponent("示例公司 BP.pdf");
+  assert.deepEqual(filePathsFromClipboardData({ getData: type => type === "text/uri-list"
+    ? `# Finder files\r\n${uri}\r\n${uri}\r\nfile://localhost/synthetic/data.xlsx` : "" }),
+  ["/synthetic/示例公司 BP.pdf", "/synthetic/data.xlsx"]);
+});
+
+test("ordinary text, web links and invalid or non-local file URLs are not file imports", () => {
+  for (const value of ["", "参会者：示例负责人", "/synthetic/data.pdf", "https://example.com/bp.pdf", "file:///bad%ZZ.pdf", "file://remote/share/bp.pdf", "file:///bad%00.pdf"]) {
+    assert.deepEqual(filePathsFromClipboardData({ getData: () => value }), []);
+  }
+});
 
 test("composer paste uses the direct file view only once", () => {
   const directImage = {

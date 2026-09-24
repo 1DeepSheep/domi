@@ -11708,7 +11708,7 @@ body.panel-resizing .main-grid {
 .plaud-context-materials-drop small { display: block; margin-top: 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
 .plaud-context-materials-drop > svg { flex: 0 0 auto; color: var(--muted); }
 .plaud-context-materials-drop:hover:enabled, .plaud-context-materials-drop.is-dragging { border-color: var(--accent); background: var(--accent-soft); }
-.plaud-context-materials button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.plaud-context-materials:focus-visible, .plaud-context-materials button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .plaud-context-materials button:disabled { opacity: .55; cursor: default; }
 .plaud-context-materials-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
 .plaud-context-materials-list li { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 7px; padding: 9px 11px; font-size: 12px; }
