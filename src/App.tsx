@@ -2209,6 +2209,7 @@ function App() {
   const plaudIntakeRuntimeRef = useRef(plaudIntakeRuntime);
   const plaudContextPreparePromisesRef = useRef(new Map<string, Promise<void>>());
   const plaudContextSubmitIdsRef = useRef(new Set<string>());
+  const plaudAttachmentImportsRef = useRef(new Set<string>());
   const creatingThreadRef = useRef(false);
   const attachmentImportCountRef = useRef(0);
   const submissionStartingThreadIdsRef = useRef(new Set<string>());
@@ -2322,7 +2323,7 @@ function App() {
   }
 
   function threadDeletionIsBusy(threadId: string) {
-    if (plaudIntakeRuntimeRef.current[threadId]?.importingAttachments) return true;
+    if (plaudAttachmentImportsRef.current.has(threadId)) return true;
     if (!codexRecoveryReady) return true;
     const liveRun = [...runContextRef.current.entries()].find(
       ([, context]) => context.threadId === threadId
@@ -6425,7 +6426,7 @@ function App() {
   async function addPlaudContextAttachments(threadId: string, droppedFiles?: File[]) {
     const intake = threadsRef.current.find(thread => thread.id === threadId)?.plaudIntake;
     const runtime = plaudIntakeRuntimeRef.current[threadId];
-    if (!intake || intake.phase !== "draft" || runtime?.importingAttachments || runtime?.scopeRecovery
+    if (!intake || intake.phase !== "draft" || plaudAttachmentImportsRef.current.has(threadId) || runtime?.scopeRecovery
       || plaudContextSubmitIdsRef.current.has(threadId) || activeRunsByThreadRef.current[threadId]) return;
     if (droppedFiles && !droppedFiles.length) return;
     const scopeVersion = plaudScopeVersionRef.current;
@@ -6436,6 +6437,7 @@ function App() {
         && thread.plaudIntake.phase === "draft") && !plaudIntakeRuntimeRef.current[threadId]?.scopeRecovery;
     const imported: LocalAttachment[] = [];
     let attached = false;
+    plaudAttachmentImportsRef.current.add(threadId);
     patchPlaudIntakeRuntime(threadId, { importingAttachments: true, attachmentError: "" });
     changeAttachmentImportCount(1);
     try {
@@ -6479,6 +6481,7 @@ function App() {
       if (current()) patchPlaudIntakeRuntime(threadId, { attachmentError: describeOperationError(error, "材料暂未添加，请重试。") });
     } finally {
       if (!attached) await Promise.allSettled(imported.map(file => workbench.discardStagedAttachment(file.path)));
+      plaudAttachmentImportsRef.current.delete(threadId);
       patchPlaudIntakeRuntime(threadId, { importingAttachments: false });
       changeAttachmentImportCount(-1);
     }
@@ -6486,7 +6489,7 @@ function App() {
 
   async function removePlaudContextAttachment(threadId: string, filePath: string) {
     const intake = threadsRef.current.find(thread => thread.id === threadId)?.plaudIntake;
-    if (!intake || intake.phase !== "draft" || plaudIntakeRuntimeRef.current[threadId]?.importingAttachments
+    if (!intake || intake.phase !== "draft" || plaudAttachmentImportsRef.current.has(threadId)
       || plaudIntakeRuntimeRef.current[threadId]?.scopeRecovery || plaudContextSubmitIdsRef.current.has(threadId)) return;
     if (!intake.attachments?.some(file => file.path === filePath)) return;
     patchPlaudIntake(threadId, value => ({ ...value, attachments: value.attachments?.filter(file => file.path !== filePath) }));
@@ -6636,7 +6639,7 @@ function App() {
   }
 
   async function submitPlaudContext(threadId: string, skip: boolean) {
-    if (!codexRecoveryReady || plaudContextSubmitIdsRef.current.has(threadId) || plaudIntakeRuntimeRef.current[threadId]?.importingAttachments) return;
+    if (!codexRecoveryReady || plaudContextSubmitIdsRef.current.has(threadId) || plaudAttachmentImportsRef.current.has(threadId)) return;
     const originalThread = threadsRef.current.find(thread => thread.id === threadId);
     const originalIntake = originalThread?.plaudIntake;
     const prepared = plaudIntakeRuntimeRef.current[threadId]?.prepared;
@@ -14512,7 +14515,7 @@ function App() {
                       <PlaudContextCard
                         fileName={activePlaudIntake.item.fileName} createdAt={activePlaudIntake.item.createdAt} duration={activePlaudIntake.item.duration}
                         draft={activePlaudIntake.draft} recall={activePlaudIntakeRuntime?.recall}
-                        attachments={activePlaudIntake.attachments || []} importingAttachments={activePlaudIntakeRuntime?.importingAttachments}
+                        attachments={activePlaudIntake.attachments || []} importingAttachments={plaudAttachmentImportsRef.current.has(activeThread.id)}
                         attachmentError={activePlaudIntakeRuntime?.attachmentError}
                         onAddAttachments={() => void addPlaudContextAttachments(activeThread.id)}
                         onDropAttachments={files => void addPlaudContextAttachments(activeThread.id, files)}
