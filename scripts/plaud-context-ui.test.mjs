@@ -356,6 +356,22 @@ try {
       target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
     }, names);
   };
+  await scenario({ selectFiles: { hold: true } }, async ({ page, calls, wait, release, start, card }) => {
+    await start(); await card.getByRole("button", { name: /添加公司材料或 BP/ }).click(); await wait("selectFiles", 1);
+    await page.getByTitle("打开 Codex 设置", { exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "domi 设置", exact: true });
+    await settings.getByRole("button", { name: "录音转写", exact: true }).click();
+    await settings.getByRole("button", { name: "登录并验证", exact: true }).click(); await wait("prepare", 2);
+    await settings.getByTitle("关闭设置", { exact: true }).click();
+    assert.equal(await card.getByRole("button", { name: "确认并生成纪要", exact: true }).isDisabled(), true,
+      "Connection reset must not release the in-flight material import guard");
+    assert.equal(await card.getByRole("button", { name: /正在添加材料/ }).isDisabled(), true);
+    await release("selectFiles", { ok: true, files: [{ name: "原连接材料.pdf", path: "/synthetic/staging/old-scope.pdf", size: 1024 }] });
+    await wait("discard", 1);
+    await page.waitForFunction(() => !document.querySelector('.plaud-context-submit').disabled);
+    assert.equal(await card.getByRole("listitem").count(), 0, "Old-connection imports never enter the refreshed meeting");
+    assert.equal((await calls("run")).length, 0);
+  });
   await scenario({}, async ({ calls, wait, start, card }) => {
     await start(); await card.getByRole("button", { name: /添加公司材料或 BP/ }).waitFor();
     await drop(card, ["公司简介.txt", "产品补充.txt"]); await wait("importFileData", 1);
