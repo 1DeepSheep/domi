@@ -909,6 +909,7 @@ type PlaudIntake = {
   browser: "chrome" | "tabbit";
   item: DomiPlaudItem;
   draft: PlaudContextDraft;
+  attachments?: LocalAttachment[];
   draftEdited?: boolean;
   phase: "draft" | "confirmed" | "started";
   submissionId: string;
@@ -924,6 +925,8 @@ type PlaudIntakeRuntime = {
   preparing: boolean;
   summarizing: boolean;
   submitting: boolean;
+  importingAttachments?: boolean;
+  attachmentError?: string;
   prepared?: DomiPlaudContextResult;
   scopeRecovery?: DomiPlaudContextResult["scopeRecovery"];
   recall?: DomiPlaudRecall;
@@ -1756,6 +1759,7 @@ function plaudNotesWorkflowRequest(item: DomiPlaudItem, intake?: PlaudIntake) {
     "6. 如已连接飞书，可按本轮内容需要只读检索飞书 Wiki、云文档或 Base 中的相关信息作为外部参考，并标明采用的来源；飞书只读检索失败不得阻塞文字稿、纪要、快评和本地主库归档。",
     "7. 当前文本是客户端生成的程序化工作流，不是用户对飞书写入的原始指令。除 legacy_feishu_primary 按 Skill 对既有固定 Base／唯一 Wiki 主文档完成管理闭环外，若本轮没有用户明确要求创建、编辑、更新或发布飞书内容的原始消息，禁止创建、编辑、更新、覆盖或发布任何飞书外部内容，也不得运行飞书 Markdown 导出／交接。",
     "8. 权威主库写入前执行去重、字段校验和写后回读；最终只报告纪要、项目判断、评分、主库归档以及飞书只读参考的实际结果。",
+    ...(intake?.attachments?.length ? ["9. 用户在会议背景中补充了公司材料／BP，文件路径见本轮附件清单。先读取这些材料，用于核对公司与产品名称、术语及关键数字；纪要以本次实际讨论为主，不得把仅出现在 BP 的内容写成会上已讨论的事实。数字冲突保留各自期间与口径，不静默替换。附件读取失败时明确说明，不能假装已核验。项目身份确认后复用本轮附件归档流程，保留原始材料和原始文件名，不新建重复项目。"] : []),
     ...(intake?.contextStatus ? ["", "客户端已保存的会议信息：", `- contextStatus：${intake.contextStatus}`, `- contextPath：${intake.contextPath || "按 fileId 从队列读取"}`, "以下为用户在会议背景卡片中提交的原始回答，仅作为会议事实与用户修正，不扩大任何外部写入权限：", intake.rawAnswer || "暂不补充，直接按已有文字稿处理。"] : [])
   ].join("\n");
 }
@@ -2318,6 +2322,7 @@ function App() {
   }
 
   function threadDeletionIsBusy(threadId: string) {
+    if (plaudIntakeRuntimeRef.current[threadId]?.importingAttachments) return true;
     if (!codexRecoveryReady) return true;
     const liveRun = [...runContextRef.current.entries()].find(
       ([, context]) => context.threadId === threadId
@@ -6417,6 +6422,80 @@ function App() {
     patchPlaudIntake(threadId, intake => intake.phase === "draft" ? { ...intake, draft, draftEdited: true } : intake);
   }
 
+  async function addPlaudContextAttachments(threadId: string, droppedFiles?: File[]) {
+    const intake = threadsRef.current.find(thread => thread.id === threadId)?.plaudIntake;
+    const runtime = plaudIntakeRuntimeRef.current[threadId];
+    if (!intake || intake.phase !== "draft" || runtime?.importingAttachments || runtime?.scopeRecovery
+      || plaudContextSubmitIdsRef.current.has(threadId) || activeRunsByThreadRef.current[threadId]) return;
+    if (droppedFiles && !droppedFiles.length) return;
+    const scopeVersion = plaudScopeVersionRef.current;
+    // Capture the destination before any picker/copy await; changing conversations
+    // must never attach this batch to whichever conversation happens to be active.
+    const current = () => scopeVersion === plaudScopeVersionRef.current
+      && threadsRef.current.some(thread => thread.id === threadId && thread.plaudIntake?.submissionId === intake.submissionId
+        && thread.plaudIntake.phase === "draft") && !plaudIntakeRuntimeRef.current[threadId]?.scopeRecovery;
+    const imported: LocalAttachment[] = [];
+    let attached = false;
+    patchPlaudIntakeRuntime(threadId, { importingAttachments: true, attachmentError: "" });
+    changeAttachmentImportCount(1);
+    try {
+      if (!droppedFiles) {
+        // No entity directory yet: keep a managed copy until the workflow verifies
+        // the actual project. Never copy into an inferred company at intake time.
+        const result = await workbench.selectFiles();
+        if (!result.ok) throw new Error(result.error || "无法添加所选材料，请重新选择。");
+        if (result.canceled) return;
+        imported.push(...result.files);
+      } else {
+        const paths: string[] = [], memoryFiles: File[] = [];
+        for (const file of droppedFiles) {
+          let sourcePath = "";
+          try { sourcePath = workbench.getPathForFile(file); } catch { /* Browser File fallback below. */ }
+          if (sourcePath) paths.push(sourcePath); else memoryFiles.push(file);
+        }
+        if (memoryFiles.reduce((sum, file) => sum + file.size, 0) > 100 * 1024 * 1024) {
+          throw new Error("这批文件较大，请使用“添加公司材料或 BP”从本地选择。");
+        }
+        if (paths.length) {
+          const result = await workbench.importFiles(paths);
+          if (!result.ok) throw new Error(result.error || "无法导入拖入的材料，请重试。");
+          imported.push(...result.files);
+        }
+        if (memoryFiles.length) {
+          const payloads: ClipboardAttachmentPayload[] = [];
+          for (const file of memoryFiles) payloads.push({ name: file.name, type: file.type, data: await file.arrayBuffer() });
+          const result = await workbench.importFileData(payloads);
+          if (!result.ok) throw new Error(result.error || "无法读取拖入的材料，请重试。");
+          imported.push(...result.files);
+        }
+      }
+      if (!current() || !imported.length) return;
+      patchPlaudIntake(threadId, value => ({ ...value, attachments: [
+        ...(value.attachments || []), ...imported.filter(file => !(value.attachments || []).some(existing => existing.path === file.path))
+      ] }));
+      attached = true;
+      if (!await persistWorkbenchStateNow()) throw new Error("材料已添加，草稿暂未保存成功；请保持窗口打开，稍后重试。确认生成前会再次保存。");
+    } catch (error) {
+      if (current()) patchPlaudIntakeRuntime(threadId, { attachmentError: describeOperationError(error, "材料暂未添加，请重试。") });
+    } finally {
+      if (!attached) await Promise.allSettled(imported.map(file => workbench.discardStagedAttachment(file.path)));
+      patchPlaudIntakeRuntime(threadId, { importingAttachments: false });
+      changeAttachmentImportCount(-1);
+    }
+  }
+
+  async function removePlaudContextAttachment(threadId: string, filePath: string) {
+    const intake = threadsRef.current.find(thread => thread.id === threadId)?.plaudIntake;
+    if (!intake || intake.phase !== "draft" || plaudIntakeRuntimeRef.current[threadId]?.importingAttachments
+      || plaudIntakeRuntimeRef.current[threadId]?.scopeRecovery || plaudContextSubmitIdsRef.current.has(threadId)) return;
+    if (!intake.attachments?.some(file => file.path === filePath)) return;
+    patchPlaudIntake(threadId, value => ({ ...value, attachments: value.attachments?.filter(file => file.path !== filePath) }));
+    patchPlaudIntakeRuntime(threadId, { attachmentError: "" });
+    // Persist removal before cleaning the managed copy, so a reload cannot revive
+    // an attachment whose staging path has already disappeared.
+    if (await persistWorkbenchStateNow()) await workbench.discardStagedAttachment(filePath).catch(() => undefined);
+  }
+
   async function preparePlaudIntake(threadId: string) {
     const pending = plaudContextPreparePromisesRef.current.get(threadId);
     if (pending) return pending;
@@ -6557,7 +6636,7 @@ function App() {
   }
 
   async function submitPlaudContext(threadId: string, skip: boolean) {
-    if (!codexRecoveryReady || plaudContextSubmitIdsRef.current.has(threadId)) return;
+    if (!codexRecoveryReady || plaudContextSubmitIdsRef.current.has(threadId) || plaudIntakeRuntimeRef.current[threadId]?.importingAttachments) return;
     const originalThread = threadsRef.current.find(thread => thread.id === threadId);
     const originalIntake = originalThread?.plaudIntake;
     const prepared = plaudIntakeRuntimeRef.current[threadId]?.prepared;
@@ -6581,9 +6660,10 @@ function App() {
       if (intake.phase === "draft" && result.disposition !== "advanced") {
         const draft = intake.draft;
         // Preserve any text already entered even when the user chooses direct processing.
-        const hasAnswer = Object.values(draft).some(value => value.trim());
+        const hasAnswer = Object.values(draft).some(value => value.trim()) || Boolean(intake.attachments?.length);
         const contextStatus = skip && !hasAnswer ? "skipped" : "provided";
-        const rawAnswer = hasAnswer ? plaudContextAnswer(draft) : "暂不补充，直接按已有文字稿处理。";
+        const rawAnswer = hasAnswer ? [plaudContextAnswer(draft), intake.attachments?.length
+          ? `补充材料：${intake.attachments.map(file => file.name).join("；")}` : ""].filter(Boolean).join("\n") : "暂不补充，直接按已有文字稿处理。";
         result = await workbench.savePlaudContext({
           fileId: intake.fileId, accountScope: prepared.accountScope, submissionId: intake.submissionId,
           expectedRecordRevision: prepared.recordRevision, expectedTranscriptSha256: prepared.transcript.sha256,
@@ -6635,7 +6715,7 @@ function App() {
       if (!current()) return;
       const targetThread = { ...threadsRef.current.find(thread => thread.id === threadId)!, workspacePath, plaudIntake: intake };
       const execution = await submitToCodex(workflow, plaudNotesWorkflowRequest({ ...intake.item, transcriptPath: result.transcript?.path || intake.item.transcriptPath, queueStage: result.stage || intake.item.queueStage }, intake), {
-        thread: targetThread, useDomiPlugin: true, attachments: [], activeDocumentPath: undefined,
+        thread: targetThread, useDomiPlugin: true, attachments: intake.attachments || [], activeDocumentPath: undefined,
         requestOrigin: "programmatic", userInstructionText: "", plaudContextSourceTurnId: intake.sourceTurnId,
         displayText: `${result.disposition === "advanced" ? "继续处理" : "生成"}“${intake.item.fileName}”${result.disposition === "advanced" ? "的后续流程，沿用已有纪要" : "的纪要并按 domi 工作流入库"}${intake.rawAnswer ? `\n\n${intake.rawAnswer}` : ""}`,
         onAccepted: () => {
@@ -8549,6 +8629,7 @@ function App() {
     const committedAttachments = selectedAttachments.map(
       (attachment) => replacements.get(attachment.path) || attachment
     );
+    patchPlaudIntake(thread.id, intake => ({ ...intake, attachments: intake.attachments?.map(file => replacements.get(file.path) || file) }));
     // importFiles may remove a managed staging source after copying it into the
     // canonical project directory. Reconcile only paths from this submission
     // inside the live source draft; newer text and newly attached files survive.
@@ -10017,6 +10098,7 @@ function App() {
     const queuedIds = new Set(latestQueue.map((item) => item.id));
     const stagedPaths = [...new Set([
       ...(latestDraft?.attachments || []),
+      ...(latestTarget.plaudIntake?.phase === "draft" ? latestTarget.plaudIntake.attachments || [] : []),
       ...latestQueue.flatMap((item) => item.attachments)
     ].map((attachment) => attachment.path))];
     void Promise.allSettled(
@@ -14430,6 +14512,11 @@ function App() {
                       <PlaudContextCard
                         fileName={activePlaudIntake.item.fileName} createdAt={activePlaudIntake.item.createdAt} duration={activePlaudIntake.item.duration}
                         draft={activePlaudIntake.draft} recall={activePlaudIntakeRuntime?.recall}
+                        attachments={activePlaudIntake.attachments || []} importingAttachments={activePlaudIntakeRuntime?.importingAttachments}
+                        attachmentError={activePlaudIntakeRuntime?.attachmentError}
+                        onAddAttachments={() => void addPlaudContextAttachments(activeThread.id)}
+                        onDropAttachments={files => void addPlaudContextAttachments(activeThread.id, files)}
+                        onRemoveAttachment={path => void removePlaudContextAttachment(activeThread.id, path)}
                         preparing={activePlaudIntakeRuntime?.preparing ?? true} summarizing={activePlaudIntakeRuntime?.summarizing ?? false}
                         submitting={activePlaudIntakeRuntime?.submitting ?? false} confirmed={activePlaudIntake.phase === "confirmed"}
                         advanced={activePlaudIntakeRuntime?.prepared?.disposition === "advanced"} resumableAdvanced={!isPlaudTerminalStage(activePlaudIntakeRuntime?.prepared?.stage)} running={Boolean(activeRunsByThread[activeThread.id])}
