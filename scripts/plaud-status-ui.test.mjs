@@ -24,6 +24,7 @@ import "@fontsource-variable/newsreader/standard.css";
 const state = window.__plaudStatusTest = { calls: [], plans: { cache: [], list: [], sync: [], resume: [] }, pending: {}, issues: [], settings: null };
 state.readerListeners = [];
 const startup = window.__plaudStartupConfig || {};
+if (startup.online === false) Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
 const fallback = (await import("/src/bridge?plaud-status-fallback")).workbench;
 if (startup.allowRun) window.workbench = { ...fallback };
 const { workbench } = await import("/src/bridge");
@@ -390,9 +391,11 @@ try {
     assert.equal(await page.getByText("合成录音 saved-recording", { exact: true }).count(), 1);
     for (const delay of [2001, 5001, 15001]) { await page.clock.fastForward(delay); await page.waitForTimeout(20); }
     await wait("list", 4);
-    await page.getByText("已保留录音，暂未更新", { exact: true }).waitFor();
-    await page.clock.fastForward(120000);
-    assert.equal(await count("list"), 4, "Startup recovery has a finite read-only retry budget");
+    await page.getByText("已保留录音，正在后台重连", { exact: true }).waitFor();
+    await page.clock.fastForward(30_001);
+    await wait("list", 5);
+    assert.equal(await page.locator(".plaud-inline-notice.failed").count(), 0,
+      "A background network outage keeps the cached list without a red task-failure banner");
     await page.locator(".plaud-connection-status summary").click();
     assert.match(await page.locator(".plaud-connection-status").innerText(), /PLAUD_NETWORK_TIMEOUT.*init/);
     if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, "startup-cached-recordings.png") });
@@ -588,6 +591,67 @@ try {
     assert.equal(await count("resume"), 1);
   });
   const transient = snapshot([], { ok: false, retryable: true, remoteStatus: "network_error", error: "Failed to fetch" });
+  const setOnline = (page, value) => page.evaluate(value => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value });
+    window.dispatchEvent(new Event(value ? "online" : "offline"));
+  }, value);
+  await startupScenario({ online: false, cache: { result: trustedCache }, snapshot: snapshot([startupReady]) }, async ({ page, count, wait }) => {
+    await page.getByText("合成录音 saved-recording", { exact: true }).waitFor();
+    await page.getByText("已显示本地录音，联网后自动更新", { exact: true }).waitFor();
+    await page.clock.fastForward(120_001);
+    assert.equal(await count("resume"), 0, "Offline startup does not open a browser worker");
+    assert.equal(await count("list"), 0);
+    await setOnline(page, true);
+    await wait("list", 1);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+    assert.equal(await page.locator(".plaud-connection-status").count(), 0);
+  });
+  await startupScenario({ cache: { result: trustedCache }, list: { error: "Failed to fetch" }, snapshot: snapshot([startupReady]) }, async ({ page, count, wait }) => {
+    await wait("list", 1);
+    await page.getByText("已保留录音，正在后台重连", { exact: true }).waitFor();
+    await setOnline(page, false);
+    await page.getByText("已显示本地录音，联网后自动更新", { exact: true }).waitFor();
+    await page.clock.fastForward(900_001);
+    assert.equal(await count("list"), 1, "Offline time suspends read retries rather than burning a retry budget");
+    await setOnline(page, true);
+    await wait("list", 2);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+    assert.equal(await page.locator(".plaud-connection-status").count(), 0);
+    assert.equal(await page.getByRole("button", { name: "重新登录", exact: true }).count(), 0);
+  });
+  await startupScenario({ snapshot: transient }, async ({ page, count, wait }) => {
+    await wait("list", 1);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    assert.equal(await count("list"), 1, "Rapid focus changes must not cause a request storm");
+    await page.evaluate(value => {
+      window.__plaudStatusTest.snapshot = value;
+      Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+      window.dispatchEvent(new Event("offline"));
+    }, snapshot([startupReady]));
+    await page.clock.fastForward(31_001);
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    await wait("list", 2);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+    assert.equal(await count("list"), 2, "Wake/focus and scheduled recovery share a single read");
+  });
+  await startupScenario({ list: { hold: true }, snapshot: snapshot([startupReady]) }, async ({ page, count, wait, release }) => {
+    await wait("list", 1);
+    const retryAt = await page.evaluate(() => Date.now() + 90_000);
+    await release("list", { ...transient, retryAt, retryAfterMs: 90_000 });
+    await page.getByText(/正在自动恢复最近录音/).waitFor();
+    await setOnline(page, false);
+    await setOnline(page, true);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.clock.fastForward(89_000);
+    assert.equal(await count("list"), 1, "Online/focus recovery must honor the backend's stable cooldown");
+    await page.clock.fastForward(1_001);
+    await wait("list", 2);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+  });
   await startupScenario({ snapshot: transient }, async ({ page, count, wait }) => {
     await wait("list", 1);
     await page.getByText(/正在自动恢复最近录音/).waitFor();
@@ -606,9 +670,15 @@ try {
       await page.clock.fastForward(delay);
       await wait("list", attempt + 2);
     }
-    await page.getByRole("button", { name: "重试", exact: true }).waitFor();
-    await page.clock.fastForward(180_001);
-    assert.equal(await count("list"), 4, "Automatic list recovery must stop after three retries");
+    for (const [attempt, delay] of [30_001, 60_001, 300_001].entries()) {
+      await page.clock.fastForward(delay);
+      await wait("list", attempt + 5);
+    }
+    await page.evaluate(value => { window.__plaudStatusTest.snapshot = value; }, snapshot([startupReady]));
+    await page.clock.fastForward(300_001);
+    await wait("list", 8);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+    assert.equal(await count("sync"), 0, "Recovery beyond the first three tries remains read-only");
   });
   await startupScenario({ snapshot: transient }, async ({ page, count, wait }) => {
     await wait("list", 1);
@@ -630,6 +700,39 @@ try {
   const syncButton = page => page.getByRole("button", { name: "同步 PLAUD 并生成文字稿", exact: true });
   const pendingNotice = page => page.getByText("已保留同步请求，连接恢复后自动继续。", { exact: true });
   const manualScenario = verify => startupScenario({ manualSync: true, snapshot: snapshot([startupReady]) }, verify);
+  await manualScenario(async ({ page, count, wait }) => {
+    await wait("list", 1);
+    await queuePlan(page, "sync", { result: preflightFailure() });
+    await syncButton(page).click();
+    await pendingNotice(page).waitFor();
+    await setOnline(page, false);
+    await page.clock.fastForward(60_001);
+    assert.equal(await count("sync"), 1, "Offline time preserves but does not execute a safe unsubmitted intent");
+    await queuePlan(page, "sync", { result: readyResult });
+    await setOnline(page, true);
+    await wait("sync", 2);
+    await page.locator(".plaud-inline-notice.complete").waitFor();
+    assert.equal(await count("list"), 1, "Reconnection continues the same explicit sync without a competing read");
+  });
+  await manualScenario(async ({ page, count, wait, release }) => {
+    await wait("list", 1);
+    await queuePlan(page, "sync", { result: preflightFailure() });
+    await syncButton(page).click();
+    await pendingNotice(page).waitFor();
+    await queuePlan(page, "sync", { hold: true });
+    await page.clock.fastForward(2_001);
+    await wait("sync", 2);
+    await setOnline(page, false);
+    await page.clock.fastForward(900_001);
+    await page.getByText("同步仍在处理中，正在确认结果。", { exact: true }).waitFor();
+    assert.doesNotMatch(await page.locator(".plaud-inline-notice").innerText(), /尚未提交|同步完成/,
+      "Expiry cannot assert no POST after a continuation has already entered the backend");
+    assert.equal(await count("sync"), 2);
+    await release("sync", readyResult);
+    await page.locator(".plaud-inline-notice.complete").waitFor();
+    assert.match(await page.locator(".plaud-inline-notice.complete").innerText(), /已补下载/,
+      "The original in-flight result is still reconciled after continuation permission expires");
+  });
   await manualScenario(async ({ page, count, wait, release }) => {
     await wait("list", 1);
     await queuePlan(page, "sync", { result: preflightFailure({ errorCode: "PLAUD_READ_TRANSIENT", errorStage: "discovery" }) });
@@ -656,20 +759,21 @@ try {
   });
   await manualScenario(async ({ page, count, wait }) => {
     await wait("list", 1);
-    for (let attempt = 0; attempt < 4; attempt++) await queuePlan(page, "sync", { result: preflightFailure() });
+    for (let attempt = 0; attempt < 10; attempt++) await queuePlan(page, "sync", { result: preflightFailure() });
     await syncButton(page).click();
-    for (const [attempt, delay] of [2001, 5001, 15001].entries()) {
+    for (const [attempt, delay] of [2001, 5001, 15001, 30001, 60001].entries()) {
       await pendingNotice(page).waitFor();
       await page.clock.fastForward(delay);
       await wait("sync", attempt + 2);
     }
-    await page.locator(".plaud-inline-notice.failed").waitFor();
+    await pendingNotice(page).waitFor();
     await page.clock.fastForward(900_001);
-    assert.equal(await count("sync"), 4, "One manual sync has at most three automatic continuations");
+    assert.equal(await count("sync"), 6, "An absolute expiry stops deferred submission after an extended outage");
     assert.equal(await pendingNotice(page).count(), 0);
-    await page.locator(".plaud-inline-notice.failed").waitFor();
-    assert.match(await page.locator(".plaud-inline-notice.failed").innerText(), /同步未完成/,
-      "A later automatic successful list refresh must not erase an exhausted manual sync failure");
+    await page.getByText("同步已暂停，尚未提交新的生成请求。连接恢复后可再次同步。", { exact: true }).waitFor();
+    assert.equal(await page.locator(".plaud-inline-notice.failed").count(), 0);
+    assert.equal(await page.locator(".plaud-inline-notice.complete").count(), 0,
+      "A successful list refresh cannot pretend an expired generating request was completed");
   });
   await manualScenario(async ({ page, count, wait }) => {
     await wait("list", 1);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback } from "../src/plaud-status.ts";
+import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadFailureSnapshot, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback } from "../src/plaud-status.ts";
 import { restorePlaudOnStartup } from "../src/plaud-startup.ts";
 import { planPlaudSyncContinuation } from "../src/plaud-sync-intent.ts";
 
@@ -24,14 +24,25 @@ test("manual sync continuation requires an explicit never-submitted, scoped tran
   ]) assert.equal(planPlaudSyncContinuation(safePreflight(patch), 1, null, 1000), null);
 });
 
-test("manual sync continuation has three attempts and one absolute expiry", () => {
+test("manual sync continuation backs off for one absolute expiry without losing short-outage intent", () => {
   const first = planPlaudSyncContinuation(safePreflight(), 1, null, 1000);
   const second = planPlaudSyncContinuation(safePreflight(), 1, first, 3000);
   const third = planPlaudSyncContinuation(safePreflight(), 1, second, 8000);
   assert.deepEqual([first.retryAt, second.retryAt, third.retryAt], [3000, 8000, 23000]);
   assert.equal(second.expiresAt, first.expiresAt);
   assert.equal(third.expiresAt, first.expiresAt);
-  assert.equal(planPlaudSyncContinuation(safePreflight(), 1, third, 23000), null);
+  const fourth = planPlaudSyncContinuation(safePreflight(), 1, third, 23000);
+  assert.equal(fourth.retryAt, 53000);
+  let previous = fourth;
+  let attempts = 4;
+  for (;;) {
+    const next = planPlaudSyncContinuation(safePreflight(), 1, previous, previous.retryAt);
+    if (!next) break;
+    assert.equal(next.expiresAt, first.expiresAt);
+    assert.ok(next.retryAt < first.expiresAt);
+    previous = next;
+    assert.ok(++attempts < 20, "Bounded time and capped retries prevent an unlimited generating intent");
+  }
   assert.equal(planPlaudSyncContinuation(safePreflight(), 1, first, first.expiresAt), null);
   assert.equal(planPlaudSyncContinuation(safePreflight(), 2, first, 3000), null);
   assert.equal(planPlaudSyncContinuation(safePreflight({ recoveryScope: "changed-account" }), 1, first, 3000), null);
@@ -335,15 +346,44 @@ test("expected profile use is neutral and never schedules a retry that competes 
   assert.equal(plaudSyncFeedback({ ok: true, paused: true, status: "paused" }).tone, "waiting");
 });
 
-test("transient recent-list errors retry with a finite budget, independently of transcript recovery", () => {
+test("transient recent-list errors keep a capped read-only recovery cadence", () => {
   const snapshot = { ok: false, retryable: true, remoteStatus: "network_error", items: [] };
-  assert.deepEqual([0, 1, 2, 3, 4].map(attempt => plaudReadRetryDelay(snapshot, attempt)), [2000, 5000, 15000, null, null]);
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 20].map(attempt => plaudReadRetryDelay(snapshot, attempt)), [2000, 5000, 15000, 30000, 60000, 300000, 300000]);
+  for (const attempt of [-1, 0.5, NaN, Infinity]) assert.equal(plaudReadRetryDelay(snapshot, attempt), null);
   for (const remoteStatus of ["auth_required", "access_denied", "unknown", "runtime_unavailable", "workflow_in_use"]) {
     assert.equal(plaudReadRetryDelay({ ...snapshot, remoteStatus }, 0), null);
   }
   assert.equal(plaudReadRetryDelay({ ...snapshot, retryable: false }, 0), null);
   assert.equal(plaudReadRetryDelay({ ...snapshot, ok: true }, 0), null);
   assert.equal(plaudReadRetryDelay({ ...snapshot, remoteStatus: "rate_limited" }, 0), 30000);
+});
+
+test("rejected reads preserve truthful stale state and only known network failures retry", () => {
+  for (const error of [new Error("Failed to fetch"), "ETIMEDOUT", "PLAUD_NETWORK_TIMEOUT: synthetic", "net::ERR_TIMED_OUT", "ERR_NETWORK_CHANGED", "ENOTFOUND", "ENETUNREACH", "ERR_PROXY_CONNECTION_FAILED"]) {
+    const failure = plaudReadFailureSnapshot(error);
+    assert.equal(failure.remoteStatus, "network_error");
+    assert.equal(failure.stale, true);
+    assert.equal(failure.retryable, true);
+    const merged = mergePlaudSnapshot({ ok: true, items: [item()], syncedAt: 123 }, failure);
+    assert.equal(merged.items.length, 1);
+    assert.equal(merged.syncedAt, 123);
+  }
+  for (const error of ["Unexpected parser result", "PLAUD_AUTH_REQUIRED: expired", "PLAUD_ACCESS_DENIED: denied"]) {
+    assert.equal(plaudReadRetryDelay(plaudReadFailureSnapshot(error), 0), null);
+  }
+  assert.match(plaudConnectionSummary({ items: [item()] }, false, false), /本地录音.*联网后自动更新/);
+  assert.doesNotMatch(plaudConnectionSummary({ items: [] }, false, false), /已显示|已保留/);
+});
+
+test("a never-submitted sync stays pending and never claims failed recordings or completion", () => {
+  const feedback = plaudSyncFeedback(safePreflight());
+  assert.equal(feedback.tone, "waiting");
+  assert.match(feedback.text, /尚未提交新的生成请求/);
+  assert.doesNotMatch(feedback.text, /同步完成|同步未完成|需要处理|已生成/);
+  assert.equal(plaudSyncFeedback(safePreflight({ submissionStarted: true })).tone, "failed");
+  assert.equal(plaudSyncFeedback(safePreflight({ failedCount: 1 })).tone, "failed");
+  assert.equal(plaudSyncFeedback(safePreflight({ errorCode: "PLAUD_AUTH_REQUIRED" })).tone, "failed");
+  assert.equal(plaudSyncFeedback(safePreflight({ errorCode: "PLAUD_ACCESS_DENIED" })).tone, "failed");
 });
 
 test("completion keeps the turn's frozen recording identity when its conversation changes", () => {

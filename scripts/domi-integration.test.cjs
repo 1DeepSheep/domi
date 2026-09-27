@@ -4071,110 +4071,46 @@ test("PLAUD sync never submits generation from a stale cached list", async () =>
   assert.match(result.error, /远端读取/);
 });
 
-test("PLAUD sync recovers a cold authorization refresh within the same click", async (t) => {
-  const { artifact } = plaudSyncFixture(t);
-  const integration = new DomiIntegration({
-    stateStore: {
-      loadCache: () => null,
-      saveCache: () => undefined
-    },
-    plaudOutputDir: "/tmp/domi-test"
-  });
+test("PLAUD sync does not multiply an exhausted worker recovery or submit from stale data", async () => {
+  const { integration, events } = plaudReservationFixture();
   const queueRequests = [];
-  integration.plaudQueue = async (request) => {
+  integration.plaudQueue = async request => {
     queueRequests.push(request);
-    if (queueRequests.length === 1) {
-      return {
-        ok: true,
-        stale: true,
-        retryable: true,
-        remoteStatus: "authorization_pending",
-        pendingCount: 1,
-        items: [{ fileId: "cached", fileName: "缓存录音" }]
-      };
-    }
-    return queueRequests.length === 2
-      ? { ok: true, stale: false, pendingCount: 1, items: [] }
-      : { ok: true, stale: false, pendingCount: 0, items: [] };
+    return { ok: true, stale: true, retryable: true, remoteStatus: "verification_pending",
+      errorCode: "PLAUD_SESSION_PROBE_INCOMPLETE", errorStage: "recording-authorization",
+      pendingCount: 1, items: [{ fileId: "cached", fileName: "Synthetic recording" }] };
   };
-  const stoppedReasons = [];
-  integration.stopPlaudBackgroundSession = async (reason) => stoppedReasons.push(reason);
-  integration.plaudPaths = () => ({ script: "/tmp/plaud.js" });
-  integration.plaudSupportsRecovery = async () => true;
-  let generationCalls = 0;
-  integration.runJson = async (_command, args, options) => {
-    generationCalls += 1;
-    assert.equal(options.queue, "plaud");
-    assert.equal(options.releasePlaudSession, "sync-workflow");
-    stoppedReasons.push(options.releasePlaudSession);
-    assert.deepEqual(args.slice(0, 3), ["/tmp/plaud.js", "sync-pending", "1"]);
-    return {
-      results: [{ ok: true, fileId: "new-recording", transcriptPath: artifact() }],
-      manifestPath: "/tmp/domi-test/manifest.json"
-    };
-  };
-
+  integration.runJson = async () => { throw new Error("no generation on stale data"); };
   const result = await integration.syncPlaud();
-
-  assert.equal(result.ok, true);
-  assert.equal(result.generatedCount, 1);
-  assert.equal(generationCalls, 1);
-  assert.deepEqual(queueRequests.map(request => request.fresh === true), [false, true, false]);
-  assert.ok(queueRequests.every(request => Number.isFinite(request.deadlineAt)));
-  assert.ok(queueRequests[1].deadlineAt > queueRequests[0].deadlineAt);
-  assert.deepEqual(stoppedReasons, ["sync-read-recovery", "sync-workflow"]);
+  assert.equal(result.ok, false);
+  assert.equal(result.preflight, true);
+  assert.equal(result.submissionStarted, false);
+  assert.equal(result.retryable, true);
+  assert.equal(result.errorCode, "PLAUD_SESSION_PROBE_INCOMPLETE");
+  assert.equal(result.errorStage, "recording-authorization");
+  assert.equal(queueRequests.length, 1);
+  assert.ok(Number.isFinite(queueRequests[0].deadlineAt));
+  assert.equal(events.filter(event => event.kind === "stop").length, 0);
 });
 
-test("PLAUD sync retries only the final read and never repeats a completed generation", async (t) => {
-  const { artifact } = plaudSyncFixture(t);
-  const integration = new DomiIntegration({
-    stateStore: {
-      loadCache: () => null,
-      saveCache: () => undefined
-    },
-    plaudOutputDir: "/tmp/domi-test"
-  });
-  let queueReads = 0;
-  integration.plaudQueue = async () => {
-    queueReads += 1;
-    if (queueReads === 1) {
-      return { ok: true, stale: false, pendingCount: 1, items: [] };
-    }
-    if (queueReads === 2) {
-      return {
-        ok: true,
-        stale: true,
-        retryable: true,
-        remoteStatus: "verification_pending",
-        pendingCount: 1,
-        items: []
-      };
-    }
-    return { ok: true, stale: false, pendingCount: 0, items: [] };
-  };
-  const stoppedReasons = [];
-  integration.stopPlaudBackgroundSession = async (reason) => stoppedReasons.push(reason);
-  integration.plaudPaths = () => ({ script: "/tmp/plaud.js" });
-  integration.plaudSupportsRecovery = async () => true;
-  let generationCalls = 0;
+test("PLAUD sync final read failure preserves completed generation without replay or another browser reset", async t => {
+  const { integration, artifact } = plaudSyncFixture(t);
+  let queueReads = 0, generationCalls = 0;
+  integration.plaudQueue = async () => ++queueReads === 1
+    ? { ok: true, stale: false, pendingCount: 1, items: [] }
+    : { ok: true, stale: true, retryable: true, remoteStatus: "verification_pending", items: [] };
+  integration.stopPlaudBackgroundSession = async () => { throw new Error("worker already owns read recovery"); };
   integration.runJson = async (_command, _args, options) => {
-    generationCalls += 1;
-    assert.equal(options.queue, "plaud");
+    generationCalls++;
     assert.equal(options.releasePlaudSession, "sync-workflow");
-    stoppedReasons.push(options.releasePlaudSession);
-    return {
-      results: [{ ok: true, fileId: "new-recording", transcriptPath: artifact() }],
-      manifestPath: "/tmp/domi-test/manifest.json"
-    };
+    return { results: [{ ok: true, fileId: "new-recording", transcriptPath: artifact() }] };
   };
-
   const result = await integration.syncPlaud();
-
-  assert.equal(result.ok, true);
+  assert.equal(result.status, "partial");
   assert.equal(result.generatedCount, 1);
+  assert.equal(result.listRefreshFailed, true);
   assert.equal(generationCalls, 1);
-  assert.equal(queueReads, 3);
-  assert.deepEqual(stoppedReasons, ["sync-workflow", "sync-read-recovery"]);
+  assert.equal(queueReads, 2);
 });
 
 test("PLAUD sync never auto-retries confirmed logout, access denial or rate limits", async () => {
@@ -4515,6 +4451,8 @@ for (const command of ["login", "logout", "podcast-transcription"]) {
       plaudShuttingDown: false,
       plaudConfigFingerprint: "",
       plaudConfigGeneration: 0,
+      plaudAccountEpochs: new Map(),
+      plaudReadCooldowns: new Map(),
       plaudBroker: {
         stop: async (reason) => {
           events.push({ type: "stop", reason });
@@ -5597,4 +5535,88 @@ test("joined native downloads still enforce each caller's expected transcript ha
   assert.equal((await oldForm).errorCode, "PLAUD_CONTEXT_TRANSCRIPT_CHANGED");
   assert.equal(f.reads.length, 1);
   assert.equal(f.digest(fs.readFileSync(f.record().transcriptPath)), f.digest(f.source));
+});
+
+
+test("PLAUD failed list reads share a bounded scope-specific cooldown without delaying cached reads or extending retryAt", async () => {
+  const { integration, settings, cache } = plaudReservationFixture();
+  const scope = integration.plaudSnapshotScope();
+  cache.set(integration.plaudListCacheKey(scope), { value: { syncedAt: 123, items: [{ fileId: "existing", fileName: "Synthetic cached recording" }] } });
+  let brokerReads = 0;
+  integration.plaudBroker.request = async () => {
+    brokerReads++;
+    throw Object.assign(new Error("Synthetic network failure"), { code: "PLAUD_READ_TRANSIENT", stage: "recording-authorization", networkErrorCode: "ERR_NETWORK_CHANGED" });
+  };
+  const first = await integration.plaudQueue({ fresh: true });
+  assert.equal(first.retryable, true);
+  assert.equal(first.errorStage, "recording-authorization");
+  assert.ok(first.retryAfterMs >= 15000);
+  assert.equal(first.items[0].fileId, "existing");
+  const second = await integration.plaudQueue({ fresh: true });
+  assert.equal(brokerReads, 1);
+  assert.ok(Math.abs(second.retryAt - first.retryAt) < 20, "suppressed reads must not slide the recovery deadline");
+  assert.equal((await integration.plaudQueue({ cacheOnly: true })).items[0].fileId, "existing");
+  assert.equal(brokerReads, 1);
+  const oldCooldown = [...integration.plaudReadCooldowns.values()][0];
+  oldCooldown.retryAt = Date.now() - 1;
+  const third = await integration.plaudQueue({ fresh: true });
+  assert.equal(brokerReads, 2);
+  assert.equal(third.retryAfterMs, 30000);
+  settings.plaudBrowser = "tabbit";
+  const otherScope = await integration.plaudQueue({ fresh: true });
+  assert.equal(brokerReads, 3, "a prior profile cooldown must not block a different account");
+  assert.deepEqual(otherScope.items, [], "a failed different profile must not borrow earlier recordings");
+  integration.plaudBroker.request = async () => { brokerReads++; return { ok: true, connected: true, items: [] }; };
+  await integration.runPlaudWorker("connection");
+  await integration.plaudQueue({ fresh: true });
+  assert.equal(brokerReads, 5, "a successful explicit verification clears only its own scope's cooldown");
+  settings.plaudBrowser = "chrome";
+  await integration.plaudQueue({ fresh: true });
+  assert.equal(brokerReads, 5, "other account verification must not clear the original failure");
+});
+
+test("PLAUD backend cooldown honors vendor Retry-After for list and explicit verification", async () => {
+  const { integration } = plaudReservationFixture();
+  let requests = 0;
+  integration.plaudBroker.request = async () => {
+    requests++;
+    throw Object.assign(new Error("Synthetic rate limit"), { code: "PLAUD_RATE_LIMITED", httpStatus: 429, retryAfterMs: 180000 });
+  };
+  const first = await integration.plaudQueue({ fresh: true });
+  assert.equal(first.retryAfterMs, 180000);
+  await assert.rejects(integration.runPlaudWorker("connection"), error => error.code === "PLAUD_RATE_LIMITED" && error.retryAfterMs > 179000);
+  await integration.plaudQueue({ fresh: true });
+  assert.equal(requests, 1);
+  integration.invalidatePlaudAccountSnapshot("chrome");
+  assert.equal(integration.plaudReadCooldowns.size, 0);
+});
+
+
+test("PLAUD CLI failures preserve typed initialization diagnostics across both exit paths", async () => {
+  const { integration } = plaudReservationFixture();
+  const value = { ok: false, error: "Synthetic probe did not observe a response", code: "PLAUD_SESSION_PROBE_INCOMPLETE",
+    errorStage: "recording-authorization", networkErrorCode: "ERR_CONNECTION_CLOSED",
+    sessionProbe: { apiRequests: 5, recordingRequests: 0, recordingResponses: 0, privateUrl: "https://private.invalid/token" } };
+  for (const nonzero of [false, true]) {
+    integration.execTrackedPlaudFile = async () => {
+      if (nonzero) throw Object.assign(new Error("Synthetic nonzero exit"), { stdout: JSON.stringify(value) });
+      return { stdout: JSON.stringify(value) };
+    };
+    await assert.rejects(integration.runJson("/synthetic/plaud", ["connection"], { queue: "plaud" }), error => {
+      assert.equal(error.code, "PLAUD_SESSION_PROBE_INCOMPLETE");
+      assert.equal(error.stage, "recording-authorization");
+      assert.equal(error.networkErrorCode, "ERR_CONNECTION_CLOSED");
+      assert.deepEqual(error.sessionProbe, { apiRequests: 5, recordingRequests: 0, recordingResponses: 0 });
+      return true;
+    });
+  }
+});
+
+test("an explicit failed zero-submission receipt survives a nonzero PLAUD process exit", async () => {
+  const { integration } = plaudReservationFixture();
+  const value = { ok: false, error: "Synthetic read failure", results: [], submitted: 0, submissionStarted: false,
+    discovery: { complete: false, retryable: true, errorCode: "PLAUD_READ_TRANSIENT" } };
+  integration.execTrackedPlaudFile = async () => { throw Object.assign(new Error("Synthetic nonzero exit"), { stdout: JSON.stringify(value) }); };
+  assert.deepEqual(await integration.runJson("/synthetic/plaud", ["sync-pending"], { queue: "plaud", acceptPlaudSyncResults: true }), value);
+  await assert.rejects(integration.runJson("/synthetic/plaud", ["sync-pending"], { queue: "plaud" }), /Synthetic read failure/);
 });

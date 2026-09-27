@@ -70,23 +70,40 @@ export function mergePlaudSnapshot(current: DomiPlaudSnapshot | null, incoming: 
     cached: fallback.cached, cacheVerified: fallback.cacheVerified, stale: true };
 }
 
-export function plaudConnectionSummary(snapshot: DomiPlaudSnapshot | null, retryPending: boolean) {
+export function plaudConnectionSummary(snapshot: DomiPlaudSnapshot | null, retryPending: boolean, online = true) {
   if (snapshot?.remoteStatus === "auth_required") return "PLAUD 登录已失效";
   if (snapshot?.remoteStatus === "access_denied") return "PLAUD 访问受限";
   if (snapshot?.remoteStatus === "runtime_unavailable") return "PLAUD 连接组件暂不可用";
+  if (!online) return snapshot?.items?.length ? "已显示本地录音，联网后自动更新" : "联网后自动读取录音";
   if (retryPending) return snapshot?.items?.length ? "已保留录音，正在后台重连" : "正在自动恢复最近录音";
   return snapshot?.items?.length ? "已保留录音，暂未更新" : "暂时无法读取录音";
 }
 
 export function plaudReadRetryDelay(snapshot: DomiPlaudSnapshot | null, attempt: number, now = Date.now()) {
-  const delays = [2_000, 5_000, 15_000];
+  // A temporary network/proxy outage can last longer than three quick tries.
+  // Keep read-only recovery alive, with a capped cadence rather than requiring
+  // another click. This never authorizes a generation request.
+  const delays = [2_000, 5_000, 15_000, 30_000, 60_000, 300_000];
   if (!snapshot || snapshot.paused || !snapshot.retryable || (snapshot.ok && !snapshot.stale)
     || (snapshot.cached && snapshot.cacheVerified && !snapshot.errorCode && !snapshot.error && !snapshot.warning)
     || !["verification_pending", "authorization_pending", "profile_locked", "browser_unavailable", "network_error", "rate_limited", "service_unavailable"].includes(snapshot.remoteStatus || "")
-    || attempt < 0 || attempt >= delays.length) return null;
-  return Math.max(delays[attempt], snapshot.remoteStatus === "rate_limited" ? 30_000 : 0,
+    || !Number.isSafeInteger(attempt) || attempt < 0) return null;
+  return Math.max(delays[Math.min(attempt, delays.length - 1)], snapshot.remoteStatus === "rate_limited" ? 30_000 : 0,
     Number.isFinite(snapshot.retryAt) ? Math.max(0, snapshot.retryAt! - now)
       : Number.isFinite(snapshot.retryAfterMs) ? Math.max(0, snapshot.retryAfterMs!) : 0);
+}
+
+/** Legacy/rejected IPC reads still need an explicit stale state and recovery policy. */
+export function plaudReadFailureSnapshot(error: unknown, stage = "read"): DomiPlaudSnapshot {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const network = /PLAUD_NETWORK_TIMEOUT|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|ENETUNREACH|EAI_AGAIN|ERR_(?:CONNECTION_(?:CLOSED|RESET|REFUSED)|TIMED_OUT|NETWORK_CHANGED|INTERNET_DISCONNECTED|PROXY_CONNECTION_FAILED|TUNNEL_CONNECTION_FAILED)|fetch failed|failed to fetch|network error/i.test(message);
+  const auth = /\bPLAUD_AUTH_REQUIRED\b/.test(message);
+  const denied = /\bPLAUD_ACCESS_DENIED\b/.test(message);
+  return { ok: false, stale: true, items: [], errorStage: stage,
+    retryable: !auth && !denied && network,
+    remoteStatus: auth ? "auth_required" : denied ? "access_denied" : network ? "network_error" : "unknown",
+    errorCode: auth ? "PLAUD_AUTH_REQUIRED" : denied ? "PLAUD_ACCESS_DENIED" : network ? "PLAUD_NETWORK_TIMEOUT" : "PLAUD_READ_FAILED",
+    error: plaudSafeError(error) };
 }
 
 export function plaudSafeError(error: unknown, fallback = "暂时无法连接 PLAUD，请稍后刷新。") {
@@ -219,6 +236,14 @@ export function plaudQueueSummary(snapshot: DomiPlaudSnapshot) {
 
 export function plaudSyncFeedback(result: DomiPlaudSyncResult): PlaudFeedback {
   if (result.paused || result.status === "paused") return { tone: "waiting", text: "任务正在使用 PLAUD，完成后会自动更新最近录音。" };
+  if (result.preflight === true && result.submissionStarted === false && result.retryable === true
+    && /^(?:PLAUD_NETWORK_TIMEOUT|PLAUD_SESSION_PROBE_INCOMPLETE|PLAUD_UNAUTHORIZED|PLAUD_BROWSER_UNAVAILABLE|PLAUD_WORKER_EXITED|PLAUD_RATE_LIMITED|PLAUD_SERVICE_UNAVAILABLE|PLAUD_PROFILE_LOCKED|PLAUD_WORKFLOW_IN_USE|PLAUD_READ_TRANSIENT)$/.test(result.errorCode || "")
+    && !result.generatedCount && !result.recoveredCount && !result.failedCount && !result.results?.length) {
+    // An active scoped intent supplies its own automatic-continuation message.
+    // When it expires, retain a truthful pending action without a red failure
+    // banner claiming that any recording or completed transcript failed.
+    return { tone: "waiting", text: "同步暂未开始，尚未提交新的生成请求。连接恢复后可再次同步。" };
+  }
   const count = (value: number | undefined) => Number.isFinite(value) ? Math.max(0, Math.floor(value!)) : 0;
   const generated = count(result.generatedCount);
   const recovered = count(result.recoveredCount);

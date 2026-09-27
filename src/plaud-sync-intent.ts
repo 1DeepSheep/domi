@@ -1,6 +1,6 @@
 import type { DomiPlaudSyncResult } from "./env";
 
-const RETRY_DELAYS = [2_000, 5_000, 15_000];
+const RETRY_DELAYS = [2_000, 5_000, 15_000, 30_000, 60_000, 120_000];
 const INTENT_LIFETIME_MS = 15 * 60_000;
 const SAFE_PREFLIGHT_ERRORS = new Set([
   "PLAUD_SESSION_PROBE_INCOMPLETE", "PLAUD_UNAUTHORIZED", "PLAUD_BROWSER_UNAVAILABLE",
@@ -17,6 +17,13 @@ export type PlaudSyncIntent = {
   expiresAt: number;
 };
 
+export function isRecoverablePlaudSyncPreflight(result: DomiPlaudSyncResult) {
+  return result.submissionStarted === false && result.preflight === true && result.retryable === true
+    && !result.superseded && !result.snapshot?.superseded
+    && typeof result.recoveryScope === "string" && Boolean(result.recoveryScope)
+    && SAFE_PREFLIGHT_ERRORS.has(result.errorCode || "");
+}
+
 export function planPlaudSyncContinuation(
   result: DomiPlaudSyncResult,
   scopeVersion: number,
@@ -25,14 +32,12 @@ export function planPlaudSyncContinuation(
   deadline = now + INTENT_LIFETIME_MS
 ): PlaudSyncIntent | null {
   const attempt = previous ? previous.attempt + 1 : 0;
-  if (result.submissionStarted !== false || result.preflight !== true || result.retryable !== true
-    || result.superseded || result.snapshot?.superseded || typeof result.recoveryScope !== "string" || !result.recoveryScope
-    || !SAFE_PREFLIGHT_ERRORS.has(result.errorCode || "") || attempt >= RETRY_DELAYS.length
+  if (!isRecoverablePlaudSyncPreflight(result) || !Number.isSafeInteger(attempt) || attempt < 0
     || (previous && (previous.scopeVersion !== scopeVersion || previous.recoveryScope !== result.recoveryScope))) return null;
   const expiresAt = previous?.expiresAt ?? deadline;
-  const delay = Math.max(RETRY_DELAYS[attempt], result.errorCode === "PLAUD_RATE_LIMITED" ? 30_000 : 0,
+  const delay = Math.max(RETRY_DELAYS[Math.min(attempt, RETRY_DELAYS.length - 1)], result.errorCode === "PLAUD_RATE_LIMITED" ? 30_000 : 0,
     Number.isFinite(result.retryAfterMs) ? Math.max(0, result.retryAfterMs!) : 0);
   const retryAt = Math.max(now + delay, Number.isFinite(result.retryAt) ? result.retryAt! : 0);
   if (retryAt >= expiresAt) return null;
-  return { scopeVersion, recoveryScope: result.recoveryScope, attempt, retryAt, expiresAt };
+  return { scopeVersion, recoveryScope: result.recoveryScope!, attempt, retryAt, expiresAt };
 }
