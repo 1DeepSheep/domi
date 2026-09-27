@@ -50,7 +50,8 @@ declare global {
       importFiles: (
         sourcePaths: string[],
         workspacePath?: string,
-        entityRequest?: DomiEntityMaterialsRequest
+        entityRequest?: DomiEntityMaterialsRequest,
+        sourceNames?: Pick<LocalAttachment, "path" | "name">[]
       ) => Promise<FileSelectionResult>;
       importFileData: (
         files: ClipboardAttachmentPayload[],

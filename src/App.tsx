@@ -8684,7 +8684,8 @@ function App() {
     const imported = await workbench.importFiles(
       pending.map((attachment) => attachment.path),
       workspacePath,
-      { entityType: thread.externalType, recordId: thread.externalRecordId }
+      { entityType: thread.externalType, recordId: thread.externalRecordId },
+      pending.map(({ path, name }) => ({ path, name }))
     );
     if (!imported.ok || imported.files.length !== pending.length) {
       return {
