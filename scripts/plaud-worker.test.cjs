@@ -231,7 +231,7 @@ test("PLAUD worker retries Failed to fetch and closed sockets without calling th
   }
 });
 
-test("PLAUD worker server read retry rebuilds sessions but never replays executed mutations", async (t) => {
+test("PLAUD worker retries network reads in the verified session but never replays executed mutations", async (t) => {
   const { runServerCommand, closeServerClient } = require("../electron/plaud-worker.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-server-test-"));
   t.after(async () => { await closeServerClient(); fs.rmSync(root, { recursive: true, force: true }); delete globalThis.__plaudServerTest; });
@@ -248,7 +248,7 @@ test("PLAUD worker server read retry rebuilds sessions but never replays execute
   const delays = [];
   const options = { sleep: async ms => { delays.push(ms); } };
   assert.equal((await runServerCommand(root, "connection", [], options)).connected, true);
-  assert.deepEqual(delays, [400]); assert.equal(globalThis.__plaudServerTest.inits, 2);
+  assert.deepEqual(delays, [400]); assert.equal(globalThis.__plaudServerTest.inits, 1);
   await assert.rejects(runServerCommand(root, "trash", ["recording-file-id"], options), /ERR_CONNECTION_CLOSED/);
   assert.equal(globalThis.__plaudServerTest.posts, 1);
   const recovered = await runServerCommand(root, "download", ["recording-file-id", root], options);
@@ -270,9 +270,9 @@ test("server releases the final broken client and a later request starts fresh",
   };`);
   t.after(async () => { await closeServerClient(); delete globalThis.__plaudFinalFailure; fs.rmSync(root, { recursive: true, force: true }); });
   await assert.rejects(runServerCommand(root, "list", [], { sleep: async () => {} }), /Failed to fetch/);
-  assert.equal(globalThis.__plaudFinalFailure.closes, 3);
+  assert.equal(globalThis.__plaudFinalFailure.closes, 1);
   await runServerCommand(root, "list", [], { sleep: async () => {} });
-  assert.equal(globalThis.__plaudFinalFailure.inits, 4);
+  assert.equal(globalThis.__plaudFinalFailure.inits, 2);
 });
 
 test("server passes one deadline through initialization and list and does not cold-retry an exhausted budget", async t => {
@@ -391,4 +391,78 @@ test("typed browser init failures never expose native diagnostics or hide missin
   assert.equal(isRetryableReadError(new Error("PLAUD browser restored 2 tabs and could not be compacted safely.")), true);
   assert.equal(isRetryableReadError(new Error("Unrecognized synthetic startup failure")), false,
     "Do not treat arbitrary init failures as transient browser failures");
+});
+
+
+test("an incomplete init probe reports its precise cause before cleanup and is not cold-replayed", async t => {
+  const { runServerCommand, closeServerClient, plaudErrorDetails } = require("../electron/plaud-worker.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-init-cause-"));
+  const clientPath = path.join(root, "skills/plaud/vendor/plaud-cli/src/plaud.js");
+  fs.mkdirSync(path.dirname(clientPath), { recursive: true });
+  let releaseCleanup;
+  globalThis.__plaudInitCause = { inits: 0, cleanup: new Promise(resolve => { releaseCleanup = resolve; }) };
+  fs.writeFileSync(clientPath, `module.exports.PlaudClient = class {
+    async init() { globalThis.__plaudInitCause.inits++; throw Object.assign(new Error('Synthetic authorization probe incomplete'),
+      { code:'PLAUD_SESSION_PROBE_INCOMPLETE', stage:'recording-authorization', networkErrorCode:'ERR_PROXY_CONNECTION_FAILED' }); }
+    async close() { await globalThis.__plaudInitCause.cleanup; }
+  };`);
+  t.after(async () => { releaseCleanup(); await closeServerClient(); delete globalThis.__plaudInitCause; fs.rmSync(root, { recursive: true, force: true }); });
+  const diagnostics = [];
+  const pending = runServerCommand(root, "list", [], { sleep: async () => { throw new Error("probe must not replay"); },
+    onDiagnostic: diagnostic => diagnostics.push(diagnostic) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(diagnostics.at(-1), { code: "PLAUD_SESSION_PROBE_INCOMPLETE", stage: "recording-authorization", networkErrorCode: "ERR_PROXY_CONNECTION_FAILED" });
+  releaseCleanup();
+  await assert.rejects(pending, error => error.code === "PLAUD_SESSION_PROBE_INCOMPLETE");
+  assert.equal(globalThis.__plaudInitCause.inits, 1);
+  assert.equal(plaudErrorDetails({ networkErrorCode: "https://private.invalid/token", errorStage: "private recording title" }).networkErrorCode, undefined);
+});
+
+
+test("numeric-only session probe diagnostics distinguish an absent recording request without leaking request data", () => {
+  const { plaudErrorDetails } = require("../electron/plaud-worker.cjs");
+  assert.deepEqual(plaudErrorDetails({ code: "PLAUD_SESSION_PROBE_INCOMPLETE", errorStage: "initialization", initializationStage: "recording-authorization",
+    sessionProbe: { apiRequests: 4, recordingRequests: 0, recordingResponses: 0, httpStatus: 200, apiStatus: -3901,
+      requestUrl: "https://private.invalid/token", header: "secret" } }), {
+    code: "PLAUD_SESSION_PROBE_INCOMPLETE", stage: "recording-authorization",
+    sessionProbe: { apiRequests: 4, recordingRequests: 0, recordingResponses: 0, httpStatus: 200, apiStatus: -3901 }
+  });
+  assert.equal(plaudErrorDetails({sessionProbe:{apiRequests:-1, recordingRequests:"private", recordingResponses:Infinity, httpStatus:0}}).sessionProbe, undefined);
+});
+
+
+test("vendor init can publish safe diagnostics before its own deferred cleanup finishes", async t => {
+  const { runServerCommand, closeServerClient } = require("../electron/plaud-worker.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-vendor-cleanup-"));
+  const clientPath = path.join(root, "skills/plaud/vendor/plaud-cli/src/plaud.js");
+  fs.mkdirSync(path.dirname(clientPath), { recursive: true });
+  let releaseCleanup;
+  globalThis.__plaudVendorCleanup = { entered: false, cleanup: new Promise(resolve => { releaseCleanup = resolve; }) };
+  fs.writeFileSync(clientPath, `module.exports.PlaudClient = class {
+    constructor(options) { this.onInitializationError = options.onInitializationError; }
+    async init() {
+      const error = Object.assign(new Error('Private recording name https://private.invalid/token'), {
+        code:'PLAUD_SESSION_PROBE_INCOMPLETE', errorStage:'recording-authorization',
+        sessionProbe:{apiRequests:3,recordingRequests:0,recordingResponses:0,privateUrl:'https://private.invalid/token'}
+      });
+      this.onInitializationError?.(error);
+      await this.close();
+      throw error;
+    }
+    async close() { globalThis.__plaudVendorCleanup.entered = true; await globalThis.__plaudVendorCleanup.cleanup; }
+  };`);
+  t.after(async () => { releaseCleanup(); await closeServerClient(); delete globalThis.__plaudVendorCleanup; fs.rmSync(root, { recursive: true, force: true }); });
+  const diagnostics = [];
+  let completed = false;
+  const pending = runServerCommand(root, "list", [], { onDiagnostic: diagnostic => diagnostics.push(diagnostic) })
+    .finally(() => { completed = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(globalThis.__plaudVendorCleanup.entered, true);
+  assert.equal(completed, false, "the native vendor init has not rejected yet");
+  assert.deepEqual(diagnostics.at(-1), { code: "PLAUD_SESSION_PROBE_INCOMPLETE", stage: "recording-authorization",
+    sessionProbe: { apiRequests: 3, recordingRequests: 0, recordingResponses: 0 } });
+  assert.doesNotMatch(JSON.stringify(diagnostics), /Private|private|https/);
+  releaseCleanup();
+  await assert.rejects(pending, error => error.code === "PLAUD_SESSION_PROBE_INCOMPLETE");
+  assert.equal(diagnostics.filter(diagnostic => diagnostic.code).length, 1, "later worker cleanup must not duplicate the same failure");
 });

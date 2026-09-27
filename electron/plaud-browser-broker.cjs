@@ -179,7 +179,11 @@ class PlaudSessionBroker {
       const timer = setTimeout(() => {
         const pending = this.pending.get(id);
         this.pending.delete(id);
-        const error = brokerFailure("PLAUD_NETWORK_TIMEOUT: PLAUD 后台操作超时；已保留上次成功数据。", { ...pending?.lastDiagnostic, code: "PLAUD_NETWORK_TIMEOUT" });
+        // Preserve the actual failing phase/code when the deadline interrupts
+        // cleanup; an incomplete authorization probe is not a network diagnosis.
+        const error = brokerFailure("PLAUD 后台读取达到时间上限；已保留上次成功数据。", {
+          ...pending?.lastDiagnostic, code: pending?.lastDiagnostic?.code || "PLAUD_NETWORK_TIMEOUT"
+        });
         try { this.onDiagnostic({ operation: command, outcome: "timeout", ...plaudErrorDetails(error),
           ...(pending?.lastDiagnostic?.code ? { lastErrorCode: pending.lastDiagnostic.code } : {}) }); } catch { /* diagnostic only */ }
         reject(error);

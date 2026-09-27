@@ -33,7 +33,7 @@ function safeError(error) {
     return "PLAUD 后台页面本轮意外中断。domi 已关闭故障进程；重新同步时会自动建立新会话，无需重新登录。";
   }
   if (/PLAUD_SESSION_PROBE_INCOMPLETE|authorization request was not observed|会话验证未完成/i.test(message)) {
-    return "PLAUD 登录数据仍在，但本轮未及时完成会话验证。请重新同步，domi 会自动重建后台会话。";
+    return "PLAUD 登录数据仍在，本轮会话验证尚未完成。已保留录音列表，domi 会在后台继续检查。";
   }
   if (/PLAUD_AUTH_REQUIRED|account sign-in is required/i.test(message)) {
     return "PLAUD 登录已失效，请在设置中重新登录并验证。";
@@ -84,11 +84,24 @@ function plaudErrorDetails(error, stage = "") {
     else code = "PLAUD_READ_FAILED";
   }
   const retryAfterMs = Number(error?.retryAfterMs);
-  const errorStage = ["init", "connection", "list", "download", "rename", "trash", "cleanup"].includes(error?.stage)
-    ? error.stage : ["init", "connection", "list", "download", "rename", "trash", "cleanup"].includes(stage) ? stage : "";
+  const networkErrorCode = String(error?.networkErrorCode || "");
+  const allowedStages = ["init", "connection", "list", "download", "rename", "trash", "cleanup",
+    "browser-lock", "browser-start", "page-navigation", "recording-authorization"];
+  const reportedStage = error?.initializationStage || error?.stage || error?.errorStage;
+  const errorStage = allowedStages.includes(reportedStage) ? reportedStage : allowedStages.includes(stage) ? stage : "";
+  const sessionProbe = {};
+  for (const key of ["apiRequests", "recordingRequests", "recordingResponses"]) {
+    const count = error?.sessionProbe?.[key];
+    if (Number.isSafeInteger(count) && count >= 0) sessionProbe[key] = count;
+  }
+  const probeHttpStatus = error?.sessionProbe?.httpStatus;
+  if (Number.isInteger(probeHttpStatus) && probeHttpStatus >= 100 && probeHttpStatus <= 599) sessionProbe.httpStatus = probeHttpStatus;
+  if (Number.isSafeInteger(error?.sessionProbe?.apiStatus)) sessionProbe.apiStatus = error.sessionProbe.apiStatus;
   return { code, ...(errorStage ? { stage: errorStage } : {}),
+    ...(Object.keys(sessionProbe).length ? { sessionProbe } : {}),
     ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { httpStatus: status } : {}),
     ...(Number.isSafeInteger(apiStatus) ? { apiStatus } : {}),
+    ...(/^(?:ERR_[A-Z0-9_]{1,64}|E(?:CONNRESET|CONNREFUSED|CONNABORTED|TIMEDOUT|NOTFOUND|NETUNREACH|HOSTUNREACH))$/.test(networkErrorCode) ? { networkErrorCode } : {}),
     ...(Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? { retryAfterMs: Math.min(retryAfterMs, Number.MAX_SAFE_INTEGER) } : {}) };
 }
 
@@ -307,7 +320,15 @@ async function ensureServerClient(pluginRoot, options = {}) {
   }
   await closeServerClient();
   const PlaudClient = resolveClient(normalizedRoot);
-  const candidate = new PlaudClient({ headless: true, operationDeadlineAt: options.deadlineAt });
+  const reportInitializationError = error => {
+    Object.assign(error, plaudErrorDetails(error, "init"));
+    if (options.onDiagnostic && !error.plaudInitDiagnosticReported) {
+      options.onDiagnostic(plaudErrorDetails(error, "init"));
+      error.plaudInitDiagnosticReported = true;
+    }
+  };
+  const candidate = new PlaudClient({ headless: true, operationDeadlineAt: options.deadlineAt,
+    onInitializationError: reportInitializationError });
   activeClient = candidate;
   try {
     await candidate.init();
@@ -315,6 +336,10 @@ async function ensureServerClient(pluginRoot, options = {}) {
     serverPluginRoot = normalizedRoot;
     return candidate;
   } catch (error) {
+    // New vendors report through onInitializationError before their own
+    // cleanup. Older vendors ignore that option; preserve their final cause
+    // here without emitting duplicate diagnostics for updated vendors.
+    reportInitializationError(error);
     await candidate.close().catch(() => {});
     if (activeClient === candidate) activeClient = null;
     throw error;
@@ -362,17 +387,22 @@ async function runServerCommand(pluginRoot, command, args = [], options = {}) {
       return await execute();
     } catch (error) {
       Object.assign(error, plaudErrorDetails(error, stage));
-      emitDiagnostic(error);
+      if (!error.plaudInitDiagnosticReported) emitDiagnostic(error);
       const readOnly = ["connection", "list", "download"].includes(command);
-      // Release even on the final failure. A later read must not reuse the
-      // detached page that exhausted this request's recovery budget.
-      await closeServerClient();
-      // Never replay an executed PATCH/POST after an uncertain response.
-      if (!isRetryableReadError(error) || (operationStarted && !readOnly) || attempt === 2) throw error;
+      const rebuild = error.code === "PLAUD_BROWSER_UNAVAILABLE";
+      // A network outage does not invalidate an initialized browser. Keep its
+      // verified session for read retries; restarting it multiplies cold login
+      // probes and cannot repair the proxy/network. Broken pages and writes
+      // with uncertain responses are released before returning to the caller.
+      const retryable = isRetryableReadError(error)
+        && (operationStarted ? readOnly : rebuild)
+        && error.code !== "PLAUD_SESSION_PROBE_INCOMPLETE";
       const delay = attempt === 0 ? 400 : 1200;
-      // A new private browser needs meaningful time to initialize. The broker
-      // remains the hard bound for an older plugin that ignores deadlineAt.
-      if (remaining() < delay + 5_000) throw error;
+      const canRetry = retryable && attempt < 2 && remaining() >= delay + 5_000;
+      if (rebuild || !canRetry) await closeServerClient();
+      // Never replay an executed PATCH/POST, or repeat an exhausted vendor
+      // authorization probe. One layer owns each bounded recovery attempt.
+      if (!canRetry) throw error;
       await pause(delay);
     }
   }

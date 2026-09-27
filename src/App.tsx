@@ -78,7 +78,7 @@ import {
 import { hasNativeWorkbench, workbench } from "./bridge";
 import IndustryOverview from "./IndustryOverview";
 import PlaudContextCard, { type PlaudContextDraft } from "./components/PlaudContextCard";
-import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
+import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadFailureSnapshot, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
 import { restorePlaudOnStartup } from "./plaud-startup";
 import { planPlaudSyncContinuation, type PlaudSyncIntent } from "./plaud-sync-intent";
 import {
@@ -2026,6 +2026,7 @@ function App() {
   const [podcastError, setPodcastError] = useState("");
   const [plaudReaderBusy, setPlaudReaderBusy] = useState(false);
   const [plaudReadRetryPending, setPlaudReadRetryPending] = useState(false);
+  const [plaudNetworkOnline, setPlaudNetworkOnline] = useState(() => navigator.onLine !== false);
   const [plaudSyncIntent, setPlaudSyncIntentState] = useState<PlaudSyncIntent | null>(null);
   const [plaudNotice, setPlaudNoticeState] = useState<PlaudFeedback | null>(null);
   const [editingPlaudId, setEditingPlaudId] = useState<string | null>(null);
@@ -2198,6 +2199,7 @@ function App() {
   const plaudReaderEventGenerationRef = useRef(0);
   const plaudIdleRefreshPromiseRef = useRef<Promise<DomiPlaudSnapshot | null> | null>(null);
   const plaudReadRetryAttemptRef = useRef(0);
+  const plaudLastRemoteAttemptAtRef = useRef(0);
   const plaudSnapshotRef = useRef(plaudSnapshot);
   const plaudSyncIntentRef = useRef<PlaudSyncIntent | null>(null);
   const plaudSyncIntentEpochRef = useRef(0);
@@ -3548,6 +3550,10 @@ function App() {
         }
       } catch { /* A cache miss must not prevent the following read-only check. */ }
       if (!isCurrent() || scope !== plaudScopeVersionRef.current) return;
+      if (navigator.onLine === false) {
+        setPlaudError("当前未连接网络，录音列表会在联网后自动更新。");
+        return;
+      }
       await plaudScopeHandoffRef.current;
       await restorePlaudOnStartup({
         isCurrent,
@@ -3583,13 +3589,13 @@ function App() {
           // Resume the existing bounded read-retry effect at its absolute
           // cooldown, instead of turning an owner-release event into a read.
           setPlaudSnapshot(current => current ? { ...current, paused: false, stale: true } : current);
-        } else void refreshPlaudAfterIdle();
+        } else void refreshPlaudAfterIdle({ automatic: true });
       }
     });
   }, [plaudEnabled, appSettings?.onboardingComplete, appSettings?.plaudBrowser]);
 
   useEffect(() => {
-    if (!plaudEnabled || !appSettings?.onboardingComplete || plaudReaderBusy || plaudSyncIntent) return;
+    if (!plaudEnabled || !appSettings?.onboardingComplete || !plaudNetworkOnline || plaudReaderBusy || plaudSyncIntent) return;
     const delay = plaudReadRetryDelay(plaudSnapshot, plaudReadRetryAttemptRef.current);
     if (delay === null) return;
     let disposed = false;
@@ -3599,20 +3605,56 @@ function App() {
       void refreshPlaudAfterIdle({ automatic: true }).finally(() => { if (!disposed) setPlaudReadRetryPending(false); });
     }, delay);
     return () => { disposed = true; window.clearTimeout(timer); setPlaudReadRetryPending(false); };
-  }, [plaudSnapshot, plaudEnabled, appSettings?.onboardingComplete, appSettings?.plaudBrowser, plaudReaderBusy, plaudSyncIntent]);
+  }, [plaudSnapshot, plaudEnabled, appSettings?.onboardingComplete, appSettings?.plaudBrowser, plaudReaderBusy, plaudSyncIntent, plaudNetworkOnline]);
+
+  useEffect(() => {
+    if (!plaudEnabled || !appSettings?.onboardingComplete) return;
+    setPlaudNetworkOnline(navigator.onLine !== false);
+    const recover = (reconnected = false) => {
+      const online = navigator.onLine !== false;
+      setPlaudNetworkOnline(online);
+      if (!online || !currentPlaudScope() || plaudReaderBusyRef.current) return;
+      const intent = plaudSyncIntentRef.current;
+      if (intent) { void continuePlaudSyncIntent(intent); return; }
+      const snapshot = plaudSnapshotRef.current;
+      const initialRead = plaudNeedsFreshListRef.current && !snapshot?.error && !snapshot?.warning
+        && !snapshot?.errorCode && (!snapshot?.remoteStatus || ["not_loaded", "verification_pending"].includes(snapshot.remoteStatus));
+      if (!initialRead && plaudReadRetryDelay(snapshot, 0) === null) return;
+      if (["auth_required", "access_denied", "runtime_unavailable"].includes(snapshot?.remoteStatus || "")) return;
+      const now = Date.now();
+      const retryAt = Number.isFinite(snapshot?.retryAt) ? snapshot!.retryAt!
+        : plaudLastRemoteAttemptAtRef.current + (snapshot?.retryAfterMs || 0);
+      if (retryAt > now || (!reconnected && now - plaudLastRemoteAttemptAtRef.current < 30_000)) return;
+      void refreshPlaudAfterIdle({ automatic: true });
+    };
+    const online = () => recover(true);
+    const offline = () => setPlaudNetworkOnline(false);
+    const focus = () => recover();
+    const visible = () => { if (document.visibilityState === "visible") recover(); };
+    window.addEventListener("online", online);
+    window.addEventListener("offline", offline);
+    window.addEventListener("focus", focus);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      window.removeEventListener("online", online);
+      window.removeEventListener("offline", offline);
+      window.removeEventListener("focus", focus);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [plaudEnabled, appSettings?.onboardingComplete, appSettings?.plaudBrowser]);
 
   useEffect(() => {
     if (!plaudSyncIntent) return;
     // Keep the server's cooldown even if the shared browser becomes free
     // earlier. Busy ownership consumes time, but never the submission budget.
-    const target = plaudReaderBusy ? plaudSyncIntent.expiresAt : plaudSyncIntent.retryAt;
+    const target = plaudReaderBusy || !plaudNetworkOnline ? plaudSyncIntent.expiresAt : plaudSyncIntent.retryAt;
     const timer = window.setTimeout(() => {
       if (plaudSyncIntentRef.current !== plaudSyncIntent) return;
-      if (Date.now() >= plaudSyncIntent.expiresAt) setPlaudSyncIntent(null);
+      if (Date.now() >= plaudSyncIntent.expiresAt) expirePlaudSyncIntent();
       else void continuePlaudSyncIntent(plaudSyncIntent);
     }, Math.max(0, target - Date.now()));
     return () => window.clearTimeout(timer);
-  }, [plaudSyncIntent, plaudReaderBusy]);
+  }, [plaudSyncIntent, plaudReaderBusy, plaudNetworkOnline]);
 
   useEffect(() => () => {
     // Invalidate callbacks which were awaiting a bridge operation on unmount.
@@ -3621,7 +3663,7 @@ function App() {
     plaudScopeVersionRef.current += 1;
   }, []);
 
-  const plaudNeedsRecovery = plaudEnabled
+  const plaudNeedsRecovery = plaudEnabled && plaudNetworkOnline
     && !plaudReaderBusy && !plaudSnapshot?.paused && !plaudSyncIntent
     && (plaudResumePendingCount === null ? hasRecoverablePlaudItems(plaudSnapshot) : plaudResumePendingCount > 0)
     && !["auth_required", "access_denied", "runtime_unavailable"]
@@ -6124,17 +6166,24 @@ function App() {
     setPlaudSyncIntent(null);
   }
 
+  function expirePlaudSyncIntent() {
+    setPlaudSyncIntent(null);
+    setPlaudNotice(plaudSyncPromiseRef.current
+      ? "同步仍在处理中，正在确认结果。"
+      : "同步已暂停，尚未提交新的生成请求。连接恢复后可再次同步。", "waiting");
+  }
+
   async function continuePlaudSyncIntent(intent: PlaudSyncIntent): Promise<void> {
     if (plaudContinuationPromiseRef.current) return plaudContinuationPromiseRef.current;
     const current = () => plaudSyncIntentRef.current === intent
       && intent.scopeVersion === plaudScopeVersionRef.current && currentPlaudScope();
-    if (!current() || Date.now() < intent.retryAt || plaudReaderBusyRef.current) return;
+    if (!current() || Date.now() < intent.retryAt || navigator.onLine === false || plaudReaderBusyRef.current) return;
     const request = Promise.resolve().then(async () => {
       for (let handoff = 0; handoff < 8 && current(); handoff += 1) {
         await Promise.allSettled([plaudScopeHandoffRef.current, plaudListPromiseRef.current,
           plaudSyncPromiseRef.current, plaudMutationPromiseRef.current]);
-        if (!current() || plaudReaderBusyRef.current) return;
-        if (Date.now() >= intent.expiresAt) { setPlaudSyncIntent(null); return; }
+        if (!current() || plaudReaderBusyRef.current || navigator.onLine === false) return;
+        if (Date.now() >= intent.expiresAt) { expirePlaudSyncIntent(); return; }
         if (plaudListPromiseRef.current || plaudSyncPromiseRef.current || plaudMutationPromiseRef.current) continue;
         await syncPlaudQueue({ continuation: intent });
         return;
@@ -6158,13 +6207,15 @@ function App() {
   }
 
   async function refreshPlaudAfterIdle({ automatic = false } = {}): Promise<DomiPlaudSnapshot | null> {
+    if (automatic && navigator.onLine === false) return null;
     if (plaudIdleRefreshPromiseRef.current) return plaudIdleRefreshPromiseRef.current;
     const scope = plaudScopeVersionRef.current;
     const request = Promise.resolve().then(async () => {
       for (let handoff = 0; handoff < 8; handoff += 1) {
         await Promise.allSettled([plaudScopeHandoffRef.current, plaudListPromiseRef.current,
           plaudSyncPromiseRef.current, plaudMutationPromiseRef.current]);
-        if (scope !== plaudScopeVersionRef.current || !currentPlaudScope() || plaudReaderBusyRef.current) return null;
+        if (scope !== plaudScopeVersionRef.current || !currentPlaudScope() || plaudReaderBusyRef.current
+          || (automatic && navigator.onLine === false)) return null;
         if (plaudListPromiseRef.current || plaudSyncPromiseRef.current || plaudMutationPromiseRef.current) continue;
         return refreshPlaudQueue({ fresh: true, automatic });
       }
@@ -6190,8 +6241,9 @@ function App() {
   }
 
   async function refreshPlaudQueue({ fresh = false, automatic = false }: { fresh?: boolean; automatic?: boolean } = {}): Promise<DomiPlaudSnapshot | null> {
+    const scope = plaudScopeVersionRef.current;
     if (plaudScopeHandoffRef.current) await plaudScopeHandoffRef.current;
-    if (!currentPlaudScope()) return null;
+    if (scope !== plaudScopeVersionRef.current || !currentPlaudScope() || (automatic && navigator.onLine === false)) return null;
     if (plaudReaderBusyRef.current) return null;
     // A newly selected browser must not reuse the prior scope's IPC TTL cache,
     // including a panel-open read racing with startup restoration.
@@ -6209,6 +6261,7 @@ function App() {
     let refreshedSnapshot: DomiPlaudSnapshot | null = null;
     const request = (async (): Promise<DomiPlaudSnapshot | null> => {
       try {
+        plaudLastRemoteAttemptAtRef.current = Date.now();
         const response = await Promise.resolve().then(() => workbench.listPlaud({ fresh, offset: 0, limit: 50 }));
         if (response.superseded) return null;
         const result = plaudSnapshotForScope(response, !plaudNeedsFreshListRef.current);
@@ -6235,6 +6288,7 @@ function App() {
         return result;
       } catch (error) {
         if (currentPlaudRequest(revision)) {
+          setPlaudSnapshot(current => mergePlaudSnapshot(current, plaudReadFailureSnapshot(error)));
           setPlaudError(plaudSafeError(error));
         }
         return null;
@@ -6256,8 +6310,9 @@ function App() {
   }
 
   async function loadMorePlaudQueue(): Promise<DomiPlaudSnapshot | null> {
+    const scope = plaudScopeVersionRef.current;
     if (plaudScopeHandoffRef.current) await plaudScopeHandoffRef.current;
-    if (!currentPlaudScope()) return null;
+    if (scope !== plaudScopeVersionRef.current || !currentPlaudScope()) return null;
     if (plaudReaderBusyRef.current) return null;
     if (!plaudSnapshot?.ok || !plaudSnapshot.hasMore) return null;
     if (plaudListPromiseRef.current) return plaudListPromiseRef.current;
@@ -6283,6 +6338,10 @@ function App() {
                 stale: true,
                 remoteStatus: result.remoteStatus,
                 retryable: result.retryable,
+                retryAt: result.retryAt,
+                retryAfterMs: result.retryAfterMs,
+                errorCode: result.errorCode,
+                errorStage: result.errorStage,
                 warning: result.warning || result.error
               }
             : current);
@@ -6319,6 +6378,7 @@ function App() {
         return result;
       } catch (error) {
         if (currentPlaudRequest(revision)) {
+          setPlaudSnapshot(current => mergePlaudSnapshot(current, plaudReadFailureSnapshot(error)));
           setPlaudError(plaudSafeError(error));
         }
         return null;
@@ -6335,12 +6395,15 @@ function App() {
   }
 
   async function syncPlaudQueue({ resumeOnly = false, continuation = null }: { resumeOnly?: boolean; continuation?: PlaudSyncIntent | null } = {}): Promise<DomiPlaudSyncResult | null> {
+    const scope = plaudScopeVersionRef.current;
+    if ((resumeOnly || continuation) && navigator.onLine === false) return null;
     if (resumeOnly && plaudSyncIntentRef.current) return null;
     if (!resumeOnly && !continuation) cancelPlaudSyncIntent();
     const intentEpoch = plaudSyncIntentEpochRef.current;
     const intentDeadline = continuation?.expiresAt ?? Date.now() + 15 * 60_000;
     if (plaudScopeHandoffRef.current) await plaudScopeHandoffRef.current;
-    if (!currentPlaudScope()) return null;
+    if (scope !== plaudScopeVersionRef.current || !currentPlaudScope()
+      || ((resumeOnly || continuation) && navigator.onLine === false)) return null;
     if (continuation && (plaudSyncIntentRef.current !== continuation || continuation.scopeVersion !== plaudScopeVersionRef.current)) return null;
     if (plaudReaderBusyRef.current && (resumeOnly || continuation)) return { ok: true, paused: true, status: "paused", snapshot: { ok: true, paused: true, remoteStatus: "workflow_in_use" } };
     if (plaudSyncPromiseRef.current) return plaudSyncPromiseRef.current;
@@ -6356,6 +6419,8 @@ function App() {
     setPlaudNotice("");
     const request = (async (): Promise<DomiPlaudSyncResult | null> => {
       try {
+        if ((resumeOnly || continuation) && navigator.onLine === false) return null;
+        plaudLastRemoteAttemptAtRef.current = Date.now();
         const result = await Promise.resolve().then(() => resumeOnly ? workbench.resumePlaudTranscripts()
           : workbench.syncPlaud(continuation ? { expectedRecoveryScope: continuation.recoveryScope } : undefined));
         if (result.superseded || result.snapshot?.superseded) {
@@ -6370,7 +6435,7 @@ function App() {
         if (result.snapshot) {
           const snapshot = plaudSnapshotForScope(result.snapshot, !plaudNeedsFreshListRef.current);
           setPlaudSnapshot(current => mergePlaudSnapshot(current, snapshot));
-          if (resumeOnly && (!snapshot.ok || snapshot.stale)) setPlaudError(plaudSafeError(snapshot.error || snapshot.warning));
+          if (!snapshot.ok || snapshot.stale) setPlaudError(plaudSafeError(snapshot.error || snapshot.warning));
           if (snapshot.ok && !snapshot.stale) plaudNeedsFreshListRef.current = false;
         }
         setPlaudResumePendingCount(typeof result.resumePendingCount === "number" ? Math.max(0, result.resumePendingCount) : null);
@@ -6388,6 +6453,7 @@ function App() {
       } catch (error) {
         if (currentPlaudRequest(revision)) {
           if (!resumeOnly) setPlaudSyncIntent(null);
+          setPlaudSnapshot(current => mergePlaudSnapshot(current, plaudReadFailureSnapshot(error, resumeOnly ? "resume" : "sync")));
           setPlaudError(plaudSafeError(error));
         }
         return null;
@@ -14595,7 +14661,7 @@ function App() {
                   <>
                     {plaudError && !plaudSyncIntent && (
                       <div className="plaud-connection-status" role="status">
-                        <span>{plaudConnectionSummary(plaudSnapshot, plaudReadRetryPending)}</span>
+                        <span>{plaudConnectionSummary(plaudSnapshot, plaudReadRetryPending, plaudNetworkOnline)}</span>
                         {!plaudReadRetryPending && (
                         <button
                           type="button"

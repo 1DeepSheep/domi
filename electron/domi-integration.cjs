@@ -357,15 +357,6 @@ const PLAUD_SYNC_PREFLIGHT_RECOVERY_STATUSES = new Set([
   "service_unavailable"
 ]);
 
-function shouldRecoverPlaudSyncRead(snapshot) {
-  return Boolean(
-    snapshot
-    && snapshot.retryable
-    && (snapshot.ok === false || snapshot.stale)
-    && PLAUD_SYNC_PREFLIGHT_RECOVERY_STATUSES.has(String(snapshot.remoteStatus || ""))
-  );
-}
-
 function safePlaudSyncError(error) {
   const message = error instanceof Error ? error.message : String(error || "");
   if (/Transcript not found|transcript.*not ready|PLAUD_TRANSCRIPT_PENDING/i.test(message)) {
@@ -418,6 +409,8 @@ function classifyPlaudConnectionFailure(error, browser) {
     ...(details.httpStatus !== undefined ? { httpStatus: details.httpStatus } : {}),
     ...(details.apiStatus !== undefined ? { apiStatus: details.apiStatus } : {}),
     ...(details.stage ? { errorStage: details.stage } : {}),
+    ...(details.networkErrorCode ? { networkErrorCode: details.networkErrorCode } : {}),
+    ...(details.sessionProbe ? { sessionProbe: details.sessionProbe } : {}),
     ...(retryAfterMs !== undefined ? { retryAfterMs, retryAt: Date.now() + retryAfterMs } : {}),
     checkedAt: Date.now(),
     error: guidance
@@ -1238,6 +1231,7 @@ class DomiIntegration {
     this.intakeFieldsPromiseKey = "";
     this.plaudCommandQueue = new TaskQueue(1);
     this.plaudRemoteHealth = null;
+    this.plaudReadCooldowns = new Map();
     this.plaudChildProcesses = new Set();
     this.podcastProcessPromises = new Map();
     this.plaudShuttingDown = false;
@@ -1696,7 +1690,15 @@ class DomiIntegration {
           ? await this.execTrackedPlaudFile(binary, args, commandOptions)
           : await execFileAsync(binary, args, commandOptions));
       } catch (error) {
-        throw new Error(commandErrorMessage(error, binary, options));
+        let value;
+        if (options.queue === "plaud") {
+          try { value = JSON.parse(String(error?.stdout || "").trim()); } catch { /* Non-JSON failures use the safe command message. */ }
+        }
+        if (value?.ok === false && options.acceptPlaudSyncResults && Array.isArray(value.results)) return value;
+        const failure = new Error(commandErrorMessage(error, binary, options));
+        if (value?.ok === false) Object.assign(failure, plaudErrorDetails({ ...value,
+          code: value.errorCode || value.code, message: failure.message }));
+        throw failure;
       }
       const value = JSON.parse(stdout.trim());
       if (value?.ok === false) {
@@ -1704,7 +1706,10 @@ class DomiIntegration {
         // an explicit zero-submission discovery receipt. Preserve that result.
         if (options.acceptPlaudSyncResults && Array.isArray(value.results)) return value;
         const message = typeof value.error === "string" ? value.error : value.error?.message;
-        throw new Error(message || "domi 命令执行失败。 ");
+        const failure = new Error(message || "domi 命令执行失败。 ");
+        if (options.queue === "plaud") Object.assign(failure, plaudErrorDetails({ ...value,
+          code: value.errorCode || value.code, message: failure.message }));
+        throw failure;
       }
       return value;
     };
@@ -1931,23 +1936,49 @@ class DomiIntegration {
     const settings = this.configProvider();
     const browser = this.normalizePlaudBrowser(settings.plaudBrowser);
     const sessionKey = this.plaudBrokerSessionKey(plugin, browser, settings);
-    return this.enqueuePlaudOperation(() => {
+    const cooldownKey = `${this.plaudRecoveryScope()}\0${plugin.root}`;
+    return this.enqueuePlaudOperation(async () => {
       assertScope();
       this.assertPlaudReaderAvailable();
       if (this.plaudShuttingDown) {
         throw new Error("domi 正在退出，已取消尚未开始的 PLAUD 操作。");
       }
       if (!this.plaudEnabled()) throw new Error("PLAUD 已停用，已取消后续读取。");
-      return this.plaudBroker.request(
-        command,
-        args,
-        plugin.root,
-        {
-          timeoutMs: command === "download" ? Math.min(Math.max(Number(options.timeoutMs) || 30_000, 1000), 30_000) : 90_000,
-          ...(Number.isFinite(options.deadlineAt) ? { deadlineAt: options.deadlineAt } : {}),
-          sessionKey
+      const priorFailure = this.plaudReadCooldowns.get(cooldownKey);
+      const remainingCooldown = (priorFailure?.retryAt || 0) - Date.now();
+      // Both background and explicit sync reads share this circuit breaker.
+      // A suppressed read returns the original diagnosis and fixed retryAt;
+      // it must not lengthen the outage or launch another private browser.
+      if (remainingCooldown > 0 && (command === "list"
+        || (command === "connection" && priorFailure.error.code === "PLAUD_RATE_LIMITED"))) {
+        throw Object.assign(new Error(priorFailure.error.message), priorFailure.error, { retryAfterMs: remainingCooldown });
+      }
+      try {
+        const result = await this.plaudBroker.request(
+          command,
+          args,
+          plugin.root,
+          {
+            timeoutMs: command === "download" ? Math.min(Math.max(Number(options.timeoutMs) || 30_000, 1000), 30_000) : 90_000,
+            ...(Number.isFinite(options.deadlineAt) ? { deadlineAt: options.deadlineAt } : {}),
+            sessionKey
+          }
+        );
+        if (["list", "connection"].includes(command) && result?.ok !== false) this.plaudReadCooldowns.delete(cooldownKey);
+        return result;
+      } catch (error) {
+        if (["list", "connection"].includes(command) && isRetryablePlaudReadFailure(error)) {
+          const details = plaudErrorDetails(error);
+          const failures = Math.min((priorFailure?.failures || 0) + 1, 5);
+          const retryAfterMs = Math.max(Math.min(15_000 * 2 ** (failures - 1), 120_000), details.retryAfterMs || 0);
+          this.plaudReadCooldowns.set(cooldownKey, { failures, retryAt: Date.now() + retryAfterMs,
+            error: { ...details, message: safePlaudWorkerError(error) } });
+          // Only the selected account/plugin can influence its next read.
+          if (this.plaudReadCooldowns.size > 8) this.plaudReadCooldowns.delete(this.plaudReadCooldowns.keys().next().value);
+          Object.assign(error, details, { retryAfterMs });
         }
-      );
+        throw error;
+      }
     });
   }
 
@@ -1990,6 +2021,7 @@ class DomiIntegration {
     this.stateStore?.saveCache?.(key, { epoch });
     this.plaudAccountEpochs.set(key, epoch);
     this.plaudVerifiedSnapshot = null;
+    this.plaudReadCooldowns.clear();
     this.plaudRecoveryEpoch = crypto.randomUUID();
   }
 
@@ -2715,6 +2747,8 @@ class DomiIntegration {
     const retryable = Boolean(remoteFailure && isRetryablePlaudReadFailure(remoteResult.reason));
     const failureDetails = remoteFailure ? {
       errorCode: remoteFailure.errorCode, errorStage: remoteFailure.errorStage || "list",
+      ...(remoteFailure.networkErrorCode ? { networkErrorCode: remoteFailure.networkErrorCode } : {}),
+      ...(remoteFailure.sessionProbe ? { sessionProbe: remoteFailure.sessionProbe } : {}),
       ...(remoteFailure.httpStatus !== undefined ? { httpStatus: remoteFailure.httpStatus } : {}),
       ...(remoteFailure.apiStatus !== undefined ? { apiStatus: remoteFailure.apiStatus } : {}),
       ...(remoteFailure.retryAfterMs !== undefined ? { retryAfterMs: remoteFailure.retryAfterMs, retryAt: remoteFailure.retryAt } : {})
@@ -2774,20 +2808,10 @@ class DomiIntegration {
   }
 
   async plaudQueueForSync() {
-    const deadlineAt = Date.now() + 90_000;
-    let snapshot = await this.plaudQueue({ deadlineAt: Math.min(deadlineAt, Date.now() + 45_000) });
-    if (!shouldRecoverPlaudSyncRead(snapshot)) return snapshot;
-
-    // A cold managed browser can refresh its PLAUD authorization while the
-    // first list request is already failing. Rebuild only the read session and
-    // verify once more inside the same click. Generation and download commands
-    // are deliberately outside this recovery block, so no mutation is ever
-    // submitted twice.
-    await this.enqueuePlaudOperation(() => this.stopPlaudBackgroundSession("sync-read-recovery"));
-    await this.sleep(500);
-    if (!this.plaudEnabled() || this.plaudShuttingDown || deadlineAt - Date.now() < 5_000) return snapshot;
-    snapshot = await this.plaudQueue({ fresh: true, deadlineAt });
-    return snapshot;
+    // The worker owns read recovery and the vendor owns credential recovery.
+    // Restarting the worker after either budget is exhausted only repeats the
+    // same probes, delaying the click and extending outages/rate limits.
+    return this.plaudQueue({ deadlineAt: Date.now() + 90_000 });
   }
 
   syncPlaud(request = {}) {
@@ -2835,7 +2859,8 @@ class DomiIntegration {
       if (!this.plaudEnabled() || this.plaudShuttingDown) throw new Error("PLAUD 已停用或 domi 正在退出，已保留现有任务。");
       try { return await operation(); }
       catch (error) {
-        if (attempt === 2 || !PLAUD_SYNC_PREFLIGHT_RECOVERY_STATUSES.has(plaudFailureStatus(error))) throw error;
+        if (attempt === 2 || plaudErrorDetails(error).code === "PLAUD_SESSION_PROBE_INCOMPLETE"
+          || !PLAUD_SYNC_PREFLIGHT_RECOVERY_STATUSES.has(plaudFailureStatus(error))) throw error;
         await this.sleep(attempt === 0 ? 500 : 1500);
       }
     }
@@ -2974,6 +2999,8 @@ class DomiIntegration {
         preflight: true, submissionStarted: false, retryable: current.retryable === true,
         recoveryScope: requestedRecoveryScope, errorCode: current.errorCode || "PLAUD_READ_FAILED",
         errorStage: current.errorStage || "list",
+        ...(current.networkErrorCode ? { networkErrorCode: current.networkErrorCode } : {}),
+        ...(current.sessionProbe ? { sessionProbe: current.sessionProbe } : {}),
         ...(current.httpStatus !== undefined ? { httpStatus: current.httpStatus } : {}),
         ...(current.apiStatus !== undefined ? { apiStatus: current.apiStatus } : {}),
         ...(current.retryAfterMs !== undefined ? { retryAfterMs: current.retryAfterMs, retryAt: current.retryAt } : {}),

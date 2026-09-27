@@ -160,3 +160,28 @@ test("broker keeps structured failure fields and drains diagnostic plus response
   assert.deepEqual(diagnostics[0], { operation: "list", outcome: "failed", code: "PLAUD_RATE_LIMITED", stage: "list", httpStatus: 429, retryAfterMs: 120000 });
   assert.doesNotMatch(JSON.stringify(diagnostics), /private|secret|https/);
 });
+
+
+test("a broker deadline preserves the diagnosed initialization failure instead of replacing it with network timeout", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-plaud-cause-deadline-"));
+  const workerPath = path.join(root, "synthetic-worker.cjs");
+  fs.writeFileSync(workerPath, `require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+    const request = JSON.parse(line);
+    process.stdout.write(JSON.stringify({id:request.id,type:'diagnostic',diagnostic:{
+      code:'PLAUD_SESSION_PROBE_INCOMPLETE',stage:'recording-authorization',networkErrorCode:'ERR_PROXY_CONNECTION_FAILED',privateUrl:'https://private.invalid/token'
+    }})+'\\n');
+  });`);
+  const diagnostics = [];
+  const broker = new PlaudSessionBroker({ executable: process.execPath, workerPath,
+    requestTimeoutMs: 1000, shutdownTimeoutMs: 1000, onDiagnostic: event => diagnostics.push(event) });
+  t.after(async () => { await broker.stop("test-cleanup"); fs.rmSync(root, { recursive: true, force: true }); });
+  await assert.rejects(broker.request("list", [], root), error => {
+    assert.equal(error.code, "PLAUD_SESSION_PROBE_INCOMPLETE");
+    assert.equal(error.stage, "recording-authorization");
+    assert.equal(error.networkErrorCode, "ERR_PROXY_CONNECTION_FAILED");
+    assert.equal(error.privateUrl, undefined);
+    return true;
+  });
+  assert.equal(diagnostics[0].outcome, "timeout");
+  assert.equal(diagnostics[0].lastErrorCode, "PLAUD_SESSION_PROBE_INCOMPLETE");
+});
