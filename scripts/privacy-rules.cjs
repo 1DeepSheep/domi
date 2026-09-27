@@ -35,7 +35,20 @@ function containsOneDriveAccountPath(content) {
   return /(?:^|[/\\])OneDrive-[^/\\\s"'<>]+(?:[/\\]|$)/m.test(String(content || ""));
 }
 
+function containsHardcodedFeishuAssignment(content) {
+  const allowedPlaceholders = new Set([
+    "example", "placeholder", "configured", "employee", "user", "node_token", "field_id", "table_id",
+    // Historical synthetic-library tests use these exact semantic placeholders.
+    // Do not exempt arbitrary test-prefixed values: they could be real IDs.
+    "test-base", "test-table", "test-space"
+  ]);
+  const assignment = /(?:app[_ -]?token|base[_ -]?token|table[_ -]?id|field[_ -]?id|wiki[_ -]?(?:space|node)?[_ -]?(?:id|token)|space[_ -]?id|parent[_ -]?node[_ -]?token)["'`\s]*[：:=]["'`\s]*([A-Za-z0-9_-]{8,})/gi;
+  return [...String(content || "").matchAll(assignment)]
+    .some(match => !allowedPlaceholders.has(match[1].toLowerCase()));
+}
+
 module.exports = {
+  containsHardcodedFeishuAssignment,
   containsHardcodedSecret,
   containsOneDriveAccountPath,
   isForbiddenRuntimeName

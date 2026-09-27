@@ -4,6 +4,7 @@ const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const asar = require("@electron/asar");
 const {
+  containsHardcodedFeishuAssignment,
   containsHardcodedSecret,
   containsOneDriveAccountPath,
   isForbiddenRuntimeName
@@ -111,12 +112,8 @@ function inspectContent(content, filePath, scanRoot, options = {}) {
     fail("发现飞书文档或数据资源标识", relative);
   }
 
-  const feishuAssignment = /(?:app[_ -]?token|base[_ -]?token|table[_ -]?id|field[_ -]?id|wiki[_ -]?(?:space|node)?[_ -]?(?:id|token)|space[_ -]?id|parent[_ -]?node[_ -]?token)["'`\s]*[：:=]["'`\s]*([A-Za-z0-9_-]{8,})/gi;
-  for (const match of content.matchAll(feishuAssignment)) {
-    if (!/^(?:example|placeholder|configured|employee|user|node_token|field_id|table_id)$/i.test(match[1])) {
-      fail("发现硬编码飞书标识", relative);
-      break;
-    }
+  if (containsHardcodedFeishuAssignment(content)) {
+    fail("发现硬编码飞书标识", relative);
   }
 }
 
