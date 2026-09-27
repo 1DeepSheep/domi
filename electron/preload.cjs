@@ -36,7 +36,7 @@ contextBridge.exposeInMainWorld("workbench", {
   manageSkillHub: (request) => ipcRenderer.invoke("skill-hub:manage", request),
   selectFiles: (workspacePath, entityRequest) => ipcRenderer.invoke("files:select", workspacePath, entityRequest),
   getPathForFile: (file) => webUtils.getPathForFile(file),
-  importFiles: (sourcePaths, workspacePath, entityRequest) => ipcRenderer.invoke("files:import", sourcePaths, workspacePath, entityRequest),
+  importFiles: (sourcePaths, workspacePath, entityRequest, sourceNames) => ipcRenderer.invoke("files:import", sourcePaths, workspacePath, entityRequest, sourceNames),
   importFileData: (files, workspacePath, entityRequest) => ipcRenderer.invoke("files:import-data", files, workspacePath, entityRequest),
   discardStagedAttachment: (filePath) => ipcRenderer.invoke("files:discard-staged", filePath),
   openResource: (resource) => ipcRenderer.invoke("resource:open", resource),

@@ -40,5 +40,7 @@ test("attachment prompt separates original names from immutable paths as JSON", 
   const files = [{ name: "【BP】示例公司.pdf", path: raw }, { name: 'quoted"\nname.pdf', path: '/library/attachments/a"\n.pdf' }];
   const prompt = attachmentPrompt(files);
   assert.deepEqual(prompt.split("\n").slice(1).map((line) => JSON.parse(line)), files);
+  assert.match(prompt, /归档副本的物理文件名也必须使用 name/);
+  assert.match(prompt, /originalName=name/);
   assert.equal(attachmentPrompt([]), "");
 });

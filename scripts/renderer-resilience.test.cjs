@@ -1134,8 +1134,8 @@ assert.match(
 );
 assert.match(
   main,
-  /logicalStagingAttachmentName[\s\S]*?replace\(\/\^\\d\+-\\d\+-[\s\S]*?const name = logicalStagingAttachmentName/,
-  "Moving a managed staged attachment must not stack a second timestamp prefix onto its logical name."
+  /logicalStagingAttachmentName[\s\S]*?sourceNames\.find[\s\S]*?const name = logicalStagingAttachmentName\(resolvedSourcePath, sourceNames\)/,
+  "Moving a managed staged attachment must use its persisted original name, never guess from numeric filename prefixes."
 );
 assert.match(
   app,
