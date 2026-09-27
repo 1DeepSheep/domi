@@ -154,3 +154,56 @@ test("attachment names reject traversal metadata and keep numeric clipboard name
   assert.equal(path.basename(result.files[0].path), name);
   assert.equal(f.api.logicalStagingAttachmentName(result.files[0].path, [{ path: result.files[0].path, name: "../escape.pdf" }]), name);
 });
+
+test("partial write failures leave no file or temporary directory and preserve existing collisions", async t => {
+  const f = fixture(t);
+  for (const staging of [false, true]) {
+    const directory = path.join(f.root, staging ? "attachments" : "原始材料");
+    fs.mkdirSync(directory);
+    const existing = path.join(directory, "BP.pdf");
+    fs.writeFileSync(existing, "existing-complete-material");
+    for (const code of ["ENOSPC", "EIO"]) {
+      await assert.rejects(writeNamedAttachment({
+        directory, name: "BP.pdf", staging,
+        write: async temporaryPath => {
+          await fs.promises.writeFile(temporaryPath, "partial-bytes", { flag: "wx" });
+          throw Object.assign(new Error("simulated write failure"), { code });
+        }
+      }), error => error.code === code);
+      assert.deepEqual(fs.readdirSync(directory), ["BP.pdf"]);
+      assert.equal(fs.readFileSync(existing, "utf8"), "existing-complete-material");
+    }
+  }
+});
+
+test("a file remains unpublished while writing and concurrent publication cannot be overwritten", async t => {
+  const f = fixture(t);
+  const directory = path.join(f.entity, "原始材料");
+  fs.mkdirSync(directory);
+  let resumeWrite;
+  let announceWrite;
+  const held = new Promise(resolve => { resumeWrite = resolve; });
+  const started = new Promise(resolve => { announceWrite = resolve; });
+  const delayed = writeNamedAttachment({
+    directory, name: "BP.pdf",
+    write: async temporaryPath => {
+      await fs.promises.writeFile(temporaryPath, "partial-", { flag: "wx" });
+      announceWrite();
+      await held;
+      await fs.promises.appendFile(temporaryPath, "complete");
+    }
+  });
+  await started;
+  assert.equal(fs.existsSync(path.join(directory, "BP.pdf")), false);
+  assert.deepEqual(fs.readdirSync(directory).filter(name => !name.startsWith(".")), []);
+  const concurrent = await writeNamedAttachment({
+    directory, name: "BP.pdf", write: temporaryPath => fs.promises.writeFile(temporaryPath, "concurrent", { flag: "wx" })
+  });
+  resumeWrite();
+  const later = await delayed;
+  assert.equal(path.basename(concurrent), "BP.pdf");
+  assert.equal(path.basename(later), "BP (2).pdf");
+  assert.equal(fs.readFileSync(concurrent, "utf8"), "concurrent");
+  assert.equal(fs.readFileSync(later, "utf8"), "partial-complete");
+  assert.deepEqual(fs.readdirSync(directory).sort(), ["BP (2).pdf", "BP.pdf"]);
+});
