@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  containsHardcodedFeishuAssignment,
   containsHardcodedSecret,
   containsOneDriveAccountPath,
   isForbiddenRuntimeName
@@ -25,4 +26,18 @@ test("OneDrive detection distinguishes account paths from descriptive prose", ()
     containsOneDriveAccountPath("/Users/example/Library/CloudStorage/OneDrive-company/Documents"),
     true
   );
+});
+
+
+test("Feishu assignment detection allows only the exact historical synthetic-library placeholders", () => {
+  const historicalFixture = 'settings = { ...settings, storageBackend: "feishu", projectBaseToken: "test-base", projectTableId: "test-table", wikiSpaceId: "test-space" };';
+  assert.equal(containsHardcodedFeishuAssignment(historicalFixture), false);
+  for (const value of ["test-private-resource-1234", "test-base-secret", "test-table-1234", "test-space-opaque", "opaqueResourceIdentifier123"]) {
+    for (const key of ["projectBaseToken", "projectTableId", "wikiSpaceId"]) {
+      assert.equal(containsHardcodedFeishuAssignment(`${key}: "${value}"`), true, `${key} must reject ${value}`);
+    }
+  }
+  assert.equal(containsHardcodedFeishuAssignment(`${historicalFixture} field_id = "opaqueResourceIdentifier123";`), true,
+    "an allowed placeholder must not exempt a different hardcoded identifier in the same file");
+  assert.equal(containsHardcodedFeishuAssignment('app_token: "configured"'), false);
 });
