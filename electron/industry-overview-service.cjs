@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
+const { Worker } = require("node:worker_threads");
 const { LocalDomiRepository } = require("./local-domi-repository.cjs");
 const taxonomy = require("../shared/investment-taxonomy.json");
 
@@ -44,7 +45,10 @@ function sourceSnapshot(source) {
     // Hash relevant row values, not database/WAL mtimes: chat persistence, cache writes,
     // and SQLite checkpoints must not trigger hundreds of generated Markdown pages.
     const projects = database.prepare("SELECT * FROM projects ORDER BY id").all();
-    const documents = database.prepare("SELECT * FROM documents WHERE owner_type IN ('project','industry') ORDER BY id").all();
+    const documents = database.prepare("SELECT * FROM documents WHERE owner_type IN ('project','industry') ORDER BY id").all()
+      // Generated pages are outputs, even when the document index refreshes their metadata.
+      // User edits to these pages are separately checked by outputFingerprint.
+      .filter(document => !(document.owner_type === "industry" && path.basename(document.path || "") === "行业速览.md"));
     const custom = database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='custom_taxonomy'").get()
       ? database.prepare("SELECT * FROM custom_taxonomy ORDER BY id").all() : [];
     const news = LocalDomiRepository.prototype.listAllNews.call({ database });
@@ -124,4 +128,117 @@ async function loadIndustryOverviews(refresh) {
   catch (error) { return { ok: false, entries: [], error: error instanceof Error ? error.message : String(error) }; }
 }
 
-module.exports = { IndustryOverviewCache, loadIndustryOverviews };
+function cacheKey(source) {
+  return `industry-overview-v1:${hash([source.databasePath, source.libraryDir])}`;
+}
+
+// The synchronous cache engine runs only inside a worker in production. Even a cache hit
+// validates hundreds of cloud-backed file metadata entries; doing that in Electron's
+// main thread stalls navigation, input and unrelated IPC requests.
+class IndustryOverviewService {
+  constructor({ stateStore, workerPath = path.join(__dirname, "industry-overview-worker.cjs"), WorkerClass = Worker,
+    timeoutMs = 180_000 } = {}) {
+    this.stateStore = stateStore;
+    this.workerPath = workerPath;
+    this.WorkerClass = WorkerClass;
+    this.timeoutMs = timeoutMs;
+    this.entries = new Map();
+    this.pending = new Map();
+    this.queue = Promise.resolve();
+    this.active = null;
+    this.closed = false;
+  }
+
+  previous(key, { allowStale = false } = {}) {
+    let value = this.entries.get(key);
+    if (!value) { try { value = this.stateStore?.loadCache?.(key)?.value; } catch {} }
+    if ((!allowStale && value?.version !== CACHE_VERSION) || !usable(value?.result) || !Array.isArray(value?.result?.entries)) return null;
+    this.entries.set(key, value);
+    return value;
+  }
+
+  read(requestedSource, { force = false, cachedOnly = false } = {}) {
+    const source = sourceIdentity(requestedSource);
+    const key = cacheKey(source);
+    const captured = { backend: "local", localDatabasePath: source.databasePath, localLibraryDir: source.libraryDir };
+    if (this.closed) return Promise.reject(new Error("行业看板后台服务已停止。"));
+    if (cachedOnly) {
+      const previous = this.previous(key, { allowStale: true });
+      return Promise.resolve(previous ? { ...previous.result, cached: true } : { ok: true, entries: [], cached: false });
+    }
+    const active = this.pending.get(key);
+    if (active) {
+      if (!force || active.force) return active.promise;
+      // One manual refresh requested while validation is pending must still force a
+      // fresh generation, but repeated clicks share that one queued operation.
+      if (!active.forced) active.forced = active.promise.catch(() => undefined).then(() => this.read(captured, { force: true }));
+      return active.forced;
+    }
+    const promise = this.queue.then(() => {
+      if (this.closed) throw new Error("行业看板后台服务已停止。");
+      return this.run(captured, key, force);
+    });
+    this.queue = promise.catch(() => undefined);
+    const item = { promise, force };
+    this.pending.set(key, item);
+    const finish = () => { if (this.pending.get(key) === item) this.pending.delete(key); };
+    promise.then(finish, finish);
+    return promise;
+  }
+
+  run(source, key, force) {
+    return new Promise((resolve, reject) => {
+      const lockToken = JSON.stringify({ pid: process.pid, token: crypto.randomUUID() });
+      const lockPath = path.join(path.dirname(source.localDatabasePath), `.domi-industry-${hash(source.localLibraryDir).slice(0, 16)}.lock`);
+      const worker = new this.WorkerClass(this.workerPath, {
+        workerData: { source, previous: this.previous(key), force, lockToken },
+        resourceLimits: { maxOldGenerationSizeMb: 256 }
+      });
+      let settled = false;
+      let termination, cleanupPromise, abortError;
+      const cleanupLock = () => cleanupPromise ||= (async () => {
+        // Terminated threads have the main process PID. Only our unique token can
+        // distinguish an abandoned lock from another healthy thread's lock.
+        try { if (await fs.promises.readFile(lockPath, "utf8") === lockToken) await fs.promises.unlink(lockPath); } catch {}
+      })();
+      const terminate = () => termination ||= Promise.resolve(worker.terminate()).catch(() => undefined).then(cleanupLock);
+      const finish = (error, message) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.active?.worker === worker) this.active = null;
+        if (error) { reject(error); return; }
+        const value = message.cache;
+        if (value?.version === CACHE_VERSION && usable(value?.result)) {
+          this.entries.set(key, value);
+          try { this.stateStore?.saveCache?.(key, value); } catch {}
+        }
+        resolve(message.result);
+      };
+      const cancel = error => {
+        abortError ||= error;
+        return terminate().then(() => finish(abortError));
+      };
+      const timer = setTimeout(() => {
+        void cancel(new Error("行业看板后台刷新超时，已保留上次成功结果。"));
+      }, this.timeoutMs);
+      this.active = { worker, cancel };
+      worker.once("message", message => {
+        if (message?.ok) finish(null, message);
+        else void cleanupLock().then(() => finish(new Error(message?.error || "行业看板后台刷新失败。")));
+      });
+      worker.once("error", error => { void cancel(error); });
+      worker.once("exit", code => {
+        if (!settled) void cleanupLock().then(() => finish(abortError || new Error(`行业看板后台服务意外退出（${code}）。`)));
+      });
+    });
+  }
+
+  async close() {
+    this.closed = true;
+    await this.active?.cancel(new Error("行业看板后台服务已停止。"));
+    await this.queue;
+  }
+}
+
+module.exports = { IndustryOverviewCache, IndustryOverviewService, loadIndustryOverviews, sourceSnapshot };

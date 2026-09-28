@@ -14426,7 +14426,7 @@ function App() {
                 : workspaceView === "news"
                   ? renderNewsWorkspace()
                   : workspaceView === "industries"
-                    ? (appSettings && <IndustryOverview key={industryCacheKey} cacheKey={industryCacheKey} refreshKey={industryRefreshKey} onOpenAttachment={openDocument} />)
+                    ? (appSettings && <IndustryOverview key={industryCacheKey} cacheKey={industryCacheKey} refreshKey={industryRefreshKey} onOpenAttachment={openDocumentFromMessage} />)
                   : workspaceView === "data"
                     ? renderDatabaseWorkspace()
                   : workspaceView === "documents"

@@ -1,4 +1,4 @@
-// Shared verbatim with the domi plugin. Only indexed evidence is read; no workspace crawl.
+// Generator and lock protocol are shared with the domi plugin. Only indexed evidence is read; no workspace crawl.
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -376,7 +376,7 @@ function refreshRepositoryIndustryOverviews(repository, canonicalTaxonomy) {
   // The client and plugin may finish independent writes concurrently. Serialize derived file updates
   // beside the local database, not in the cloud-synced library, and recover only a dead local owner.
   const lockPath = path.join(path.dirname(repository.databasePath), `.domi-industry-${hash(path.resolve(repository.libraryDir)).slice(0, 16)}.lock`);
-  const token = JSON.stringify({ pid: process.pid, token: crypto.randomUUID() });
+  const token = repository.industryOverviewLockToken || JSON.stringify({ pid: process.pid, token: crypto.randomUUID() });
   function acquire() {
     try { fs.writeFileSync(lockPath, token, { encoding: "utf8", flag: "wx", mode: 0o600 }); return true; }
     catch (error) { if (error.code !== "EEXIST") throw error; return false; }

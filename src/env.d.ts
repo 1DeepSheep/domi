@@ -109,7 +109,7 @@ declare global {
       ) => Promise<FeishuSetupStatus>;
       provisionFeishuSetup: () => Promise<FeishuSetupProvisionResult>;
       syncDomi: () => Promise<DomiSyncResult>;
-      refreshIndustryOverviews: (request?: { force?: boolean }) => Promise<IndustryOverviewResult>;
+      refreshIndustryOverviews: (request?: { force?: boolean; cachedOnly?: boolean }) => Promise<IndustryOverviewResult>;
       listDomiDatabase: (request?: { fresh?: boolean }) => Promise<DomiDatabaseSnapshot>;
       updateDomiDatabaseRecord: (
         request: DomiDatabaseUpdateRequest

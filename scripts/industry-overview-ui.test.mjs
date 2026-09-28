@@ -55,7 +55,7 @@ const news = [
   url: `https://example.test/news/${recordId}`, types: [], summary: "", investmentMeaning: "", companies: "",
   institutions: "", importance: 7, confidence: 8, evidenceStatus: "已核验", action: "跟踪" }));
 const source = `
-import React, { useState } from "react";
+import React, { Profiler, useCallback, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "/src/styles.css";
 import "/src/appearance/index.css";
@@ -65,9 +65,28 @@ const docs = ${JSON.stringify(docs)};
 const news = ${JSON.stringify(news)};
 const indexPath = ${JSON.stringify(indexPath)};
 const mode = new URL(location.href).searchParams.get("mode") || "ready";
-const state = window.__industryTest = { calls: [], entries, docs, news, mode, failPaths: [], refreshFailure: mode === "initial-refresh-failure", pending: {}, deferredPaths: [], deferRefresh: mode === "initial-catalog-delay", pendingRefresh: [], refresh: null, leave: null, enter: null, selectLibrary: null, metrics: {} };
+const state = window.__industryTest = { cacheReads: 0, cachePending: [], diskCache: null, deferCache: mode.startsWith("late-disk-cache"), renders: [], calls: [], entries, docs, news, mode, failPaths: [], refreshFailure: ["initial-refresh-failure", "late-disk-cache-failure"].includes(mode), pending: {}, deferredPaths: [], deferRefresh: ["initial-catalog-delay", "disk-cache", "strict-mode"].includes(mode), pendingRefresh: [], refresh: null, leave: null, enter: null, selectLibrary: null, metrics: {} };
+if (mode === "disk-cache") state.diskCache = { ok: true, entries, news, projectCount: 4, cached: true };
+if (mode === "large-catalog") {
+  const now = Date.now();
+  state.entries = Array.from({ length: 132 }, (_, i) => {
+    const domain = "合成行业 " + Math.floor(i / 11);
+    const subdomain = i % 11 ? "合成方向 " + (i % 11) : "";
+    const path = "/synthetic/large/" + i + ".md";
+    state.docs[path] = ["## 大型项目对照", "", "| 项目 | 进展 | 融资 | 判断 | 日期 |", "| --- | --- | --- | --- | --- |",
+      ...Array.from({ length: 400 }, (_, row) => "| 合成项目 " + row + " | 已完成试点，继续验证交付成本 | 测试数据，无真实融资 | 保留完整研究细节 | 2026-09-01 |")].join(String.fromCharCode(10));
+    return { domain, subdomain, projectCount: 400, title: domain, path };
+  });
+  state.news = Array.from({ length: 25000 }, (_, i) => ({ ...news[0], recordId: "large-" + i,
+    title: "合成大数据动态 " + i, domains: ["合成行业 " + (i % 12)], publishedAt: now - i * 1000 }));
+}
 const bridge = {
   refreshIndustryOverviews: async options => {
+    if (options?.cachedOnly) {
+      state.cacheReads++;
+      if (state.deferCache) await new Promise(resolve => state.cachePending.push(resolve));
+      return state.diskCache || { ok: true, entries: [], cached: false };
+    }
     const call = { kind: "refreshIndustryOverviews", options, settled: false }; state.calls.push(call);
     const response = state.refreshFailure ? { ok: false, entries: [], error: "合成刷新失败，原资料仍保留" }
       : mode === "conflict" ? { ok: false, entries: [...state.entries], news: [...state.news], indexPath, conflicts: [{ path: entries[0].path }], warnings: ["合成资料缺口"] }
@@ -96,13 +115,16 @@ function Harness() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [visible, setVisible] = useState(true);
   const [cacheKey, setCacheKey] = useState("synthetic-library-a");
+  const [tick, setTick] = useState(0);
+  const openAttachment = useCallback(resource => { state.calls.push({ kind: "onOpenAttachment", resource }); }, []);
+  state.rerender = () => setTick(value => value + 1);
   state.refresh = () => setRefreshKey(key => key + 1);
   state.leave = () => setVisible(false);
   state.enter = () => setVisible(true);
   state.selectLibrary = setCacheKey;
-  return visible ? <IndustryOverview key={cacheKey} cacheKey={cacheKey} refreshKey={refreshKey} onOpenAttachment={resource => { state.calls.push({ kind: "onOpenAttachment", resource }); }} /> : <p>合成其他页面</p>;
+  return visible ? <Profiler id="industry" onRender={(_id, phase, duration) => state.renders.push({ phase, duration })}><div data-tick={tick} style={{ height: "100%" }}><IndustryOverview key={cacheKey} cacheKey={cacheKey} refreshKey={refreshKey} onOpenAttachment={openAttachment} /></div></Profiler> : <p>合成其他页面</p>;
 }
-createRoot(document.getElementById("root")).render(<Harness />);
+createRoot(document.getElementById("root")).render(mode === "strict-mode" ? <React.StrictMode><Harness /></React.StrictMode> : <Harness />);
 `;
 let server;
 let browser;
@@ -136,7 +158,7 @@ try {
     const errors = []; page.on("pageerror", error => errors.push(error.message));
     await page.goto(`${origin}/?mode=${mode}`, { waitUntil: "networkidle" });
     await page.getByRole("region", { name: "行业看板", exact: true }).waitFor();
-    if (mode !== "initial-catalog-delay") await page.waitForFunction(() => document.querySelector(".industry-overview-reader")?.getAttribute("aria-busy") === "false");
+    if (!["initial-catalog-delay", "strict-mode", "late-disk-cache-failure"].includes(mode)) await page.waitForFunction(() => document.querySelector(".industry-overview-reader")?.getAttribute("aria-busy") === "false");
     return { page, context, errors, externalRequests };
   }
   async function scenario(name, callback, { mode = "ready", width = 1280 } = {}) {
@@ -680,6 +702,71 @@ try {
       "Opening fresh Markdown must not wait for background catalog validation");
     await releaseCatalog(page);
   });
+  await scenario("cold-start-restores-disk-catalog-before-validation", async page => {
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    assert.equal(await page.locator(".industry-overview-reader").getAttribute("aria-busy"), "false");
+    assert.equal(await page.evaluate(() => window.__industryTest.calls[0].settled), false,
+      "Persistent catalog is visible while fresh source validation is still pending");
+    await enterDomain(page);
+    await releaseCatalog(page);
+    await page.getByRole("heading", { name: "AI行业概况", exact: true }).waitFor();
+  }, { mode: "disk-cache" });
+  await scenario("strict-mode-and-rapid-navigation-share-one-read", async page => {
+    await page.waitForFunction(() => window.__industryTest.pendingRefresh.length === 1);
+    await leaveBoard(page);
+    await page.evaluate(() => window.__industryTest.enter());
+    await page.getByRole("region", { name: "行业看板", exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.__industryTest.calls.length), 1);
+    assert.equal(await page.evaluate(() => window.__industryTest.cacheReads), 1);
+    await releaseCatalog(page);
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+  }, { mode: "strict-mode" });
+  await scenario("late-disk-catalog-cannot-replace-fresh-results", async page => {
+    await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.diskCache = { ok: true, entries: [], news: [], cached: true };
+      state.cachePending.splice(0).forEach(resolve => resolve());
+    });
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    await leaveBoard(page);
+    await page.evaluate(() => window.__industryTest.enter());
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+  }, { mode: "late-disk-cache" });
+  await scenario("disk-catalog-survives-faster-validation-failure", async page => {
+    await page.waitForFunction(() => window.__industryTest.cachePending.length === 1);
+    await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.diskCache = { ok: true, entries: state.entries, news: state.news, cached: true };
+      state.cachePending.splice(0).forEach(resolve => resolve());
+    });
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    await page.getByRole("alert").filter({ hasText: "已保留上次内容" }).waitFor();
+    await enterDomain(page);
+    await page.getByRole("heading", { name: "研究依据", exact: true }).waitFor();
+  }, { mode: "late-disk-cache-failure" });
+  await scenario("large-catalog-and-markdown-ignore-unrelated-updates", async page => {
+    assert.equal(await page.locator(".industry-board-card").count(), 12);
+    await page.getByRole("button", { name: "查看合成行业 0行业", exact: true }).click();
+    await idle(page);
+    assert.equal(await page.locator(".industry-overview-table tbody tr").count(), 400,
+      "Full project details remain available; no truncation is used to speed rendering");
+    await page.evaluate(() => { window.__industryTest.renders = []; });
+    for (let i = 0; i < 40; i++) await page.evaluate(() => {
+      window.__industryTest.rerender();
+      return new Promise(resolve => requestAnimationFrame(resolve));
+    });
+    const metrics = await page.evaluate(() => {
+      const state = window.__industryTest;
+      const total = state.renders.reduce((sum, render) => sum + render.duration, 0);
+      return state.metrics = { projectsInTable: 400, catalogNews: state.news.length,
+        unrelatedUpdates: 40, renderDurationMs: Math.round(total * 10) / 10 };
+    });
+    assert(metrics.renderDurationMs < 100, "40 unrelated updates must not reparse the large Markdown table: " + JSON.stringify(metrics));
+    await home(page);
+    const latest = await page.locator(".industry-board-card-news span").allTextContents();
+    assert.deepEqual(latest, Array.from({ length: 12 }, (_, i) => "合成大数据动态 " + i));
+    assert.equal(await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").length), 1);
+  }, { mode: "large-catalog" });
   for (const width of [320, 390, 744]) await scenario(`narrow-${width}`, async page => {
     const homeDimensions = await page.evaluate(() => ({ viewport: innerWidth, page: document.documentElement.scrollWidth, body: document.body.scrollWidth }));
     assert(homeDimensions.page <= width + 1 && homeDimensions.body <= width + 1, "Home cards fit narrow windows: " + JSON.stringify(homeDimensions));
