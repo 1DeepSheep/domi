@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { LocalDomiRepository } = require("../electron/local-domi-repository.cjs");
-const { IndustryOverviewCache, loadIndustryOverviews } = require("../electron/industry-overview-service.cjs");
+const { IndustryOverviewCache, IndustryOverviewService, loadIndustryOverviews } = require("../electron/industry-overview-service.cjs");
 
 test("preserved edits remain readable and a failed refresh does not block the next read", async () => {
   const conflict = { ok: false, entries: [{ title: "AI", path: "/synthetic/AI/行业速览.md" }], conflicts: [{ path: "edited" }], warnings: [] };
@@ -204,18 +204,164 @@ test("a failed forced refresh cannot replace the previous verified cache", async
   assert.equal(data.cache.read(data.source).cached, true);
 });
 
-test("DomiIntegration honors force and captures the currently configured library for each request", t => {
+test("DomiIntegration honors force and captures the currently configured library for each request", async t => {
   const { DomiIntegration } = require("../electron/domi-integration.cjs");
   const first = fixture(t, "示例甲", 1), second = fixture(t, "示例乙", 2);
   let settings = { storageBackend: "local", localDatabasePath: first.source.localDatabasePath, localRepositoryDir: first.source.localLibraryDir };
   const integration = new DomiIntegration({ stateStore: first.stateStore, configProvider: () => settings,
     plaudOutputDir: path.join(first.root, "plaud-output"), plaudStateDir: path.join(first.root, "plaud-state") });
-  assert.equal(integration.refreshIndustryOverviews().projectCount, 1);
-  assert.equal(integration.refreshIndustryOverviews().cached, true);
-  assert.equal(integration.refreshIndustryOverviews({ force: true }).cached, false);
+  t.after(() => integration.closeIndustryOverviews());
+  assert.equal((await integration.refreshIndustryOverviews()).projectCount, 1);
+  assert.equal((await integration.refreshIndustryOverviews()).cached, true);
+  assert.equal((await integration.refreshIndustryOverviews({ force: true })).cached, false);
   settings = { ...settings, localDatabasePath: second.source.localDatabasePath, localRepositoryDir: second.source.localLibraryDir };
-  assert.equal(integration.refreshIndustryOverviews().projectCount, 2);
-  assert.equal(integration.refreshIndustryOverviews().cached, true);
+  assert.equal((await integration.refreshIndustryOverviews()).projectCount, 2);
+  assert.equal((await integration.refreshIndustryOverviews()).cached, true);
   settings = { ...settings, storageBackend: "feishu" };
   assert.throws(() => integration.refreshIndustryOverviews(), /项目库连接尚未配置/);
+});
+
+test("indexing generated overview rows does not invalidate the source evidence", t => {
+  const data = fixture(t);
+  const first = data.cache.read(data.source);
+  const target = first.entries[0].path;
+  data.repository.database.prepare("INSERT INTO documents (id,owner_type,owner_id,kind,title,path,created_at,updated_at) VALUES ('derived-1','industry','AI','industry-overview','行业速览',?,1,1)").run(target);
+  assert.equal(data.cache.read(data.source).cached, true);
+  data.repository.database.prepare("UPDATE documents SET updated_at=999 WHERE id='derived-1'").run();
+  assert.equal(data.cache.read(data.source).cached, true);
+  assert.equal(data.count(), 1);
+  fs.appendFileSync(target, "\n人工补充，不修改自动维护区。\n");
+  assert.equal(data.cache.read(data.source).cached, false, "Actual human edits still validate output content");
+});
+
+function workerFixture(t, data, { delay = 0, body = "", ...options } = {}) {
+  const workerPath = path.join(data.root, "test-industry-worker.cjs");
+  fs.writeFileSync(workerPath, `const { parentPort, workerData } = require('node:worker_threads');
+    ${delay ? `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${delay});` : ""}
+    ${body || `require(${JSON.stringify(path.resolve(__dirname, "../electron/industry-overview-worker.cjs"))});`}`);
+  const service = new IndustryOverviewService({ stateStore: data.stateStore, workerPath, ...options });
+  t.after(() => service.close());
+  return service;
+}
+
+test("persisted snapshot is immediate without source IO, while validation and generation leave the event loop responsive", async t => {
+  const data = fixture(t, "示例企业", 280);
+  data.cache.read(data.source);
+  const service = workerFixture(t, data, { delay: 200 });
+  const originalStat = fs.statSync, originalRealpath = fs.realpathSync;
+  fs.statSync = fs.realpathSync = () => { throw new Error("Main thread must not inspect source files"); };
+  try {
+    const first = await service.read(data.source, { cachedOnly: true });
+    assert.equal(first.cached, true);
+    assert.equal(first.projectCount, 280);
+  } finally { fs.statSync = originalStat; fs.realpathSync = originalRealpath; }
+  let beats = 0;
+  const interval = setInterval(() => { beats += 1; }, 10);
+  try {
+    assert.equal((await service.read(data.source)).cached, true);
+    assert.ok(beats >= 3, `Main event loop remained responsive: ${beats} heartbeats`);
+  } finally { clearInterval(interval); }
+  const reopened = workerFixture(t, data);
+  assert.equal((await reopened.read(data.source, { cachedOnly: true })).projectCount, 280);
+});
+
+test("worker refresh reads source database without running migrations or changing project homepages", async t => {
+  const data = fixture(t);
+  const before = data.repository.database.prepare("SELECT * FROM projects").all();
+  const home = fs.readFileSync(data.homes[0], "utf8");
+  const service = workerFixture(t, data);
+  assert.deepEqual(await service.read(data.source, { cachedOnly: true }), { ok: true, entries: [], cached: false });
+  const result = await service.read(data.source);
+  assert.equal(result.ok, true);
+  assert.equal(result.projectCount, 1);
+  assert.deepEqual(data.repository.database.prepare("SELECT * FROM projects").all(), before);
+  assert.equal(fs.readFileSync(data.homes[0], "utf8"), home);
+  assert.equal((await service.read(data.source)).cached, true);
+});
+
+test("application upgrades display the existing snapshot while rebuilding the changed generator cache", async t => {
+  const data = fixture(t);
+  data.cache.read(data.source);
+  const [key, serialized] = [...data.stored.entries()][0];
+  data.stored.set(key, JSON.stringify({ ...JSON.parse(serialized), version: "previous-application-generator" }));
+  const service = workerFixture(t, data);
+  const snapshot = await service.read(data.source, { cachedOnly: true });
+  assert.equal(snapshot.cached, true);
+  assert.equal(snapshot.projectCount, 1);
+  assert.equal((await service.read(data.source)).cached, false, "Stale version is only for initial display, never treated as fresh");
+  assert.equal((await service.read(data.source)).cached, true);
+});
+
+test("worker requests deduplicate, serialize force escalation, and capture library paths before queuing", async t => {
+  const data = fixture(t), other = fixture(t, "示例乙", 2);
+  const { Worker } = require("node:worker_threads");
+  let workers = 0;
+  class CountingWorker extends Worker { constructor(...args) { super(...args); workers += 1; } }
+  const service = workerFixture(t, data, { delay: 100, WorkerClass: CountingWorker });
+  const source = { ...data.source };
+  const first = service.read(source);
+  assert.equal(service.read(source), first);
+  const forced = service.read(source, { force: true });
+  assert.equal(service.read(source, { force: true }), forced);
+  source.localDatabasePath = other.source.localDatabasePath;
+  source.localLibraryDir = other.source.localLibraryDir;
+  assert.equal((await first).projectCount, 1);
+  const forceResult = await forced;
+  assert.equal(forceResult.projectCount, 1);
+  assert.equal(forceResult.cached, false);
+  assert.equal(workers, 2);
+  assert.equal((await service.read(source)).projectCount, 2);
+  assert.equal((await service.read(data.source, { cachedOnly: true })).projectCount, 1);
+  assert.equal(workers, 3);
+});
+
+test("worker failures retain the last usable snapshot and the next worker recovers", async t => {
+  const data = fixture(t);
+  data.cache.read(data.source);
+  const service = workerFixture(t, data, { body: "throw new Error('synthetic worker crash');" });
+  const stored = JSON.stringify([...data.stored.entries()]);
+  await assert.rejects(service.read(data.source), /synthetic worker crash/);
+  assert.equal(JSON.stringify([...data.stored.entries()]), stored);
+  assert.equal((await service.read(data.source, { cachedOnly: true })).projectCount, 1);
+  service.workerPath = path.resolve(__dirname, "../electron/industry-overview-worker.cjs");
+  assert.equal((await service.read(data.source)).cached, true);
+});
+
+test("stopping a worker releases only its own generator lock and cancels queued work", async t => {
+  const data = fixture(t);
+  const crypto = require("node:crypto");
+  const lockPath = path.join(path.dirname(data.source.localDatabasePath), `.domi-industry-${crypto.createHash("sha256").update(data.source.localLibraryDir).digest("hex").slice(0, 16)}.lock`);
+  const body = `require('node:fs').writeFileSync(${JSON.stringify(lockPath)}, workerData.lockToken); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);`;
+  const service = workerFixture(t, data, { body });
+  const pending = service.read(data.source).catch(error => error);
+  const queued = service.read(data.source, { force: true }).catch(error => error);
+  while (!fs.existsSync(lockPath)) await new Promise(resolve => setTimeout(resolve, 10));
+  await service.close();
+  assert.ok((await pending) instanceof Error);
+  assert.ok((await queued) instanceof Error);
+  assert.equal(fs.existsSync(lockPath), false);
+
+  const second = workerFixture(t, data, { body });
+  const next = second.read(data.source).catch(error => error);
+  while (!fs.existsSync(lockPath)) await new Promise(resolve => setTimeout(resolve, 10));
+  const otherOwner = JSON.stringify({ pid: process.pid, token: "another-live-writer" });
+  fs.writeFileSync(lockPath, otherOwner);
+  await second.close();
+  assert.ok((await next) instanceof Error);
+  assert.equal(fs.readFileSync(lockPath, "utf8"), otherOwner);
+});
+
+test("worker timeout preserves cached content and remains retryable without a stranded live-PID lock", async t => {
+  const data = fixture(t);
+  data.cache.read(data.source);
+  const crypto = require("node:crypto");
+  const lockPath = path.join(path.dirname(data.source.localDatabasePath), `.domi-industry-${crypto.createHash("sha256").update(data.source.localLibraryDir).digest("hex").slice(0, 16)}.lock`);
+  const service = workerFixture(t, data, { timeoutMs: 250,
+    body: `require('node:fs').writeFileSync(${JSON.stringify(lockPath)}, workerData.lockToken); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);` });
+  await assert.rejects(service.read(data.source, { force: true }), /后台刷新超时/);
+  assert.equal(fs.existsSync(lockPath), false);
+  assert.equal((await service.read(data.source, { cachedOnly: true })).projectCount, 1);
+  service.workerPath = path.resolve(__dirname, "../electron/industry-overview-worker.cjs");
+  service.timeoutMs = 5000;
+  assert.equal((await service.read(data.source, { force: true })).ok, true);
 });

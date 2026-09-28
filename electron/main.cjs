@@ -1735,6 +1735,7 @@ async function attemptSafeUpdateInstall() {
       // itself, so a failed installer can recover without relaunching domi.
       try {
         await domiIntegration?.stopPlaudBackgroundSession("update-install");
+        await domiIntegration?.closeIndustryOverviews();
       } catch (error) {
         appendRuntimeLog("update-plaud-shutdown-failed", {
           message: boundedRuntimeText(error?.message || error, 2_000)
@@ -4412,6 +4413,7 @@ app.on("before-quit", (event) => {
     });
     plaudRecallService.close();
     await domiIntegration?.shutdownAllPlaudOperations("app-quit");
+    await domiIntegration?.closeIndustryOverviews();
     await documentSearchService?.close();
     updateService?.stop();
     codexClient?.close();

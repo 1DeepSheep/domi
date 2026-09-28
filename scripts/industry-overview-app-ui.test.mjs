@@ -30,6 +30,7 @@ window.workbench = { ...fallback,
   listWeeklyNews: async () => ({ ok: true, items: [], total: 0, radarCheckedThrough: Date.now() }),
   listDomiDatabase: async () => { state.databaseReads++; throw new Error("Opening an industry board must not load the editable database"); },
   refreshIndustryOverviews: async request => {
+    if (request?.cachedOnly) return { ok: true, entries: [], cached: false };
     state.requests.push(request || {});
     if (state.hold) await new Promise(resolve => state.pending.push(resolve));
     return { ok: true, entries: [entry], projectCount: 4, news: [{ recordId: "synthetic-news", title: "合成行业新进展 " + state.revision,

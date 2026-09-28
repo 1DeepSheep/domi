@@ -4969,13 +4969,16 @@ class DomiIntegration {
       return { ok: false, entries: [], error: "行业速览需要本地资料库；当前资料库保持不变。" };
     }
     if (!this.industryOverviewCache) {
-      const { IndustryOverviewCache } = require("./industry-overview-service.cjs");
-      this.industryOverviewCache = new IndustryOverviewCache({
-        stateStore: this.stateStore,
-        refresh: capturedSource => this.withLocalRepository(capturedSource, repository => repository.refreshIndustryOverviews())
-      });
+      const { IndustryOverviewService } = require("./industry-overview-service.cjs");
+      this.industryOverviewCache = new IndustryOverviewService({ stateStore: this.stateStore });
     }
-    return this.industryOverviewCache.read(source, { force: request?.force === true });
+    return this.industryOverviewCache.read(source, { force: request?.force === true, cachedOnly: request?.cachedOnly === true });
+  }
+
+  async closeIndustryOverviews() {
+    const service = this.industryOverviewCache;
+    this.industryOverviewCache = null;
+    await service?.close();
   }
 
   databaseSnapshot() {

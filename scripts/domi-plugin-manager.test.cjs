@@ -1326,9 +1326,10 @@ async function verifyMainShutdownActivationDrain() {
   const registration = main.match(/app\.on\("before-quit", \(event\) => \{[\s\S]*?\n\}\);/)[0];
   for (const rejectActivation of [false, true]) {
     const events = [], logs = [];
-    let quitHandler, finishActivation, failActivation, didQuit;
+    let quitHandler, finishActivation, failActivation, finishIndustries, didQuit;
     const pending = new Promise((resolve, reject) => { finishActivation = resolve; failActivation = reject; });
     const quitFinished = new Promise(resolve => { didQuit = resolve; });
+    const industryFinished = new Promise(resolve => { finishIndustries = resolve; });
     const context = {
       app: { on: (_event, handler) => { quitHandler = handler; }, quit: () => { events.push("quit"); didQuit(); } },
       appendRuntimeLog: (...args) => logs.push(args), codexCheckFailureDetails,
@@ -1338,7 +1339,8 @@ async function verifyMainShutdownActivationDrain() {
       requestRendererFlush: () => assert.fail("No renderer"), drainRunPostProcessing: async () => 0,
       domiPluginActivationGate: { pending, dispose: () => events.push("dispose") },
       plaudRecallService: { close: () => events.push("recall-close") },
-      domiIntegration: { shutdownAllPlaudOperations: async () => events.push("plaud-close") },
+      domiIntegration: { shutdownAllPlaudOperations: async () => events.push("plaud-close"),
+        closeIndustryOverviews: () => { events.push("industries-close"); return industryFinished; } },
       documentSearchService: { close: async () => events.push("documents-close") },
       updateService: { stop: () => events.push("updates-stop") },
       codexClient: { close: () => events.push("codex-close") },
@@ -1351,9 +1353,14 @@ async function verifyMainShutdownActivationDrain() {
     assert.deepEqual(events, ["prevent", "dispose"]);
     events.push("activation-drained");
     if (rejectActivation) failActivation(new Error("Synthetic completed rollback")); else finishActivation({ ok: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(events.includes("industries-close"), true);
+    assert.equal(events.includes("state-close"), false, "Drain the overview worker before closing its cache store");
+    assert.equal(events.includes("quit"), false);
+    finishIndustries();
     await quitFinished;
     assert.deepEqual(events, ["prevent", "dispose", "activation-drained", "recall-close", "plaud-close",
-      "documents-close", "updates-stop", "codex-close", "state-close", "quit"]);
+      "industries-close", "documents-close", "updates-stop", "codex-close", "state-close", "quit"]);
     assert.equal(context.applicationQuitFlushComplete, true);
     assert.equal(logs.filter(([event]) => event === "domi-plugin-shutdown-drain").length, Number(rejectActivation));
   }
