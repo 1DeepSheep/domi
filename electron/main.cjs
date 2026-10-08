@@ -3470,8 +3470,8 @@ async function runSystemDiagnostics() {
   push(
     "codex",
     "Codex App Server",
-    codex.ok,
-    codex.ok
+    codex.connectionOk,
+    codex.connectionOk
       ? `${codex.version} · ${codex.providerLabel}`
       : codex.error || "Codex 不可用"
   );

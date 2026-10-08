@@ -180,3 +180,31 @@ test("preserves the actual relay auth mode as well as older API reports", () => 
     assert.equal(safe.connection.authMode, authMode);
   }
 });
+
+test("system diagnostics do not count a plugin failure as an account connection failure", async () => {
+  const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const implementation = source.match(/async function runSystemDiagnostics\(\) \{[\s\S]*?\n\}/)[0];
+  let codex = { ok: false, connectionOk: true, version: "synthetic-version", providerLabel: "ChatGPT",
+    pluginSetup: { ok: false, error: "domi 插件状态检查超时" }, error: "domi 插件状态检查超时", models: [] };
+  const context = {
+    process, os: require("node:os"), appName: "domi", app: { getVersion: () => "7.0.27", isPackaged: true },
+    getAppSettings: () => ({ load: () => ({ secureStorageAvailable: true, settings: { authMode: "chatgpt" } }) }),
+    ensureDemoWorkspace() {}, verifyWorkspace() {}, demoWorkspace: "/synthetic",
+    getStateStore: () => ({ loadAppSettings() {} }),
+    runCodexCheck: async () => codex, codexNetworkDiagnostic: null,
+    workflowCapabilities: () => ({ checks: [] }), sanitizeDiagnosticReport,
+    getDomiIntegration: () => ({ status: async () => ({ plugin: { ok: true, version: "7.0.16" }, plaud: { ok: true } }) })
+  };
+  vm.createContext(context);
+  vm.runInContext(implementation, context);
+  const failedPlugin = await context.runSystemDiagnostics();
+  assert.equal(failedPlugin.ok, false);
+  assert.equal(failedPlugin.checks.find(check => check.id === "codex").ok, true);
+  assert.doesNotMatch(failedPlugin.checks.find(check => check.id === "codex").detail, /插件|超时/);
+  assert.equal(failedPlugin.checks.find(check => check.id === "domi-plugin-package").ok, false);
+  codex = { ...codex, connectionOk: false, pluginSetup: { ok: true, version: "7.0.16" }, error: "请先登录 ChatGPT" };
+  const failedAccount = await context.runSystemDiagnostics();
+  assert.equal(failedAccount.checks.find(check => check.id === "codex").ok, false);
+  assert.equal(failedAccount.checks.find(check => check.id === "domi-plugin-package").ok, true);
+});

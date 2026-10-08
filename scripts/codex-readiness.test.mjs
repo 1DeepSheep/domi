@@ -17,6 +17,7 @@ test("plugin health displays the verified active version before an older reposit
   assert.equal(domiPluginVersionLabel({ ok: true, version: "7.0.10", bundledVersion: "7.0.11" }, cached), "v7.0.10",
     "A bundled but not activated update is not the active plugin version");
   assert.equal(domiPluginVersionLabel({ ok: false, status: "missing" }, cached), "未就绪");
+  assert.equal(domiPluginVersionLabel({ ok: false, status: "check-failed" }, cached), "检查未完成");
   assert.equal(domiPluginVersionLabel({ ok: true }, cached), "已就绪");
   assert.equal(domiPluginVersionLabel(undefined, cached), "v7.0.10");
   assert.equal(domiPluginVersionLabel(null, { ok: true, version: "" }), "等待检测");
@@ -49,7 +50,15 @@ test("connection and plugin readiness are independent; explicit failed connectio
 test("checking is neutral, plugin failure is not a Codex outage, command paths never reach the card", () => {
   assert.equal(codexReadinessPresentation({ status: null, checking: true }).tone, "neutral");
   assert.deepEqual(codexReadinessPresentation({ status: transient, checking: false }),
-    { tone: "warning", title: "Codex 已连接", detail: "domi 组件未就绪" });
+    { tone: "warning", title: "Codex 已连接", detail: "domi 组件检查未完成" });
+  assert.deepEqual(codexReadinessPresentation({ status: { ...ready, diagnosticWarnings: ["Synthetic optional warning"] }, checking: false }),
+    { tone: "ok", title: "Codex 已就绪", detail: "" });
+  assert.equal(codexReadinessPresentation({ status: transient, checking: true }).detail, "正在检查 domi 组件");
+  assert.equal(codexReadinessPresentation({ status: { ...ready, pluginSetup: null }, checking: false }).detail, "domi 组件检查未完成");
+  assert.deepEqual(codexReadinessPresentation({ status: { ...transient, pluginSetup: {
+    ok: false, status: "deferred", reason: "activation-verification" } }, checking: false }),
+    { tone: "neutral", title: "Codex 已连接", detail: "正在检查 domi 组件" });
+  assert.equal(codexReadinessPresentation({ status: { ...transient, pluginSetup: { ok: false, status: "missing" } }, checking: false }).detail, "domi 组件未就绪");
   const text = JSON.stringify(codexReadinessPresentation({ status: { ...failed, error: "Command failed: " + "/Users/" + "fixture/path" }, checking: false }));
   assert.doesNotMatch(text, /Users|secret|Command failed/);
   assert.equal(codexReadinessPresentation({ status: { ...failed, account: null, requiresOpenaiAuth: true }, checking: false }).title, "Codex 需要登录");

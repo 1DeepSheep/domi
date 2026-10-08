@@ -35,6 +35,10 @@ const initialStatus = mode.startsWith("login") ? { ...ready, ok: false, connecti
   : mode.startsWith("network") ? { ...ready, ok: false, connectionOk: false, error: "Synthetic network timeout" }
   : mode === "plugin" ? { ...ready, ok: false, pluginSetup: { ok: false, status: "missing", error: "Synthetic plugin missing" } }
   : mode === "plugin-pending" ? { ...ready, ok: false, pluginSetup: { ok: false, status: "deferred", deferred: true, reason: "activation-pending", version: "7.0.13", bundledVersion: "7.0.14" } }
+  : mode === "existing-check-failed" || mode === "existing-checking" ? { ...ready, ok: false, pluginSetup: { ok: false, status: "check-failed", error: "Synthetic plugin check timeout" }, diagnosticWarnings: ["Synthetic plugin check timeout"] }
+  : mode === "existing-unknown" ? { ...ready, ok: false, pluginSetup: undefined }
+  : mode === "existing-warning" ? { ...ready, diagnosticWarnings: ["Synthetic optional version check timeout"] }
+  : mode === "existing-upgrade" ? { ...ready, pluginSetup: { ok: true, status: "deferred", reason: "active-tasks", version: "synthetic" } }
   : mode === "install" ? { ...ready, ok: false, connectionOk: false, path: "", account: null, requiresOpenaiAuth: true }
   : ready;
 state.settings = baseSettings; state.status = initialStatus; state.ready = ready;
@@ -69,14 +73,15 @@ function Harness() {
   const [settings, setSettings] = useState(baseSettings);
   const [status, setStatus] = useState(initialStatus);
   const [closed, setClosed] = useState(false);
-  const [checking, setChecking] = useState(false);
+  const [checking, setChecking] = useState(mode === "existing-checking");
+  state.setChecking = setChecking;
   state.finishPluginPreparation = () => { state.status = structuredClone(ready); setStatus(state.status); };
   const refresh = async (verified, readOnly = false) => {
     record(readOnly ? "readonly-check" : "check", { verified: Boolean(verified) });
     setChecking(true);
     try {
       if (mode === "login-held" && readOnly) await new Promise(resolve => state.pending.readonly = resolve);
-      const next = verified || (state.loginReady || mode === "network" || mode === "plugin" ? ready : state.status);
+      const next = verified || (state.loginReady || mode === "network" || mode === "plugin" || mode === "existing-check-failed" ? ready : state.status);
       state.status = next; setStatus(next);
     } finally { setChecking(false); }
   };
@@ -130,7 +135,7 @@ try {
     const ui = await open(mode);
     assert.equal(await ui.page.getByRole("radiogroup", { name: "Codex 连接方式（二选一）" }).isVisible(), false);
     assert.equal(await ui.page.getByRole("button", { name: "录音转写", exact: true }).count(), 0);
-    if (mode === "provider") await ui.page.getByText("已找到可用的 Codex 连接", { exact: true }).waitFor();
+    if (mode === "provider") await ui.page.getByText("已连接，可以使用 domi", { exact: true }).waitFor();
     if (screenshotDir && mode === "ready") await ui.page.screenshot({ path: path.join(screenshotDir, "first-use-ready.png"), fullPage: true, animations: "disabled" });
     await ui.primary.click();
     await ui.page.getByText("Synthetic setup finished").waitFor();
@@ -140,6 +145,73 @@ try {
     assert.equal(saved.localRepositoryDir, "/synthetic/Documents/domi工作区");
     for (const kind of ["login", "model", "feishu-status", "plaud-check"]) assert.equal((await ui.calls(kind)).length, 0, kind);
     assert.equal(Object.hasOwn(saved, "outlookCalendarRecipients"), false);
+    await ui.close();
+  }
+  // Reopened settings must not demand a paid test or expose technical details.
+  for (const mode of ["existing", "existing-warning", "existing-upgrade"]) {
+    const ui = await open(mode);
+    await ui.page.getByText("已连接，可以使用 domi", { exact: true }).waitFor();
+    const visible = await ui.page.getByRole("dialog").innerText();
+    assert.doesNotMatch(visible, /待实测|未就绪|辅助检查|synthetic\/codex|Codex CLI|测试完整连接|导出诊断报告/);
+    assert.equal(await ui.page.getByRole("button", { name: "切换 ChatGPT 账号", exact: true }).isVisible(), false);
+    assert.equal(await ui.primary.innerText(), "完成");
+    if (screenshotDir && mode === "existing") await ui.page.screenshot({ path: path.join(screenshotDir, "connection-ready.png"), fullPage: true, animations: "disabled" });
+    await ui.primary.click(); await ui.page.getByText("Synthetic setup finished").waitFor();
+    assert.equal((await ui.calls("save")).length, 0);
+    assert.equal((await ui.calls("full-test")).length, 0);
+    await ui.close();
+  }
+  for (const mode of ["existing-check-failed", "existing-unknown"]) {
+    const ui = await open(mode);
+    await ui.page.locator(".connection-status strong").getByText("domi 组件检查未完成", { exact: true }).waitFor();
+    assert.equal(await ui.page.locator(".connection-checklist .ready").innerText(), "已连接");
+    assert.doesNotMatch(await ui.page.getByRole("dialog").innerText(), /待实测|未就绪|还需准备|辅助检查/);
+    assert.equal(await ui.page.locator(".connection-summary-actions button").count(), 1);
+    if (mode === "existing-check-failed") {
+      await ui.page.getByText("Codex 已连接，组件检查超时。可重新检查，无需重新登录。", { exact: true }).waitFor();
+      if (screenshotDir) await ui.page.screenshot({ path: path.join(screenshotDir, "connection-check-incomplete.png"), fullPage: true, animations: "disabled" });
+      await ui.page.getByRole("button", { name: "重新检查组件", exact: true }).click();
+      await ui.page.getByText("已连接，可以使用 domi", { exact: true }).waitFor();
+      assert.equal((await ui.calls("check")).length, 1);
+    }
+    assert.equal((await ui.calls("full-test")).length, 0);
+    assert.equal((await ui.calls("login")).length, 0);
+    await ui.close();
+  }
+  {
+    const ui = await open("existing-checking");
+    await ui.page.getByText("正在确认 domi 组件", { exact: true }).waitFor();
+    assert.equal(await ui.page.locator(".connection-summary.neutral").count(), 1);
+    assert.doesNotMatch(await ui.page.getByRole("dialog").innerText(), /检查未完成|未就绪|待实测/);
+    await ui.page.evaluate(() => window.__setupTest.setChecking(false));
+    await ui.page.locator(".connection-status strong").getByText("domi 组件检查未完成", { exact: true }).waitFor();
+    await ui.close();
+  }
+  {
+    const ui = await open("existing");
+    await ui.page.locator(".connection-advanced > summary").click();
+    assert.equal(await ui.page.getByRole("button", { name: "测试完整连接", exact: true }).isVisible(), true);
+    await ui.page.getByLabel("自定义 Codex 路径", { exact: true }).fill("/synthetic/alternate-codex");
+    assert.equal(await ui.primary.innerText(), "应用 Codex 路径");
+    await ui.page.getByText("连接设置尚未应用", { exact: true }).waitFor();
+    assert.equal(await ui.page.locator(".connection-checklist .ready").count(), 0);
+    assert.equal(await ui.page.getByRole("button", { name: "测试完整连接", exact: true }).isDisabled(), true);
+    await ui.primary.click();
+    assert.equal((await ui.calls("save")).length, 1);
+    assert.equal((await ui.calls("save"))[0].request.codexPath, "/synthetic/alternate-codex");
+    assert.equal((await ui.calls("full-test")).length, 0);
+    await ui.close();
+  }
+  {
+    const ui = await open("existing");
+    await ui.page.locator(".connection-advanced > summary").click();
+    await ui.page.getByRole("radio", { name: /Responses 中转站/ }).click();
+    await ui.page.getByText("请完成中转站配置", { exact: true }).waitFor();
+    assert.equal(await ui.page.locator(".connection-checklist .ready").count(), 0);
+    await ui.primary.click();
+    assert.equal(await ui.page.getByRole("dialog", { name: "domi 设置", exact: true }).count(), 1);
+    assert.equal((await ui.calls("save")).length, 0);
+    assert.equal((await ui.calls("full-test")).length, 0);
     await ui.close();
   }
   {
@@ -189,7 +261,7 @@ try {
   }
   {
     const ui = await open("network"); await ui.page.evaluate(() => { window.dispatchEvent(new Event("online")); window.dispatchEvent(new Event("focus")); });
-    await ui.page.getByText("已登录，可以开始使用", { exact: true }).waitFor();
+    await ui.page.getByText("已连接，可以使用 domi", { exact: true }).waitFor();
     assert.equal((await ui.calls("check")).length, 1); assert.equal((await ui.calls("full-test")).length, 0); assert.equal((await ui.calls("login")).length, 0);
     await ui.close();
   }
@@ -204,21 +276,21 @@ try {
     await ui.close();
   }
   {
-    const ui = await open("plugin"); await ui.page.getByText("Codex 已连接，domi 组件未就绪", { exact: true }).waitFor();
-    await ui.page.getByRole("button", { name: "重新准备 domi 组件", exact: true }).click();
-    await ui.page.getByText("已登录，可以开始使用", { exact: true }).waitFor();
+    const ui = await open("plugin"); await ui.page.getByText("domi 组件还需准备", { exact: true }).waitFor();
+    await ui.page.getByRole("button", { name: "准备 domi 组件", exact: true }).click();
+    await ui.page.getByText("已连接，可以使用 domi", { exact: true }).waitFor();
     assert.equal((await ui.calls("login")).length, 0); await ui.close();
   }
   {
     const ui = await open("plugin-pending");
-    await ui.page.getByText("Codex 已连接，正在准备 domi 组件", { exact: true }).waitFor();
-    await ui.page.getByText("账号连接正常，domi 正在自动准备组件，完成后即可使用。", { exact: true }).waitFor();
+    await ui.page.getByText("正在准备 domi 组件", { exact: true }).waitFor();
+    await ui.page.getByText("Codex 已连接，domi 会在当前任务结束后完成组件准备。", { exact: true }).waitFor();
     assert.equal(await ui.page.locator(".setup-feedback.error").count(), 0,
       "A safely queued plugin upgrade must show progress instead of an installation error");
     assert.equal((await ui.calls("login")).length, 0);
     assert.equal((await ui.calls("full-test")).length, 0);
     await ui.page.evaluate(() => window.__setupTest.finishPluginPreparation());
-    await ui.page.getByText("已登录，可以开始使用", { exact: true }).waitFor();
+    await ui.page.getByText("已连接，可以使用 domi", { exact: true }).waitFor();
     assert.equal((await ui.calls("check")).length, 0,
       "A verified parent status update requires no extra manual preparation check");
     assert.equal((await ui.calls("login")).length, 0);
@@ -264,6 +336,9 @@ try {
       await ui.page.clock.runFor(96_000); await ui.page.evaluate(() => window.__setupTest.pending.fullTest());
     }
     await ui.page.locator(".setup-feedback.error").waitFor();
+    await ui.page.locator(".connection-status strong").getByText(mode === "cancel" ? "任务连接测试已取消" : "任务连接测试未通过", { exact: true }).waitFor();
+    assert.equal(await ui.page.locator(".connection-checklist .ready").count(), 2, "A failed task test must not change established account/plugin connectivity");
+    assert.doesNotMatch(await ui.page.locator(".setup-feedback.error").innerText(), /连接暂时没有完成|设置尚未完成/);
     if (mode === "failure") {
       const checksBeforeRecovery = (await ui.calls("check")).length;
       await ui.page.evaluate(() => window.dispatchEvent(new Event("online")));
@@ -272,6 +347,7 @@ try {
     }
     assert.equal((await ui.calls("save")).filter(call => call.request.onboardingComplete).length, 0);
     if (mode !== "failure") assert.equal((await ui.calls("cancel")).length, 1);
+    await ui.page.locator(".connection-advanced > summary").click();
     await ui.page.getByRole("button", { name: "导出诊断报告", exact: true }).click();
     await ui.page.waitForFunction(() => window.__setupTest.calls.some(call => call.kind === "export"));
     assert.equal((await ui.calls("diagnose")).length, 1); await ui.close();
