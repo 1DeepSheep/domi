@@ -937,7 +937,7 @@ assert.match(
 );
 assert.match(
   setupCenter,
-  /codexConnectionDraftBlockReason\(\{[\s\S]*?savedCodexPath: settings\.codexPath[\s\S]*?relayApiKey[\s\S]*?disabled=\{Boolean\(connectionTestBlockReason\)/,
+  /codexConnectionDraftBlockReason\(\{[\s\S]*?savedCodexPath: settings\.codexPath[\s\S]*?relayApiKey[\s\S]*?disabled=\{connectionOperationBusy \|\| Boolean\(connectionTestBlockReason\)/,
   "A generic test must be unavailable for an unsaved Codex path or replacement relay key."
 );
 assert.match(
@@ -957,7 +957,7 @@ assert.match(
 );
 assert.match(
   setupCenter,
-  /className="connection-test-cancel"[\s\S]*?cancelConnectionTest\(\)[\s\S]*?最多等待 90 秒，可随时取消/,
+  /className="connection-test-progress"[\s\S]*?最多等待 90 秒[\s\S]*?onClick=\{\(\) => cancelConnectionTest\(\)\}>取消测试/,
   "Connection setup must expose an independent cancel action and a visible total wait bound."
 );
 assert.match(

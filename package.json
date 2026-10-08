@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "7.0.26",
+  "version": "7.0.27",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -93,7 +93,7 @@
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "smol-toml": "1.7.1"
+    "smol-toml": "1.9.0"
   },
   "devDependencies": {
     "@types/react": "^19.1.9",

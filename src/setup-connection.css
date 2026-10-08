@@ -1,0 +1,30 @@
+.connection-summary { background: var(--panel, #fff); }
+.connection-summary .connection-status { grid-template-columns: 40px minmax(0, 1fr); padding: 24px; gap: 14px; }
+.connection-summary .connection-status strong { font-size: 17px; letter-spacing: -0.025em; }
+.connection-summary .connection-status span { margin-top: 8px; font-size: 12px; line-height: 1.65; }
+.connection-summary.neutral { border-color: var(--line); background: #faf9f6; }
+.connection-summary.neutral .connection-status-icon { color: var(--muted); background: #efeee9; }
+.connection-checklist { margin: 0 24px 20px; padding-top: 8px; border-top: 1px solid var(--line); }
+.connection-checklist > div { display: flex; gap: 20px; align-items: center; justify-content: space-between; padding: 13px 0; }
+.connection-checklist > div + div { border-top: 1px solid var(--line); }
+.connection-checklist dt { color: var(--text); font-size: 12px; }
+.connection-checklist dt small { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.connection-checklist dd { display: flex; align-items: center; flex-shrink: 0; gap: 6px; margin: 0; font-size: 11px; }
+.connection-checklist .ready { color: #55705e; }
+.connection-checklist .pending { color: var(--muted); }
+.connection-summary .connection-summary-actions { padding: 13px 24px; }
+.connection-summary .connection-summary-actions button { min-height: 36px; font-size: 12px; }
+.connection-optional-note { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 12px 2px 22px; }
+.connection-advanced > .codex-install-step { margin: 0 14px 16px; box-shadow: none; }
+.connection-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 14px; }
+.connection-detail-actions button { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface, #fff); color: var(--text); padding: 8px 10px; font-size: 11px; }
+.connection-detail-actions button:disabled { opacity: .5; cursor: default; }
+.connection-detail-note { margin: 10px 14px 18px; color: var(--muted); font-size: 11px; line-height: 1.65; }
+.connection-detail-note button { border: 0; background: none; padding: 0 0 0 8px; color: var(--text); text-decoration: underline; }
+.connection-summary .connection-test-progress { flex-wrap: wrap; }
+.connection-summary .connection-test-progress button { margin-left: auto; padding: 4px 6px; border: 0; color: var(--text); background: none; text-decoration: underline; }
+@media (max-width: 800px) {
+  .connection-summary .connection-status { padding: 18px; }
+  .connection-summary .connection-status strong { font-size: 15px; }
+  .connection-checklist { margin-left: 18px; margin-right: 18px; }
+}

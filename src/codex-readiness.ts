@@ -12,7 +12,8 @@ export function domiPluginVersionLabel(current: CodexCheckResult["pluginSetup"],
   // Repository health predates runtime activation after an app/plugin update.
   // Use it only until an actual plugin check has supplied the current state.
   if (current) return current.ok ? current.version?.trim() ? `v${current.version.trim()}` : "已就绪"
-    : current.status === "deferred" ? "正在准备" : "未就绪";
+    : current.status === "deferred" ? "正在准备"
+      : current.status === "check-failed" ? "检查未完成" : "未就绪";
   return cached?.ok && cached.version?.trim() ? `v${cached.version.trim()}` : "等待检测";
 }
 
@@ -33,11 +34,14 @@ export function codexReadinessPresentation(snapshot: CodexReadinessSnapshot, nat
   if (!native) return { tone: "neutral", title: "浏览器预览", detail: "" };
   if (codexConnectionReady(status)) {
     if (status?.pluginSetup?.ok !== true) {
-      const preparing = status?.pluginSetup?.status === "deferred";
-      return { tone: preparing || checking ? "neutral" : "warning", title: "Codex 已连接",
-        detail: preparing ? "正在准备 domi 组件" : checking ? "正在检查 domi 组件" : "domi 组件未就绪" };
+      const preparing = status?.pluginSetup?.status === "deferred"
+        && status.pluginSetup.reason !== "activation-verification";
+      const verifying = checking || status?.pluginSetup?.reason === "activation-verification";
+      return { tone: preparing || verifying ? "neutral" : "warning", title: "Codex 已连接",
+        detail: preparing ? "正在准备 domi 组件" : verifying ? "正在检查 domi 组件"
+          : !status?.pluginSetup || status.pluginSetup.status === "check-failed" ? "domi 组件检查未完成" : "domi 组件未就绪" };
     }
-    return { tone: "ok", title: "Codex 已就绪", detail: status?.diagnosticWarnings?.length ? "连接正常，有诊断提示" : "" };
+    return { tone: "ok", title: "Codex 已就绪", detail: "" };
   }
   if (checking || (!status && !checkFailed)) return { tone: "neutral", title: "正在检查 Codex", detail: "" };
   // Raw process errors contain paths and often say nothing useful about what

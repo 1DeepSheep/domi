@@ -369,8 +369,7 @@ async function verifyReadOnlyInstalledCheck() {
     manager.remoteUpdater.check = () => assert.fail("read-only check cannot update from network");
     let listed = [];
     let calls = 0;
-    manager.runCodex = async (_binary, args) => {
-      assert.deepEqual(args, ["plugin", "list", "--json"]);
+    manager.listInstalledDomi = async () => {
       calls += 1;
       return { installed: listed };
     };
@@ -393,7 +392,7 @@ async function verifyReadOnlyInstalledCheck() {
     assert.equal((await check()).status, "ready");
     manager.installedInfo = () => ({ manifest: { version: "7.0.4" } });
     assert.equal((await check()).reason, "plugin-outdated", "registered cache must match newer managed source too");
-    manager.runCodex = async () => { throw Object.assign(new Error("Command failed: /private/fixture/codex plugin list --json"), {
+    manager.listInstalledDomi = async () => { throw Object.assign(new Error("Command failed: /private/fixture/codex plugin list --json"), {
       signal: "SIGTERM", killed: true, code: null, domiCheckStage: "plugin/list"
     }); };
     const failure = await check();
@@ -416,6 +415,76 @@ async function verifyReadOnlyInstalledCheck() {
     freshReadOnly.runCodex = () => assert.fail("incomplete activation cannot be declared verified");
     assert.equal((await freshReadOnly.checkInstalled({ enabled: true })).reason, "activation-incomplete");
     assert.equal(fs.readFileSync(manager.transactionStatePath, "utf8"), receipt);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function verifyScopedPluginRegistry() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-scoped-plugin-registry-"));
+  const binary = path.join(root, "codex-fixture");
+  const configPath = path.join(root, "config.toml");
+  const callsPath = path.join(root, "calls.jsonl");
+  const env = { ...process.env, CODEX_HOME: root, DOMI_FIXTURE_CALLS: callsPath };
+  const writeConfig = value => fs.writeFileSync(configPath, value);
+  const calls = () => fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+  fs.writeFileSync(binary, `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.DOMI_FIXTURE_CALLS, JSON.stringify(args) + "\\n");
+const scope = args[args.indexOf("--marketplace") + 1];
+if (!args.includes("--marketplace") || scope === "unrelated-remote") {
+  // Simulate an unreachable unrelated catalog. This must never be queried.
+  setTimeout(() => process.exit(2), 30000);
+} else if (process.env.DOMI_FIXTURE_INVALID_LIST === "1") {
+  console.log(JSON.stringify({ available: [] }));
+} else if (process.env.DOMI_FIXTURE_FAIL_MARKET === scope) {
+  process.exitCode = 1;
+} else {
+  const plugin = { name: "domi", enabled: true, pluginId: "domi@" + scope,
+    version: scope === "newer-user" ? "7.1.0" : "7.0.3" };
+  if (process.env.DOMI_FIXTURE_DISABLED === "1") plugin.enabled = false;
+  if (process.env.DOMI_FIXTURE_WRONG_ID === "1") plugin.pluginId = "domi@wrong-market";
+  console.log(JSON.stringify({ installed: [plugin], available: [] }));
+}
+`, { mode: 0o755 });
+  const manager = new DomiPluginManager({ userDataPath: root, bundledPluginRoot: path.join(root, "bundle"),
+    bundledLockPath: path.join(root, "lock.json"), recoverTransactions: false, codexCommandTimeoutMs: 1000 });
+  manager.bundledInfo = () => ({ manifest: { version: "7.0.3" } });
+  manager.installedInfo = () => ({ manifest: { version: "7.0.3" } });
+  const check = extra => manager.checkInstalled({ binary, env: { ...env, ...extra } });
+  try {
+    // Fresh users without config still get a targeted query, not a remote scan.
+    assert.equal((await check()).ok, true);
+    assert.deepEqual(calls(), [["plugin", "list", "--json", "--marketplace", "domi-managed"]]);
+    const config = '[plugins."domi@domi-managed"]\nenabled = true\n'
+      + '[plugins."domi@newer-user"]\nenabled = true\n'
+      + '[plugins."domi@disabled-user"]\nenabled = false\n'
+      + '[plugins."other@unrelated-remote"]\nenabled = true\n';
+    writeConfig(config);
+    const result = await check();
+    assert.equal(result.ok, true);
+    assert.equal(result.pluginId, "domi@newer-user", "Preserve the newer user-installed plugin");
+    assert.equal(fs.readFileSync(configPath, "utf8"), config, "Discovery cannot rewrite the user's configuration");
+    assert.deepEqual(calls().slice(1).map(args => args.at(-1)), ["domi-managed", "newer-user"]);
+    const alternateHome = path.join(root, "alternate-home");
+    fs.mkdirSync(path.join(alternateHome, ".codex"), { recursive: true });
+    fs.writeFileSync(path.join(alternateHome, ".codex", "config.toml"), config);
+    const homeOnlyEnv = { ...env, HOME: alternateHome };
+    delete homeOnlyEnv.CODEX_HOME;
+    assert.equal((await manager.checkInstalled({ binary, env: homeOnlyEnv })).pluginId, "domi@newer-user",
+      "Discovery and CLI must use the same overridden HOME");
+    assert.equal((await check({ DOMI_FIXTURE_DISABLED: "1" })).reason, "plugin-missing");
+    assert.equal((await check({ DOMI_FIXTURE_WRONG_ID: "1" })).reason, "plugin-missing");
+    assert.equal((await check({ DOMI_FIXTURE_INVALID_LIST: "1" })).reason, "plugin-check-failed");
+    assert.equal((await check({ DOMI_FIXTURE_FAIL_MARKET: "newer-user" })).reason, "plugin-check-failed",
+      "A genuinely configured domi plugin failure cannot be hidden by the managed copy");
+    const priorCalls = calls().length;
+    writeConfig("[broken toml");
+    const invalidConfig = await check();
+    assert.equal(invalidConfig.ok, false);
+    assert.equal(invalidConfig.diagnostic.code, "DOMI_PLUGIN_CONFIG_READ_FAILED");
+    assert.equal(calls().length, priorCalls, "Invalid config must not silently skip another installed domi");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -674,7 +743,7 @@ async function verifyPlaudPluginActivationLease() {
     readEntered = deferred(); readResponse = deferred();
     const reading = integration.plaudQueue({ fresh: true });
     await readEntered.promise;
-    const activation = manager.ensure({ binary: "synthetic", env: {} });
+    const activation = manager.ensure({ binary: "synthetic", env: { CODEX_HOME: directory } });
     await mutationEntered.promise;
     assert.equal(integration.plaudReaderPaused(), true);
     assert.equal(fs.existsSync(oldPluginRoot), true);
@@ -696,12 +765,12 @@ async function verifyPlaudPluginActivationLease() {
     readResponse = null; addResponse = null;
     assert.equal((await integration.plaudQueue({ fresh: true })).stale, false);
     const priorLeases = leaseCalls;
-    assert.equal((await manager.ensure({ binary: "synthetic", env: {} })).updated, false);
+    assert.equal((await manager.ensure({ binary: "synthetic", env: { CODEX_HOME: directory } })).updated, false);
     assert.equal(leaseCalls, priorLeases, "An ordinary installed-version check must not pause PLAUD");
 
     // Failed install and rollback remain inside the lease, then always release.
     writeBundle("3.0.0"); failAdd = true;
-    const failed = await manager.ensure({ binary: "synthetic", env: {} });
+    const failed = await manager.ensure({ binary: "synthetic", env: { CODEX_HOME: directory } });
     assert.equal(failed.ok, false);
     assert.equal(manager.installedInfo().manifest.version, "2.0.0");
     assert.equal(registryVersion, "2.0.0", "Rollback restored the previous registered plugin");
@@ -713,7 +782,7 @@ async function verifyPlaudPluginActivationLease() {
     assert.equal(manager.installedInfo().manifest.version, "3.0.0");
     await integration.reservePlaudForWorkflow("existing-recording-task");
     const beforeRecovery = leaseCalls;
-    const recovery = manager.ensure({ binary: "synthetic", env: {} });
+    const recovery = manager.ensure({ binary: "synthetic", env: { CODEX_HOME: directory } });
     await Promise.resolve();
     assert.equal(leaseCalls, beforeRecovery + 1);
     assert.equal(manager.installedInfo().manifest.version, "3.0.0", "Do not recover over an existing workflow owner");
@@ -1047,7 +1116,7 @@ async function verifyDeferredUpgradeAndReadback() {
     manager.writeManagedMarketplace(manager.bundledInfo());
     writeBundle("7.0.14");
     const reader = gate.withStableClient(async () => { await readerMayFinish; events.push("reader-finished"); });
-    const request = { binary, env: process.env, enabled: true };
+    const request = { binary, env: { ...process.env, CODEX_HOME: root }, enabled: true };
     assert.equal((await gate.ensureWhenIdle(request)).deferred, true);
     assert.equal((await manager.checkInstalled(request)).reason, "plugin-outdated");
     assert.equal(manager.installedInfo().manifest.version, "7.0.13");
@@ -1402,7 +1471,7 @@ async function verifyMainShutdownActivationDrain() {
 }
 
 Promise.all([verifyMainShutdownActivationDrain(), verifyMainAutomaticActivationWiring(), verifyHealthProbeDuringDeferredUpgrade(), verifyDeferredUpgradeAndReadback(), verifyDeferredIdleAndCancellation(), verifyLongPluginOperationLeases(), verifyLocalPlaudCompletionLease(), verifyPlaudPluginActivationLease(), verifyBoundedRemoteStartup(), verifyActivationGate(), verifyRecoveryReaderLease(),
-  verifyReadOnlyInstalledCheck(), verifyReadinessDiagnostics()])
+  verifyReadOnlyInstalledCheck(), verifyScopedPluginRegistry(), verifyReadinessDiagnostics()])
   .then(() => console.log("domi plugin manager tests passed."))
   .catch((error) => {
     console.error(error);

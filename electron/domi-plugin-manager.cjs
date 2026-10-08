@@ -1,7 +1,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const { parse: parseToml } = require("smol-toml");
 
 const {
   DomiPluginUpdater,
@@ -372,6 +374,48 @@ class DomiPluginManager {
     }
   }
 
+  async listInstalledDomi(binary, env) {
+    // Recent Codex versions also fetch remote catalogs for an unfiltered
+    // `plugin list`. A local readiness check must not depend on unrelated
+    // marketplaces or their network availability. Configuration is used only
+    // to discover domi identities; the CLI still verifies each installation.
+    const marketplaces = new Set([MARKETPLACE_NAME]);
+    const environment = env || process.env;
+    const configPath = path.join(environment.CODEX_HOME
+      || path.join(environment.HOME || os.homedir(), ".codex"), "config.toml");
+    try {
+      const config = parseToml(fs.readFileSync(configPath, "utf8"));
+      for (const [pluginId, options] of Object.entries(config.plugins || {})) {
+        if (/^domi@[^\s@]+$/.test(pluginId) && options?.enabled !== false) {
+          marketplaces.add(pluginId.slice("domi@".length));
+        }
+      }
+    } catch (cause) {
+      if (cause.code !== "ENOENT") {
+        const error = new Error("无法读取 Codex 插件配置。");
+        error.code = "DOMI_PLUGIN_CONFIG_READ_FAILED";
+        error.domiCheckStage = "plugin/config";
+        throw error;
+      }
+    }
+    // Keep the managed identity first, and bound process concurrency even if a
+    // user has installed domi from several other marketplaces.
+    const installed = [];
+    for (const marketplace of marketplaces) {
+      const listing = await this.runCodex(binary,
+        ["plugin", "list", "--json", "--marketplace", marketplace], env);
+      if (!Array.isArray(listing?.installed)) {
+        const error = new Error("Codex 返回的 domi 插件状态格式无效。");
+        error.code = "INVALID_PLUGIN_LIST";
+        error.domiCheckStage = "plugin/list";
+        throw error;
+      }
+      installed.push(...listing.installed.filter(item => item?.name === "domi"
+        && item.pluginId === `domi@${marketplace}`));
+    }
+    return { installed };
+  }
+
   writeMarketplaceDefinition() {
     const marketplacePath = path.join(this.marketplaceRoot, ".agents", "plugins", "marketplace.json");
     fs.mkdirSync(path.dirname(marketplacePath), { recursive: true });
@@ -490,10 +534,7 @@ class DomiPluginManager {
         ok: false, updated: false, status: "check-failed", reason: "activation-incomplete",
         error: "domi 插件安装尚未完成，请在任务结束后检查插件安装。"
       };
-      const listing = await this.runCodex(binary, ["plugin", "list", "--json"], env);
-      if (!Array.isArray(listing?.installed)) {
-        return pluginCheckFailure({ domiCheckStage: "plugin/list", code: "INVALID_PLUGIN_LIST" });
-      }
+      const listing = await this.listInstalledDomi(binary, env);
       const bundledVersion = this.bundledInfo()?.manifest?.version || "";
       const currentVersion = this.installedInfo()?.manifest?.version || bundledVersion;
       const requiredVersion = compareVersions(currentVersion, bundledVersion) > 0 ? currentVersion : bundledVersion;
@@ -556,7 +597,7 @@ class DomiPluginManager {
       await this.runCodex(binary, ["plugin", "marketplace", "add", this.marketplaceRoot, "--json"], env);
     }
 
-    const before = await this.runCodex(binary, ["plugin", "list", "--json"], env);
+    const before = await this.listInstalledDomi(binary, env);
     const installedDomi = (before.installed || []).filter((item) => item.name === "domi" && item.enabled);
     const newestExisting = installedDomi
       .slice()
@@ -602,7 +643,7 @@ class DomiPluginManager {
           await this.runCodex(binary, ["plugin", "remove", PLUGIN_ID], env);
         }
         await this.runCodex(binary, ["plugin", "add", PLUGIN_ID, "--json"], env);
-        const activated = await this.runCodex(binary, ["plugin", "list", "--json"], env);
+        const activated = await this.listInstalledDomi(binary, env);
         const registered = activated?.installed?.find?.((plugin) => plugin.name === "domi"
           && plugin.pluginId === PLUGIN_ID && plugin.enabled === true
           && plugin.version === info.manifest.version);
