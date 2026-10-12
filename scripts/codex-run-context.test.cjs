@@ -63,7 +63,7 @@ function mainRunHarness(overrides = {}) {
   const context = {
     path, process, setTimeout, clearTimeout,
     activeRuns: new Map(), startingCodexRunIds: new Set(), cancelledCodexRunIds: new Set(),
-    startingCodexThreadIds: new Set(), liveCodexThreads: new Map(), codexThreadTurnIds: new Map(),
+    startingCodexThreadIds: new Set(), liveCodexThreads: new Map(), codexThreadTurnIds: new Map(), codexThreadSandboxPolicies: new Map(),
     updateRestartPreparing: false, skillHubCodexReloadPending: false, demoWorkspace: "/synthetic/workspace",
     ensureDemoWorkspace() {}, getAppSettings: () => ({ load: () => ({ settings: { storageBackend: "local" } }) }),
     resolveCanonicalEntityWorkspace: async () => ({ ok: true, workspacePath: "/synthetic/entity" }),
@@ -98,12 +98,13 @@ function mainRunHarness(overrides = {}) {
       calls.push({ method, params });
       if (method === "thread/start") return { thread: { id: "new-thread" } };
       if (method === "thread/resume") return { thread: { id: params.threadId, turns: [] } };
+      if (method === "thread/turns/list") return { data: [], nextCursor: null };
       if (method === "turn/start") return { turn: { id: "new-turn" } };
       throw new Error(`Unexpected fake call: ${method}`);
     }
   });
   vm.createContext(context);
-  for (const name of ["finishRun", "domiOutputRuntimeContext", "codexThreadRuntimeKey", "resolveThread", "assertCodexRunNotCancelled", "markRunMaterialIndexInjected", "reconcileCodexTurnStart", "runCodex", "stopCodex", "handleCodexNotification", "recoverCodexThread"]) {
+  for (const name of ["finishRun", "domiOutputRuntimeContext", "codexThreadRuntimeKey", "rememberCodexThreadSandbox", "codexTurnSandboxPolicy", "readCodexThreadTurnHeaders", "verifyCodexThreadIdle", "resolveThread", "assertCodexRunNotCancelled", "markRunMaterialIndexInjected", "reconcileCodexTurnStart", "runCodex", "stopCodex", "handleCodexNotification", "recoverCodexThread"]) {
     const implementation = main.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n\\}\\n`));
     assert.ok(implementation, `missing real function ${name}`);
     vm.runInContext(implementation[0], context);
@@ -136,6 +137,7 @@ test("every real run supplies the domi output contract without changing user inp
       });
       if (lifecycle === "live") {
         context.liveCodexThreads.set("original", context.codexThreadRuntimeKey("/synthetic/workspace", "workspace-write"));
+        context.codexThreadTurnIds.set("original", new Set());
       }
       const prompt = "用户明确要求解释指令语法，保留代码示例。";
       const result = await context.runCodex({}, {
@@ -173,6 +175,196 @@ test("resume failures preserve the original thread without creating a blank repl
     } };
     await assert.rejects(context.resolveThread(client, { threadId: "original", model: "chosen" }, "/synthetic/workspace", "read-only"), /原对话已保留/);
     assert.deepEqual(calls.map(call => call.method), ["thread/resume"]);
+  }
+});
+
+test("archiving a live thread changes cwd and permissions without resuming or losing retired turns", async () => {
+  for (const sandbox of ["workspace-write", "read-only", "danger-full-access"]) {
+    const { context, calls } = mainRunHarness({
+      confirmExternalDomiRun: async () => ({ allowed: true, sandbox })
+    });
+    context.liveCodexThreads.set("original", context.codexThreadRuntimeKey("/synthetic/intake", "danger-full-access"));
+    context.codexThreadTurnIds.set("original", new Set(["previous-turn"]));
+    const running = context.runCodex({}, { runId: "followup", threadId: "original", prompt: "synthetic",
+      externalType: "project", externalRecordId: "synthetic-project" });
+    await new Promise(resolve => setImmediate(resolve));
+    const turnCalls = calls.filter(call => call.method === "turn/start");
+    assert.equal(turnCalls.length, 1);
+    assert.equal(calls.some(call => call.method === "thread/resume" || call.method === "thread/start"), false);
+    const params = turnCalls[0].params;
+    assert.equal(params.cwd, "/synthetic/entity");
+    assert.deepEqual(Array.from(params.runtimeWorkspaceRoots), ["/synthetic/entity"]);
+    assert.equal(params.sandboxPolicy.type, sandbox === "read-only" ? "readOnly"
+      : sandbox === "danger-full-access" ? "dangerFullAccess" : "workspaceWrite");
+    if (sandbox !== "danger-full-access") assert.equal(params.sandboxPolicy.networkAccess, false);
+    if (sandbox === "workspace-write") assert.deepEqual(Array.from(params.sandboxPolicy.writableRoots), ["/synthetic/entity"]);
+    const run = context.activeRuns.get("followup");
+    assert.ok(run.retiredTurnIds.has("previous-turn"));
+    assert.deepEqual(run.turnParameters.sandboxPolicy, params.sandboxPolicy, "automatic correction keeps the same permissions");
+    assert.deepEqual(run.turnParameters.runtimeWorkspaceRoots, params.runtimeWorkspaceRoots);
+    context.handleCodexNotification("turn/completed", { threadId: "original", turnId: "previous-turn",
+      turn: { id: "previous-turn", status: "completed" } });
+    assert.equal(run.finished, false, "delayed old completions cannot finish a follow-up");
+    context.finishRun(run, "completed");
+    assert.equal((await running).ok, true);
+  }
+});
+
+test("live workspace moves preserve configured network and extra roots without carrying the old cwd", async () => {
+  const { context, calls } = mainRunHarness();
+  const initial = { thread: { id: "original" }, cwd: "/synthetic/intake", sandbox: {
+    type: "workspaceWrite", writableRoots: ["/synthetic/intake", "/synthetic/shared"],
+    networkAccess: true, excludeSlashTmp: true, excludeTmpdirEnvVar: true
+  } };
+  const client = { request: async () => initial };
+  assert.equal(await context.resolveThread(client, {}, "/synthetic/intake", "workspace-write"), "original");
+  const running = context.runCodex({}, { runId: "custom-policy", threadId: "original", prompt: "synthetic",
+    externalType: "project", externalRecordId: "synthetic-project" });
+  await new Promise(resolve => setImmediate(resolve));
+  const params = calls.find(call => call.method === "turn/start").params;
+  assert.equal(params.sandboxPolicy.networkAccess, true);
+  assert.deepEqual(Array.from(params.sandboxPolicy.writableRoots), ["/synthetic/entity", "/synthetic/shared"]);
+  assert.equal(params.sandboxPolicy.excludeSlashTmp, true);
+  assert.equal(params.sandboxPolicy.excludeTmpdirEnvVar, true);
+  assert.deepEqual(initial.sandbox.writableRoots, ["/synthetic/intake", "/synthetic/shared"]);
+  context.finishRun(context.activeRuns.get("custom-policy"), "completed");
+  await running;
+});
+
+test("resumed policies are preserved only for a matching mode and guidance always stays offline", async () => {
+  const { context } = mainRunHarness();
+  const client = { request: async method => method === "thread/resume" ? {
+    thread: { id: "original" }, cwd: "/synthetic/intake",
+    sandbox: { type: "readOnly", networkAccess: true }
+  } : { data: [], nextCursor: null } };
+  await context.resolveThread(client, { threadId: "original" }, "/synthetic/entity", "read-only");
+  assert.equal(context.codexTurnSandboxPolicy("read-only", "/synthetic/entity", "original").networkAccess, true);
+  assert.equal(context.codexTurnSandboxPolicy("read-only", "/synthetic/entity", "original", true).networkAccess, false);
+  context.rememberCodexThreadSandbox("original", { sandbox: { type: "dangerFullAccess" } }, "/synthetic/intake");
+  const downgrade = context.codexTurnSandboxPolicy("workspace-write", "/synthetic/entity", "original");
+  assert.equal(downgrade.networkAccess, false);
+  assert.deepEqual(Array.from(downgrade.writableRoots), ["/synthetic/entity"]);
+});
+
+test("a rejected elevated turn cannot widen the cached effective policy", async () => {
+  const { context } = mainRunHarness({ confirmExternalDomiRun: async () => ({ allowed: true, sandbox: "danger-full-access" }) });
+  context.liveCodexThreads.set("original", context.codexThreadRuntimeKey("/synthetic/intake", "workspace-write"));
+  context.codexThreadTurnIds.set("original", new Set());
+  context.rememberCodexThreadSandbox("original", { sandbox: { type: "workspaceWrite", networkAccess: false,
+    writableRoots: ["/synthetic/shared"] } }, "/synthetic/intake");
+  const before = context.codexThreadSandboxPolicies.get("original");
+  const client = context.getCodexClient();
+  context.getCodexClient = () => ({ ...client, request: async method => {
+    assert.equal(method, "turn/start");
+    throw Object.assign(new Error("rejected"), { responseReceived: true });
+  } });
+  const result = await context.runCodex({}, { runId: "rejected-policy", threadId: "original", prompt: "synthetic" });
+  assert.equal(result.ok, false);
+  assert.equal(context.codexThreadSandboxPolicies.get("original"), before);
+  const next = context.codexTurnSandboxPolicy("workspace-write", "/synthetic/entity", "original");
+  assert.equal(next.type, "workspaceWrite");
+  assert.equal(next.networkAccess, false);
+  assert.deepEqual(Array.from(next.writableRoots), ["/synthetic/entity", "/synthetic/shared"]);
+});
+
+test("cold resume pages every turn header without hydrating items", async () => {
+  const { context } = mainRunHarness();
+  const calls = [];
+  const client = { request: async (method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/resume") return { thread: { id: "original", turns: [] } };
+    assert.equal(method, "thread/turns/list");
+    assert.equal(params.itemsView, "notLoaded");
+    return params.cursor === null
+      ? { data: [{ id: "recent", status: "completed" }], nextCursor: "older-page" }
+      : { data: [{ id: "old", status: "interrupted" }], nextCursor: null };
+  } };
+  assert.equal(await context.resolveThread(client, { threadId: "original" }, "/synthetic/workspace", "read-only"), "original");
+  assert.equal(calls[0].params.excludeTurns, true);
+  assert.deepEqual([...context.codexThreadTurnIds.get("original")], ["recent", "old"]);
+  assert.equal(calls.length, 3);
+});
+
+test("a lost resume response recovers only the same proven idle thread without resending", async () => {
+  const { context } = mainRunHarness();
+  const calls = [];
+  const client = { request: async (method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/resume") throw Object.assign(new Error("timeout"), {
+      code: "DOMI_CODEX_REQUEST_TIMEOUT", requestSent: true
+    });
+    if (method === "thread/read") {
+      assert.equal(params.includeTurns, false);
+      return { thread: { id: "original", status: { type: "idle" } } };
+    }
+    assert.equal(method, "thread/turns/list");
+    return { data: [{ id: "previous-turn", status: "completed" }], nextCursor: null };
+  } };
+  assert.equal(await context.resolveThread(client, { threadId: "original" }, "/synthetic/new", "workspace-write"), "original");
+  assert.deepEqual(calls.map(call => call.method), ["thread/resume", "thread/read", "thread/turns/list", "thread/read"]);
+  assert.deepEqual([...context.codexThreadTurnIds.get("original")], ["previous-turn"]);
+  assert.equal(await context.resolveThread(client, { threadId: "original" }, "/synthetic/next", "read-only"), "original");
+  assert.equal(calls.length, 4, "the next follow-up reuses the recovered thread");
+});
+
+for (const failure of ["wrong-id", "not-loaded", "active", "became-active", "active-turn", "unknown-turn", "unreadable"]) {
+  test(`resume timeout reconciliation preserves history and fails closed for ${failure}`, async () => {
+    const { context } = mainRunHarness();
+    const calls = [];
+    let reads = 0;
+    const client = { request: async method => {
+      calls.push(method);
+      if (method === "thread/resume") throw Object.assign(new Error("timeout"), {
+        code: "DOMI_CODEX_REQUEST_TIMEOUT", requestSent: true
+      });
+      if (method === "thread/read") {
+        reads++;
+        return { thread: { id: failure === "wrong-id" ? "different" : "original",
+          status: { type: failure === "not-loaded" ? "notLoaded"
+            : failure === "active" || (failure === "became-active" && reads > 1) ? "active" : "idle" } } };
+      }
+      assert.equal(method, "thread/turns/list");
+      return failure === "unreadable" ? { data: [] } : { data: [{ id: "previous-turn",
+        status: failure === "active-turn" ? "inProgress" : failure === "unknown-turn" ? "futureStatus" : "completed" }], nextCursor: null };
+    } };
+    await assert.rejects(context.resolveThread(client, { threadId: "original" }, "/synthetic/workspace", "read-only"), /原对话已保留/);
+    assert.equal(calls.filter(method => method === "thread/resume").length, 1);
+    assert.equal(calls.includes("thread/start"), false);
+    assert.equal(context.liveCodexThreads.has("original"), false);
+    assert.equal(context.codexThreadTurnIds.has("original"), false);
+  });
+}
+
+test("turn baseline rejects repeated cursors and duplicate turn ids", async () => {
+  for (const duplicate of ["cursor", "turn-id"]) {
+    const { context } = mainRunHarness();
+    let page = 0;
+    const client = { request: async () => ({ data: [{ id: duplicate === "turn-id" ? "same" : `turn-${page++}`, status: "completed" }],
+      nextCursor: duplicate === "cursor" ? "same" : `page-${page++}` }) };
+    await assert.rejects(context.readCodexThreadTurnHeaders(client, "original"), /无效/);
+  }
+});
+
+test("empty intermediate turn pages fail closed instead of silently accepting an incomplete baseline", async () => {
+  const { context } = mainRunHarness();
+  let calls = 0;
+  await assert.rejects(context.readCodexThreadTurnHeaders({ request: async () => {
+    calls++;
+    return { data: [], nextCursor: "another-page" };
+  } }, "original"), /分页状态无效/);
+  assert.equal(calls, 1);
+});
+
+test("ephemeral completion removes its effective policy while persistent threads retain it", async () => {
+  for (const ephemeral of [true, false]) {
+    const { context } = mainRunHarness();
+    const running = context.runCodex({}, { runId: "cleanup-policy", prompt: "synthetic", ephemeral });
+    await new Promise(resolve => setImmediate(resolve));
+    const run = context.activeRuns.get("cleanup-policy");
+    context.rememberCodexThreadSandbox(run.threadId, { sandbox: { type: "workspaceWrite", networkAccess: true } }, run.workspacePath);
+    context.finishRun(run, "completed");
+    await running;
+    assert.equal(context.codexThreadSandboxPolicies.has(run.threadId), !ephemeral);
   }
 });
 
@@ -283,15 +475,18 @@ test("resume refuses an active remote turn and preserves model settings for a co
   const calls = [];
   const client = { request: async (method, params) => {
     calls.push({ method, params });
-    return { thread: { id: "original", turns: [{ id: "old-turn", status }] } };
+    return method === "thread/turns/list" ? { data: [{ id: "old-turn", status }], nextCursor: null }
+      : { thread: { id: "original", turns: [] } };
   } };
   const payload = { threadId: "original", model: "chosen-model", reasoningEffort: "high", serviceTier: "fast" };
   await assert.rejects(context.resolveThread(client, payload, "/synthetic/workspace", "workspace-write"), /仍有任务运行/);
   status = "completed";
   assert.equal(await context.resolveThread(client, payload, "/synthetic/workspace", "workspace-write"), "original");
-  assert.equal(calls.at(-1).params.model, "chosen-model");
-  assert.equal(calls.at(-1).params.config.model_reasoning_effort, "high");
-  assert.equal(calls.at(-1).params.serviceTier, "fast");
+  const resume = calls.findLast(call => call.method === "thread/resume");
+  assert.equal(resume.params.model, "chosen-model");
+  assert.equal(resume.params.config.model_reasoning_effort, "high");
+  assert.equal(resume.params.serviceTier, "fast");
+  assert.equal(resume.params.excludeTurns, true);
 });
 
 for (const phase of ["entity", "runtime", "client"]) {
@@ -322,7 +517,8 @@ test("a lost turn/start response recovers the new final answer through the deliv
   const { context, calls } = mainRunHarness({ getCodexClient: () => ({
     start: async () => {}, capabilities: () => ({ experimentalApi: true }),
     request: async (method, params) => {
-      if (method === "thread/resume") return { thread: { id: params.threadId, turns: [{ id: "old", status: "completed" }] } };
+      if (method === "thread/resume") return { thread: { id: params.threadId, turns: [] } };
+      if (method === "thread/turns/list") return { data: [{ id: "old", status: "completed" }], nextCursor: null };
       if (method === "turn/start") {
         turnStarts += 1;
         throw Object.assign(new Error("lost response"), { code: "DOMI_CODEX_REQUEST_TIMEOUT", requestSent: true });
@@ -346,7 +542,8 @@ test("an unknown submission keeps its owner and blocks a different run id on the
   const { context } = mainRunHarness({ getCodexClient: () => ({
     start: async () => {}, capabilities: () => ({ experimentalApi: true }),
     request: async (method, params) => {
-      if (method === "thread/resume") return { thread: { id: params.threadId, turns: [{ id: "old", status: "completed" }] } };
+      if (method === "thread/resume") return { thread: { id: params.threadId, turns: [] } };
+      if (method === "thread/turns/list") return { data: [{ id: "old", status: "completed" }], nextCursor: null };
       if (method === "turn/start") throw Object.assign(new Error("timeout"), { requestSent: true });
       read.resolve();
       return { thread: { turns: [{ id: "old", status: "completed", items: [{ type: "agentMessage", text: "Old result" }] }] } };

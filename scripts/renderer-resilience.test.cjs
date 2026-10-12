@@ -1184,7 +1184,7 @@ assert.match(
 );
 assert.match(
   main,
-  /liveCodexThreads\.get\(payload\.threadId\) === runtimeKey[\s\S]*?return payload\.threadId/,
+  /liveCodexThreads\.has\(payload\.threadId\) && codexThreadTurnIds\.has\(payload\.threadId\)[\s\S]*?return payload\.threadId/,
   "A persistent App Server session must reuse its live thread without repeating thread/resume."
 );
 assert.match(

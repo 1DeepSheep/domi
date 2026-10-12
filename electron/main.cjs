@@ -143,6 +143,7 @@ const cancelledCodexRunIds = new Set();
 const startingCodexThreadIds = new Set();
 const liveCodexThreads = new Map();
 const codexThreadTurnIds = new Map();
+const codexThreadSandboxPolicies = new Map();
 const resolvedCodexUserInputs = new Map();
 const pendingRunPostProcessing = new Set();
 let researchCacheWriteQueue = Promise.resolve();
@@ -2388,7 +2389,10 @@ function finishRun(run, type, details = {}) {
     run.plaudWorkflowReserved = false;
     getDomiIntegration().releasePlaudWorkflow(run.runId);
   }
-  if (!liveCodexThreads.has(run.threadId)) codexThreadTurnIds.delete(run.threadId);
+  if (!liveCodexThreads.has(run.threadId)) {
+    codexThreadTurnIds.delete(run.threadId);
+    codexThreadSandboxPolicies.delete(run.threadId);
+  }
 
   const stopped = type === "stopped";
   const awaitingSlidesInput = type === "waiting-input";
@@ -2752,6 +2756,7 @@ function getCodexClient() {
       onExit: ({ error, intentional }) => {
         liveCodexThreads.clear();
         codexThreadTurnIds.clear();
+        codexThreadSandboxPolicies.clear();
         if (!intentional) {
           failAllRuns(error);
         }
@@ -2771,6 +2776,7 @@ function resetCodexClient() {
   codexClient = null;
   liveCodexThreads.clear();
   codexThreadTurnIds.clear();
+  codexThreadSandboxPolicies.clear();
   resolvedCodexUserInputs.clear();
   serviceCoordinator.invalidate("codex:check");
 }
@@ -3086,6 +3092,77 @@ function codexThreadRuntimeKey(workspacePath, sandbox) {
   return `${path.resolve(workspacePath)}\u0000${sandbox}`;
 }
 
+function rememberCodexThreadSandbox(threadId, response, workspacePath) {
+  const policy = response?.sandbox;
+  if (!policy || typeof policy !== "object" || !["readOnly", "workspaceWrite", "dangerFullAccess"].includes(policy.type)) return;
+  codexThreadSandboxPolicies.set(threadId, {
+    policy: { ...policy, ...(Array.isArray(policy.writableRoots) ? { writableRoots: [...policy.writableRoots] } : {}) },
+    cwd: path.resolve(response.cwd || workspacePath)
+  });
+}
+
+function codexTurnSandboxPolicy(sandbox, workspacePath, threadId, offline = false) {
+  if (sandbox === "danger-full-access") return { type: "dangerFullAccess" };
+  const known = codexThreadSandboxPolicies.get(threadId);
+  const type = sandbox === "read-only" ? "readOnly" : sandbox === "workspace-write" ? "workspaceWrite" : "";
+  if (!type) throw new Error("无法确认本轮 Codex 权限范围。");
+  // Preserve the effective policy returned by Codex, including user-configured
+  // network access and extra roots. A different mode never inherits old grants.
+  const policy = known?.policy?.type === type ? known.policy : null;
+  const networkAccess = !offline && policy?.networkAccess === true;
+  if (type === "readOnly") return { type, networkAccess };
+  const cwd = path.resolve(workspacePath);
+  const writableRoots = (Array.isArray(policy?.writableRoots) ? policy.writableRoots : [])
+    .filter(root => typeof root === "string" && path.isAbsolute(root))
+    .map(root => path.resolve(root) === known.cwd ? cwd : path.resolve(root));
+  return {
+    type, writableRoots: [...new Set([cwd, ...writableRoots])], networkAccess,
+    ...(typeof policy?.excludeSlashTmp === "boolean" ? { excludeSlashTmp: policy.excludeSlashTmp } : {}),
+    ...(typeof policy?.excludeTmpdirEnvVar === "boolean" ? { excludeTmpdirEnvVar: policy.excludeTmpdirEnvVar } : {})
+  };
+}
+
+async function readCodexThreadTurnHeaders(client, threadId, deadlineAt = Date.now() + 10_000) {
+  const turns = [];
+  const turnIds = new Set();
+  const cursors = new Set();
+  let cursor = null;
+  do {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0 || cursors.size >= 200) throw new Error("原对话状态读取尚未完成。");
+    const page = await client.request("thread/turns/list", {
+      threadId, cursor, limit: 100, sortDirection: "desc", itemsView: "notLoaded"
+    }, { timeoutMs: Math.min(5_000, remaining) });
+    if (!Array.isArray(page?.data) || !Object.hasOwn(page, "nextCursor")) {
+      throw new Error("Codex 未返回可核验的原对话状态。");
+    }
+    for (const turn of page.data) {
+      if (typeof turn?.id !== "string" || !turn.id || turnIds.has(turn.id)) {
+        throw new Error("Codex 返回的对话轮次标识无效。");
+      }
+      turnIds.add(turn.id);
+      turns.push(turn);
+    }
+    cursor = page.nextCursor;
+    if (cursor !== null && (!page.data.length || typeof cursor !== "string" || !cursor || cursors.has(cursor))) {
+      throw new Error("Codex 返回的对话分页状态无效。");
+    }
+    if (cursor) cursors.add(cursor);
+  } while (cursor !== null);
+  return turns;
+}
+
+async function verifyCodexThreadIdle(client, threadId, deadlineAt) {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) throw new Error("原对话状态读取尚未完成。");
+  const response = await client.request("thread/read", { threadId, includeTurns: false }, {
+    timeoutMs: Math.min(5_000, remaining)
+  });
+  if (response?.thread?.id !== threadId || response.thread.status?.type !== "idle") {
+    throw new Error("尚未确认原对话已恢复且处于空闲状态，请稍后重试。");
+  }
+}
+
 async function resolveThread(client, payload, workspacePath, sandbox) {
   const model = payload.model && payload.model !== "default" ? payload.model : undefined;
   const effort = payload.reasoningEffort && payload.reasoningEffort !== "default"
@@ -3098,36 +3175,66 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
       : undefined;
   if (payload.threadId && payload.ephemeral !== true) {
     const runtimeKey = codexThreadRuntimeKey(workspacePath, sandbox);
-    if (liveCodexThreads.get(payload.threadId) === runtimeKey) {
+    // A loaded conversation belongs to the App Server, not its previous cwd.
+    // turn/start applies the current directory and permissions for every turn.
+    // Re-resuming a loaded, large conversation needlessly hydrates its history.
+    if (liveCodexThreads.has(payload.threadId) && codexThreadTurnIds.has(payload.threadId)) {
+      appendRuntimeLog("codex-thread-continuity", {
+        outcome: "reused", contextChanged: liveCodexThreads.get(payload.threadId) !== runtimeKey
+      });
+      liveCodexThreads.set(payload.threadId, runtimeKey);
       return payload.threadId;
     }
+    const startedAt = Date.now();
+    let stage = "resume";
+    let recovered = false;
+    let resumed;
     try {
-      const resumed = await client.request("thread/resume", {
-        threadId: payload.threadId,
-        model,
-        serviceTier,
-        config: effort ? { model_reasoning_effort: effort } : undefined,
-        cwd: workspacePath,
-        approvalPolicy: "never",
-        sandbox
-      });
-      if (resumed?.thread?.id !== payload.threadId) {
-        throw new Error("Codex 返回的对话标识与原对话不一致。");
+      try {
+        resumed = await client.request("thread/resume", {
+          threadId: payload.threadId,
+          model,
+          serviceTier,
+          config: effort ? { model_reasoning_effort: effort } : undefined,
+          cwd: workspacePath,
+          runtimeWorkspaceRoots: [workspacePath],
+          approvalPolicy: "never",
+          sandbox,
+          excludeTurns: true
+        });
+        if (resumed?.thread?.id !== payload.threadId) {
+          throw new Error("Codex 返回的对话标识与原对话不一致。");
+        }
+      } catch (error) {
+        if (error?.code !== "DOMI_CODEX_REQUEST_TIMEOUT" || error?.requestSent !== true) throw error;
+        // A timed-out response is not evidence that resume failed. Verify the
+        // exact loaded/idle conversation, without resuming or submitting again.
+        stage = "resume-reconcile";
+        recovered = true;
       }
-      // Establish the pre-submission turn set once per resumed thread. This
-      // lets a timed-out turn/start be reconciled without mistaking an earlier
-      // completed answer for the result of the new request.
-      const thread = Array.isArray(resumed.thread.turns)
-        ? resumed.thread
-        : (await client.request("thread/read", { threadId: payload.threadId, includeTurns: true })).thread;
-      if (!Array.isArray(thread?.turns)) throw new Error("Codex 未返回可核验的原对话状态。");
-      if (thread.turns.some((turn) => !["completed", "failed", "stopped"].includes(classifyCodexTurnStatus(turn.status)))) {
+      const deadlineAt = Date.now() + 10_000;
+      if (recovered) await verifyCodexThreadIdle(client, payload.threadId, deadlineAt);
+      stage = "turn-baseline";
+      const turns = await readCodexThreadTurnHeaders(client, payload.threadId, deadlineAt);
+      if (turns.some((turn) => !["completed", "failed", "stopped"].includes(classifyCodexTurnStatus(turn.status)))) {
         throw new Error("原对话仍有任务运行，请先恢复或停止该任务。");
       }
-      codexThreadTurnIds.set(payload.threadId, new Set(thread.turns.map((turn) => turn.id).filter(Boolean)));
-      liveCodexThreads.set(resumed.thread.id, runtimeKey);
-      return resumed.thread.id;
+      // Check again after pagination so a remote turn that started during the
+      // read cannot be mistaken for a safe continuation after a lost response.
+      if (recovered) await verifyCodexThreadIdle(client, payload.threadId, deadlineAt);
+      codexThreadTurnIds.set(payload.threadId, new Set(turns.map((turn) => turn.id)));
+      liveCodexThreads.set(payload.threadId, runtimeKey);
+      if (resumed) rememberCodexThreadSandbox(payload.threadId, resumed, workspacePath);
+      appendRuntimeLog("codex-thread-continuity", {
+        outcome: recovered ? "resume-recovered" : "resumed", turnCount: turns.length,
+        totalMs: Date.now() - startedAt
+      });
+      return payload.threadId;
     } catch (error) {
+      appendRuntimeLog("codex-thread-continuity", {
+        outcome: "failed", stage, recovered, totalMs: Date.now() - startedAt,
+        code: typeof error?.code === "string" ? error.code : "DOMI_CODEX_THREAD_RESUME_FAILED"
+      });
       const failure = new Error(`无法恢复原 Codex 对话：${error instanceof Error ? error.message : String(error)} 原对话已保留，未创建空白对话；请稍后重试，或明确新建任务。`);
       failure.code = error?.code || "DOMI_CODEX_THREAD_RESUME_FAILED";
       throw failure;
@@ -3138,6 +3245,7 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
     model,
     serviceTier,
     cwd: workspacePath,
+    runtimeWorkspaceRoots: [workspacePath],
     approvalPolicy: "never",
     sandbox,
     serviceName: "domi",
@@ -3149,6 +3257,7 @@ async function resolveThread(client, payload, workspacePath, sandbox) {
   });
   if (!started?.thread?.id) throw new Error("Codex 未返回新对话标识。");
   codexThreadTurnIds.set(started.thread.id, new Set());
+  rememberCodexThreadSandbox(started.thread.id, started, workspacePath);
   if (payload.ephemeral !== true) {
     liveCodexThreads.set(
       started.thread.id,
@@ -3957,6 +4066,8 @@ async function runCodex(sender, payload) {
       : payload.serviceTier && payload.serviceTier !== "default"
         ? payload.serviceTier
         : undefined;
+    const sandboxPolicy = codexTurnSandboxPolicy(execution.sandbox, workspacePath, threadId,
+      payload?.workflowId === "connection-guidance");
     const completion = new Promise((resolve) => {
       const run = {
         runId,
@@ -3979,7 +4090,9 @@ async function runCodex(sender, payload) {
         slidesDeliveryCorrectionAttempts: 0,
         deliveryCorrectionStarting: false,
         deliveryGatePending: false,
-        turnParameters: { model, effort, serviceTier },
+        turnParameters: { model, effort, serviceTier,
+          sandboxPolicy,
+          runtimeWorkspaceRoots: [workspacePath] },
         allowUserInput: payload?.allowUserInput !== false,
         workspaceIdentity: directoryIdentity(workspacePath),
         finished: false,
@@ -4008,6 +4121,8 @@ async function runCodex(sender, payload) {
         effort,
         serviceTier,
         cwd: workspacePath,
+        runtimeWorkspaceRoots: [workspacePath],
+        sandboxPolicy,
         approvalPolicy: "never"
       }, prompt, runtimeContext, {
         onCompatibility: ({ message, error }) => {

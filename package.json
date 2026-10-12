@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "7.0.27",
+  "version": "7.0.28",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -57,7 +57,8 @@
     "test:onboarding-ui": "node scripts/setup-onboarding-ui.test.mjs",
     "test:industry-overview": "node --test scripts/industry-overview.test.cjs scripts/industry-overview-service.test.cjs && node scripts/industry-overview-ui.test.mjs && node scripts/industry-overview-app-ui.test.mjs",
     "test:plaud-context": "node --test scripts/plaud-context.test.cjs scripts/plaud-recall-model.test.cjs",
-    "test:plaud-context-ui": "node scripts/plaud-context-ui.test.mjs"
+    "test:plaud-context-ui": "node scripts/plaud-context-ui.test.mjs",
+    "test:codex-thread-runtime": "node scripts/codex-thread-runtime.test.cjs"
   },
   "dependencies": {
     "@floating-ui/dom": "^1.8.0",
