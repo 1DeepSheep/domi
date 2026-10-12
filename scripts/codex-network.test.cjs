@@ -281,7 +281,8 @@ test("a pending network reload waits for active and starting tasks and rechecks 
     activeRuns, startingCodexRunIds, codexClientIdleForSkillReload,
     setImmediate: callback => scheduled.push(callback),
     serviceCoordinator: { invalidate: () => { invalidations++; } },
-    liveCodexThreads: new Map(), codexThreadTurnIds: new Map(), resolvedCodexUserInputs: new Set(),
+    liveCodexThreads: new Map(), codexThreadTurnIds: new Map(),
+    codexThreadSandboxPolicies: new Map([["old-thread", { policy: { type: "dangerFullAccess" } }]]), resolvedCodexUserInputs: new Set(),
     fixtureClient: { close: () => { closes++; } }
   }, 'var codexClient = fixtureClient, codexNetworkReloadPending = true, skillHubCodexReloadPending = false, codexCheckGeneration = 0;');
   context.schedulePendingSkillHubCodexReload();
@@ -296,6 +297,7 @@ test("a pending network reload waits for active and starting tasks and rechecks 
   activeRuns.clear(); context.schedulePendingSkillHubCodexReload(); scheduled.shift()();
   assert.equal(closes, 1); assert.equal(invalidations, 1);
   assert.equal(context.codexClient, null); assert.equal(context.codexNetworkReloadPending, false);
+  assert.equal(context.codexThreadSandboxPolicies.size, 0, "A replacement client cannot inherit a previous client policy");
 });
 
 test("resolved PAC routes reach a real subprocess and a refresh applies only to a new process", async () => {

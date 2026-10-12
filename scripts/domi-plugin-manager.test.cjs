@@ -1279,7 +1279,7 @@ async function verifyMainAutomaticActivationWiring() {
     applicationQuitFlushStarted: false, activeRuns, startingCodexRunIds: new Set(),
     codexClientIdleForSkillReload: runs => runs.size === 0,
     codexNetworkReloadPending: false, codexCheckGeneration: 0,
-    liveCodexThreads: new Map(), codexThreadTurnIds: new Map(), resolvedCodexUserInputs: new Map(),
+    liveCodexThreads: new Map(), codexThreadTurnIds: new Map(), codexThreadSandboxPolicies: new Map(), resolvedCodexUserInputs: new Map(),
     codexCheckRuntimeKey: () => runtimeKey, codexClient: oldClient,
     codexNetworkDiagnostic: { ok: true, status: "direct" }, codexCheckFailureDetails, pluginCheckFailure,
     serviceCoordinator: { invalidate: key => invalidated.push(key) },
