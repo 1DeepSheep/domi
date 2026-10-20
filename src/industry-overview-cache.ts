@@ -43,6 +43,12 @@ export function requestIndustryOverview(cacheKey: string, refreshKey: number, fo
       return snapshot;
     }).catch(() => undefined);
   request.result = Promise.resolve().then(() => read({ force })).then(result => {
+    // A busy response did not refresh the catalog, even if it includes old
+    // entries. Keep the last usable snapshot and explain why retry is needed.
+    if (!result.ok && result.warnings?.some(warning => warning !== null && typeof warning === "object"
+      && "code" in warning && warning.code === "overview_refresh_busy")) {
+      throw new Error("另一个流程正在更新行业看板，请稍后重试。");
+    }
     if (!result.ok && !result.entries?.length) throw new Error(result.error || "行业看板暂时无法刷新。");
     if (!isCurrent()) return undefined;
     const snapshot = { result, refreshKey };

@@ -65,8 +65,8 @@ const docs = ${JSON.stringify(docs)};
 const news = ${JSON.stringify(news)};
 const indexPath = ${JSON.stringify(indexPath)};
 const mode = new URL(location.href).searchParams.get("mode") || "ready";
-const state = window.__industryTest = { cacheReads: 0, cachePending: [], diskCache: null, deferCache: mode.startsWith("late-disk-cache"), renders: [], calls: [], entries, docs, news, mode, failPaths: [], refreshFailure: ["initial-refresh-failure", "late-disk-cache-failure"].includes(mode), pending: {}, deferredPaths: [], deferRefresh: ["initial-catalog-delay", "disk-cache", "strict-mode"].includes(mode), pendingRefresh: [], refresh: null, leave: null, enter: null, selectLibrary: null, metrics: {} };
-if (mode === "disk-cache") state.diskCache = { ok: true, entries, news, projectCount: 4, cached: true };
+const state = window.__industryTest = { cacheReads: 0, cachePending: [], diskCache: null, deferCache: mode.startsWith("late-disk-cache"), renders: [], calls: [], entries, docs, news, mode, failPaths: [], refreshBusy: mode.startsWith("refresh-busy"), busyEntries: [], refreshFailure: ["initial-refresh-failure", "late-disk-cache-failure"].includes(mode), pending: {}, deferredPaths: [], deferRefresh: ["initial-catalog-delay", "disk-cache", "strict-mode"].includes(mode), pendingRefresh: [], refresh: null, leave: null, enter: null, selectLibrary: null, metrics: {} };
+if (["disk-cache", "refresh-busy-disk-cache"].includes(mode)) state.diskCache = { ok: true, entries, news, projectCount: 4, cached: true };
 if (mode === "large-catalog") {
   const now = Date.now();
   state.entries = Array.from({ length: 132 }, (_, i) => {
@@ -88,7 +88,8 @@ const bridge = {
       return state.diskCache || { ok: true, entries: [], cached: false };
     }
     const call = { kind: "refreshIndustryOverviews", options, settled: false }; state.calls.push(call);
-    const response = state.refreshFailure ? { ok: false, entries: [], error: "合成刷新失败，原资料仍保留" }
+    const response = state.refreshBusy ? { ok: false, entries: state.busyEntries, projectCount: 99, warnings: [null, "unrelated warning", { code: "overview_refresh_busy", message: "另一个流程正在更新行业速览；本次资料写入已保存，可稍后刷新。" }] }
+      : state.refreshFailure ? { ok: false, entries: [], error: "合成刷新失败，原资料仍保留" }
       : mode === "conflict" ? { ok: false, entries: [...state.entries], news: [...state.news], indexPath, conflicts: [{ path: entries[0].path }], warnings: ["合成资料缺口"] }
       : { ok: true, entries: mode === "empty-library" ? [] : [...state.entries], news: [...state.news], indexPath, projectCount: 4 };
     if (state.deferRefresh) await new Promise(resolve => state.pendingRefresh.push(resolve));
@@ -425,6 +426,43 @@ try {
     await enterDomain(page);
     assert.equal(await page.getByRole("alert").count(), 0);
   }, { mode: "initial-refresh-failure" });
+  for (const mode of ["refresh-busy", "refresh-busy-disk-cache"]) await scenario(mode, async page => {
+    const alert = page.getByRole("alert");
+    await alert.filter({ hasText: "另一个流程正在更新行业看板，请稍后重试。" }).waitFor();
+    const text = await alert.innerText();
+    assert.doesNotMatch(text, /本次资料写入已保存|行业看板暂时无法刷新/, "Read-only refresh explains contention without claiming a write succeeded");
+    assert.equal(text.includes("已保留上次内容。"), mode === "refresh-busy-disk-cache", "Only a usable prior catalog gets the retained-content message");
+    assert.doesNotMatch(text, /[。！？]\s*[，。]/, "The banner must not combine sentence and comma punctuation");
+    assert.equal(await page.getByRole("button", { name: "查看AI行业", exact: true }).count(), mode === "refresh-busy-disk-cache" ? 1 : 0);
+    assert.equal(await page.getByText("当前资料库尚无行业资料。", { exact: true }).count(), 0, "Contention is not an empty library");
+    await page.waitForTimeout(150);
+    assert.equal(await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").length), 1, "Contention must not trigger a retry loop");
+    await page.evaluate(() => { window.__industryTest.refreshBusy = false; });
+    await page.getByRole("button", { name: "重试", exact: true }).click();
+    await page.getByRole("button", { name: "查看AI行业", exact: true }).waitFor();
+    await page.waitForFunction(() => !document.querySelector('[role="alert"]'));
+    assert.equal(await page.evaluate(() => window.__industryTest.calls.filter(call => call.kind === "refreshIndustryOverviews").at(-1).options.force), true);
+  }, { mode });
+  await scenario("busy-refresh-keeps-current-catalog-and-page", async page => {
+    await enterSubdomain(page);
+    await page.evaluate(() => {
+      const state = window.__industryTest;
+      state.refreshBusy = true;
+      state.busyEntries = [{ ...state.entries[0], projectCount: 99 }];
+    });
+    await refresh(page);
+    await page.getByRole("alert").filter({ hasText: "另一个流程正在更新行业看板，请稍后重试。已保留上次内容。" }).waitFor();
+    await page.getByRole("heading", { name: "AI 数据行业概况", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "研究依据", exact: true }).waitFor();
+    await home(page);
+    assert.match(await page.locator(".industry-board-stats").innerText(), /4\s*个入库项目/);
+    assert.doesNotMatch(await page.locator(".industry-board-stats").innerText(), /99/);
+    await enterSubdomain(page);
+    await page.evaluate(() => { window.__industryTest.refreshBusy = false; });
+    await page.getByRole("button", { name: "重试", exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector('[role="alert"]'));
+    await page.getByRole("heading", { name: "AI 数据行业概况", exact: true }).waitFor();
+  });
   await scenario("project-read-failure-retries-and-retains-origin", async page => {
     await enterSubdomain(page);
     await page.evaluate(failed => window.__industryTest.failPaths.push(failed), projectPath);

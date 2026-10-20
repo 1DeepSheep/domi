@@ -3,6 +3,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const { Worker } = require("node:worker_threads");
+const { runRepositoryWorker } = require("./repository-worker.cjs");
 const { LocalDomiRepository } = require("./local-domi-repository.cjs");
 const taxonomy = require("../shared/investment-taxonomy.json");
 
@@ -147,6 +148,7 @@ class IndustryOverviewService {
     this.queue = Promise.resolve();
     this.active = null;
     this.closed = false;
+    this.closedEvent = new Promise(resolve => { this.notifyClosed = resolve; });
   }
 
   previous(key, { allowStale = false } = {}) {
@@ -168,76 +170,76 @@ class IndustryOverviewService {
     }
     const active = this.pending.get(key);
     if (active) {
-      if (!force || active.force) return active.promise;
+      if (!force || active.force || active.run?.abortError) return active.promise;
       // One manual refresh requested while validation is pending must still force a
       // fresh generation, but repeated clicks share that one queued operation.
-      if (!active.forced) active.forced = active.promise.catch(() => undefined).then(() => this.read(captured, { force: true }));
+      if (!active.forced) active.forced = Promise.race([
+        // A timed-out worker may remain alive in native IO. Propagate its
+        // request failure immediately; only a successful validation can queue
+        // a forced generation after the worker has finished.
+        active.promise.then(() => active.completion).then(() => this.read(captured, { force: true })),
+        this.closedEvent.then(() => { throw new Error("行业看板后台服务已停止。"); })
+      ]);
       return active.forced;
     }
-    const promise = this.queue.then(() => {
+    let resolve, reject;
+    const promise = new Promise((accept, decline) => { resolve = accept; reject = decline; });
+    const item = { promise, force, resolve, reject };
+    const completion = this.queue.then(() => {
       if (this.closed) throw new Error("行业看板后台服务已停止。");
-      return this.run(captured, key, force);
+      const run = this.run(captured, key, force);
+      item.run = run;
+      this.active = run;
+      void run.result.then(
+        async value => { await item.completion; resolve(value); },
+        async error => {
+          if (!run.abortError) await item.completion;
+          reject(error);
+        }
+      );
+      return run.completion;
+    }).catch(reject).finally(() => {
+      if (this.pending.get(key) === item) this.pending.delete(key);
+      if (this.active === item.run) this.active = null;
     });
-    this.queue = promise.catch(() => undefined);
-    const item = { promise, force };
+    item.completion = completion;
+    this.queue = completion;
     this.pending.set(key, item);
-    const finish = () => { if (this.pending.get(key) === item) this.pending.delete(key); };
-    promise.then(finish, finish);
     return promise;
   }
 
   run(source, key, force) {
-    return new Promise((resolve, reject) => {
-      const lockToken = JSON.stringify({ pid: process.pid, token: crypto.randomUUID() });
-      const lockPath = path.join(path.dirname(source.localDatabasePath), `.domi-industry-${hash(source.localLibraryDir).slice(0, 16)}.lock`);
-      const worker = new this.WorkerClass(this.workerPath, {
-        workerData: { source, previous: this.previous(key), force, lockToken },
-        resourceLimits: { maxOldGenerationSizeMb: 256 }
-      });
-      let settled = false;
-      let termination, cleanupPromise, abortError;
-      const cleanupLock = () => cleanupPromise ||= (async () => {
-        // Terminated threads have the main process PID. Only our unique token can
-        // distinguish an abandoned lock from another healthy thread's lock.
-        try { if (await fs.promises.readFile(lockPath, "utf8") === lockToken) await fs.promises.unlink(lockPath); } catch {}
-      })();
-      const terminate = () => termination ||= Promise.resolve(worker.terminate()).catch(() => undefined).then(cleanupLock);
-      const finish = (error, message) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (this.active?.worker === worker) this.active = null;
-        if (error) { reject(error); return; }
-        const value = message.cache;
-        if (value?.version === CACHE_VERSION && usable(value?.result)) {
-          this.entries.set(key, value);
-          try { this.stateStore?.saveCache?.(key, value); } catch {}
-        }
-        resolve(message.result);
-      };
-      const cancel = error => {
-        abortError ||= error;
-        return terminate().then(() => finish(abortError));
-      };
-      const timer = setTimeout(() => {
-        void cancel(new Error("行业看板后台刷新超时，已保留上次成功结果。"));
-      }, this.timeoutMs);
-      this.active = { worker, cancel };
-      worker.once("message", message => {
-        if (message?.ok) finish(null, message);
-        else void cleanupLock().then(() => finish(new Error(message?.error || "行业看板后台刷新失败。")));
-      });
-      worker.once("error", error => { void cancel(error); });
-      worker.once("exit", code => {
-        if (!settled) void cleanupLock().then(() => finish(abortError || new Error(`行业看板后台服务意外退出（${code}）。`)));
-      });
+    const run = runRepositoryWorker({
+      workerPath: this.workerPath, WorkerClass: this.WorkerClass,
+      workerData: { source, previous: this.previous(key), force },
+      resourceLimits: { maxOldGenerationSizeMb: 256 }, timeoutMs: this.timeoutMs,
+      timeoutError: () => new Error("行业看板后台刷新超时，已保留上次成功结果。"),
+      exitError: code => new Error(`行业看板后台服务意外退出（${code}）。`)
     });
+    const result = run.result.then(message => {
+      if (!message?.ok) throw new Error(message?.error || "行业看板后台刷新失败。");
+      const value = message.cache;
+      if (value?.version === CACHE_VERSION && usable(value?.result)) {
+        this.entries.set(key, value);
+        try { this.stateStore?.saveCache?.(key, value); } catch {}
+      }
+      return message.result;
+    });
+    return { result, completion: run.completion, cancel: run.cancel, get abortError() { return run.abortError; } };
   }
 
   async close() {
     this.closed = true;
-    await this.active?.cancel(new Error("行业看板后台服务已停止。"));
-    await this.queue;
+    this.notifyClosed();
+    const error = new Error("行业看板后台服务已停止。");
+    for (const item of this.pending.values()) item.reject(error);
+    void this.active?.cancel(error);
+    // Native IO may delay worker termination. Closing the UI must not hang on
+    // that IO; the retained completion handler still cleans up after real exit.
+    await new Promise(resolve => {
+      const timer = setTimeout(resolve, 250);
+      void this.queue.then(() => { clearTimeout(timer); resolve(); });
+    });
   }
 }
 

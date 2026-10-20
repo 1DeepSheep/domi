@@ -321,6 +321,7 @@ test("worker failures retain the last usable snapshot and the next worker recove
   const service = workerFixture(t, data, { body: "throw new Error('synthetic worker crash');" });
   const stored = JSON.stringify([...data.stored.entries()]);
   await assert.rejects(service.read(data.source), /synthetic worker crash/);
+  await service.queue;
   assert.equal(JSON.stringify([...data.stored.entries()]), stored);
   assert.equal((await service.read(data.source, { cachedOnly: true })).projectCount, 1);
   service.workerPath = path.resolve(__dirname, "../electron/industry-overview-worker.cjs");
@@ -359,9 +360,93 @@ test("worker timeout preserves cached content and remains retryable without a st
   const service = workerFixture(t, data, { timeoutMs: 250,
     body: `require('node:fs').writeFileSync(${JSON.stringify(lockPath)}, workerData.lockToken); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);` });
   await assert.rejects(service.read(data.source, { force: true }), /后台刷新超时/);
+  await service.queue;
   assert.equal(fs.existsSync(lockPath), false);
   assert.equal((await service.read(data.source, { cachedOnly: true })).projectCount, 1);
   service.workerPath = path.resolve(__dirname, "../electron/industry-overview-worker.cjs");
   service.timeoutMs = 5000;
   assert.equal((await service.read(data.source, { force: true })).ok, true);
+});
+
+test("successful worker results clean a leftover own lock before becoming visible", async t => {
+  const data = fixture(t);
+  const { industryWorkerLock } = require("../electron/repository-worker.cjs");
+  const lockPath = industryWorkerLock(data.source).path;
+  const service = workerFixture(t, data, {
+    body: `require('node:fs').writeFileSync(${JSON.stringify(lockPath)}, workerData.lockToken);
+      parentPort.postMessage({ ok: true, result: { ok: true, entries: [], projectCount: 1 } });`
+  });
+  assert.equal((await service.read(data.source)).projectCount, 1);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("slow termination reports the deadline without unlocking or spawning another worker, and close remains bounded", async t => {
+  const data = fixture(t);
+  const { EventEmitter } = require("node:events");
+  const { industryWorkerLock } = require("../electron/repository-worker.cjs");
+  const lockPath = industryWorkerLock(data.source).path;
+  let finishTermination, worker, workers = 0;
+  class DelayedTermination extends EventEmitter {
+    constructor(_path, options) {
+      super(); worker = this; workers += 1;
+      fs.writeFileSync(lockPath, options.workerData.lockToken);
+    }
+    terminate() { return new Promise(resolve => { finishTermination = resolve; }); }
+  }
+  const service = new IndustryOverviewService({ stateStore: data.stateStore, WorkerClass: DelayedTermination, timeoutMs: 40 });
+  const request = service.read(data.source);
+  await assert.rejects(request, /后台刷新超时/);
+  assert.equal(fs.existsSync(lockPath), true);
+  assert.equal(service.read(data.source, { force: true }), request);
+  assert.equal(workers, 1);
+  const started = performance.now();
+  await service.close();
+  assert.ok(performance.now() - started < 1000, "closing must not wait indefinitely on native IO");
+  assert.equal(fs.existsSync(lockPath), true, "close must not steal a lock from a still-live worker");
+  finishTermination(1);
+  worker.emit("exit", 1);
+  await service.queue;
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("force requested before a timeout rejects promptly and never queues another worker after the aborted one exits", async t => {
+  const data = fixture(t);
+  const { EventEmitter } = require("node:events");
+  const { industryWorkerLock } = require("../electron/repository-worker.cjs");
+  const lockPath = industryWorkerLock(data.source).path;
+  let finishTermination, worker, workers = 0;
+  class DelayedTermination extends EventEmitter {
+    constructor(_path, options) {
+      super(); worker = this; workers += 1;
+      fs.writeFileSync(lockPath, options.workerData.lockToken);
+    }
+    terminate() { return new Promise(resolve => { finishTermination = resolve; }); }
+  }
+  const service = new IndustryOverviewService({ WorkerClass: DelayedTermination, timeoutMs: 40 });
+  t.after(async () => {
+    finishTermination?.(1);
+    worker?.emit("exit", 1);
+    await service.close();
+  });
+  const request = service.read(data.source);
+  const forced = service.read(data.source, { force: true });
+  assert.equal(service.read(data.source, { force: true }), forced);
+  let deadline;
+  try {
+    await Promise.race([
+      Promise.all([
+        assert.rejects(request, /后台刷新超时/),
+        assert.rejects(forced, /后台刷新超时/)
+      ]),
+      new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("forced request remained pending after timeout")), 1000); })
+    ]);
+  } finally { clearTimeout(deadline); }
+  assert.equal(fs.existsSync(lockPath), true, "neither rejected request may release a still-live worker's lock");
+  assert.equal(workers, 1);
+  finishTermination(1);
+  worker.emit("exit", 1);
+  await service.queue;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fs.existsSync(lockPath), false);
+  assert.equal(workers, 1, "the earlier force click must not auto-retry after an aborted worker finally exits");
 });
