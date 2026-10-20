@@ -269,7 +269,7 @@ function IndustryOverview({ cacheKey, refreshKey, onOpenAttachment }: {
     {error && <div className="industry-overview-notice" role="alert">{error} <button type="button" onClick={() => {
       if (failedRouteRef.current) void readRoute(failedRouteRef.current);
     }}>重试</button></div>}
-    {catalogError && <div className="industry-overview-notice" role="alert">{catalogError}{hasCatalog ? "，已保留上次内容。" : ""} <button type="button" onClick={() => setRetryKey(value => value + 1)}>重试</button></div>}
+    {catalogError && <div className="industry-overview-notice" role="alert">{catalogError}{/[。.!?！？]$/.test(catalogError) ? "" : "。"}{hasCatalog ? "已保留上次内容。" : ""} <button type="button" onClick={() => setRetryKey(value => value + 1)}>重试</button></div>}
     {notice && <div className="industry-overview-notice">{notice}</div>}
     <div className={`industry-overview-reader${!entry ? " industry-board-home" : ""}`} ref={readerRef} aria-busy={loading || (catalogLoading && !hasCatalog)}>
       {!entry ? <>

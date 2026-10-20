@@ -5,8 +5,10 @@ const path = require("node:path");
 const test = require("node:test");
 const { performance } = require("node:perf_hooks");
 const { EventEmitter } = require("node:events");
+const { Worker } = require("node:worker_threads");
 const { DomiIntegration } = require("../electron/domi-integration.cjs");
 const { runLocalDomiSync } = require("../electron/local-domi-sync-runner.cjs");
+const { industryWorkerLock } = require("../electron/repository-worker.cjs");
 
 function localHealth() {
   return {
@@ -137,4 +139,105 @@ test("a stuck local scan is terminated at the deadline instead of hanging the ap
       && /保留上次成功数据/.test(error.message)
   );
   assert.equal(terminated, true);
+});
+
+function lockFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-local-sync-lock-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = { localDatabasePath: path.join(root, "repository.sqlite3"), localLibraryDir: path.join(root, "library") };
+  return { root, source, lockPath: industryWorkerLock(source).path };
+}
+
+async function until(predicate) {
+  const deadline = Date.now() + 2500;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, "worker lifecycle did not complete");
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
+
+test("terminating the real scanner inside overview generation releases the parent-owned lock", async t => {
+  const data = lockFixture(t);
+  const bootstrap = path.join(data.root, "blocked-scanner.cjs");
+  fs.writeFileSync(bootstrap, `
+    const fs = require('node:fs');
+    const { workerData } = require('node:worker_threads');
+    const originalWrite = fs.writeFileSync;
+    fs.writeFileSync = function (file, ...args) {
+      const result = originalWrite.call(this, file, ...args);
+      if (String(file) === ${JSON.stringify(data.lockPath)}) {
+        originalWrite.call(this, ${JSON.stringify(path.join(data.root, "received-token"))}, workerData.lockToken);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000);
+      }
+      return result;
+    };
+    require(${JSON.stringify(path.resolve(__dirname, "../electron/local-domi-sync-worker.cjs"))});
+  `);
+  let worker;
+  class ObservedWorker extends Worker { constructor(...args) { super(...args); worker = this; } }
+  const pending = runLocalDomiSync(data.source, { workerPath: bootstrap, WorkerClass: ObservedWorker, timeoutMs: 600 });
+  const failed = assert.rejects(pending, error => error.code === "DOMI_LOCAL_SYNC_TIMEOUT");
+  await until(() => fs.existsSync(path.join(data.root, "received-token")));
+  assert.equal(fs.readFileSync(data.lockPath, "utf8"), fs.readFileSync(path.join(data.root, "received-token"), "utf8"),
+    "the actual generator must use the parent's token, not create a worker-local token");
+  await failed;
+  await until(() => worker.threadId === -1 && !fs.existsSync(data.lockPath));
+  const recovered = await runLocalDomiSync(data.source);
+  assert.equal(recovered.repositoryHealth.ok, true);
+});
+
+test("normal completion, errors and unexpected exit clean only the scanner's own lock", async t => {
+  for (const mode of ["success", "failure", "error", "exit"]) {
+    for (const foreign of [false, true]) {
+      await t.test(`${mode}, ${foreign ? "foreign" : "owned"} token`, async t => {
+        const data = lockFixture(t);
+        const other = JSON.stringify({ pid: process.pid, token: "another-worker" });
+        class CompletingWorker extends EventEmitter {
+          constructor(_file, options) {
+            super();
+            fs.writeFileSync(data.lockPath, foreign ? other : options.workerData.lockToken);
+            queueMicrotask(() => {
+              if (mode === "success") this.emit("message", { ok: true, value: { projects: ["preserved"] } });
+              if (mode === "failure") this.emit("message", { ok: false, error: { code: "TEST_FAILURE", message: "scan failed" } });
+              if (mode === "error") this.emit("error", new Error("worker failed"));
+              if (mode === "exit") this.emit("exit", 9);
+            });
+          }
+          terminate() { return Promise.resolve(1); }
+        }
+        const request = runLocalDomiSync(data.source, { WorkerClass: CompletingWorker });
+        if (mode === "success") assert.deepEqual(await request, { projects: ["preserved"] });
+        else await assert.rejects(request, /scan failed|worker failed|意外退出/);
+        if (foreign) {
+          await new Promise(resolve => setTimeout(resolve, 15));
+          assert.equal(fs.readFileSync(data.lockPath, "utf8"), other);
+        } else {
+          await until(() => !fs.existsSync(data.lockPath));
+        }
+      });
+    }
+  }
+});
+
+test("a timeout keeps the lock and scanner slot until termination is confirmed", async t => {
+  const data = lockFixture(t);
+  let worker, finishTermination, calls = 0;
+  class DelayedTermination extends EventEmitter {
+    constructor(_file, options) {
+      super(); worker = this; calls += 1;
+      fs.writeFileSync(data.lockPath, options.workerData.lockToken);
+    }
+    terminate() { return new Promise(resolve => { finishTermination = resolve; }); }
+  }
+  const request = runLocalDomiSync(data.source, { WorkerClass: DelayedTermination, timeoutMs: 100 });
+  await assert.rejects(request, error => error.code === "DOMI_LOCAL_SYNC_TIMEOUT");
+  assert.equal(fs.existsSync(data.lockPath), true, "a still-live worker must keep its lock");
+  assert.equal(runLocalDomiSync(data.source, { WorkerClass: DelayedTermination }), request);
+  assert.equal(calls, 1, "retry must not start a second scanner before the first exits");
+  const other = JSON.stringify({ pid: process.pid, token: "replacement-worker" });
+  fs.writeFileSync(data.lockPath, other);
+  finishTermination(1);
+  worker.emit("exit", 1);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(fs.readFileSync(data.lockPath, "utf8"), other, "late cleanup must not delete a replacement lock");
 });

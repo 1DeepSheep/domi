@@ -16,11 +16,12 @@ function testDelay(milliseconds) {
   Atomics.wait(signal, 0, 0, delay);
 }
 
-function syncLocalRepository(source = {}) {
+function syncLocalRepository(source = {}, lockToken = workerData?.lockToken) {
   const repository = new LocalDomiRepository({
     databasePath: source.localDatabasePath,
     libraryDir: source.localLibraryDir
   });
+  repository.industryOverviewLockToken = lockToken;
   try {
     testDelay(workerData?.testDelayMs);
     const workspaceIndex = repository.reindexWorkspace();
