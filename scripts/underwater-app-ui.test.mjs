@@ -83,8 +83,10 @@ try {
     const navOrder = await page.locator(".sidebar-nav-item").allTextContents();
     assert.ok(navOrder.findIndex(item => item.includes("水下项目")) < navOrder.findIndex(item => item.includes("行业动态")), "Underwater appears above industry news");
     await page.getByRole("tab", { name: "发现范围", exact: false }).click();
+    await page.getByRole("button", { name: "每日更新设置", exact: true }).click();
     await page.getByRole("combobox", { name: "每天更新时间" }).selectOption("11");
     await page.getByText("每天 11:00 自动发现", { exact: true }).waitFor();
+    await page.locator(".uw-disclosure > summary").filter({ hasText: "数据来源" }).click();
     await page.getByRole("button", { name: "添加来源", exact: true }).click();
     await page.getByRole("textbox", { name: "来源名称" }).fill("合成 App 来源");
     await page.getByRole("textbox", { name: "公开网址" }).fill("https://example.test/synthetic");
@@ -181,6 +183,7 @@ try {
     }
     if (scenario.name === "due") {
       await page.getByRole("tab", { name: "发现范围", exact: false }).click();
+      await page.getByRole("button", { name: "每日更新设置", exact: true }).click();
       assert.equal(await page.getByRole("switch", { name: "核验后自动入库", exact: true }).isDisabled(), true, "An active run cannot have intake permission changed mid-flight");
       await page.getByRole("button", { name: "行业动态", exact: true }).click();
       await navigation.click();

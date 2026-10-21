@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from "react";
-import { Check, ChevronDown, Compass, Loader2, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { Check, ChevronDown, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import type { SourcingFocus, SourcingSnapshot } from "../sourcing-types";
+import "../sourcing-focus.css";
 
 type Draft = { name: string; keywords: string; excludedKeywords: string; urls: string };
 const emptyDraft = (): Draft => ({ name: "", keywords: "", excludedKeywords: "", urls: "" });
@@ -29,17 +30,30 @@ export default function SourcingFocusManager({ focuses, configured = false, resu
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
+  const [truncatedIds, setTruncatedIds] = useState<string[]>([]);
+  const descriptionNodes = useRef(new Map<string, HTMLHeadingElement>());
   const locked = disabled || running || saving;
   const existing = focuses.find(focus => focus.id === editingId);
   const legacyEditing = Boolean(existing && existing.type !== "freeform");
   const maxDescriptionLength = legacyEditing ? 300 : 4000;
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      const next = [...descriptionNodes.current].filter(([, element]) => element.scrollHeight > element.clientHeight + 1).map(([id]) => id);
+      setTruncatedIds(previous => previous.length === next.length && previous.every((id, index) => id === next[index]) ? previous : next);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    for (const element of descriptionNodes.current.values()) observer.observe(element);
+    return () => observer.disconnect();
+  }, [focuses, expandedIds]);
 
   function reset() { setEditingId(null); setDraft(emptyDraft()); setAdvanced(false); setError(""); }
   function edit(focus: SourcingFocus) {
     if (locked) return;
     setError(""); setSaved(false); setEditingId(focus.id);
     setDraft({ name: focus.name, keywords: focus.keywords.join("、"), excludedKeywords: focus.excludedKeywords.join("、"), urls: focus.urls.join("\n") });
-    setAdvanced(Boolean(focus.keywords.length || focus.excludedKeywords.length || focus.urls.length));
+    setAdvanced(false);
     requestAnimationFrame(() => {
       const field = document.getElementById("uw-focus-description") as HTMLTextAreaElement | null;
       field?.focus(); field?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -76,32 +90,35 @@ export default function SourcingFocusManager({ focuses, configured = false, resu
     void persist(editingId ? focuses.map(item => item.id === editingId ? focus : item) : [...focuses, focus], true);
   }
 
-  return <section className="uw-focus-manager uw-focus-natural" aria-label="关注描述">
-    <header className="uw-focus-heading"><div><div className="uw-focus-kicker"><Search size={13} />让搜索围绕你的关注展开</div><h2>我想关注什么</h2><p>方向、实验室、公司、人名和关联关系可以写在一起，持续寻找相关的潜在创始人与创业项目。</p></div></header>
-    {running && <div className="uw-focus-running" role="status"><Loader2 size={14} className="uw-spinning" />本轮搜索进行中，完成后可调整关注描述。</div>}
-    {focuses.length > 0 && focuses.every(focus => !focus.enabled) && <div className="uw-notice" role="status">全部关注对象已暂停，开启后继续发现。</div>}
+  const conditionCount = Number(Boolean(draft.keywords.trim())) + Number(Boolean(draft.excludedKeywords.trim())) + Number(Boolean(draft.urls.trim()));
+  return <section className="uw-focus-manager uw-focus-compact" aria-label="关注描述">
+    {running && <div className="sfc-notice" role="status"><Loader2 size={13} className="uw-spinning" />搜索中，完成后可修改。</div>}
+    {focuses.length > 0 && focuses.every(focus => !focus.enabled) && <div className="sfc-notice" role="status">全部关注对象已暂停，开启后继续发现。</div>}
     {error && <div className="uw-notice uw-notice-error" role="alert">{error}</div>}
-    {saved && <div className="uw-focus-saved" role="status"><Check size={14} />关注已保存，从下一轮搜索生效；也可点击页面右上方“立即搜索”。</div>}
-    <form className={`uw-focus-form uw-focus-composer${editingId ? " is-editing" : ""}`} onSubmit={submit}>
-      <div className="uw-focus-form-heading"><h3>{legacyEditing ? "修改原有名称（保留原范围）" : editingId ? "编辑这条关注" : "写下你的关注"}</h3>{editingId && <button className="uw-icon-button" type="button" aria-label="取消编辑关注" disabled={saving} onClick={reset}><X size={16} /></button>}</div>
+    <form className={`sfc-editor${editingId ? " is-editing" : ""}`} onSubmit={submit}>
+      <div className="sfc-editor-heading"><h2>{legacyEditing ? "修改原有名称（保留原范围）" : editingId ? "编辑关注" : "我想关注什么"}</h2>{editingId && <button className="uw-icon-button" type="button" aria-label="取消编辑关注" disabled={saving} onClick={reset}><X size={15} /></button>}</div>
       <fieldset disabled={locked}>
-        <label className="uw-focus-description-label"><span className="uw-visually-hidden">关注描述</span><textarea id="uw-focus-description" required rows={legacyEditing ? 2 : 4} maxLength={maxDescriptionLength} value={draft.name} onChange={event => { setDraft({ ...draft, name: event.target.value }); setSaved(false); }} placeholder={"例如：关注 AI Agent 和具身智能，重点看 MMLab 校友、相关开源作者，以及已有人脉周围有创业迹象的人。\n也可以写：围绕某家公司离职的研究员，或某位教授的学生、共同作者寻找早期创业团队。"} /></label>
-        <div className="uw-focus-composer-hint"><span>{legacyEditing ? "这条保留原有名称和关联范围。如需混合新方向或人物，请取消编辑后另写一条关注。" : "可以写成一段话，也可以分行补充；每次保存为一条持续关注。"}</span><small>{draft.name.length.toLocaleString()} / {maxDescriptionLength.toLocaleString()}</small></div>
-        {existing && retainedScope(existing) && <div className="uw-focus-retained-scope"><Check size={13} /><span>{retainedScope(existing)}。修改描述会保留这些已有设置。</span></div>}
-        <button className="uw-focus-advanced-toggle" type="button" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}><ChevronDown size={14} className={advanced ? "is-open" : ""} />补充搜索条件<span>可选</span></button>
-        {advanced && <div className="uw-focus-advanced"><div><label>补充关键词<input value={draft.keywords} placeholder="如：多模态、机器人、前研究员；用逗号分隔" onChange={event => setDraft({ ...draft, keywords: event.target.value })} /></label><label>排除词<input value={draft.excludedKeywords} placeholder="不希望出现的方向或同名机构" onChange={event => setDraft({ ...draft, excludedKeywords: event.target.value })} /></label></div><label>指定来源网址<textarea rows={3} value={draft.urls} placeholder={"可留空；domi 会自行寻找公开来源\n需要指定时，每行填写一个完整网址"} onChange={event => setDraft({ ...draft, urls: event.target.value })} /></label></div>}
-      </fieldset><div className="uw-focus-form-footer"><p>{editingId ? "保留原有范围，更新这条关注。" : "保存后持续关注，可随时修改或暂停。"}</p>{editingId && <button type="button" className="uw-inline-button" disabled={saving} onClick={reset}>取消编辑</button>}<button type="submit" className="uw-primary-button" disabled={locked || !draft.name.trim()}>{saving ? <Loader2 size={14} className="uw-spinning" /> : editingId ? <Check size={14} /> : <Plus size={14} />}{saving ? "保存中…" : editingId ? "保存修改" : "保存关注"}</button></div>
+        <label className="sfc-description"><span className="uw-visually-hidden">关注描述</span><textarea id="uw-focus-description" required rows={2} maxLength={maxDescriptionLength} value={draft.name} onChange={event => { setDraft({ ...draft, name: event.target.value }); setSaved(false); }} placeholder="例如：关注 AI Agent，重点看 MMLab 校友、某公司离职研究员和某位教授的学生。" /></label>
+        {legacyEditing && <p className="sfc-legacy-note">仅修改名称，保留原有关联范围；要混合新方向或人物，请另加一条关注。</p>}
+        {existing && retainedScope(existing) && <p className="sfc-retained-scope">{retainedScope(existing)}</p>}
+        <div className="sfc-editor-meta"><button className="sfc-advanced-toggle" type="button" aria-label="更多条件" aria-controls="sfc-advanced-fields" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}><ChevronDown size={13} className={advanced ? "is-open" : ""} />更多条件{conditionCount > 0 && <span>{conditionCount}</span>}</button><small>{draft.name.length.toLocaleString()} / {maxDescriptionLength.toLocaleString()}</small></div>
+        {advanced && <div id="sfc-advanced-fields" className="sfc-advanced"><div><label>补充关键词<input value={draft.keywords} placeholder="多个词用逗号分隔" onChange={event => setDraft({ ...draft, keywords: event.target.value })} /></label><label>排除词<input value={draft.excludedKeywords} placeholder="不关注的方向或同名机构" onChange={event => setDraft({ ...draft, excludedKeywords: event.target.value })} /></label></div><label>指定来源网址<textarea rows={2} value={draft.urls} placeholder="可留空；每行一个完整网址" onChange={event => setDraft({ ...draft, urls: event.target.value })} /></label></div>}
+      </fieldset>
+      <div className="sfc-editor-footer"><span role={saved ? "status" : undefined}>{saved && <><Check size={12} />已保存，下轮生效。</>}</span>{editingId && <button type="button" className="uw-inline-button" disabled={saving} onClick={reset}>取消编辑</button>}<button type="submit" className="uw-primary-button" disabled={locked || !draft.name.trim()}>{saving ? <Loader2 size={13} className="uw-spinning" /> : editingId ? <Check size={13} /> : <Plus size={13} />}{saving ? "保存中…" : editingId ? "保存修改" : "保存关注"}</button></div>
     </form>
-    <div className="uw-focus-list-heading"><span>持续关注<b>{focuses.length}</b></span><small>{focuses.filter(focus => focus.enabled).length} 条开启 · 公开信息核验 · 与项目、人脉查重</small></div>
-    <div className="uw-focus-list">{focuses.length ? focuses.map(focus => {
+    <div className="sfc-list-heading"><span>已关注 <b>{focuses.length}</b></span>{focuses.length > 0 && <small>{focuses.filter(focus => focus.enabled).length} 条开启</small>}</div>
+    <div className="sfc-list">{focuses.length ? focuses.map(focus => {
       const result = results.find(item => item.focusId === focus.id);
       const expanded = expandedIds.includes(focus.id);
-      return <article className={`uw-focus-row uw-focus-description-row${focus.enabled ? "" : " is-disabled"}`} key={focus.id}>
-        <div className="uw-focus-row-icon"><Compass size={17} /></div><div className="uw-focus-row-body"><div><h3 className={expanded ? "is-expanded" : ""}>{focus.name}</h3>{!focus.enabled && <small>已暂停</small>}</div>{focus.name.length > 140 && <button type="button" className="uw-focus-read-more" onClick={() => setExpandedIds(expanded ? expandedIds.filter(id => id !== focus.id) : [...expandedIds, focus.id])}>{expanded ? "收起描述" : "展开完整描述"}</button>}{retainedScope(focus) && <p>{retainedScope(focus)}</p>}
-        {Boolean(focus.keywords.length || focus.excludedKeywords.length || focus.urls.length) && <div className="uw-focus-row-details">{focus.keywords.length > 0 && <span>关键词：{focus.keywords.join(" · ")}</span>}{focus.excludedKeywords.length > 0 && <span>排除：{focus.excludedKeywords.join(" · ")}</span>}{focus.urls.length > 0 && <span>{focus.urls.length} 个指定来源</span>}</div>}
-        {result && <div className={`uw-focus-result is-${result.status}`}><span>{result.status === "checked" ? "上轮已检查" : result.status === "failed" ? "上轮检查失败" : "尚未完成检查"}</span>{result.detail && <small>{result.detail}</small>}</div>}</div>
-        <div className="uw-focus-row-actions"><button type="button" role="switch" className="uw-toggle" aria-checked={focus.enabled} aria-label={`${focus.enabled ? "暂停" : "开启"}关注对象 ${focus.name}`} disabled={locked} onClick={() => void persist(focuses.map(item => item.id === focus.id ? { ...item, enabled: !item.enabled } : item))}><span /></button><button type="button" className="uw-icon-button" aria-label={`编辑关注对象 ${focus.name}`} title="编辑" disabled={locked} onClick={() => edit(focus)}><Pencil size={14} /></button><button type="button" className="uw-icon-button" aria-label={`移除关注对象 ${focus.name}`} title="移除" disabled={locked} onClick={() => void persist(focuses.filter(item => item.id !== focus.id))}><Trash2 size={14} /></button></div>
+      const hasConditions = Boolean(focus.keywords.length || focus.excludedKeywords.length || focus.urls.length || retainedScope(focus));
+      return <article className={`sfc-row${focus.enabled ? "" : " is-disabled"}`} key={focus.id}>
+        <div className="uw-focus-row-body sfc-row-body"><h3 ref={element => { if (element) descriptionNodes.current.set(focus.id, element); else descriptionNodes.current.delete(focus.id); }} className={expanded ? "is-expanded" : ""}>{focus.name}</h3>
+          <div className="sfc-row-meta">{!focus.enabled && <span className="sfc-paused">已暂停</span>}{result && <span className={`sfc-result is-${result.status}`}>{result.status === "checked" ? "上轮已检查" : result.status === "failed" ? "上轮检查失败" : "尚未完成检查"}</span>}{(expanded || truncatedIds.includes(focus.id)) && <button type="button" className="sfc-read-more" aria-expanded={expanded} onClick={() => setExpandedIds(expanded ? expandedIds.filter(id => id !== focus.id) : [...expandedIds, focus.id])}>{expanded ? "收起描述" : "展开完整描述"}</button>}</div>
+          {result?.detail && <p className={`sfc-result-detail is-${result.status}`}>{result.detail}</p>}
+          {hasConditions && <details className="sfc-conditions"><summary>补充条件<ChevronDown size={12} /></summary><div>{retainedScope(focus) && <p>{retainedScope(focus)}</p>}{focus.keywords.length > 0 && <p>关键词：{focus.keywords.join(" · ")}</p>}{focus.excludedKeywords.length > 0 && <p>排除：{focus.excludedKeywords.join(" · ")}</p>}{focus.urls.length > 0 && <p>指定来源：{focus.urls.join(" · ")}</p>}</div></details>}
+        </div>
+        <div className="sfc-row-actions"><button type="button" role="switch" className="uw-toggle" aria-checked={focus.enabled} aria-label={`${focus.enabled ? "暂停" : "开启"}关注对象 ${focus.name}`} disabled={locked} onClick={() => void persist(focuses.map(item => item.id === focus.id ? { ...item, enabled: !item.enabled } : item))}><span /></button><button type="button" className="uw-icon-button" aria-label={`编辑关注对象 ${focus.name}`} title="编辑" disabled={locked} onClick={() => edit(focus)}><Pencil size={13} /></button><button type="button" className="uw-icon-button" aria-label={`移除关注对象 ${focus.name}`} title="移除" disabled={locked} onClick={() => void persist(focuses.filter(item => item.id !== focus.id))}><Trash2 size={13} /></button></div>
       </article>;
-    }) : <div className="uw-focus-empty"><Compass size={24} /><h3>{configured ? "尚未设置关注对象，请先添加" : "写下第一条关注，开始持续发现"}</h3><p>在上方写一段你想关注的内容，方向、机构和人物可以放在一起。</p></div>}</div>
+    }) : <p className="sfc-empty">{configured ? "尚未设置关注对象，请先添加" : "还没有关注内容，在上方添加即可。"}</p>}</div>
   </section>;
 }
