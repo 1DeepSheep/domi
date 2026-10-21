@@ -73,6 +73,13 @@ try {
     await navigation.click();
     await page.getByRole("heading", { name: "水下项目", exact: true }).waitFor();
     await page.waitForFunction(() => document.querySelectorAll(".uw-candidate").length === 5);
+    await page.getByRole("button", { name: "查看 示例项目·研究助手 的已有项目关联", exact: true }).click();
+    const contextDialog = page.getByRole("dialog", { name: "示例项目·研究助手", exact: true });
+    await contextDialog.getByRole("heading", { name: /可以通过谁联系/ }).waitFor();
+    await contextDialog.getByText("有库内关系依据", { exact: true }).waitFor();
+    await contextDialog.getByText("公开关系待确认", { exact: true }).waitFor();
+    assert.equal(await contextDialog.locator(".uw-research-card").count(), 2, "Full App preserves concrete library comparisons");
+    await page.keyboard.press("Escape");
     const navOrder = await page.locator(".sidebar-nav-item").allTextContents();
     assert.ok(navOrder.findIndex(item => item.includes("水下项目")) < navOrder.findIndex(item => item.includes("行业动态")), "Underwater appears above industry news");
     await page.getByRole("tab", { name: "发现范围", exact: false }).click();
@@ -195,7 +202,7 @@ try {
     assert.deepEqual(errors, [], scenario.name);
     await context.close();
   }
-  console.log("underwater App UI: navigation, saves, manual-run lifecycle, daily scheduling/due gates/failed retry, active-run deduplication, and preview isolation passed");
+  console.log("underwater App UI: library contact/comparison context, navigation, saves, manual-run lifecycle, daily scheduling/due gates/failed retry, active-run deduplication, and preview isolation passed");
 } finally {
   await browser?.close(); await server?.close(); await fs.rm(cache, { recursive: true, force: true });
 }

@@ -84,6 +84,98 @@ try {
   await page.getByRole("button", { name: "重点实验室", exact: true }).click();
   assert.equal(await page.locator(".uw-candidate").count(), 1);
   await page.getByRole("button", { name: "全部", exact: true }).click();
+  // Contact and research context use explicit library identities and grounded evidence.
+  await page.getByRole("button", { name: "查看 示例项目·研究助手 的联系路径", exact: true }).click();
+  const contextDialog = page.getByRole("dialog", { name: "示例项目·研究助手", exact: true });
+  await contextDialog.waitFor();
+  assert.deepEqual(await contextDialog.locator("section > h3").allTextContents().then(headings => headings.slice(0, 3)), ["可以通过谁联系2 条线索", "与已有项目和方向的关联2 项", "为什么发现这条线索"]);
+  assert.equal(await contextDialog.getByText("有库内关系依据", { exact: true }).count(), 1);
+  assert.equal(await contextDialog.getByText("公开关系待确认", { exact: true }).count(), 1);
+  await contextDialog.getByText("以下是可先询问的路径，关系与引荐意愿仍需确认。", { exact: true }).waitFor();
+  assert.equal(await contextDialog.locator(".uw-contact-card").count(), 2);
+  assert.equal(await contextDialog.locator(".uw-research-card").count(), 2);
+  await contextDialog.getByText("相似产品", { exact: true }).waitFor();
+  await contextDialog.getByText("同一研究方向", { exact: true }).waitFor();
+  await contextDialog.getByText("研究助手聚焦学术文献与研究计划；知识助手侧重企业内部文档和团队知识协作。", { exact: true }).waitFor();
+  await contextDialog.getByText("知识助手的产品负责人", { exact: true }).waitFor();
+  await contextDialog.getByRole("button", { name: "打开人脉档案 示例联系人·陈女士", exact: true }).first().click();
+  const firstEvidence = contextDialog.locator(".uw-contact-card").first().locator("summary");
+  await firstEvidence.focus();
+  await page.keyboard.press("Enter");
+  assert.equal(await contextDialog.locator(".uw-contact-card").first().locator("details").getAttribute("open"), "");
+  await contextDialog.locator(".uw-contact-card").first().getByRole("button", { name: "打开人脉档案 示例联系人·陈女士", exact: true }).last().click();
+  const publicPath = contextDialog.locator(".uw-contact-card").nth(1);
+  await publicPath.locator("summary").click();
+  await publicPath.getByRole("button", { name: "打开项目档案 示例项目·知识助手", exact: true }).last().click();
+  await publicPath.getByRole("button", { name: "公开来源 example.com", exact: true }).click();
+  await contextDialog.locator(".uw-research-card").first().getByRole("button", { name: "打开项目档案 示例项目·知识助手", exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => window.__underwaterTest.calls.filter(call => ["record", "url"].includes(call.kind))), [
+    { kind: "record", value: { type: "person", id: "preview-person-chen" } },
+    { kind: "record", value: { type: "person", id: "preview-person-chen" } },
+    { kind: "record", value: { type: "project", id: "preview-project-knowledge-assistant" } },
+    { kind: "url", value: "https://example.com/research-meetup" },
+    { kind: "record", value: { type: "project", id: "preview-project-knowledge-assistant" } }
+  ]);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => { const state = window.__underwaterTest; state.contextOriginal = structuredClone(state.snapshot); state.calls = []; });
+
+  // Missing, incomplete, current not-found, and historical conclusions stay distinct.
+  const absentRow = page.locator(".uw-candidate").filter({ has: page.getByRole("button", { name: "查看 GenuX 详情", exact: true }) });
+  assert.equal(await absentRow.locator(".uw-library-summary").getByText("尚未检查", { exact: true }).count(), 2);
+  await page.getByRole("button", { name: "查看 GenuX 的已有项目关联", exact: true }).click();
+  assert.equal(await page.getByRole("dialog").locator(".uw-context-empty").getByText("尚未检查", { exact: true }).count(), 2);
+  await page.keyboard.press("Escape");
+  const setContextState = async (status, checkedDelta, keepItems = false) => {
+    await page.evaluate(({ status, checkedDelta, keepItems }) => {
+      const state = window.__underwaterTest; const snapshot = structuredClone(state.contextOriginal);
+      const candidate = snapshot.candidates.find(item => item.id === "preview-research-assistant");
+      for (const field of ["contactPaths", "researchLinks"]) candidate[field] = {
+        ...candidate[field], status, note: "合成检查状态说明", items: keepItems ? candidate[field].items : [],
+        checkedAt: checkedDelta === null ? undefined : snapshot.run.lastAttemptAt + checkedDelta
+      };
+      state.setSnapshot(snapshot);
+    }, { status, checkedDelta, keepItems });
+    await page.waitForFunction(({ status, checkedDelta, keepItems }) => {
+      const state = window.__underwaterTest; const result = state.snapshot.candidates.find(item => item.id === "preview-research-assistant").contactPaths;
+      return result.status === status && result.items.length === (keepItems ? 2 : 0) && (checkedDelta === null ? result.checkedAt === undefined : result.checkedAt === state.snapshot.run.lastAttemptAt + checkedDelta);
+    }, { status, checkedDelta, keepItems });
+  };
+  const syntheticRow = page.locator(".uw-candidate").filter({ has: page.getByRole("button", { name: "查看 示例项目·研究助手 详情", exact: true }) });
+  await setContextState("not_found", 1000);
+  assert.equal(await syntheticRow.locator(".uw-library-summary").getByText("本轮未找到", { exact: true }).count(), 2);
+  await page.getByRole("button", { name: "查看 示例项目·研究助手 的联系路径", exact: true }).click();
+  assert.equal(await contextDialog.locator(".uw-context-empty").getByText("本轮未找到", { exact: true }).count(), 2);
+  await page.keyboard.press("Escape");
+  await setContextState("not_found", -1000);
+  assert.equal(await syntheticRow.locator(".uw-library-summary").getByText("上次未找到，本轮待复核", { exact: true }).count(), 2);
+  await page.getByRole("button", { name: "查看 示例项目·研究助手 的联系路径", exact: true }).click();
+  assert.equal(await contextDialog.getByText("本轮未找到", { exact: true }).count(), 0);
+  assert.equal(await contextDialog.locator(".uw-context-empty").getByText("上次未找到，本轮待复核", { exact: true }).count(), 2);
+  assert.equal(await contextDialog.locator(".uw-context-checked").count(), 2, "Historical checks retain their timestamps");
+  await page.keyboard.press("Escape");
+  await setContextState("found", -1000, true);
+  assert.equal(await syntheticRow.locator(".uw-library-summary button").filter({ hasText: "本轮待复核" }).count(), 2);
+  await page.getByRole("button", { name: "查看 示例项目·研究助手 的联系路径", exact: true }).click();
+  assert.equal(await contextDialog.locator(".uw-contact-card").count(), 2, "Historical paths remain inspectable");
+  assert.equal(await contextDialog.locator(".uw-research-card").count(), 2);
+  await contextDialog.getByText("以下为上次检查的联系线索，本轮待复核。", { exact: true }).waitFor();
+  await contextDialog.getByText("以下为上次检查的项目与方向关联，本轮待复核。", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  for (const status of ["found", "not_found"]) {
+    await setContextState(status, null, status === "found");
+    assert.equal(await syntheticRow.locator(".uw-library-summary button").filter({ hasText: "本轮待复核" }).count(), 2, "Missing check time never implies current completion");
+  }
+  await setContextState("pending", null, true);
+  assert.equal(await syntheticRow.locator(".uw-library-summary button").filter({ hasText: "检查未完成" }).count(), 2);
+  await page.getByRole("button", { name: "查看 示例项目·研究助手 的联系路径", exact: true }).click();
+  assert.equal(await contextDialog.locator(".uw-contact-card").count(), 2, "Incomplete checks can retain grounded partial paths");
+  assert.equal(await contextDialog.locator(".uw-research-card").count(), 2);
+  assert.equal(await contextDialog.getByText("尚未检查", { exact: true }).count(), 0);
+  await contextDialog.getByText("联系路径检查未完成，以下为目前已有的线索。", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await setContextState("pending", null);
+  assert.equal(await syntheticRow.locator(".uw-library-summary").getByText("检查未完成", { exact: true }).count(), 2);
+  await page.evaluate(() => { const state = window.__underwaterTest; state.setSnapshot(structuredClone(state.contextOriginal)); state.calls = []; });
   await page.getByRole("button", { name: "查看 PhAI lab 详情", exact: true }).click();
   await page.getByRole("dialog", { name: "PhAI lab" }).waitFor();
   assert.equal(await page.locator(":focus").getAttribute("aria-label"), "关闭线索详情");
@@ -156,7 +248,7 @@ try {
   await page.evaluate(() => { window.__underwaterTest.setSnapshot(null); window.__underwaterTest.setLoading(true); });
   await page.getByRole("heading", { name: "正在读取水下线索" }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("underwater panel UI: filters, evidence, keyboard modal, responsive layout, source CRUD, duplicate protection, save failure, schedule, run/partial/error/empty states passed");
+  console.log("underwater panel UI: contact routes, research comparisons, historical/partial check states, evidence callbacks, filters, keyboard modal, responsive layout, source CRUD, duplicate protection, save failure, schedule, run/partial/error/empty states passed");
   await context.close();
 } finally {
   await browser?.close();

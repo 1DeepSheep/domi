@@ -32,6 +32,47 @@ export interface SourcingFocus {
   enabled: boolean;
 }
 
+export interface SourcingLibraryRef {
+  type: "project" | "person";
+  id: string;
+  name: string;
+}
+
+export type SourcingContextEvidence = {
+  kind: "library";
+  entity: SourcingLibraryRef;
+  quote: string;
+  documentPath?: string;
+} | {
+  kind: "web";
+  url: string;
+  quote: string;
+};
+
+export interface SourcingContactPath {
+  via: SourcingLibraryRef;
+  chain: string[];
+  basis: "library_record" | "public_overlap";
+  reason: string;
+  nextStep: string;
+  evidence: SourcingContextEvidence[];
+}
+
+export interface SourcingResearchLink {
+  target: SourcingLibraryRef;
+  relation: "similar_product" | "same_direction" | "competitor" | "upstream" | "downstream" | "complementary" | "team_connection";
+  reason: string;
+  difference: string;
+  evidence: SourcingContextEvidence[];
+}
+
+export interface SourcingContextResult<T> {
+  status: "pending" | "found" | "not_found";
+  note: string;
+  checkedAt?: number;
+  items: T[];
+}
+
 export interface SourcingCandidate {
   id: string;
   name: string;
@@ -50,6 +91,8 @@ export interface SourcingCandidate {
   sources: Array<{ url: string; title: string; type: string }>;
   discoveryPath: string[];
   relatedEntities: Array<{ type: "project" | "person"; id: string; name: string; relation: string }>;
+  contactPaths?: SourcingContextResult<SourcingContactPath>;
+  researchLinks?: SourcingContextResult<SourcingResearchLink>;
   intake: {
     status: "pending" | "matched" | "created" | "needs_review";
     projectId?: string;

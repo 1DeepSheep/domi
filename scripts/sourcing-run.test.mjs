@@ -116,3 +116,13 @@ test("mixed natural-language scope is preserved without forced entity classifica
   assert.ok(text.includes("空 relations 数组不表示禁止原文明确要求的关系搜索"));
   assert.ok(text.includes("只有所有分支及明确网址都完成才能 checked"));
 });
+
+test("every discovery requires evidence-backed contact routes and research comparisons", () => {
+  const text = sourcingRequestText(lease);
+  for (const field of ["contactPaths", "researchLinks", "library_record", "public_overlap", "similar_product", "same_direction", "difference", "documentPath"]) assert.ok(text.includes(field));
+  assert.ok(text.includes("库内有档案不等于用户认识"));
+  assert.ok(text.includes("相似产品、方向相近或团队关系不等于同一实体"));
+  assert.ok(text.includes("不代发消息或自动联系"));
+  assert.ok(text.includes("即使关闭自动入库仍要完成这两项分析"));
+  assert.ok(text.includes("checkedAt 由后台生成"));
+});

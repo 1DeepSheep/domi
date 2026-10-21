@@ -1,7 +1,8 @@
 import type { SourcingSnapshot } from "./sourcing-types";
 
 // Explicit preview route only. These UI examples never seed the user's library.
-// Names and discovery routes come from the reference workbook; all timestamps,
+// Some names and discovery routes come from the reference workbook; the explicitly
+// named synthetic research-assistant example has no real people or relationships. All timestamps,
 // run results, intake decisions and record identifiers below are demonstration data.
 const at = (minute: number) => Date.parse(`2026-10-21T09:${String(minute).padStart(2, "0")}:00+08:00`);
 export const previewSourcingSnapshot: SourcingSnapshot = {
@@ -26,7 +27,62 @@ export const previewSourcingSnapshot: SourcingSnapshot = {
   ],
   candidates: [
     { id: "preview-genux", name: "GenuX", kind: "team", founders: ["许牧天"], summary: "从研究者去向中发现的早期创业团队线索。", domain: "AI 基础设施", tags: ["校友创业"], signal: "校友名录出现团队线索，继续追踪本人主页与创业身份。", discoveredAt: at(15), lastSeenAt: at(15), stage: "new", confidence: "medium", sources: [{ url: "https://liuziwei7.github.io/team.html", title: "MMLab 成员与校友名单", type: "lab" }], discoveryPath: ["MMLab 校友", "许牧天", "GenuX"], relatedEntities: [], intake: { status: "needs_review", reason: "预览示例：公司主体与团队关系仍需核验，不直接创建正式公司。" }, nextAction: "确认创始人身份、公司主体与当前产品，再判断是否建立项目档案。" },
-    { id: "preview-xiao", name: "萧屹枫", kind: "person", founders: ["萧屹枫"], summary: "个人经历中的创业信号，保留为创始人观察线索。", domain: "AI 研究与应用", tags: ["人物观察"], signal: "个人主页披露创业相关经历，尚需确认对应团队与产品。", discoveredAt: at(13), lastSeenAt: at(13), stage: "new", confidence: "medium", sources: [{ url: "https://yfxiao16.github.io/experiences/", title: "萧屹枫 · Experiences", type: "person" }], discoveryPath: ["研究者主页", "职业变化", "潜在创始人"], relatedEntities: [], intake: { status: "pending", reason: "预览示例：先留在候选池，核验后再建立人脉档案与团队关系。" }, nextAction: "核实创业主体、联合创始人和公开联络路径。" },
+    {
+      id: "preview-research-assistant", name: "示例项目·研究助手", kind: "product", founders: ["示例创始人·林博士"],
+      summary: "面向研究员的文献检索、观点核验与研究工作流助手。", domain: "AI 研究工具", tags: ["合成界面示例"],
+      signal: "示例产品页出现研究助手与创始人介绍，可进一步核验产品和创业主体。", discoveredAt: at(17), lastSeenAt: at(17), stage: "new", confidence: "medium",
+      sources: [
+        { url: "https://example.com/research-assistant", title: "示例产品介绍（合成演示）", type: "other" },
+        { url: "https://example.com/research-meetup", title: "示例研究社区活动（合成演示）", type: "event" }
+      ],
+      discoveryPath: ["研究工作流方向", "公开产品页", "示例项目·研究助手"], relatedEntities: [],
+      contactPaths: {
+        status: "found", note: "仅展示可询问的线索，尚未确认引荐意愿。", checkedAt: at(17),
+        items: [
+          {
+            via: { type: "person", id: "preview-person-chen", name: "示例联系人·陈女士" },
+            chain: ["示例联系人·陈女士", "前同事：示例创始人·林博士", "示例项目·研究助手"], basis: "library_record",
+            reason: "示例人脉档案记载，陈女士与林博士曾在同一研究团队共事；可先向陈女士核实目前是否仍有联系。",
+            nextStep: "询问陈女士是否仍认识林博士，以及是否愿意帮助介绍。",
+            evidence: [{ kind: "library", entity: { type: "person", id: "preview-person-chen", name: "示例联系人·陈女士" }, quote: "合成档案示例：陈女士与林博士曾在同一研究团队共事，未记录引荐意愿。", documentPath: "/preview/contacts/chen-notes.md" }]
+          },
+          {
+            via: { type: "project", id: "preview-project-knowledge-assistant", name: "示例项目·知识助手" },
+            chain: ["知识助手的产品负责人", "同场研究社区活动", "示例创始人·林博士"], basis: "public_overlap",
+            reason: "示例项目中的产品负责人与林博士出现在同一公开活动名单，现有材料尚未证明两人熟识。",
+            nextStep: "先问知识助手的产品负责人是否认识林博士，再确认是否愿意介绍。",
+            evidence: [
+              { kind: "library", entity: { type: "project", id: "preview-project-knowledge-assistant", name: "示例项目·知识助手" }, quote: "合成档案示例：知识助手的产品负责人参与研究者社区，未记录与林博士的私人关系。" },
+              { kind: "web", url: "https://example.com/research-meetup", quote: "合成活动示例：知识助手产品负责人与林博士同列嘉宾；同场出席不能证明彼此认识。" }
+            ]
+          }
+        ]
+      },
+      researchLinks: {
+        status: "found", note: "以下是合成示例的研究对照，不代表真实项目关系。", checkedAt: at(17),
+        items: [
+          {
+            target: { type: "project", id: "preview-project-knowledge-assistant", name: "示例项目·知识助手" }, relation: "similar_product",
+            reason: "都提供文档检索、引用回溯与结论整理，服务需要核对信息来源的用户。",
+            difference: "研究助手聚焦学术文献与研究计划；知识助手侧重企业内部文档和团队知识协作。",
+            evidence: [
+              { kind: "library", entity: { type: "project", id: "preview-project-knowledge-assistant", name: "示例项目·知识助手" }, quote: "合成项目档案：知识助手支持企业内部文档检索、引用回溯与团队知识协作。" },
+              { kind: "web", url: "https://example.com/research-assistant", quote: "合成产品介绍：研究助手面向学术文献检索、证据核对与研究计划整理。" }
+            ]
+          },
+          {
+            target: { type: "project", id: "preview-project-lab-workflow", name: "示例项目·实验协作助手" }, relation: "same_direction",
+            reason: "共同关注科研工作流，用 AI 整理研究输入并支持团队协作。",
+            difference: "研究助手处理论文与证据；实验协作助手处理实验日志、共享任务和进度流转。",
+            evidence: [
+              { kind: "library", entity: { type: "project", id: "preview-project-lab-workflow", name: "示例项目·实验协作助手" }, quote: "合成项目档案：实验协作助手面向实验日志、共享任务和研究团队进度流转。" },
+              { kind: "web", url: "https://example.com/research-assistant", quote: "合成产品介绍：研究助手围绕文献和证据核对组织科研工作流。" }
+            ]
+          }
+        ]
+      },
+      intake: { status: "pending", reason: "纯合成界面示例，未创建真实项目或人脉记录。" }, nextAction: "先核验创业主体，再询问有依据的联系人是否愿意帮助介绍。"
+    },
     { id: "preview-second", name: "第二次启蒙", kind: "company", founders: ["薛天禄"], summary: "从创始人访谈延展，核验旗下产品与公司主体。", domain: "AI 应用", tags: ["连续创业"], signal: "访谈出现公司与产品信息，按同一主体整理多产品关系。", discoveredAt: at(11), lastSeenAt: at(11), stage: "new", confidence: "high", sources: [{ url: "https://dinehq.com/news/tianlu-interview/", title: "Dine · 薛天禄访谈", type: "event" }], discoveryPath: ["创始人访谈", "薛天禄", "第二次启蒙"], relatedEntities: [], intake: { status: "created", projectId: "preview-project-second", personIds: ["preview-person-xue"], reason: "预览示例：主体核验通过后建立项目与创始人档案，多产品关联到同一家公司。" }, nextAction: "继续跟踪产品发布、用户验证与商业进展。" },
     { id: "preview-chorus", name: "Chorus", kind: "product", founders: ["陈逸斐"], summary: "从社区项目追到开源作者，创业主体仍待核实。", domain: "AI Agent", tags: ["开源产品"], signal: "开源作者与产品线索可以关联，但尚不足以确认独立公司。", discoveredAt: at(9), lastSeenAt: at(9), stage: "new", confidence: "low", sources: [{ url: "https://github.com/ChenNima", title: "陈逸斐 · GitHub", type: "open_source" }], discoveryPath: ["社区项目", "GitHub 作者", "Chorus"], relatedEntities: [], intake: { status: "needs_review", reason: "预览示例：保留独立产品候选，不将开源仓库自动等同创业公司。" }, nextAction: "确认开发者与产品的关系、是否独立创业，以及当前投入程度。" },
     { id: "preview-phai", name: "PhAI lab", kind: "company", founders: ["吴英成"], summary: "人物主页的新身份，补充到已有项目关系。", domain: "AI for Science", tags: ["已有项目关联"], signal: "吴英成的创业身份指向 PhAI lab，与现有主体合并关联。", discoveredAt: at(7), lastSeenAt: at(7), stage: "watching", confidence: "high", sources: [{ url: "https://charles-wu.com/", title: "吴英成 · 个人主页", type: "project" }], discoveryPath: ["已有人物线索", "本人主页", "PhAI lab"], relatedEntities: [{ type: "project", id: "preview-project-phai", name: "PhAI lab", relation: "同一创业主体，补充创始人关系" }], intake: { status: "matched", projectId: "preview-project-phai", reason: "预览示例：识别人物别名与公司关系，补充已有档案，避免重复建立隐形团队。" }, nextAction: "围绕共同作者、团队成员与相关实验室继续延展。" },
