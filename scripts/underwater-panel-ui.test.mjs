@@ -67,6 +67,8 @@ try {
   await page.getByRole("heading", { name: "水下项目", exact: true }).waitFor();
   await page.evaluate(() => document.fonts.ready);
   assert.equal(await page.locator(".uw-candidate").count(), 5);
+  assert.equal(await page.locator(".uw-summary-grid").count(), 0, "Counts are shown once in filters");
+  assert.ok((await page.locator(".uw-candidate").first().boundingBox()).y < 330, "First result is visible without a large summary dashboard");
   if (screenshots) await page.screenshot({ path: path.join(screenshots, "underwater-panel.png") });
   for (const width of [1187, 1027, 760]) {
     await page.setViewportSize({ width, height: 900 });
@@ -81,9 +83,9 @@ try {
   await page.getByRole("textbox", { name: "搜索项目、创始人" }).fill("许牧天");
   assert.equal(await page.locator(".uw-candidate").count(), 1);
   await page.getByRole("button", { name: "清空搜索" }).click();
-  await page.getByRole("button", { name: "重点实验室", exact: true }).click();
+  await page.getByRole("combobox", { name: "发现路径", exact: true }).selectOption("lab");
   assert.equal(await page.locator(".uw-candidate").count(), 1);
-  await page.getByRole("button", { name: "全部", exact: true }).click();
+  await page.getByRole("combobox", { name: "发现路径", exact: true }).selectOption("all");
   // Contact and research context use explicit library identities and grounded evidence.
   await page.getByRole("button", { name: "查看 示例项目·研究助手 的联系路径", exact: true }).click();
   const contextDialog = page.getByRole("dialog", { name: "示例项目·研究助手", exact: true });
@@ -193,6 +195,9 @@ try {
   assert.equal(await page.getByRole("dialog").count(), 0);
   await page.getByRole("tab", { name: "发现范围", exact: false }).click();
   if (screenshots) await page.screenshot({ path: path.join(screenshots, "underwater-sources.png") });
+  assert.equal(await page.getByRole("button", { name: "添加来源", exact: true }).isVisible(), false, "Source controls start collapsed");
+  assert.equal(await page.getByRole("switch", { name: "每日自动更新", exact: true }).isVisible(), false, "Daily settings start collapsed");
+  await page.locator(".uw-disclosure > summary").filter({ hasText: "数据来源" }).click();
   await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, sources: s.snapshot.sources.map((item, index) => index ? item : { ...item, focusIds: ["preview-focus-mmlab"], inScope: false }) }); });
   await page.getByText("关联关注对象已暂停或移除，本轮不搜索。", { exact: true }).waitFor();
   assert.equal(await page.getByRole("switch", { name: "暂停关注 MMLab · 成员与校友", exact: true }).getAttribute("aria-checked"), "true", "Out-of-scope does not overwrite the original source toggle");
@@ -201,6 +206,7 @@ try {
   await page.getByRole("button", { name: "保存来源", exact: true }).click();
   await page.waitForFunction(() => window.__underwaterTest.snapshot.sources[0].name === "MMLab · 编辑过的校友来源");
   assert.deepEqual(await page.evaluate(() => ({ focusIds: window.__underwaterTest.snapshot.sources[0].focusIds, inScope: window.__underwaterTest.snapshot.sources[0].inScope })), { focusIds: ["preview-focus-mmlab"], inScope: false }, "Editing a source preserves focus ownership and scope state");
+  await page.getByRole("button", { name: "每日更新设置", exact: true }).click();
   await page.getByRole("combobox", { name: "每天更新时间" }).selectOption("10");
   await page.waitForFunction(() => window.__underwaterTest.snapshot.settings.localHour === 10);
   await page.getByRole("switch", { name: "每日自动更新", exact: true }).click();
@@ -240,7 +246,12 @@ try {
   assert.equal(await page.getByRole("button", { name: "正在发现", exact: true }).isDisabled(), true);
   await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, run: { ...s.snapshot.run, status: "partial", coverage: { checked: 4, failed: 2, pending: 0 } } }); });
   await page.getByText("本次发现已保存；2 个来源未完成，后续会继续检查。").waitFor();
-  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, run: { ...s.snapshot.run, status: "failed", error: "合成搜索失败" } }); });
+  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, error: "部分来源检查未完成" }); });
+  assert.equal(await page.locator(".uw-notice").count(), 1, "Partial errors appear once, with both recovery actions available");
+  await page.getByRole("alert").getByRole("button", { name: "查看来源", exact: true }).click();
+  assert.equal(await page.getByRole("button", { name: "添加来源", exact: true }).isVisible(), true);
+  await page.getByRole("tab", { name: "项目线索", exact: true }).click();
+  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, error: undefined, run: { ...s.snapshot.run, status: "failed", error: "合成搜索失败" } }); });
   await page.getByRole("alert").getByText("合成搜索失败 已保留上次成功结果。").waitFor();
   assert.equal(await page.locator(".uw-candidate").count(), 5);
   await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, candidates: [], run: { status: "idle" } }); });
