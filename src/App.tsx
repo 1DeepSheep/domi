@@ -43,6 +43,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Radar,
   Scale,
   Search,
   Settings,
@@ -77,6 +78,9 @@ import {
 } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
 import IndustryOverview from "./IndustryOverview";
+import UnderwaterPanel from "./components/UnderwaterPanel";
+import { useSourcing } from "./use-sourcing";
+import { previewSourcingSnapshot } from "./sourcing-preview";
 import PlaudContextCard, { type PlaudContextDraft } from "./components/PlaudContextCard";
 import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadFailureSnapshot, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
 import { restorePlaudOnStartup } from "./plaud-startup";
@@ -216,7 +220,8 @@ const RadarSourceManager = lazy(() => import("./RadarSourceManager"));
 const SkillHubManager = lazy(() => import("./SkillHubManager"));
 
 type Role = "user" | "assistant" | "system";
-type WorkspaceView = "conversation" | "tasks" | "news" | "data" | "documents" | "industries";
+const sourcingPreviewEnabled = import.meta.env.DEV && !hasNativeWorkbench && new URLSearchParams(window.location.search).get("preview") === "underwater";
+type WorkspaceView = "conversation" | "tasks" | "news" | "sourcing" | "data" | "documents" | "industries";
 
 type DomiSearchOption =
   | { key: string; kind: "project"; record: DomiProject }
@@ -243,6 +248,7 @@ type DocumentPreviewOrigin = {
 const WORKSPACE_VIEW_DEFAULT_RIGHT_PANEL: Record<WorkspaceView, boolean> = {
   conversation: true,
   tasks: true,
+  sourcing: false,
   news: true,
   data: false,
   documents: false,
@@ -255,6 +261,7 @@ const WORKSPACE_SCROLL_SELECTORS: Record<WorkspaceView, string[]> = {
   // restore, which could make a reopened conversation jump to another task's spot.
   conversation: [".right-panel:not(.document-panel)"],
   tasks: [".task-board-scroll", ".task-column-list", ".right-panel:not(.document-panel)"],
+  sourcing: [".uw-page-scroll", ".right-panel:not(.document-panel)"],
   news: [".home-weekly-news", ".right-panel:not(.document-panel)"],
   data: [".database-grid-shell", ".right-panel:not(.document-panel)"],
   documents: [".rich-markdown-scroll"],
@@ -1879,7 +1886,7 @@ function App() {
   const { confirm: requestConfirmation, confirmDialog: appConfirmDialog } = useAppConfirm();
   const [threads, setThreads] = useState<Thread[]>(initialThreads);
   const [activeThreadId, setActiveThreadId] = useState(initialThreads[0].id);
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("conversation");
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(sourcingPreviewEnabled ? "sourcing" : "conversation");
   const [skillsExpanded, setSkillsExpanded] = useState(true);
   const selectedSkillButtonRef = useRef<HTMLButtonElement>(null);
   const [skillHubOpen, setSkillHubOpen] = useState(false);
@@ -2059,7 +2066,7 @@ function App() {
   const [executingSuggestionId, setExecutingSuggestionId] = useState<string | null>(null);
   const [executionSuggestionError, setExecutionSuggestionError] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [rightPanelOpen, setRightPanelOpen] = useState(!sourcingPreviewEnabled);
   const [leftPanelWidth, setLeftPanelWidth] = useState(() =>
     readStoredWidth("domi.layout.leftPanelWidth", DEFAULT_LEFT_PANEL_WIDTH)
   );
@@ -2112,6 +2119,7 @@ function App() {
   const workspaceUiStateRef = useRef<Record<WorkspaceView, WorkspaceUiState>>({
     conversation: { rightPanelOpen: true, scrollPositions: [] },
     tasks: { rightPanelOpen: true, scrollPositions: [] },
+    sourcing: { rightPanelOpen: false, scrollPositions: [] },
     news: { rightPanelOpen: true, scrollPositions: [] },
     data: { rightPanelOpen: false, scrollPositions: [] },
     documents: { rightPanelOpen: false, scrollPositions: [] },
@@ -2870,6 +2878,23 @@ function App() {
       userReasoningEffort: options.reasoningEffort ?? reasoningEffort,
       userServiceTier: options.serviceTier ?? serviceTier
     });
+  }
+
+  const sourcing = useSourcing({
+    ready: Boolean(appSettings?.onboardingComplete),
+    automaticAccess: appSettings?.externalAccessMode === "always",
+    followedDomains: appSettings?.radarFollowedDomains || [],
+    preview: sourcingPreviewEnabled ? previewSourcingSnapshot : undefined,
+    getRunOptions: () => ({
+      ...resolveRunModelPolicy("underwater-sourcing"),
+      workspacePath: appSettingsRef.current?.localRepositoryDir || activeThread.workspacePath
+    })
+  });
+
+  async function openSourcingRecord(entityType: "project" | "person", recordId: string) {
+    if (sourcingPreviewEnabled) return;
+    const result = await workbench.previewDomiDatabaseRecord({ entityType, recordId });
+    if (result.ok && result.resource) await openDocument(result.resource);
   }
 
   const deferredThreadQuery = useDeferredValue(threadQuery);
@@ -10245,10 +10270,11 @@ function App() {
     }
   }
 
-  async function openPrimaryWorkspace(view: "tasks" | "news" | "data" | "industries") {
+  async function openPrimaryWorkspace(view: "tasks" | "sourcing" | "news" | "data" | "industries") {
     if (!await navigateWorkspace(view)) return;
     setDocumentLibrarySidebarExpanded(false);
     setThreadMenuId(null);
+    if (view === "sourcing") { setRightPanelOpen(false); void sourcing.refresh(); return; }
     if (view === "industries") { setRightPanelOpen(false); return; }
     if (view !== "data") return;
     setRightPanelOpen(false);
@@ -14002,6 +14028,15 @@ function App() {
             <span className="sidebar-nav-meta" />
           </button>
           <button
+            className={`sidebar-nav-item ${workspaceView === "sourcing" ? "active" : ""}`}
+            type="button"
+            onClick={() => void openPrimaryWorkspace("sourcing")}
+          >
+            <Radar className="sidebar-nav-icon" size={19} strokeWidth={1.9} />
+            <strong>水下项目</strong>
+            <span className="sidebar-nav-meta" />
+          </button>
+          <button
             className={`sidebar-nav-item ${workspaceView === "news" ? "active" : ""}`}
             type="button"
             onClick={() => {
@@ -14314,6 +14349,8 @@ function App() {
           <div className="project-title">
             <strong>{workspaceView === "tasks"
               ? "待办事项"
+              : workspaceView === "sourcing"
+                ? "水下项目"
               : workspaceView === "news"
                 ? "行业动态"
                 : workspaceView === "industries"
@@ -14325,6 +14362,8 @@ function App() {
                 : activeThread.title}</strong>
             <span>{workspaceView === "tasks"
               ? `${taskNavigationCount} 个待办事项`
+              : workspaceView === "sourcing"
+                ? "创业项目与创始人发现"
               : workspaceView === "news"
                 ? "domi 行业雷达"
                 : workspaceView === "industries"
@@ -14346,6 +14385,8 @@ function App() {
                     refreshDomi(),
                     ...(plaudEnabled ? [refreshPlaudQueue({ fresh: true })] : [])
                   ])
+                : workspaceView === "sourcing"
+                  ? sourcing.refresh()
                 : workspaceView === "news"
                   ? scanWeeklyNews()
                   : workspaceView === "industries"
@@ -14355,7 +14396,7 @@ function App() {
                   : workspaceView === "documents"
                     ? refreshDocumentLibrary({ force: true })
                   : refreshDomi())}
-              disabled={workspaceView === "news"
+              disabled={workspaceView === "sourcing" ? sourcing.loading : workspaceView === "news"
                 ? weeklyNewsLoading || weeklyNewsScanning
                 : workspaceView === "data"
                   ? databaseLoading || databaseSaving
@@ -14364,6 +14405,8 @@ function App() {
                 : domiSyncing || (workspaceView === "tasks" && plaudEnabled && (plaudLoading || plaudSyncing))}
               title={workspaceView === "tasks"
                 ? "刷新待办事项来源"
+                : workspaceView === "sourcing"
+                  ? "刷新水下项目"
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
                   : workspaceView === "industries"
@@ -14375,6 +14418,8 @@ function App() {
                   : domiError ? `重新同步 domi：${domiError}` : "同步 domi 项目与人脉"}
               aria-label={workspaceView === "tasks"
                 ? "刷新任务来源"
+                : workspaceView === "sourcing"
+                  ? "刷新水下项目"
                 : workspaceView === "news"
                   ? "运行 domi 行业雷达"
                   : workspaceView === "industries"
@@ -14386,7 +14431,7 @@ function App() {
                   : "同步 domi 项目与人脉"}
             >
               <RefreshCw
-                className={workspaceView === "news"
+                className={workspaceView === "sourcing" ? sourcing.loading ? "spinning" : "" : workspaceView === "news"
                   ? weeklyNewsLoading || weeklyNewsScanning ? "spinning" : ""
                   : workspaceView === "data"
                     ? databaseLoading || databaseSaving ? "spinning" : ""
@@ -14411,10 +14456,10 @@ function App() {
         </header>
 
         <div
-          className={`main-grid ${rightPanelOpen ? "right-open" : "right-closed"} ${documentPanelActive ? "document-open" : ""} ${workspaceView === "tasks" ? "task-view" : workspaceView === "news" ? "news-view" : workspaceView === "data" ? "data-view" : (workspaceView === "documents" || workspaceView === "industries") ? "document-library-view" : ""}`}
+          className={`main-grid ${rightPanelOpen ? "right-open" : "right-closed"} ${documentPanelActive ? "document-open" : ""} ${workspaceView === "tasks" ? "task-view" : workspaceView === "sourcing" ? "sourcing-view" : workspaceView === "news" ? "news-view" : workspaceView === "data" ? "data-view" : (workspaceView === "documents" || workspaceView === "industries") ? "document-library-view" : ""}`}
           style={{ "--right-panel-width": `${activeRightPanelWidth}px` } as CSSProperties}
         >
-          <section className={`chat-pane ${workspaceView === "tasks" ? "task-mode" : workspaceView === "news" ? "news-mode" : workspaceView === "data" ? "data-mode" : (workspaceView === "documents" || workspaceView === "industries") ? "document-library-mode" : hasConversation ? "has-conversation" : "is-home"}`}>
+          <section className={`chat-pane ${workspaceView === "tasks" ? "task-mode" : workspaceView === "sourcing" ? "sourcing-mode" : workspaceView === "news" ? "news-mode" : workspaceView === "data" ? "data-mode" : (workspaceView === "documents" || workspaceView === "industries") ? "document-library-mode" : hasConversation ? "has-conversation" : "is-home"}`}>
             <SectionErrorBoundary
               resetKey={`${workspaceView}:${activeThread.id}:${visibleMessages.length}:${visibleMessages[visibleMessages.length - 1]?.content.length || 0}:${weeklyNews?.syncedAt || 0}`}
               title="工作区暂时无法显示"
@@ -14423,6 +14468,11 @@ function App() {
               <RenderRegion render={() => (
               workspaceView === "tasks"
                 ? renderTaskBoard()
+                : workspaceView === "sourcing"
+                  ? <UnderwaterPanel snapshot={sourcing.snapshot} loading={sourcing.loading} busy={sourcing.busy} error={sourcing.error}
+                      preview={sourcingPreviewEnabled} onRefresh={() => void sourcing.refresh()} onRun={() => void sourcing.run()}
+                      onSaveSettings={sourcing.saveSettings} onSaveSources={sourcing.saveSources}
+                      onOpenRecord={openSourcingRecord} onOpenUrl={url => void workbench.openResource(url)} />
                 : workspaceView === "news"
                   ? renderNewsWorkspace()
                   : workspaceView === "industries"

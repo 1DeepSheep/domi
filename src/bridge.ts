@@ -1,4 +1,11 @@
 import { CodexRunRequest, DesktopNotificationTarget } from "./env";
+import type { SourcingSnapshot } from "./sourcing-types";
+
+const unavailableSourcing = (): SourcingSnapshot => ({
+  ok: false, configured: false, error: "请在 domi 客户端中连接本地资料库。",
+  candidates: [], sources: [], run: { status: "idle" },
+  settings: { enabled: false, localHour: 9, timeZone: "Asia/Shanghai", autoIntake: true }
+});
 
 const nativeWorkbench = (window as unknown as { workbench?: Window["workbench"] }).workbench;
 const browserNotificationListeners = new Set<(target: DesktopNotificationTarget) => void>();
@@ -428,6 +435,10 @@ const browserFallback: Window["workbench"] = {
     ok: false,
     error: "请在 Electron 窗口中创建飞书资料库。"
   }),
+  listSourcing: async () => unavailableSourcing(),
+  configureSourcing: async () => unavailableSourcing(),
+  beginSourcing: async () => ({ ...unavailableSourcing(), started: false }),
+  finishSourcing: async () => unavailableSourcing(),
   listWeeklyNews: async () => ({
     ok: false,
     items: [],
