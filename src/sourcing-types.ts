@@ -14,6 +14,22 @@ export interface SourcingSource {
   lastCheckedAt?: number;
   status?: "pending" | "checked" | "failed";
   detail?: string;
+  focusIds?: string[];
+  inScope?: boolean;
+}
+
+export type SourcingFocusType = "direction" | "lab" | "company" | "person";
+export type SourcingRelation = "members" | "alumni" | "founders" | "employees" | "former_employees" | "students" | "coauthors" | "collaborators";
+
+export interface SourcingFocus {
+  id: string;
+  name: string;
+  type: SourcingFocusType;
+  keywords: string[];
+  excludedKeywords: string[];
+  relations: SourcingRelation[];
+  urls: string[];
+  enabled: boolean;
 }
 
 export interface SourcingCandidate {
@@ -50,6 +66,9 @@ export interface SourcingSnapshot {
   error?: string;
   candidates: SourcingCandidate[];
   sources: SourcingSource[];
+  focuses?: SourcingFocus[];
+  focusConfigured?: boolean;
+  excludedSourceUrls?: string[];
   settings: SourcingSettings;
   run: {
     status: "idle" | "running" | "partial" | "failed";
@@ -59,6 +78,8 @@ export interface SourcingSnapshot {
     nextRunAt?: number;
     error?: string;
     coverage?: { checked: number; failed: number; pending: number };
+    focusCoverage?: { checked: number; failed: number; pending: number };
+    focusResults?: Array<{ focusId: string; status: "checked" | "failed" | "pending"; detail?: string }>;
   };
 }
 

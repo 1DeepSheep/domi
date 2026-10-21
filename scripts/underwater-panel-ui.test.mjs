@@ -34,12 +34,12 @@ function Fixture() {
     state.calls.push({ kind, value: structuredClone(value) });
     if (state.holdSave) await new Promise(resolve => { state.releaseSave = resolve; });
     if (state.failSave) throw new Error("合成保存失败，请重试");
-    setSnapshot(current => kind === "settings" ? { ...current, settings: { ...current.settings, ...value } } : { ...current, sources: value });
+    setSnapshot(current => kind === "settings" ? { ...current, settings: { ...current.settings, ...value } } : kind === "focuses" ? { ...current, focuses: value } : { ...current, sources: value });
   };
   return <UnderwaterPanel snapshot={snapshot} loading={loading} preview
     onRefresh={() => state.calls.push({ kind: "refresh" })}
     onRun={() => { state.calls.push({ kind: "run" }); setSnapshot(current => ({ ...current, run: { ...current.run, status: "running" } })); }}
-    onSaveSettings={value => save("settings", value)} onSaveSources={value => save("sources", value)}
+    onSaveSettings={value => save("settings", value)} onSaveSources={value => save("sources", value)} onSaveFocuses={value => save("focuses", value)}
     onOpenUrl={value => state.calls.push({ kind: "url", value })}
     onOpenRecord={(type, id) => state.calls.push({ kind: "record", value: { type, id } })} />;
 }
@@ -101,6 +101,14 @@ try {
   assert.equal(await page.getByRole("dialog").count(), 0);
   await page.getByRole("tab", { name: "发现范围", exact: false }).click();
   if (screenshots) await page.screenshot({ path: path.join(screenshots, "underwater-sources.png") });
+  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, sources: s.snapshot.sources.map((item, index) => index ? item : { ...item, focusIds: ["preview-focus-mmlab"], inScope: false }) }); });
+  await page.getByText("关联关注对象已暂停或移除，本轮不搜索。", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("switch", { name: "暂停关注 MMLab · 成员与校友", exact: true }).getAttribute("aria-checked"), "true", "Out-of-scope does not overwrite the original source toggle");
+  await page.getByRole("button", { name: "MMLab · 成员与校友", exact: true }).click();
+  await page.getByRole("textbox", { name: "来源名称" }).fill("MMLab · 编辑过的校友来源");
+  await page.getByRole("button", { name: "保存来源", exact: true }).click();
+  await page.waitForFunction(() => window.__underwaterTest.snapshot.sources[0].name === "MMLab · 编辑过的校友来源");
+  assert.deepEqual(await page.evaluate(() => ({ focusIds: window.__underwaterTest.snapshot.sources[0].focusIds, inScope: window.__underwaterTest.snapshot.sources[0].inScope })), { focusIds: ["preview-focus-mmlab"], inScope: false }, "Editing a source preserves focus ownership and scope state");
   await page.getByRole("combobox", { name: "每天更新时间" }).selectOption("10");
   await page.waitForFunction(() => window.__underwaterTest.snapshot.settings.localHour === 10);
   await page.getByRole("switch", { name: "每日自动更新", exact: true }).click();

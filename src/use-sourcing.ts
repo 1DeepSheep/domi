@@ -3,14 +3,13 @@ import { hasNativeWorkbench, workbench } from "./bridge";
 import { executeSourcingRun, sourcingRequestText } from "./sourcing-run";
 import { workflowPrompt, workflows } from "./workflows";
 import type { CodexRunRequest } from "./env";
-import type { SourcingSettings, SourcingSnapshot, SourcingSource } from "./sourcing-types";
+import type { SourcingSettings, SourcingSnapshot, SourcingSource, SourcingFocus } from "./sourcing-types";
 
 type RunOptions = Pick<CodexRunRequest, "workspacePath" | "model" | "reasoningEffort" | "serviceTier">;
 export function useSourcing(options: {
   ready: boolean;
   automaticAccess: boolean;
   getRunOptions: () => RunOptions;
-  followedDomains: string[];
   preview?: SourcingSnapshot;
 }) {
   const [snapshot, setSnapshot] = useState<SourcingSnapshot | null>(options.preview || null);
@@ -45,10 +44,11 @@ export function useSourcing(options: {
     catch (cause) { if (mountedRef.current) setError(String(cause)); }
     finally { readingRef.current = false; if (mountedRef.current) setLoading(false); }
   }
-  async function save(request: { settings?: Partial<SourcingSettings>; sources?: SourcingSource[] }) {
+  async function save(request: { settings?: Partial<SourcingSettings>; sources?: SourcingSource[]; focuses?: SourcingFocus[] }) {
     if (optionsRef.current.preview) {
       const previous = snapshotRef.current!;
-      accept({ ...previous, settings: { ...previous.settings, ...request.settings }, sources: request.sources || previous.sources });
+      accept({ ...previous, settings: { ...previous.settings, ...request.settings }, sources: request.sources ?? previous.sources, focuses: request.focuses ?? previous.focuses,
+        focusConfigured: request.focuses !== undefined ? true : previous.focusConfigured });
       return;
     }
     const result = await workbench.configureSourcing(request);
@@ -74,7 +74,7 @@ export function useSourcing(options: {
         onSnapshot: accept,
         execute: async lease => {
           const workflow = workflows.find(item => item.id === "underwater-sourcing")!;
-          const requestText = sourcingRequestText(lease, optionsRef.current.followedDomains);
+          const requestText = sourcingRequestText(lease);
           poll = window.setInterval(() => void refresh(), 15_000);
           return workbench.runCodex({
             ...optionsRef.current.getRunOptions(), runId: lease.runId!,
@@ -105,6 +105,7 @@ export function useSourcing(options: {
     const tick = () => {
       const current = snapshotRef.current;
       if (!current?.configured || !current.settings.enabled || runningRef.current) return;
+      if ((current.focusConfigured || current.focuses?.length) && !current.focuses?.some(focus => focus.enabled)) return;
       // begin() is the authority for calendar day, retry backoff and active leases.
       if (current.run.nextRunAt && current.run.nextRunAt > Date.now()) return;
       void actionsRef.current.run(true);
@@ -122,5 +123,6 @@ export function useSourcing(options: {
   return { snapshot, loading, busy, error: error || (snapshot?.settings.enabled && !options.automaticAccess && !options.preview
     ? "每日发现等待联网授权：请在设置中允许自动外部访问；也可手动立即发现。" : ""), refresh, run,
     saveSettings: (settings: Partial<SourcingSettings>) => save({ settings }),
-    saveSources: (sources: SourcingSource[]) => save({ sources }) };
+    saveSources: (sources: SourcingSource[]) => save({ sources }),
+    saveFocuses: (focuses: SourcingFocus[]) => save({ focuses }) };
 }

@@ -8,7 +8,7 @@ const { promisify } = require("node:util");
 const execute = promisify(execFile);
 
 function emptySnapshot(error) {
-  return { ok: false, configured: false, error: error.message || String(error), candidates: [], sources: [],
+  return { ok: false, configured: false, error: error.message || String(error), candidates: [], sources: [], focuses: [], focusConfigured: false, excludedSourceUrls: [],
     settings: { enabled: false, localHour: 9, timeZone: "Asia/Shanghai", autoIntake: true }, run: { status: "idle" } };
 }
 function flatten(result) {
@@ -54,7 +54,7 @@ class SourcingService {
     finally { if (temporaryDirectory) fs.rmSync(temporaryDirectory, { recursive: true, force: true }); }
   }
   list() { return this.command("snapshot"); }
-  configure(request = {}) { return this.command("configure", { settings: request.settings, sources: request.sources }); }
+  configure(request = {}) { return this.command("configure", { settings: request.settings, sources: request.sources, focuses: request.focuses }); }
   begin(request = {}) { return this.command("begin", { force: request.force === true }); }
   async finish(request = {}) {
     const payload = { runId: request.runId, leaseToken: request.leaseToken, ...(request.error ? { error: String(request.error) } : {}) };

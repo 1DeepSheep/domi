@@ -60,7 +60,7 @@
     "test:plaud-context-ui": "node scripts/plaud-context-ui.test.mjs",
     "test:codex-thread-runtime": "node scripts/codex-thread-runtime.test.cjs",
     "test:sourcing": "node --test scripts/sourcing-service.test.cjs && node --experimental-strip-types --test scripts/sourcing-run.test.mjs",
-    "test:sourcing-ui": "node scripts/underwater-panel-ui.test.mjs && node scripts/underwater-app-ui.test.mjs"
+    "test:sourcing-ui": "node scripts/sourcing-focus-ui.test.mjs && node scripts/underwater-panel-ui.test.mjs && node scripts/underwater-app-ui.test.mjs"
   },
   "dependencies": {
     "@floating-ui/dom": "^1.8.0",

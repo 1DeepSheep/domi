@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ArrowRight, ArrowUpRight, BookOpen, CheckCheck, ChevronRight, CircleHelp, Clock3, ExternalLink, FlaskConical, GitBranch, Link2, Loader2, Pause, Play, Plus, Radar, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, Trash2, Users, X } from "lucide-react";
-import type { SourcingCandidate, SourcingSettings, SourcingSnapshot, SourcingSource } from "../sourcing-types";
+import type { SourcingCandidate, SourcingFocus, SourcingSettings, SourcingSnapshot, SourcingSource } from "../sourcing-types";
 import "../underwater.css";
+import SourcingFocusManager from "./SourcingFocusManager";
 
 type Filter = "new" | "review" | "archived" | "all";
 type Props = {
@@ -10,10 +11,12 @@ type Props = {
   error?: string;
   preview?: boolean;
   busy?: boolean;
+  initialTab?: "leads" | "scope";
   onRefresh: () => void;
   onRun: () => void;
   onSaveSettings: (settings: Partial<SourcingSettings>) => Promise<void>;
   onSaveSources: (sources: SourcingSource[]) => Promise<void>;
+  onSaveFocuses: (focuses: SourcingFocus[]) => Promise<void>;
   onOpenRecord?: (type: "project" | "person", id: string) => void;
   onOpenUrl: (url: string) => void;
 };
@@ -45,8 +48,8 @@ function IntakeBadge({ candidate }: { candidate: SourcingCandidate }) {
   </span>;
 }
 
-export default function UnderwaterPanel({ snapshot, loading = false, error = "", preview = false, busy = false, onRefresh, onRun, onSaveSettings, onSaveSources, onOpenRecord, onOpenUrl }: Props) {
-  const [tab, setTab] = useState<"leads" | "scope">("leads");
+export default function UnderwaterPanel({ snapshot, loading = false, error = "", preview = false, busy = false, initialTab = "leads", onRefresh, onRun, onSaveSettings, onSaveSources, onSaveFocuses, onOpenRecord, onOpenUrl }: Props) {
+  const [tab, setTab] = useState<"leads" | "scope">(initialTab);
   const [filter, setFilter] = useState<Filter>("all");
   const [sourceType, setSourceType] = useState("all");
   const [query, setQuery] = useState("");
@@ -60,6 +63,10 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
   const detailRef = useRef<HTMLElement>(null);
   const candidates = snapshot?.candidates || [];
   const sources = snapshot?.sources || [];
+  const focuses = snapshot?.focuses || [];
+  const allFocusPaused = focuses.length > 0 && focuses.every(focus => !focus.enabled);
+  const noConfiguredFocus = snapshot?.focusConfigured === true && focuses.length === 0;
+  const focusCoverage = snapshot?.run.focusCoverage;
   const settings = snapshot?.settings;
   const running = snapshot?.run.status === "running" || busy;
   const disabled = saving || loading;
@@ -74,7 +81,6 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
     if (sourceType !== "all" && !candidate.sources.some(source => source.type === sourceType || sourceByUrl.get(source.url)?.type === sourceType)) return false;
     return !query || [candidate.name, ...candidate.founders, candidate.domain, candidate.summary, ...candidate.tags].join(" ").toLocaleLowerCase().includes(query.toLocaleLowerCase());
   }).sort((a, b) => b.discoveredAt - a.discoveredAt), [candidates, filter, sourceType, query, sourceByUrl]);
-  const sourceCounts = useMemo(() => sources.reduce<Record<string, number>>((acc, source) => { if (source.enabled) acc[source.type] = (acc[source.type] || 0) + 1; return acc; }, {}), [sources]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -119,11 +125,11 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
   const visibleError = actionError || error || snapshot?.error || (snapshot?.run.status === "failed" ? snapshot.run.error : "");
 
   return <section className="underwater-panel" aria-label="水下项目" aria-busy={loading}>
-    {preview && <div className="uw-preview-notice"><span><Sparkles size={14} />界面预览</span><p>项目名称取自参考表；状态、数量与入库结果仅作展示，不代表实际搜索或入库。</p></div>}
+    {preview && <div className="uw-preview-notice"><span><Sparkles size={14} />界面预览</span><p>项目与关注对象为界面示例；状态、数量与入库结果仅作展示，不代表实际搜索或入库。</p></div>}
     <div className="uw-page-scroll">
       <header className="uw-page-header">
         <div><div className="uw-eyebrow"><span />SOURCING</div><h1>水下项目</h1><p>从人、实验室和产品出发，发现新闻之前的创业线索。</p></div>
-        <div className="uw-header-actions"><button className="uw-icon-button" title="刷新搜索结果" aria-label="刷新搜索结果" disabled={loading} onClick={onRefresh}><RefreshCw size={17} className={loading ? "uw-spinning" : ""} /></button><button className="uw-primary-button" disabled={running || loading} onClick={onRun}>{running ? <Loader2 size={16} className="uw-spinning" /> : <Radar size={16} />}{running ? "正在发现" : "立即搜索"}</button></div>
+        <div className="uw-header-actions"><button className="uw-icon-button" title="刷新搜索结果" aria-label="刷新搜索结果" disabled={loading} onClick={onRefresh}><RefreshCw size={17} className={loading ? "uw-spinning" : ""} /></button><button className="uw-primary-button" disabled={running || loading || allFocusPaused || noConfiguredFocus} title={noConfiguredFocus ? "先添加一个关注对象" : allFocusPaused ? "先开启一个关注对象" : undefined} onClick={onRun}>{running ? <Loader2 size={16} className="uw-spinning" /> : <Radar size={16} />}{running ? "正在发现" : "立即搜索"}</button></div>
       </header>
 
       <div className="uw-schedule-strip">
@@ -135,17 +141,19 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
       </div>
 
       {visibleError && <div className="uw-notice uw-notice-error" role="alert"><CircleHelp size={17} /><span>{visibleError}{latestSuccess ? " 已保留上次成功结果。" : ""}</span><button onClick={onRefresh} type="button">重试</button></div>}
-      {snapshot?.run.status === "partial" && <div className="uw-notice" role="status"><CircleHelp size={16} /><span>本次发现已保存；{snapshot.run.coverage?.failed || "部分"} 个来源未完成，后续会继续检查。</span><button type="button" onClick={() => setTab("scope")}>查看来源</button></div>}
+      {snapshot?.run.status === "partial" && <div className="uw-notice" role="status"><CircleHelp size={16} /><span>{snapshot.run.coverage?.failed ? `本次发现已保存；${snapshot.run.coverage.failed} 个来源未完成，后续会继续检查。` : "本次已完成的发现结果已保存，其余搜索范围会继续检查。"}</span><button type="button" onClick={() => setTab("scope")}>查看来源</button></div>}
+      {focusCoverage && (focusCoverage.failed > 0 || focusCoverage.pending > 0) && <div className="uw-notice" role="status"><Search size={16} /><span>关注对象已检查 {focusCoverage.checked} 个，{focusCoverage.failed > 0 ? `${focusCoverage.failed} 个检查失败` : ""}{focusCoverage.failed > 0 && focusCoverage.pending > 0 ? "、" : ""}{focusCoverage.pending > 0 ? `${focusCoverage.pending} 个尚未完成` : ""}；这些对象的搜索结果仍待补全。</span><button type="button" onClick={() => setTab("scope")}>查看关注对象</button></div>}
+      {(allFocusPaused || noConfiguredFocus) && tab !== "scope" && <div className="uw-notice" role="status">{noConfiguredFocus ? "尚未设置关注对象，请先添加。" : "全部关注对象已暂停，开启后继续发现。"}<button type="button" onClick={() => setTab("scope")}>设置关注对象</button></div>}
       {running && <div className="uw-live-progress" role="status"><Loader2 className="uw-spinning" size={16} /><span>正在检查公开来源、核验创业信号并与资料库查重</span><small>发现结果会陆续更新</small></div>}
 
-      <div className="uw-summary-grid">
+      {tab === "leads" && <div className="uw-summary-grid">
         <button onClick={() => { setTab("leads"); setFilter("new"); }} className="uw-summary-cell uw-summary-featured"><span>新发现线索 <ArrowUpRight size={15} /></span><strong>{loading && !snapshot ? "—" : counts.new}<small>条</small></strong><p>从公开信息中发现创业迹象</p></button>
         <button onClick={() => { setTab("leads"); setFilter("review"); }} className="uw-summary-cell"><span>待核验 <CircleHelp size={15} /></span><strong>{loading && !snapshot ? "—" : counts.review}<small>条</small></strong><p>身份、主体或关系有待确认</p></button>
         <button onClick={() => { setTab("leads"); setFilter("archived"); }} className="uw-summary-cell"><span>已入库与关联 <CheckCheck size={16} /></span><strong>{loading && !snapshot ? "—" : counts.archived}<small>条</small></strong><p>查重后建立或补充现有档案</p></button>
-        <button onClick={() => setTab("scope")} className="uw-summary-cell"><span>持续关注来源 <GitBranch size={16} /></span><strong>{sources.filter(source => source.enabled).length}<small>个</small></strong><p>实验室 · 人物 · 项目 · 社区</p></button>
-      </div>
+        <button onClick={() => setTab("scope")} className="uw-summary-cell"><span>持续关注对象 <GitBranch size={16} /></span><strong>{focuses.filter(focus => focus.enabled).length}<small>个</small></strong><p>方向 · 实验室 · 公司 · 人物</p></button>
+      </div>}
 
-      <div className="uw-main-tabs" role="tablist" aria-label="水下项目视图"><button type="button" role="tab" aria-selected={tab === "leads"} onClick={() => setTab("leads")}>项目线索</button><button type="button" role="tab" aria-selected={tab === "scope"} onClick={() => setTab("scope")}>发现范围<span>{sources.length}</span></button></div>
+      <div className="uw-main-tabs" role="tablist" aria-label="水下项目视图"><button type="button" role="tab" aria-selected={tab === "leads"} onClick={() => setTab("leads")}>项目线索</button><button type="button" role="tab" aria-selected={tab === "scope"} onClick={() => setTab("scope")}>发现范围<span>{focuses.length}</span></button></div>
 
       {tab === "leads" ? <div className="uw-leads-view">
         <div className="uw-list-toolbar"><div className="uw-filters" aria-label="线索状态">{FILTERS.map(item => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{counts[item.id]}</span></button>)}</div><label className="uw-search-field"><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索项目、创始人" aria-label="搜索项目、创始人" />{query && <button aria-label="清空搜索" onClick={() => setQuery("")}><X size={13} /></button>}</label></div>
@@ -160,10 +168,10 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
           <footer className="uw-list-footer"><ShieldCheck size={14} /><span>先核验、再查重入库。已有项目与人脉补充关联，身份存疑的线索保留待核验。</span><b>{visibleCandidates.length} 条线索</b></footer>
         </> : <div className="uw-empty-state"><div className="uw-empty-symbol"><Radar size={29} /></div><h2>{candidates.length ? "没有符合条件的线索" : "从第一条创业线索开始"}</h2><p>{candidates.length ? "试试其他状态、发现路径或关键词。" : "关注重点实验室、已知项目和人物，持续发现潜在创始人与创业团队。"}</p><button className="uw-secondary-button" onClick={() => { if (candidates.length) { setFilter("all"); setSourceType("all"); setQuery(""); } else setTab("scope"); }}>{candidates.length ? "清除筛选" : "设置发现范围"}<ArrowRight size={14} /></button></div>}
       </div> : <div className="uw-scope-view">
-        <div className="uw-scope-intro"><div><h2>把值得持续关注的线索，放进发现范围</h2><p>定期检查主页、成员去向与产品变化，并沿已有项目和人脉寻找潜在创业者。</p></div><button className="uw-secondary-button" onClick={() => startSourceEdit()} disabled={disabled}><Plus size={15} />添加来源</button></div>
-        <div className="uw-scope-summary">{Object.entries(SOURCE_LABELS).filter(([key]) => key !== "other").map(([key, label]) => <div key={key}><SourceIcon type={key} /><span>{label}</span><strong>{sourceCounts[key] || 0}</strong></div>)}</div>
+        <SourcingFocusManager focuses={focuses} configured={snapshot?.focusConfigured} results={snapshot?.run.focusResults} running={running} disabled={disabled} onSaveFocuses={onSaveFocuses} />
+        <div className="uw-scope-intro uw-supplemental-heading"><div><h2>补充数据来源 <span>{sources.length}</span></h2><p>可选：指定校友页、访谈、社区或开源主页。暂停或移除后，该网址不再参与搜索，包括关注对象指定的网址。</p></div><button className="uw-secondary-button" onClick={() => startSourceEdit()} disabled={disabled}><Plus size={15} />添加来源</button></div>
         {adding && <form className="uw-source-form" onSubmit={event => void submitSource(event)}><div className="uw-source-form-heading"><h3>{editingId ? "编辑关注来源" : "添加关注来源"}</h3><button type="button" className="uw-icon-button" aria-label="关闭来源编辑" onClick={() => setAdding(false)}><X size={16} /></button></div><div className="uw-source-fields"><label>来源名称<input required autoFocus placeholder="例如：某实验室成员与校友" value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label><label>来源类型<select value={draft.type} onChange={event => setDraft({ ...draft, type: event.target.value as SourcingSource["type"] })}>{Object.entries(SOURCE_LABELS).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label><label className="uw-source-url-field">公开网址<input required type="url" placeholder="https://" value={draft.url} onChange={event => setDraft({ ...draft, url: event.target.value })} /></label></div><div className="uw-source-form-footer"><button type="button" className="uw-inline-button" onClick={() => setAdding(false)}>取消</button><button className="uw-primary-button" type="submit" disabled={saving}>{saving ? "保存中…" : "保存来源"}</button></div></form>}
-        <div className="uw-scope-grid"><div className="uw-source-list">{sources.length ? sources.map(source => <article className={`uw-source-row${source.enabled ? "" : " is-disabled"}`} key={source.id}><div className="uw-source-icon"><SourceIcon type={source.type} size={19} /></div><div className="uw-source-body"><h3><button type="button" onClick={() => startSourceEdit(source)}>{source.name}</button><span>{SOURCE_LABELS[source.type]}</span></h3><button className="uw-source-address" onClick={() => onOpenUrl(source.url)}>{hostLabel(source.url)}<ExternalLink size={11} /></button>{source.detail && <p>{source.detail}</p>}<small className={source.status === "failed" ? "uw-source-failed" : ""}>{source.status === "failed" ? "上次检查未完成" : source.lastCheckedAt ? `最近检查 ${dateLabel(source.lastCheckedAt)}` : "等待首次检查"}</small></div><div className="uw-source-controls"><button type="button" role="switch" className="uw-toggle" aria-checked={source.enabled} aria-label={`${source.enabled ? "暂停" : "开启"}关注 ${source.name}`} disabled={disabled} onClick={() => void save(() => onSaveSources(sources.map(item => item.id === source.id ? { ...item, enabled: !item.enabled } : item)))}><span /></button><button type="button" className="uw-icon-button" aria-label={`移除来源 ${source.name}`} title="移除来源" disabled={disabled} onClick={() => void save(() => onSaveSources(sources.filter(item => item.id !== source.id)))}><Trash2 size={14} /></button></div></article>) : <div className="uw-sources-empty"><FlaskConical size={26} /><h3>还没有关注来源</h3><p>可以从实验室校友页、创始人主页或产品社区开始。</p><button className="uw-secondary-button" onClick={() => startSourceEdit()}><Plus size={14} />添加第一个来源</button></div>}</div>
+        <div className="uw-scope-grid"><div className="uw-source-list">{sources.length ? sources.map(source => <article className={`uw-source-row${source.enabled && source.inScope !== false ? "" : " is-disabled"}`} key={source.id}><div className="uw-source-icon"><SourceIcon type={source.type} size={19} /></div><div className="uw-source-body"><h3><button type="button" onClick={() => startSourceEdit(source)}>{source.name}</button><span>{SOURCE_LABELS[source.type]}</span></h3><button className="uw-source-address" onClick={() => onOpenUrl(source.url)}>{hostLabel(source.url)}<ExternalLink size={11} /></button>{source.detail && <p>{source.detail}</p>}{source.inScope === false && <p className="uw-source-out-of-scope">关联关注对象已暂停或移除，本轮不搜索。</p>}<small className={source.status === "failed" ? "uw-source-failed" : ""}>{source.status === "failed" ? "上次检查未完成" : source.lastCheckedAt ? `最近检查 ${dateLabel(source.lastCheckedAt)}` : "等待首次检查"}</small></div><div className="uw-source-controls"><button type="button" role="switch" className="uw-toggle" aria-checked={source.enabled} aria-label={`${source.enabled ? "暂停" : "开启"}关注 ${source.name}`} disabled={disabled} onClick={() => void save(() => onSaveSources(sources.map(item => item.id === source.id ? { ...item, enabled: !item.enabled } : item)))}><span /></button><button type="button" className="uw-icon-button" aria-label={`移除来源 ${source.name}`} title="移除来源" disabled={disabled} onClick={() => void save(() => onSaveSources(sources.filter(item => item.id !== source.id)))}><Trash2 size={14} /></button></div></article>) : <div className="uw-sources-empty"><FlaskConical size={26} /><h3>还没有关注来源</h3><p>可以从实验室校友页、创始人主页或产品社区开始。</p><button className="uw-secondary-button" onClick={() => startSourceEdit()}><Plus size={14} />添加第一个来源</button></div>}</div>
           <aside className="uw-settings-card"><div className="uw-settings-card-title"><Clock3 size={17} /><h3>每日发现</h3></div><div className="uw-settings-switch-row"><span>自动更新</span><button type="button" role="switch" className="uw-toggle" aria-checked={Boolean(settings?.enabled)} aria-label="每日自动更新" disabled={disabled || !settings} onClick={() => void save(() => onSaveSettings({ enabled: !settings?.enabled }))}><span /></button></div><label className="uw-time-setting">更新时间<select aria-label="每天更新时间" value={settings?.localHour ?? 9} disabled={disabled || !settings} onChange={event => void save(() => onSaveSettings({ localHour: Number(event.target.value) }))}>{Array.from({ length: 24 }, (_, hour) => <option value={hour} key={hour}>{timeLabel(hour)}</option>)}</select></label><p className="uw-setting-note">北京时间 · 每天一次<br />客户端运行时执行，错过的更新会在恢复后补查。</p><div className="uw-settings-rule" /><div className="uw-settings-switch-row"><span>核验后自动入库</span><button type="button" role="switch" className="uw-toggle" aria-checked={Boolean(settings?.autoIntake)} aria-label="核验后自动入库" disabled={disabled || running || !settings} onClick={() => void save(() => onSaveSettings({ autoIntake: !settings?.autoIntake }))}><span /></button></div><p className="uw-setting-note">与项目库、人脉库查重。明确的新主体建立档案；已有主体补充证据与关系。</p><div className="uw-intake-note"><ShieldCheck size={16} /><span>同名、隐形团队与主体不明的线索保留待核验。</span></div></aside></div>
       </div>}
     </div>

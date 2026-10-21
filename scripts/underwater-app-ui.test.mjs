@@ -24,6 +24,8 @@ const fallback = (await import(preview ? "/src/bridge" : "/src/bridge?underwater
 const state = window.__underwaterAppTest = { calls: [], issues: [], holdRun: Boolean(config.holdRun), failRun: false, result: structuredClone(previewSourcingSnapshot) };
 state.result.run.nextRunAt = Date.now() + (config.nextRunOffset ?? 86400000);
 state.result.settings.enabled = config.enabled ?? true;
+if (config.allFocusesPaused) state.result.focuses = state.result.focuses.map(focus => ({ ...focus, enabled: false }));
+if (config.explicitEmptyFocus) { state.result.focuses = []; state.result.focusConfigured = true; }
 state.result.ok = config.ok ?? true;
 state.result.configured = config.configured ?? true;
 if (config.failed) state.result.run = { ...state.result.run, status: "failed", error: "合成上次失败，等待重试" };
@@ -37,7 +39,7 @@ const mock = { ...fallback,
   listDomiTasks: async () => ({ ok: true, configured: true, tasks: [], syncedAt: Date.now() }),
   listWeeklyNews: async () => ({ ok: true, items: [], total: 0, radarCheckedThrough: Date.now() }),
   listSourcing: async () => { state.calls.push({ kind: "list" }); return structuredClone(state.result); },
-  configureSourcing: async request => { state.calls.push({ kind: "configure", request }); state.result = { ...state.result, settings: { ...state.result.settings, ...request.settings }, sources: request.sources || state.result.sources }; return structuredClone(state.result); },
+  configureSourcing: async request => { state.calls.push({ kind: "configure", request }); state.result = { ...state.result, settings: { ...state.result.settings, ...request.settings }, sources: request.sources || state.result.sources, focuses: request.focuses || state.result.focuses }; return structuredClone(state.result); },
   beginSourcing: async request => { state.calls.push({ kind: "begin", request }); state.result.ok = true; state.result.run.status = "running"; state.result.run.error = undefined; return { ...structuredClone(state.result), started: true, runId: "synthetic-run", leaseToken: "synthetic-lease", ledgerPath: "/synthetic/sourcing.json" }; },
   finishSourcing: async request => { state.calls.push({ kind: "finish", request }); state.result.run = { ...state.result.run, status: request.error ? "failed" : "idle", error: request.error, nextRunAt: Date.now() + 86400000 }; return structuredClone(state.result); },
   runCodex: async request => { state.calls.push({ kind: "run", request }); if (state.holdRun) await new Promise(resolve => { state.releaseRun = resolve; }); if (state.failRun) throw new Error("合成搜索连接失败"); return { ok: true, output: "Synthetic run only" }; },
@@ -81,11 +83,17 @@ try {
     await page.getByRole("textbox", { name: "公开网址" }).fill("https://example.test/synthetic");
     await page.getByRole("button", { name: "保存来源", exact: true }).click();
     await page.getByRole("button", { name: "合成 App 来源", exact: true }).waitFor();
+    await page.getByRole("button", { name: "添加领域 / 方向", exact: true }).click();
+    await page.getByRole("textbox", { name: "名称", exact: true }).fill("合成重点领域");
+    await page.getByRole("button", { name: "保存关注对象", exact: true }).click();
+    await page.getByRole("heading", { name: "合成重点领域", exact: true }).waitFor();
     if (!preview) {
       const saved = await page.evaluate(() => window.__underwaterAppTest.calls.filter(call => call.kind === "configure"));
-      assert.equal(saved.length, 2);
+      assert.equal(saved.length, 3);
       assert.deepEqual(saved[0].request, { settings: { localHour: 11 } });
       assert.equal(saved[1].request.sources.length, 7);
+      assert.equal(saved[2].request.focuses.length, 6);
+      assert.deepEqual(saved[2].request.focuses.at(-1).urls, []);
       await page.evaluate(() => { window.__underwaterAppTest.holdRun = true; });
       await page.getByRole("button", { name: "立即搜索", exact: true }).click();
       await page.waitForFunction(() => window.__underwaterAppTest.calls.some(call => call.kind === "run"));
@@ -102,6 +110,7 @@ try {
       assert.equal(first[1].request.allowUserInput, false);
       assert.equal(first[1].request.webSearch, true);
       assert.match(first[1].request.requestText, /mode=underwater_discover/);
+      assert.match(first[1].request.requestText, /合成重点领域/);
       assert.deepEqual(first[2].request, { runId: "synthetic-run", leaseToken: "synthetic-lease" });
       await page.evaluate(() => { window.__underwaterAppTest.failRun = true; });
       await page.getByRole("button", { name: "立即搜索", exact: true }).click();
@@ -127,6 +136,8 @@ try {
     { name: "due", enabled: true, nextRunOffset: -1000, holdRun: true, expectedRuns: 1 },
     { name: "not-due", enabled: true, nextRunOffset: 3600000, expectedRuns: 0 },
     { name: "disabled", enabled: false, nextRunOffset: -1000, expectedRuns: 0 },
+    { name: "all-focuses-paused", enabled: true, allFocusesPaused: true, nextRunOffset: -1000, expectedRuns: 0 },
+    { name: "explicit-empty-focus", enabled: true, explicitEmptyFocus: true, nextRunOffset: -1000, expectedRuns: 0 },
     { name: "no-automatic-access", enabled: true, nextRunOffset: -1000, externalAccessMode: "ask", expectedRuns: 0 },
     { name: "failed-retry", enabled: true, nextRunOffset: 120000, ok: false, configured: true, failed: true, expectedRuns: 1 },
     { name: "preview-due", enabled: true, nextRunOffset: -1000, preview: true, expectedRuns: 0 }

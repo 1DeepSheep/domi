@@ -2883,7 +2883,6 @@ function App() {
   const sourcing = useSourcing({
     ready: Boolean(appSettings?.onboardingComplete),
     automaticAccess: appSettings?.externalAccessMode === "always",
-    followedDomains: appSettings?.radarFollowedDomains || [],
     preview: sourcingPreviewEnabled ? previewSourcingSnapshot : undefined,
     getRunOptions: () => ({
       ...resolveRunModelPolicy("underwater-sourcing"),
@@ -14470,8 +14469,9 @@ function App() {
                 ? renderTaskBoard()
                 : workspaceView === "sourcing"
                   ? <UnderwaterPanel snapshot={sourcing.snapshot} loading={sourcing.loading} busy={sourcing.busy} error={sourcing.error}
+                      initialTab={sourcingPreviewEnabled && new URLSearchParams(window.location.search).get("view") === "scope" ? "scope" : "leads"}
                       preview={sourcingPreviewEnabled} onRefresh={() => void sourcing.refresh()} onRun={() => void sourcing.run()}
-                      onSaveSettings={sourcing.saveSettings} onSaveSources={sourcing.saveSources}
+                      onSaveSettings={sourcing.saveSettings} onSaveSources={sourcing.saveSources} onSaveFocuses={sourcing.saveFocuses}
                       onOpenRecord={openSourcingRecord} onOpenUrl={url => void workbench.openResource(url)} />
                 : workspaceView === "news"
                   ? renderNewsWorkspace()

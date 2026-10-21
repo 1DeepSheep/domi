@@ -7,8 +7,17 @@ const at = (minute: number) => Date.parse(`2026-10-21T09:${String(minute).padSta
 export const previewSourcingSnapshot: SourcingSnapshot = {
   ok: true,
   configured: true,
+  focusConfigured: true,
   settings: { enabled: true, localHour: 9, timeZone: "Asia/Shanghai", autoIntake: true },
   run: { status: "idle", lastAttemptAt: at(0), lastSuccessAt: at(18), nextRunAt: Date.parse("2026-10-22T09:00:00+08:00"), coverage: { checked: 6, failed: 0, pending: 0 } },
+  // Illustrative focus choices only; these do not describe the user's settings.
+  focuses: [
+    { id: "preview-focus-agent", name: "AI 应用与基础设施", type: "direction", keywords: ["AI Agent", "AI for Science", "多模态", "个人助理"], excludedKeywords: [], relations: [], urls: [], enabled: true },
+    { id: "preview-focus-embodied", name: "具身智能", type: "direction", keywords: ["机器人", "世界模型"], excludedKeywords: ["纯硬件代工"], relations: [], urls: [], enabled: true },
+    { id: "preview-focus-mmlab", name: "MMLab", type: "lab", keywords: ["多模态", "生成式 AI"], excludedKeywords: [], relations: ["members", "alumni", "students", "collaborators"], urls: ["https://liuziwei7.github.io/team.html"], enabled: true },
+    { id: "preview-focus-phai", name: "PhAI lab", type: "company", keywords: ["AI for Science"], excludedKeywords: [], relations: ["founders", "employees", "former_employees"], urls: [], enabled: true },
+    { id: "preview-focus-wu", name: "吴英成", type: "person", keywords: ["PhAI lab"], excludedKeywords: [], relations: ["coauthors", "collaborators", "employees"], urls: ["https://charles-wu.com/"], enabled: true }
+  ],
   sources: [
     { id: "preview-source-mmlab", name: "MMLab · 成员与校友", type: "lab", url: "https://liuziwei7.github.io/team.html", enabled: true, lastCheckedAt: at(3), status: "checked", detail: "沿校友去向、个人主页与新团队继续查找。" },
     { id: "preview-source-xiao", name: "萧屹枫 · 个人主页", type: "person", url: "https://yfxiao16.github.io/experiences/", enabled: true, lastCheckedAt: at(5), status: "checked", detail: "关注职业变化、创业身份与公开产品。" },

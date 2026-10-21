@@ -43,3 +43,19 @@ test("legacy backend is rejected before any command", async t => {
   const result = await f.service.begin();
   assert.equal(result.configured, false); assert.equal(invoked, false); assert.match(result.error, /飞书/);
 });
+
+
+test("configure forwards independent focuses and preserves omitted versus explicitly cleared fields", async t => {
+  const requests = [];
+  const f = fixture(t, async (_binary, args) => {
+    requests.push(JSON.parse(fs.readFileSync(args[3], "utf8")));
+    return { stdout: JSON.stringify({ ok: true, snapshot: snapshot({ focuses: [] }) }) };
+  });
+  await f.service.configure({ focuses: [{ name: "重点实验室", type: "lab", keywords: [], excludedKeywords: [], relations: ["alumni"], urls: [], enabled: true }] });
+  await f.service.configure({ settings: { localHour: 8 } });
+  await f.service.configure({ focuses: [] });
+  assert.equal(requests[0].focuses[0].name, "重点实验室");
+  assert.equal(Object.hasOwn(requests[0], "sources"), false);
+  assert.equal(Object.hasOwn(requests[1], "focuses"), false);
+  assert.deepEqual(requests[2].focuses, []);
+});
