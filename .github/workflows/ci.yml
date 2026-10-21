@@ -86,3 +86,6 @@ jobs:
 
       - name: Verify industry overview, project navigation and source attachments
         run: node scripts/industry-overview-ui.test.mjs && node scripts/industry-overview-app-ui.test.mjs
+
+      - name: Verify sourcing scope, evidence and daily discovery interface
+        run: npm run test:sourcing-ui

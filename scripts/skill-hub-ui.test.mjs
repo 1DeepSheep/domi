@@ -150,9 +150,9 @@ try {
         })
       };
     });
-    assert.equal(navigation.buttons.length, 5, "All five primary navigation entries, including Industry Overview, must remain present");
-    assert.ok(navigation.buttons.some(button => button.title === "行业看板"), "Industry Overview must remain available alongside the existing entries");
-    assert.ok(navigation.buttons.findIndex(button => button.title === "行业看板") < navigation.buttons.findIndex(button => button.title === "行业动态"), "Industry board must precede industry news");
+    assert.deepEqual(navigation.buttons.map(button => button.title), [
+      "待办事项", "行业看板", "水下项目", "行业动态", "投资档案", "文档中心"
+    ], "All six primary navigation entries must remain in order, with underwater sourcing between the industry board and industry news");
     for (const button of navigation.buttons) {
       const description = `${button.title} at ${width}×${height}, documents ${documentsExpanded ? "expanded" : "collapsed"}`;
       for (const [inner, outer, relation] of [[button.bounds, navigation.bounds, "button within navigation"], [button.text, button.bounds, "title within button"], [button.text, navigation.bounds, "title within navigation"]]) {

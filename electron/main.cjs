@@ -30,6 +30,7 @@ const { CodexRuntimeManager } = require("./codex-runtime.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DesktopNotificationService } = require("./desktop-notifications.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
+const { SourcingService } = require("./sourcing-service.cjs");
 const { PlaudRecallService } = require("./plaud-recall-model.cjs");
 const plaudRecallService = new PlaudRecallService();
 const { resolveLarkCliForChild } = require("./lark-runtime.cjs");
@@ -163,6 +164,7 @@ const NON_ARCHIVED_WORKFLOWS = new Set([
   "project-research",
   "schedule",
   "sourcing",
+  "underwater-sourcing",
   "task"
 ]);
 const allowedMarkdownAssetPaths = new Set();
@@ -196,6 +198,7 @@ const externalDomiWorkflows = new Map([
   ["schedule", "整理主题、时间和地点，并向用户指定的一个或多个参会人发送 Outlook 日程邀请"],
   ["desk-research", "访问当前项目库、文档、材料和联网数据源，并可能按要求回填研究成果"],
   ["sourcing", "访问当前人脉库和公开信息源，并可能按要求更新人脉记录"],
+  ["underwater-sourcing", "持续检索创始人与早期创业项目，查重并按水下项目设置更新本地项目库、人脉库和搜索台账"],
   ["investment-mgmt", "访问并可能更新当前项目库、文档与本地材料"]
 ]);
 const legacyFeishuPrimaryWriteWorkflows = new Set([
@@ -227,6 +230,7 @@ let codexRuntimeReadinessPromise = null;
 let stateStore = null;
 let desktopNotifications = null;
 let domiIntegration = null;
+let sourcingService = null;
 let domiPluginManager = null;
 let domiPluginActivationGate = null;
 let appSettings = null;
@@ -321,6 +325,11 @@ function getDomiIntegration() {
     });
   }
   return domiIntegration;
+}
+
+function getSourcingService() {
+  if (!sourcingService) sourcingService = new SourcingService({ integration: getDomiIntegration() });
+  return sourcingService;
 }
 
 function getDesktopNotifications() {
@@ -4891,6 +4900,10 @@ ipcMain.handle("domi:weekly-news-checkpoint", (_event, request) => {
   if (result.ok) serviceCoordinator.invalidate("domi:weekly-news:");
   return result;
 });
+ipcMain.handle("domi:sourcing-list", () => getSourcingService().list());
+ipcMain.handle("domi:sourcing-configure", (_event, request) => getSourcingService().configure(request));
+ipcMain.handle("domi:sourcing-begin", (_event, request) => getSourcingService().begin(request));
+ipcMain.handle("domi:sourcing-finish", (_event, request) => getSourcingService().finish(request));
 ipcMain.handle("domi:radar-source-list", () => {
   try {
     return getDomiIntegration().listRadarSources();
