@@ -140,6 +140,53 @@ try {
     assert.deepEqual(errors, []);
     await context.close();
   }
+  // The collapsed right panel still occupies an animated grid track. A hidden
+  // focus target previously scrolled that grid horizontally and obscured the
+  // sourcing form behind the left sidebar on desktop-sized windows.
+  {
+    const context = await browser.newContext({ viewport: { width: 1220, height: 824 }, deviceScaleFactor: 2 });
+    await context.addInitScript(() => localStorage.setItem("domi.layout.leftPanelWidth", "222"));
+    await context.route("**/*", route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    const page = await context.newPage(); page.setDefaultTimeout(15000);
+    await page.goto(origin);
+    await page.getByRole("button", { name: "水下项目", exact: true }).click();
+    const scopeTab = page.getByRole("tab", { name: /发现范围/ });
+    await scopeTab.click();
+    for (const collapse of ["inside", "topbar"]) {
+      await page.getByRole("button", { name: "展开侧边栏", exact: true }).click();
+      const closeInside = page.locator('.right-panel-header button[title="收起今日工作"]');
+      await closeInside.focus();
+      assert.equal(await closeInside.evaluate(element => element === document.activeElement), true, "Reopened panel accepts keyboard focus");
+      if (collapse === "inside") await closeInside.click();
+      else await page.getByRole("button", { name: "收起侧边栏", exact: true }).click();
+      await page.waitForFunction(() => {
+        const main = document.querySelector(".main-grid"), chat = document.querySelector(".chat-pane");
+        return main.classList.contains("right-closed") && Math.abs(main.clientWidth - chat.getBoundingClientRect().width) < 1;
+      });
+      await page.keyboard.press("Tab");
+      assert.equal(await page.evaluate(() => Boolean(document.activeElement?.closest(".right-panel,.right-panel-resizer"))), false, "Tab after collapse skips the hidden panel");
+      await scopeTab.focus();
+      await closeInside.evaluate(element => element.focus());
+      await page.locator(".right-panel-resizer").evaluate(element => element.focus());
+      assert.equal(await scopeTab.evaluate(element => element === document.activeElement), true, "Collapsed panel and separator reject programmatic focus");
+      for (let index = 0; index < 45; index++) {
+        await page.keyboard.press("Tab");
+        assert.equal(await page.evaluate(() => Boolean(document.activeElement?.closest(".right-panel,.right-panel-resizer"))), false, "Hidden controls stay out of the keyboard sequence");
+      }
+      await page.evaluate(() => { document.querySelector(".main-grid").scrollLeft = 60; });
+      const bounds = await page.evaluate(() => {
+        const main = document.querySelector(".main-grid"), heading = document.querySelector(".uw-page-header");
+        return { left: main.scrollLeft, mainX: main.getBoundingClientRect().x, headingX: heading.getBoundingClientRect().x };
+      });
+      assert.equal(bounds.left, 0, "Sourcing grid cannot acquire hidden horizontal scrolling");
+      assert.ok(bounds.headingX >= bounds.mainX + 25, "Scope heading remains clear of the left sidebar");
+      const sourcesSummary = page.locator(".uw-disclosure > summary").filter({ hasText: "数据来源" });
+      if (!await sourcesSummary.evaluate(element => element.parentElement.open)) await sourcesSummary.click();
+      await page.evaluate(() => { document.querySelector(".uw-page-scroll").scrollTop = 100; });
+      assert.ok(await page.locator(".uw-page-scroll").evaluate(element => element.scrollTop > 0), "Inner sourcing content retains vertical scrolling");
+    }
+    await context.close();
+  }
   // Fake time covers the actual mounted hook interval, without waiting a minute
   // or substituting the scheduler implementation under test.
   const schedulerScenarios = [
@@ -205,7 +252,7 @@ try {
     assert.deepEqual(errors, [], scenario.name);
     await context.close();
   }
-  console.log("underwater App UI: library contact/comparison context, navigation, saves, manual-run lifecycle, daily scheduling/due gates/failed retry, active-run deduplication, and preview isolation passed");
+  console.log("underwater App UI: library context, navigation, saves, collapsed-panel keyboard/layout safety, manual/daily run lifecycle, and preview isolation passed");
 } finally {
   await browser?.close(); await server?.close(); await fs.rm(cache, { recursive: true, force: true });
 }

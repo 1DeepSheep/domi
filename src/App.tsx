@@ -14650,6 +14650,7 @@ function App() {
 
           <div
             className="panel-resizer right-panel-resizer"
+            inert={!rightPanelOpen}
             role="separator"
             aria-label={documentPanelActive ? "调整文档栏宽度" : "调整今日工作栏宽度"}
             aria-orientation="vertical"
@@ -14666,7 +14667,7 @@ function App() {
             }}
           />
 
-          <aside className={`right-panel ${documentPanelActive ? "document-panel" : ""}`}>
+          <aside className={`right-panel ${documentPanelActive ? "document-panel" : ""}`} inert={!rightPanelOpen}>
             <SectionErrorBoundary
               resetKey={`${documentPanelActive ? "document" : "context"}:${markdownDocument?.path || pdfDocument?.path || "none"}:${markdownDocument?.mtimeMs || pdfDocument?.mtimeMs || plaudSnapshot?.syncedAt || 0}`}
               title={documentPanelActive ? "文档栏暂时无法显示" : "今日工作暂时无法显示"}

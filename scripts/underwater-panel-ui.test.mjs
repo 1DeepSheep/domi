@@ -246,7 +246,12 @@ try {
   assert.equal(await page.getByRole("button", { name: "正在发现", exact: true }).isDisabled(), true);
   await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, run: { ...s.snapshot.run, status: "partial", coverage: { checked: 4, failed: 2, pending: 0 } } }); });
   await page.getByText("本次发现已保存；2 个来源未完成，后续会继续检查。").waitFor();
-  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, run: { ...s.snapshot.run, status: "failed", error: "合成搜索失败" } }); });
+  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, error: "部分来源检查未完成" }); });
+  assert.equal(await page.locator(".uw-notice").count(), 1, "Partial errors appear once, with both recovery actions available");
+  await page.getByRole("alert").getByRole("button", { name: "查看来源", exact: true }).click();
+  assert.equal(await page.getByRole("button", { name: "添加来源", exact: true }).isVisible(), true);
+  await page.getByRole("tab", { name: "项目线索", exact: true }).click();
+  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, error: undefined, run: { ...s.snapshot.run, status: "failed", error: "合成搜索失败" } }); });
   await page.getByRole("alert").getByText("合成搜索失败 已保留上次成功结果。").waitFor();
   assert.equal(await page.locator(".uw-candidate").count(), 5);
   await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, candidates: [], run: { status: "idle" } }); });

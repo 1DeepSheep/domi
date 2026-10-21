@@ -97,3 +97,7 @@
   .uw-source-section-toolbar { align-items:flex-start }
   .uw-setting-row { gap:10px }
 }
+
+/* Hidden auxiliary panels must not scroll the sourcing workspace sideways. */
+.main-grid.sourcing-view { overflow:clip }
+.uw-notice button + button { margin-left:0 }
