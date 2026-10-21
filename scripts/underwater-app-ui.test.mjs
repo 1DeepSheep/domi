@@ -83,16 +83,17 @@ try {
     await page.getByRole("textbox", { name: "公开网址" }).fill("https://example.test/synthetic");
     await page.getByRole("button", { name: "保存来源", exact: true }).click();
     await page.getByRole("button", { name: "合成 App 来源", exact: true }).waitFor();
-    await page.getByRole("button", { name: "添加领域 / 方向", exact: true }).click();
-    await page.getByRole("textbox", { name: "名称", exact: true }).fill("合成重点领域");
-    await page.getByRole("button", { name: "保存关注对象", exact: true }).click();
-    await page.getByRole("heading", { name: "合成重点领域", exact: true }).waitFor();
+    await page.getByRole("textbox", { name: "关注描述", exact: true }).fill("合成重点领域，围绕合成实验室的校友及某家公司离职研究员找创业者");
+    await page.getByRole("button", { name: "保存关注", exact: true }).click();
+    await page.getByRole("heading", { name: "合成重点领域，围绕合成实验室的校友及某家公司离职研究员找创业者", exact: true }).waitFor();
     if (!preview) {
       const saved = await page.evaluate(() => window.__underwaterAppTest.calls.filter(call => call.kind === "configure"));
       assert.equal(saved.length, 3);
       assert.deepEqual(saved[0].request, { settings: { localHour: 11 } });
       assert.equal(saved[1].request.sources.length, 7);
-      assert.equal(saved[2].request.focuses.length, 6);
+      assert.equal(saved[2].request.focuses.length, 4);
+      assert.equal(saved[2].request.focuses.at(-1).type, "freeform");
+      assert.deepEqual(saved[2].request.focuses.at(-1).relations, []);
       assert.deepEqual(saved[2].request.focuses.at(-1).urls, []);
       await page.evaluate(() => { window.__underwaterAppTest.holdRun = true; });
       await page.getByRole("button", { name: "立即搜索", exact: true }).click();

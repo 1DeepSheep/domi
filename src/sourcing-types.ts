@@ -18,7 +18,7 @@ export interface SourcingSource {
   inScope?: boolean;
 }
 
-export type SourcingFocusType = "direction" | "lab" | "company" | "person";
+export type SourcingFocusType = "freeform" | "direction" | "lab" | "company" | "person";
 export type SourcingRelation = "members" | "alumni" | "founders" | "employees" | "former_employees" | "students" | "coauthors" | "collaborators";
 
 export interface SourcingFocus {

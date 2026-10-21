@@ -106,3 +106,13 @@ test("explicitly adding a shared URL to an active focus keeps its source in scop
   const text = sourcingRequestText({ ...lease, focuses: [focus], focusConfigured: true, sources: [source] });
   assert.deepEqual(JSON.parse(text.split("\n").find(line => line.startsWith("sources=")).slice(8)), [source]);
 });
+
+test("mixed natural-language scope is preserved without forced entity classification", () => {
+  const description = "关注机器人方向，看看合成实验室校友和某公司离职的人里有没有创业的。\n也跟一下王同名的学生，但先区分他所在机构；不要纯硬件。";
+  const focus = { id: "mixed", name: description, type: "freeform", keywords: ["早期创业"], excludedKeywords: ["成熟上市公司"], relations: [], urls: ["https://example.test/research"], enabled: true };
+  const text = sourcingRequestText({ ...lease, focusConfigured: true, focuses: [focus] });
+  assert.deepEqual(JSON.parse(text.split("\n").find(line => line.startsWith("focuses=")).slice(8)), [focus]);
+  assert.ok(text.includes("不把整段当作一个机构名称"));
+  assert.ok(text.includes("空 relations 数组不表示禁止原文明确要求的关系搜索"));
+  assert.ok(text.includes("只有所有分支及明确网址都完成才能 checked"));
+});
