@@ -27,16 +27,18 @@ const state = window.__underwaterTest = { calls: [], failSave: false, holdSave: 
 function Fixture() {
   const [snapshot, setSnapshot] = useState(structuredClone(previewSourcingSnapshot));
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   state.snapshot = snapshot;
   state.setSnapshot = value => setSnapshot(value);
   state.setLoading = value => setLoading(value);
+  state.setError = value => setError(value);
   const save = async (kind, value) => {
     state.calls.push({ kind, value: structuredClone(value) });
     if (state.holdSave) await new Promise(resolve => { state.releaseSave = resolve; });
     if (state.failSave) throw new Error("合成保存失败，请重试");
     setSnapshot(current => kind === "settings" ? { ...current, settings: { ...current.settings, ...value } } : kind === "focuses" ? { ...current, focuses: value } : { ...current, sources: value });
   };
-  return <UnderwaterPanel snapshot={snapshot} loading={loading} preview
+  return <UnderwaterPanel snapshot={snapshot} loading={loading} error={error} preview
     onRefresh={() => state.calls.push({ kind: "refresh" })}
     onRun={() => { state.calls.push({ kind: "run" }); setSnapshot(current => ({ ...current, run: { ...current.run, status: "running" } })); }}
     onSaveSettings={value => save("settings", value)} onSaveSources={value => save("sources", value)} onSaveFocuses={value => save("focuses", value)}
@@ -244,22 +246,108 @@ try {
   await page.getByRole("button", { name: "立即搜索", exact: true }).click();
   await page.getByRole("status").getByText("正在检查公开来源、核验创业信号并与资料库查重").waitFor();
   assert.equal(await page.getByRole("button", { name: "正在发现", exact: true }).isDisabled(), true);
-  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, run: { ...s.snapshot.run, status: "partial", coverage: { checked: 4, failed: 2, pending: 0 } } }); });
-  await page.getByText("本次发现已保存；2 个来源未完成，后续会继续检查。").waitFor();
-  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, error: "部分来源检查未完成" }); });
-  assert.equal(await page.locator(".uw-notice").count(), 1, "Partial errors appear once, with both recovery actions available");
-  await page.getByRole("alert").getByRole("button", { name: "查看来源", exact: true }).click();
+  // A first partial run can have persisted results without any successful full run.
+  // Its warning is progress, while genuine read/run failures stay actionable alerts.
+  const partialAttemptAt = Date.parse("2026-10-22T01:00:00Z");
+  const partialSavedAt = partialAttemptAt + 5 * 60_000;
+  await page.evaluate(({ partialAttemptAt, partialSavedAt }) => {
+    const state = window.__underwaterTest;
+    const snapshot = structuredClone(state.contextOriginal);
+    snapshot.run = { status: "partial", lastAttemptAt: partialAttemptAt,
+      error: "合成部分来源与关联未完成", coverage: { checked: 4, failed: 2, pending: 1 },
+      focusCoverage: { checked: 0, failed: 0, pending: 1 } };
+    snapshot.focuses = snapshot.focuses.slice(0, 1);
+    snapshot.candidates = snapshot.candidates.map(candidate => ({ ...candidate, lastSeenAt: partialSavedAt }));
+    snapshot.sources = snapshot.sources.map((source, index) => ({ ...source,
+      lastCheckedAt: partialAttemptAt + 60_000, status: index < 4 ? "checked" : "failed" }));
+    state.partialSnapshot = structuredClone(snapshot);
+    state.setSnapshot(snapshot);
+    state.setError(snapshot.run.error);
+  }, { partialAttemptAt, partialSavedAt });
+  const updateCopy = page.locator(".uw-update-copy");
+  const formattedSavedAt = await page.evaluate(value => new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false
+  }).format(value), partialSavedAt);
+  await updateCopy.getByText(`本轮结果已更新 ${formattedSavedAt}`, { exact: true }).waitFor();
+  assert.equal(await updateCopy.getByText("2 条已入库", { exact: true }).count(), 1);
+  assert.equal(await page.getByRole("alert").count(), 0, "Partial run errors are not failure alerts");
+  assert.equal(await page.getByText(/关注对象已检查 0 个/).count(), 0, "A single freeform scope is not represented as zero searched projects");
+  assert.equal(await page.getByText("尚未更新", { exact: true }).count(), 0, "Saved partial results have a real update time");
+  const progressToggle = page.getByRole("button", { name: "部分来源与关系待核", exact: true });
+  assert.equal(await progressToggle.getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator("#uw-progress-details").count(), 0, "Details start collapsed");
+  await progressToggle.focus();
+  await page.keyboard.press("Enter");
+  assert.equal(await progressToggle.getAttribute("aria-expanded"), "true");
+  const progressDetails = page.locator("#uw-progress-details");
+  await progressDetails.getByText("来源已检查 4 个，2 个访问失败，1 个待补查。", { exact: true }).waitFor();
+  await progressDetails.getByText("关注范围仍有待补查内容，已发现的线索会继续保留。", { exact: true }).waitFor();
+  await progressDetails.getByText("5 条线索的联系或研究关联仍待核验。", { exact: true }).waitFor();
+  for (const width of [760, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth || document.querySelector(".uw-page-scroll").scrollWidth > document.querySelector(".uw-page-scroll").clientWidth + 1), false, `Expanded update details have no horizontal overflow at ${width}`);
+  }
+  await page.setViewportSize({ width: 1187, height: 900 });
+  if (screenshots) await page.screenshot({ path: path.join(screenshots, "underwater-partial-expanded.png") });
+  await progressDetails.getByRole("button", { name: "查看来源", exact: true }).click();
   assert.equal(await page.getByRole("button", { name: "添加来源", exact: true }).isVisible(), true);
   await page.getByRole("tab", { name: "项目线索", exact: true }).click();
-  await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, error: undefined, run: { ...s.snapshot.run, status: "failed", error: "合成搜索失败" } }); });
-  await page.getByRole("alert").getByText("合成搜索失败 已保留上次成功结果。").waitFor();
+  await progressToggle.click();
+  assert.equal(await progressToggle.getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator("#uw-progress-details").count(), 0);
+  if (screenshots) await page.screenshot({ path: path.join(screenshots, "underwater-partial-collapsed.png") });
+
+  // Excluded references can retain a historic library match, but do not inflate
+  // the intake summary or the filter count for the visible list.
+  await page.evaluate(() => {
+    const state = window.__underwaterTest;
+    const excluded = { ...state.snapshot.candidates.find(candidate => candidate.intake.status === "created"),
+      id: "synthetic-excluded-match", name: "合成已排除参考", stage: "excluded" };
+    state.setSnapshot({ ...state.snapshot, candidates: [...state.snapshot.candidates, excluded] });
+  });
+  await page.waitForFunction(() => window.__underwaterTest.snapshot.candidates.length === 6);
+  assert.equal(await updateCopy.getByText("2 条已入库", { exact: true }).count(), 1);
+  await page.getByRole("button", { name: "已入库 2", exact: true }).click();
+  assert.equal(await page.locator(".uw-candidate").count(), 2);
+  await page.getByRole("button", { name: "全部 5", exact: true }).click();
   assert.equal(await page.locator(".uw-candidate").count(), 5);
+  assert.equal(await page.getByText("合成已排除参考", { exact: true }).count(), 0);
+
+  await page.evaluate(() => window.__underwaterTest.setError("合成读取失败"));
+  await page.getByRole("alert").getByText("合成读取失败 已保存的结果仍保留。", { exact: true }).waitFor();
+  await page.getByRole("alert").getByRole("button", { name: "刷新结果", exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__underwaterTest.calls.at(-1).kind), "refresh");
+  await page.evaluate(() => {
+    const state = window.__underwaterTest; state.setError("");
+    state.setSnapshot({ ...state.snapshot, error: "合成资料库读取失败" });
+  });
+  await page.getByRole("alert").getByText("合成资料库读取失败 已保存的结果仍保留。", { exact: true }).waitFor();
+  await page.evaluate(partialSavedAt => {
+    const state = window.__underwaterTest;
+    state.setSnapshot({ ...state.snapshot, error: undefined,
+      run: { ...state.snapshot.run, lastAttemptAt: partialSavedAt + 60_000, status: "failed", error: "合成搜索失败" } });
+  }, partialSavedAt);
+  await page.getByRole("alert").getByText("合成搜索失败 已保存的结果仍保留。", { exact: true }).waitFor();
+  await updateCopy.getByText(`结果更新 ${formattedSavedAt}`, { exact: true }).waitFor();
+  assert.equal(await updateCopy.getByText(/本轮结果已更新/).count(), 0, "A later failed attempt does not present historical results as updated this run");
+  assert.equal(await progressToggle.count(), 0);
+  assert.equal(await page.locator(".uw-candidate").count(), 5);
+
+  await page.evaluate(() => {
+    const state = window.__underwaterTest;
+    state.setSnapshot({ ...state.partialSnapshot, candidates: [],
+      sources: state.partialSnapshot.sources.map(source => ({ ...source, status: "failed" })),
+      run: { ...state.partialSnapshot.run, coverage: { checked: 0, failed: 6, pending: 0 } } });
+  });
+  await updateCopy.getByText("本轮尚无已保存结果", { exact: true }).waitFor();
+  assert.equal(await updateCopy.getByText(/本轮结果已更新/).count(), 0, "Failed source timestamps cannot claim saved search results");
+  assert.equal(await page.getByRole("alert").count(), 0);
   await page.evaluate(() => { const s = window.__underwaterTest; s.setSnapshot({ ...s.snapshot, candidates: [], run: { status: "idle" } }); });
   await page.getByRole("heading", { name: "从第一条创业线索开始" }).waitFor();
   await page.evaluate(() => { window.__underwaterTest.setSnapshot(null); window.__underwaterTest.setLoading(true); });
   await page.getByRole("heading", { name: "正在读取水下线索" }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("underwater panel UI: contact routes, research comparisons, historical/partial check states, evidence callbacks, filters, keyboard modal, responsive layout, source CRUD, duplicate protection, save failure, schedule, run/partial/error/empty states passed");
+  console.log("underwater panel UI: contact routes, research comparisons, historical/partial check states, evidence callbacks, filters, keyboard modal, responsive layout, source CRUD, duplicate protection, save failure, schedule, truthful partial update times, collapsed details, visible-only counts, preserved failure alerts, run/error/empty states passed");
   await context.close();
 } finally {
   await browser?.close();

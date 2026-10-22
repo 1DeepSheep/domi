@@ -4,6 +4,7 @@ import type { SourcingCandidate, SourcingFocus, SourcingSettings, SourcingSnapsh
 import "../underwater.css";
 import SourcingFocusManager from "./SourcingFocusManager";
 import SourcingLibraryContext, { LibraryContextSummary } from "./SourcingLibraryContext";
+import { sourcingSnapshotError, sourcingUpdateStatus } from "../sourcing-status";
 
 type Filter = "new" | "review" | "archived" | "all";
 type Props = {
@@ -59,6 +60,7 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
   const [saving, setSaving] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState({ name: "", url: "", type: "lab" as SourcingSource["type"] });
@@ -70,13 +72,16 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
   const focuses = snapshot?.focuses || [];
   const allFocusPaused = focuses.length > 0 && focuses.every(focus => !focus.enabled);
   const noConfiguredFocus = snapshot?.focusConfigured === true && focuses.length === 0;
-  const focusCoverage = snapshot?.run.focusCoverage;
+  const updateStatus = useMemo(() => sourcingUpdateStatus(snapshot), [snapshot]);
   const settings = snapshot?.settings;
   const running = snapshot?.run.status === "running" || busy;
   const disabled = saving || loading;
   const selected = candidates.find(candidate => candidate.id === selectedId);
   const sourceByUrl = useMemo(() => new Map(sources.map(source => [source.url, source])), [sources]);
-  const counts = useMemo(() => ({ new: candidates.filter(candidate => candidate.stage === "new").length, review: candidates.filter(needsReview).length, archived: candidates.filter(isArchived).length, all: candidates.filter(candidate => candidate.stage !== "excluded").length }), [candidates]);
+  const counts = useMemo(() => {
+    const included = candidates.filter(candidate => candidate.stage !== "excluded");
+    return { new: included.filter(candidate => candidate.stage === "new").length, review: included.filter(needsReview).length, archived: included.filter(isArchived).length, all: included.length };
+  }, [candidates]);
   const visibleCandidates = useMemo(() => candidates.filter(candidate => {
     if (candidate.stage === "excluded") return false;
     if (filter === "new" && candidate.stage !== "new") return false;
@@ -128,8 +133,11 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
       setAdding(false); setEditingId(null);
     });
   }
-  const latestSuccess = snapshot?.run.lastSuccessAt;
-  const visibleError = actionError || error || snapshot?.error || (snapshot?.run.status === "failed" ? snapshot.run.error : "");
+  // A partial result is saved work with follow-up checks, not a transport error.
+  const visibleError = actionError || (snapshot?.run.status === "partial" && error === snapshot.run.error ? "" : error) || sourcingSnapshotError(snapshot);
+  const updateLabel = updateStatus.savedAt
+    ? updateStatus.savedThisRun && snapshot?.run.status !== "failed" ? "本轮结果已更新" : "结果更新"
+    : running ? "正在首次检查" : snapshot?.run.status === "partial" ? "本轮尚无已保存结果" : "尚无已保存结果";
 
   return <section className="underwater-panel" aria-label="水下项目" aria-busy={loading}>
     {preview && <div className="uw-preview-notice"><span><Sparkles size={14} />界面预览</span><p>项目与关注对象为界面示例；状态、数量与入库结果仅作展示，不代表实际搜索或入库。</p></div>}
@@ -140,13 +148,21 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
         <div className="uw-header-actions"><button className="uw-icon-button" title="刷新搜索结果" aria-label="刷新搜索结果" disabled={loading} onClick={onRefresh}><RefreshCw size={17} className={loading ? "uw-spinning" : ""} /></button><button className="uw-primary-button" disabled={running || loading || allFocusPaused || noConfiguredFocus} title={noConfiguredFocus ? "先添加一个关注对象" : allFocusPaused ? "先开启一个关注对象" : undefined} onClick={onRun}>{running ? <Loader2 size={16} className="uw-spinning" /> : <Search size={16} />}{running ? "正在发现" : "立即搜索"}</button></div>
       </header>
       <div className="uw-update-status">
-        <span>上次更新 {dateLabel(latestSuccess)}</span>
+        <div className="uw-update-copy" role="status">
+          <span>{updateLabel}{updateStatus.savedAt ? ` ${dateLabel(updateStatus.savedAt)}` : ""}</span>
+          {updateStatus.archivedCount > 0 && <span>{updateStatus.archivedCount} 条已入库</span>}
+          {updateStatus.partial && <button className="uw-progress-toggle" type="button" aria-expanded={progressOpen} aria-controls="uw-progress-details" onClick={() => setProgressOpen(value => !value)}>部分来源与关系待核<ChevronDown size={13} /></button>}
+        </div>
         <button type="button" onClick={openSettings} aria-label="每日更新设置"><span className={`uw-status-dot ${settings?.enabled ? "is-active" : ""}`} />{settings?.enabled ? `每天 ${timeLabel(settings.localHour)} 自动发现` : "每日更新未开启"}<ChevronRight size={12} /></button>
       </div>
 
-      {visibleError && <div className="uw-notice uw-notice-error" role="alert"><CircleHelp size={17} /><span>{visibleError}{latestSuccess ? " 已保留上次成功结果。" : ""}</span><button onClick={onRefresh} type="button">重试</button>{snapshot?.run.status === "partial" && <button type="button" onClick={() => { setTab("scope"); setSourcesOpen(true); }}>查看来源</button>}</div>}
-      {snapshot?.run.status === "partial" && !visibleError && <div className="uw-notice" role="status"><CircleHelp size={16} /><span>{snapshot.run.coverage?.failed ? `本次发现已保存；${snapshot.run.coverage.failed} 个来源未完成，后续会继续检查。` : "本次已完成的发现结果已保存，其余搜索范围会继续检查。"}</span><button type="button" onClick={() => { setTab("scope"); setSourcesOpen(true); }}>查看来源</button></div>}
-      {focusCoverage && (focusCoverage.failed > 0 || focusCoverage.pending > 0) && <div className="uw-notice" role="status"><Search size={16} /><span>关注对象已检查 {focusCoverage.checked} 个，{focusCoverage.failed > 0 ? `${focusCoverage.failed} 个检查失败` : ""}{focusCoverage.failed > 0 && focusCoverage.pending > 0 ? "、" : ""}{focusCoverage.pending > 0 ? `${focusCoverage.pending} 个尚未完成` : ""}；这些对象的搜索结果仍待补全。</span><button type="button" onClick={() => setTab("scope")}>查看关注对象</button></div>}
+      {visibleError && <div className="uw-notice uw-notice-error" role="alert"><CircleHelp size={17} /><span>{visibleError}{updateStatus.savedAt ? " 已保存的结果仍保留。" : ""}</span><button onClick={onRefresh} type="button">刷新结果</button></div>}
+      {updateStatus.partial && progressOpen && <div className="uw-progress-details" id="uw-progress-details">
+        <p>来源已检查 {updateStatus.sourceChecked} 个{updateStatus.sourceFailed > 0 ? `，${updateStatus.sourceFailed} 个访问失败` : ""}{updateStatus.sourcePending > 0 ? `，${updateStatus.sourcePending} 个待补查` : ""}。</p>
+        {(updateStatus.scopePending > 0 || updateStatus.scopeFailed > 0) && <p>关注范围仍有待补查内容，已发现的线索会继续保留。</p>}
+        {updateStatus.contextPending > 0 && <p>{updateStatus.contextPending} 条线索的联系或研究关联仍待核验。</p>}
+        <div className="uw-progress-actions"><button type="button" onClick={() => { setTab("scope"); setSourcesOpen(true); }}>查看来源</button><button type="button" onClick={() => setTab("scope")}>查看关注范围</button><button type="button" disabled={running || loading || allFocusPaused || noConfiguredFocus} onClick={onRun}>重新搜索</button></div>
+      </div>}
       {(allFocusPaused || noConfiguredFocus) && tab !== "scope" && <div className="uw-notice" role="status">{noConfiguredFocus ? "尚未设置关注对象，请先添加。" : "全部关注对象已暂停，开启后继续发现。"}<button type="button" onClick={() => setTab("scope")}>设置关注对象</button></div>}
       {running && <div className="uw-live-progress" role="status"><Loader2 className="uw-spinning" size={16} /><span>正在检查公开来源、核验创业信号并与资料库查重</span><small>发现结果会陆续更新</small></div>}
 

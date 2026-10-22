@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
 import { executeSourcingRun, sourcingRequestText } from "./sourcing-run";
+import { sourcingSnapshotError } from "./sourcing-status";
 import { workflowPrompt, workflows } from "./workflows";
 import type { CodexRunRequest } from "./env";
 import type { SourcingSettings, SourcingSnapshot, SourcingSource, SourcingFocus } from "./sourcing-types";
@@ -29,7 +30,7 @@ export function useSourcing(options: {
     snapshotRef.current = value;
     if (mountedRef.current) {
       setSnapshot(value);
-      setError(value.error || value.run.error || "");
+      setError(sourcingSnapshotError(value));
     }
   };
   async function refresh() {

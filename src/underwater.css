@@ -101,3 +101,18 @@
 /* Hidden auxiliary panels must not scroll the sourcing workspace sideways. */
 .main-grid.sourcing-view { overflow:clip }
 .uw-notice button + button { margin-left:0 }
+
+/* Saved results and remaining checks share one quiet, expandable status row. */
+.uw-update-copy { display:flex;align-items:center;flex-wrap:wrap;gap:5px 12px;min-width:0;line-height:1.7 }
+.uw-update-copy>span+span { padding-left:12px;border-left:1px solid var(--line-strong) }
+.uw-progress-toggle { display:inline-flex;align-items:center;gap:4px;padding:2px 0;border:0;background:transparent;color:var(--muted);font-size:inherit;line-height:inherit }
+.uw-progress-toggle:hover { color:var(--text) }
+.uw-progress-toggle svg { transition:transform .15s }
+.uw-progress-toggle[aria-expanded=true] svg { transform:rotate(180deg) }
+.uw-progress-details { margin:-9px 0 20px;padding:12px 15px;border:1px solid var(--line);border-radius:6px;background:var(--context);color:var(--muted);font-size:11px;line-height:1.8 }
+.uw-progress-details p { margin:0 }
+.uw-progress-details p+p { margin-top:3px }
+.uw-progress-actions { display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:8px }
+.uw-progress-actions button { border:0;background:transparent;padding:0;color:var(--accent-strong);font-size:11px;line-height:1.8 }
+.uw-progress-actions button:disabled { opacity:.45 }
+@media(max-width:600px) { .uw-update-copy { gap:4px 9px }.uw-update-copy>span+span { padding-left:9px }.uw-progress-details { padding:10px 12px } }
