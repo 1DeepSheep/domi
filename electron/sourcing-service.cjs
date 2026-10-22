@@ -55,6 +55,12 @@ class SourcingService {
   }
   list() { return this.command("snapshot"); }
   configure(request = {}) { return this.command("configure", { settings: request.settings, sources: request.sources, focuses: request.focuses }); }
+  review(request = {}) {
+    return this.command("review", { candidateId: request.candidateId, read: request.read, disposition: request.disposition,
+      note: request.note, sameEntity: request.sameEntity === null ? null : request.sameEntity
+        ? { type: request.sameEntity.type, id: request.sameEntity.id } : undefined });
+  }
+  searchLibrary(request = {}) { return this.command("search-library", { query: request.query, type: request.type }); }
   begin(request = {}) { return this.command("begin", { force: request.force === true }); }
   async finish(request = {}) {
     const payload = { runId: request.runId, leaseToken: request.leaseToken, ...(request.error ? { error: String(request.error) } : {}) };

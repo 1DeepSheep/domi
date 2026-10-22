@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ArrowRight, ArrowUpRight, BookOpen, CheckCheck, ChevronDown, ChevronRight, CircleHelp, Clock3, ExternalLink, FlaskConical, GitBranch, Link2, Loader2, Plus, Radar, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, Users, X } from "lucide-react";
-import type { SourcingCandidate, SourcingFocus, SourcingSettings, SourcingSnapshot, SourcingSource } from "../sourcing-types";
+import type { SourcingCandidate, SourcingFocus, SourcingReviewRequest, SourcingSettings, SourcingSnapshot, SourcingSource } from "../sourcing-types";
 import "../underwater.css";
 import SourcingFocusManager from "./SourcingFocusManager";
 import SourcingLibraryContext, { LibraryContextSummary } from "./SourcingLibraryContext";
+import SourcingCandidateActions, { type SourcingLibraryOption, type SourcingNoteDraft } from "./SourcingCandidateActions";
 import { sourcingSnapshotError, sourcingUpdateStatus } from "../sourcing-status";
 
 type Filter = "new" | "review" | "archived" | "all";
@@ -19,6 +20,9 @@ type Props = {
   onSaveSettings: (settings: Partial<SourcingSettings>) => Promise<void>;
   onSaveSources: (sources: SourcingSource[]) => Promise<void>;
   onSaveFocuses: (focuses: SourcingFocus[]) => Promise<void>;
+  onReview?: (request: SourcingReviewRequest) => Promise<void>;
+  onSearchLibrary?: (query: string, type: "project" | "person") => Promise<SourcingLibraryOption[]>;
+  onFollowUp?: (candidate: SourcingCandidate, text: string) => Promise<void>;
   onOpenRecord?: (type: "project" | "person", id: string) => void;
   onOpenUrl: (url: string) => void;
 };
@@ -50,12 +54,17 @@ function IntakeBadge({ candidate }: { candidate: SourcingCandidate }) {
   </span>;
 }
 
-export default function UnderwaterPanel({ snapshot, loading = false, error = "", preview = false, busy = false, initialTab = "leads", onRefresh, onRun, onSaveSettings, onSaveSources, onSaveFocuses, onOpenRecord, onOpenUrl }: Props) {
+export default function UnderwaterPanel({ snapshot, loading = false, error = "", preview = false, busy = false, initialTab = "leads", onRefresh, onRun, onSaveSettings, onSaveSources, onSaveFocuses, onReview, onSearchLibrary, onFollowUp, onOpenRecord, onOpenUrl }: Props) {
   const [tab, setTab] = useState<"leads" | "scope">(initialTab);
   const [filter, setFilter] = useState<Filter>("all");
   const [sourceType, setSourceType] = useState("all");
   const [query, setQuery] = useState("");
+  const [unreadOnly, setUnreadOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, SourcingNoteDraft>>({});
+  const [readError, setReadError] = useState<{ id: string; message: string } | null>(null);
+  const [reading, setReading] = useState(false);
+  const readRequests = useRef(new Set<string>());
   const [actionError, setActionError] = useState("");
   const [saving, setSaving] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
@@ -77,6 +86,12 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
   const running = snapshot?.run.status === "running" || busy;
   const disabled = saving || loading;
   const selected = candidates.find(candidate => candidate.id === selectedId);
+  const confirmedIdentity = selected?.userState?.sameEntity;
+  const historicalIntake = Boolean(selected && confirmedIdentity && (
+    confirmedIdentity.type === "project"
+      ? selected.intake.projectId && selected.intake.projectId !== confirmedIdentity.id
+      : selected.intake.personIds?.length && !selected.intake.personIds.includes(confirmedIdentity.id)
+  ));
   const sourceByUrl = useMemo(() => new Map(sources.map(source => [source.url, source])), [sources]);
   const counts = useMemo(() => {
     const included = candidates.filter(candidate => candidate.stage !== "excluded");
@@ -84,12 +99,13 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
   }, [candidates]);
   const visibleCandidates = useMemo(() => candidates.filter(candidate => {
     if (candidate.stage === "excluded") return false;
+    if (unreadOnly && candidate.userState?.readAt) return false;
     if (filter === "new" && candidate.stage !== "new") return false;
     if (filter === "review" && !needsReview(candidate)) return false;
     if (filter === "archived" && !isArchived(candidate)) return false;
     if (sourceType !== "all" && !candidate.sources.some(source => source.type === sourceType || sourceByUrl.get(source.url)?.type === sourceType)) return false;
     return !query || [candidate.name, ...candidate.founders, candidate.domain, candidate.summary, ...candidate.tags].join(" ").toLocaleLowerCase().includes(query.toLocaleLowerCase());
-  }).sort((a, b) => b.discoveredAt - a.discoveredAt), [candidates, filter, sourceType, query, sourceByUrl]);
+  }).sort((a, b) => b.discoveredAt - a.discoveredAt), [candidates, filter, sourceType, query, sourceByUrl, unreadOnly]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -98,7 +114,7 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
     const listener = (event: KeyboardEvent) => {
       if (event.key === "Escape") setSelectedId(null);
       if (event.key !== "Tab") return;
-      const controls = detailRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], summary, input:not([disabled]), select:not([disabled]), [tabindex="0"]');
+      const controls = detailRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], summary, input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex="0"]');
       if (!controls?.length) return;
       const first = controls[0]; const last = controls[controls.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
@@ -107,6 +123,18 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
     window.addEventListener("keydown", listener);
     return () => { window.removeEventListener("keydown", listener); if (previousFocus?.isConnected) previousFocus.focus(); };
   }, [selectedId]);
+
+  async function markRead(candidate: SourcingCandidate, read: boolean) {
+    if (!onReview || readRequests.current.has(candidate.id)) return;
+    readRequests.current.add(candidate.id); setReading(true); setReadError(null);
+    try { await onReview({ candidateId: candidate.id, read }); }
+    catch (cause) { setReadError({ id: candidate.id, message: cause instanceof Error ? cause.message : "阅读状态未保存，请重试。" }); }
+    finally { readRequests.current.delete(candidate.id); setReading(readRequests.current.size > 0); }
+  }
+  function openCandidate(candidate: SourcingCandidate) {
+    setSelectedId(candidate.id); setReadError(null);
+    if (!candidate.userState?.readAt) void markRead(candidate, true);
+  }
 
   async function save(action: () => Promise<void>) {
     if (saving) return;
@@ -167,16 +195,16 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
       {running && <div className="uw-live-progress" role="status"><Loader2 className="uw-spinning" size={16} /><span>正在检查公开来源、核验创业信号并与资料库查重</span><small>发现结果会陆续更新</small></div>}
 
       {tab === "leads" ? <div className="uw-leads-view">
-        <div className="uw-list-toolbar"><div className="uw-filters" aria-label="线索状态">{FILTERS.map(item => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{counts[item.id]}</span></button>)}</div><label className="uw-search-field"><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索项目、创始人" aria-label="搜索项目、创始人" />{query && <button aria-label="清空搜索" onClick={() => setQuery("")}><X size={13} /></button>}</label><select className="uw-path-select" aria-label="发现路径" value={sourceType} onChange={event => setSourceType(event.target.value)}><option value="all">全部来源</option>{Object.entries(SOURCE_LABELS).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></div>
+        <div className="uw-list-toolbar"><div className="uw-filters" aria-label="线索状态">{FILTERS.map(item => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{counts[item.id]}</span></button>)}</div><button type="button" className="uw-unread-filter" aria-pressed={unreadOnly} onClick={() => setUnreadOnly(value => !value)}>只看未读</button><label className="uw-search-field"><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索项目、创始人" aria-label="搜索项目、创始人" />{query && <button aria-label="清空搜索" onClick={() => setQuery("")}><X size={13} /></button>}</label><select className="uw-path-select" aria-label="发现路径" value={sourceType} onChange={event => setSourceType(event.target.value)}><option value="all">全部来源</option>{Object.entries(SOURCE_LABELS).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></div>
         {loading && !snapshot ? <div className="uw-empty-state"><Loader2 className="uw-spinning" size={27} /><h2>正在读取水下线索</h2><p>检索结果与持续关注的来源会显示在这里。</p></div> : visibleCandidates.length ? <>
           <div className="uw-list-heading"><span>项目 / 创始人</span><span>联系与关联</span><span>详情</span></div>
-          <div className="uw-candidate-list">{visibleCandidates.map(candidate => <article className="uw-candidate" key={candidate.id}>
-            <button className="uw-candidate-identity" onClick={() => setSelectedId(candidate.id)} aria-label={`查看 ${candidate.name} 详情`}><div className={`uw-candidate-monogram uw-kind-${candidate.kind}`}>{candidate.name.replace(/[^a-zA-Z\u4e00-\u9fff]/g, "").slice(0, 1).toUpperCase()}</div><div><h2>{candidate.name}<span>{KIND_LABELS[candidate.kind]}</span></h2><p className="uw-founder-line">{candidate.founders.length ? candidate.founders.join(" · ") : "创始人待确认"}</p><p className="uw-candidate-summary">{candidate.summary}</p></div></button>
-            <div className="uw-candidate-evidence"><LibraryContextSummary candidate={candidate} lastAttemptAt={snapshot?.run.lastAttemptAt} onOpen={() => setSelectedId(candidate.id)} /><div className="uw-candidate-result"><IntakeBadge candidate={candidate} /><button type="button" className="uw-inline-button" aria-label={`查看 ${candidate.name} 信息来源`} onClick={() => setSelectedId(candidate.id)}>{candidate.sources.length} 个来源</button><time>{dateLabel(candidate.discoveredAt)}</time></div></div>
-            <button className="uw-detail-button" aria-label={`查看 ${candidate.name} 证据与详情`} onClick={() => setSelectedId(candidate.id)}><ArrowUpRight size={18} /></button>
+          <div className="uw-candidate-list">{visibleCandidates.map(candidate => <article className={`uw-candidate ${candidate.userState?.readAt ? "is-read" : "is-unread"}`} key={candidate.id}>
+            <button className="uw-candidate-identity" onClick={() => openCandidate(candidate)} aria-label={`查看 ${candidate.name} 详情`}><div className={`uw-candidate-monogram uw-kind-${candidate.kind}`}>{candidate.name.replace(/[^a-zA-Z\u4e00-\u9fff]/g, "").slice(0, 1).toUpperCase()}</div><div><h2>{!candidate.userState?.readAt && <i className="uw-unread-dot" aria-hidden="true" />}{candidate.name}<span>{KIND_LABELS[candidate.kind]}</span></h2><p className="uw-founder-line">{candidate.founders.length ? candidate.founders.join(" · ") : "创始人待确认"}</p><p className="uw-candidate-summary">{candidate.summary}</p></div></button>
+            <div className="uw-candidate-evidence"><LibraryContextSummary candidate={candidate} lastAttemptAt={snapshot?.run.lastAttemptAt} onOpen={() => openCandidate(candidate)} /><div className="uw-candidate-result"><span className="uw-read-label">{candidate.userState?.readAt ? "已读" : "未读"}</span>{candidate.userState?.disposition && candidate.userState.disposition !== "none" && <span className="uw-review-label">{candidate.userState.disposition === "follow_up" ? "跟进中" : "暂不关注"}</span>}{candidate.userState?.sameEntity && <span className="uw-review-label" title={`用户确认：与 ${candidate.userState.sameEntity.name} 是同一主体`}><Link2 size={11} />已确认同一主体</span>}<IntakeBadge candidate={candidate} /><button type="button" className="uw-inline-button" aria-label={`查看 ${candidate.name} 信息来源`} onClick={() => openCandidate(candidate)}>{candidate.sources.length} 个来源</button><time>{dateLabel(candidate.discoveredAt)}</time></div></div>
+            <button className="uw-detail-button" aria-label={`查看 ${candidate.name} 证据与详情`} onClick={() => openCandidate(candidate)}><ArrowUpRight size={18} /></button>
           </article>)}</div>
           <footer className="uw-list-footer"><ShieldCheck size={14} /><span>与项目库、人脉库查重后入库，存疑线索保留待核验。</span><b>{visibleCandidates.length} 条线索</b></footer>
-        </> : <div className="uw-empty-state"><div className="uw-empty-symbol"><Radar size={29} /></div><h2>{candidates.length ? "没有符合条件的线索" : "从第一条创业线索开始"}</h2><p>{candidates.length ? "试试其他状态、发现路径或关键词。" : "关注重点实验室、已知项目和人物，持续发现潜在创始人与创业团队。"}</p><button className="uw-secondary-button" onClick={() => { if (candidates.length) { setFilter("all"); setSourceType("all"); setQuery(""); } else setTab("scope"); }}>{candidates.length ? "清除筛选" : "设置发现范围"}<ArrowRight size={14} /></button></div>}
+        </> : <div className="uw-empty-state"><div className="uw-empty-symbol"><Radar size={29} /></div><h2>{candidates.length ? "没有符合条件的线索" : "从第一条创业线索开始"}</h2><p>{candidates.length ? "试试其他状态、发现路径或关键词。" : "关注重点实验室、已知项目和人物，持续发现潜在创始人与创业团队。"}</p><button className="uw-secondary-button" onClick={() => { if (candidates.length) { setFilter("all"); setSourceType("all"); setQuery(""); setUnreadOnly(false); } else setTab("scope"); }}>{candidates.length ? "清除筛选" : "设置发现范围"}<ArrowRight size={14} /></button></div>}
       </div> : <div className="uw-scope-view">
         <SourcingFocusManager focuses={focuses} configured={snapshot?.focusConfigured} results={snapshot?.run.focusResults} running={running} disabled={disabled} onSaveFocuses={onSaveFocuses} />
         <details className="uw-disclosure" open={sourcesOpen} onToggle={event => setSourcesOpen(event.currentTarget.open)}>
@@ -195,6 +223,6 @@ export default function UnderwaterPanel({ snapshot, loading = false, error = "",
         </details>
       </div>}
     </div>
-    {selected && <div className="uw-detail-overlay" onClick={() => setSelectedId(null)}><aside ref={detailRef} className="uw-detail-panel" role="dialog" aria-modal="true" aria-labelledby="uw-detail-title" onClick={event => event.stopPropagation()}><header className="uw-detail-header"><span>线索详情</span><button ref={closeRef} className="uw-icon-button" aria-label="关闭线索详情" onClick={() => setSelectedId(null)}><X size={19} /></button></header><div className="uw-detail-content"><span className="uw-detail-kind">{KIND_LABELS[selected.kind]}</span><h2 id="uw-detail-title">{selected.name}</h2><p className="uw-detail-founder">{selected.founders.join(" · ") || "创始人待确认"}</p><p className="uw-detail-summary">{selected.summary}</p><div className="uw-detail-meta"><IntakeBadge candidate={selected} /><span>{selected.domain || "方向待确认"}</span>{selected.tags.map(tag => <span key={tag}>{tag}</span>)}</div><SourcingLibraryContext candidate={selected} lastAttemptAt={snapshot?.run.lastAttemptAt} onOpenRecord={onOpenRecord} onOpenUrl={onOpenUrl} /><section><h3>为什么发现这条线索</h3><p>{selected.signal}</p><div className="uw-detail-path">{selected.discoveryPath.map((part, index) => <div key={`${index}-${part}`}><span>{String(index + 1).padStart(2, "0")}</span><p>{part}</p></div>)}</div></section><section><h3>公开证据 <span>{selected.sources.length}</span></h3>{selected.sources.map((source, index) => <button key={`${source.url}-${index}`} className="uw-evidence-link" onClick={() => onOpenUrl(source.url)}><div><strong>{source.title || hostLabel(source.url)}</strong><small>{hostLabel(source.url)}</small></div><ArrowUpRight size={16} /></button>)}</section><section><h3>归档与主体关联</h3>{selected.relatedEntities.length ? selected.relatedEntities.map(entity => <button className="uw-related-record" key={`${entity.type}-${entity.id}`} disabled={!onOpenRecord} onClick={() => onOpenRecord?.(entity.type, entity.id)}><div><span>{entity.type === "project" ? "项目" : "人脉"}</span><strong>{entity.name}</strong><small>{entity.relation}</small></div><ChevronRight size={15} /></button>) : <p className="uw-detail-muted">{selected.intake.status === "created" ? "已为确认的新主体建立档案。" : "尚未确认与现有项目、人脉的关系。"}</p>}{selected.intake.reason && <p className="uw-detail-muted">{selected.intake.reason}</p>}{selected.intake.projectId && onOpenRecord && <button className="uw-secondary-button uw-record-open" onClick={() => onOpenRecord("project", selected.intake.projectId!)}>打开项目档案<ArrowUpRight size={14} /></button>}{Boolean(selected.intake.personIds?.length) && onOpenRecord && selected.intake.personIds!.map((id, index) => <button key={id} className="uw-inline-button uw-record-open" onClick={() => onOpenRecord("person", id)}>打开人脉档案{selected.intake.personIds!.length > 1 ? ` ${index + 1}` : ""}<ArrowUpRight size={14} /></button>)}</section>{selected.nextAction && <section className="uw-next-action"><h3>下一步关注</h3><p>{selected.nextAction}</p></section>}<div className="uw-detail-dates"><span>首次发现 {dateLabel(selected.discoveredAt)}</span><span>最近检查 {dateLabel(selected.lastSeenAt)}</span></div></div></aside></div>}
+    {selected && <div className="uw-detail-overlay" onClick={() => setSelectedId(null)}><aside ref={detailRef} className="uw-detail-panel" role="dialog" aria-modal="true" aria-labelledby="uw-detail-title" onClick={event => event.stopPropagation()}><header className="uw-detail-header"><span>线索详情</span>{onReview && <button type="button" className="uw-inline-button uw-read-toggle" disabled={reading} onClick={() => void markRead(selected, !selected.userState?.readAt)}>{selected.userState?.readAt ? "标记未读" : "标记已读"}</button>}<button ref={closeRef} className="uw-icon-button" aria-label="关闭线索详情" onClick={() => setSelectedId(null)}><X size={19} /></button></header><div className="uw-detail-content">{readError?.id === selected.id && <div className="uw-read-error" role="alert"><span>{readError.message}</span><button type="button" disabled={reading} onClick={() => void markRead(selected, !selected.userState?.readAt)}>重试保存阅读状态</button></div>}<span className="uw-detail-kind">{KIND_LABELS[selected.kind]}</span><h2 id="uw-detail-title">{selected.name}</h2><p className="uw-detail-founder">{selected.founders.join(" · ") || "创始人待确认"}</p><p className="uw-detail-summary">{selected.summary}</p><div className="uw-detail-meta"><IntakeBadge candidate={selected} /><span>{selected.domain || "方向待确认"}</span>{selected.tags.map(tag => <span key={tag}>{tag}</span>)}</div>{onReview && onSearchLibrary && <SourcingCandidateActions key={selected.id} candidate={selected} draft={noteDrafts[selected.id]} onDraft={value => setNoteDrafts(current => ({ ...current, [selected.id]: value }))} onReview={onReview} onSearchLibrary={onSearchLibrary} onFollowUp={onFollowUp} onOpenRecord={onOpenRecord} />}<SourcingLibraryContext candidate={selected} lastAttemptAt={snapshot?.run.lastAttemptAt} onOpenRecord={onOpenRecord} onOpenUrl={onOpenUrl} /><section><h3>为什么发现这条线索</h3><p>{selected.signal}</p><div className="uw-detail-path">{selected.discoveryPath.map((part, index) => <div key={`${index}-${part}`}><span>{String(index + 1).padStart(2, "0")}</span><p>{part}</p></div>)}</div></section><section><h3>公开证据 <span>{selected.sources.length}</span></h3>{selected.sources.map((source, index) => <button key={`${source.url}-${index}`} className="uw-evidence-link" onClick={() => onOpenUrl(source.url)}><div><strong>{source.title || hostLabel(source.url)}</strong><small>{hostLabel(source.url)}</small></div><ArrowUpRight size={16} /></button>)}</section><section><h3>{historicalIntake ? "此前自动归档（待复核）" : "归档与主体关联"}</h3>{historicalIntake && <p className="uw-detail-muted">以下保留此前自动归档记录，当前主体以你的确认关联为准。</p>}{selected.relatedEntities.length ? selected.relatedEntities.map(entity => <button className="uw-related-record" key={`${entity.type}-${entity.id}`} disabled={!onOpenRecord} onClick={() => onOpenRecord?.(entity.type, entity.id)}><div><span>{entity.type === "project" ? "项目" : "人脉"}</span><strong>{entity.name}</strong><small>{entity.relation}</small></div><ChevronRight size={15} /></button>) : <p className="uw-detail-muted">{confirmedIdentity ? historicalIntake ? "此前自动结果尚待按你的确认复核。" : "主体关系已由你确认，详见上方后续处理。" : selected.intake.status === "created" ? "已为确认的新主体建立档案。" : "尚未确认与现有项目、人脉的关系。"}</p>}{selected.intake.reason && <p className="uw-detail-muted">{historicalIntake ? "此前自动记录：" : ""}{selected.intake.reason}</p>}{selected.intake.projectId && onOpenRecord && <button className="uw-secondary-button uw-record-open" onClick={() => onOpenRecord("project", selected.intake.projectId!)}>{historicalIntake ? "查看此前项目档案" : "打开项目档案"}<ArrowUpRight size={14} /></button>}{Boolean(selected.intake.personIds?.length) && onOpenRecord && selected.intake.personIds!.map((id, index) => <button key={id} className="uw-inline-button uw-record-open" onClick={() => onOpenRecord("person", id)}>{historicalIntake ? "查看此前人脉档案" : "打开人脉档案"}{selected.intake.personIds!.length > 1 ? ` ${index + 1}` : ""}<ArrowUpRight size={14} /></button>)}</section>{selected.nextAction && <section className="uw-next-action"><h3>下一步关注</h3><p>{selected.nextAction}</p></section>}<div className="uw-detail-dates"><span>首次发现 {dateLabel(selected.discoveredAt)}</span><span>最近检查 {dateLabel(selected.lastSeenAt)}</span></div></div></aside></div>}
   </section>;
 }

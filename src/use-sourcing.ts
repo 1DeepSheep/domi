@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { hasNativeWorkbench, workbench } from "./bridge";
 import { executeSourcingRun, sourcingRequestText } from "./sourcing-run";
 import { sourcingSnapshotError } from "./sourcing-status";
 import { workflowPrompt, workflows } from "./workflows";
 import type { CodexRunRequest } from "./env";
-import type { SourcingSettings, SourcingSnapshot, SourcingSource, SourcingFocus } from "./sourcing-types";
+import type { SourcingSettings, SourcingSnapshot, SourcingSource, SourcingFocus, SourcingReviewRequest, SourcingLibraryRef, SourcingLibraryMatch } from "./sourcing-types";
 
 type RunOptions = Pick<CodexRunRequest, "workspacePath" | "model" | "reasoningEffort" | "serviceTier">;
 export function useSourcing(options: {
@@ -21,11 +21,20 @@ export function useSourcing(options: {
   optionsRef.current = options;
   const runningRef = useRef(false);
   const readingRef = useRef(false);
+  const reviewQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingReviewsRef = useRef(0);
   const mountedRef = useRef(true);
   const snapshotRef = useRef(snapshot);
   const snapshotRevisionRef = useRef(0);
   snapshotRef.current = snapshot;
-  const accept = (value: SourcingSnapshot) => {
+  const accept = (incoming: SourcingSnapshot) => {
+    // Discovery and review have independent requests; delayed discovery responses
+    // may carry an older copy of a human decision.
+    const previous = new Map(snapshotRef.current?.candidates.map(candidate => [candidate.id, candidate.userState]) || []);
+    const value = { ...incoming, candidates: incoming.candidates.map(candidate => {
+      const userState = previous.get(candidate.id);
+      return userState && userState.updatedAt > (candidate.userState?.updatedAt || 0) ? { ...candidate, userState } : candidate;
+    }) };
     snapshotRevisionRef.current += 1;
     snapshotRef.current = value;
     if (mountedRef.current) {
@@ -34,7 +43,7 @@ export function useSourcing(options: {
     }
   };
   async function refresh() {
-    if (optionsRef.current.preview || readingRef.current) return;
+    if (optionsRef.current.preview || readingRef.current || pendingReviewsRef.current > 0) return;
     readingRef.current = true;
     setLoading(true);
     const revision = snapshotRevisionRef.current;
@@ -53,8 +62,39 @@ export function useSourcing(options: {
       return;
     }
     const result = await workbench.configureSourcing(request);
-    accept(result);
     if (!result.ok) throw new Error(result.error || "保存失败。");
+    accept(result);
+  }
+  const searchLibrary = useCallback(async (query: string, type: SourcingLibraryRef["type"]): Promise<SourcingLibraryMatch[]> => {
+    if (optionsRef.current.preview) return [];
+    const result = await workbench.searchSourcingLibrary({ query, type });
+    if (!result.ok) throw new Error(result.error || "资料库搜索失败，请重试。");
+    return result.matches || [];
+  }, []);
+  function review(request: SourcingReviewRequest): Promise<void> {
+    pendingReviewsRef.current += 1;
+    snapshotRevisionRef.current += 1; // An older poll must not undo a user's action.
+    const operation = reviewQueueRef.current.catch(() => undefined).then(async () => {
+      if (optionsRef.current.preview) {
+        const previous = snapshotRef.current!;
+        if (request.sameEntity) throw new Error("预览中无法关联真实资料库。");
+        accept({ ...previous, candidates: previous.candidates.map(candidate => {
+          if (candidate.id !== request.candidateId) return candidate;
+          const userState = { disposition: "none" as const, note: "", ...candidate.userState, updatedAt: Date.now() };
+          if (request.read !== undefined) userState.readAt = request.read ? Date.now() : undefined;
+          if (request.note !== undefined) userState.note = request.note;
+          if (request.disposition !== undefined) userState.disposition = request.disposition;
+          if (request.sameEntity === null) delete userState.sameEntity;
+          return { ...candidate, userState };
+        }) });
+        return;
+      }
+      const result = await workbench.reviewSourcing(request);
+      if (!result.ok) throw new Error(result.error || "处理未保存，请重试。");
+      accept(result);
+    }).finally(() => { pendingReviewsRef.current -= 1; });
+    reviewQueueRef.current = operation;
+    return operation;
   }
   async function run(automatic = false) {
     if (runningRef.current) return;
@@ -123,6 +163,7 @@ export function useSourcing(options: {
   }, [options.ready, Boolean(options.preview)]);
   return { snapshot, loading, busy, error: error || (snapshot?.settings.enabled && !options.automaticAccess && !options.preview
     ? "每日发现等待联网授权：请在设置中允许自动外部访问；也可手动立即发现。" : ""), refresh, run,
+    review, searchLibrary,
     saveSettings: (settings: Partial<SourcingSettings>) => save({ settings }),
     saveSources: (sources: SourcingSource[]) => save({ sources }),
     saveFocuses: (focuses: SourcingFocus[]) => save({ focuses }) };

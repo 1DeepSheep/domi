@@ -4902,6 +4902,8 @@ ipcMain.handle("domi:weekly-news-checkpoint", (_event, request) => {
 });
 ipcMain.handle("domi:sourcing-list", () => getSourcingService().list());
 ipcMain.handle("domi:sourcing-configure", (_event, request) => getSourcingService().configure(request));
+ipcMain.handle("domi:sourcing-review", (_event, request) => getSourcingService().review(request));
+ipcMain.handle("domi:sourcing-search-library", (_event, request) => getSourcingService().searchLibrary(request));
 ipcMain.handle("domi:sourcing-begin", (_event, request) => getSourcingService().begin(request));
 ipcMain.handle("domi:sourcing-finish", (_event, request) => getSourcingService().finish(request));
 ipcMain.handle("domi:radar-source-list", () => {

@@ -38,6 +38,26 @@ export interface SourcingLibraryRef {
   name: string;
 }
 
+export type SourcingDisposition = "none" | "follow_up" | "not_interested";
+export type SourcingConfirmedEntity = SourcingLibraryRef & { confirmedAt: number };
+export interface SourcingUserState {
+  readAt?: number;
+  disposition: SourcingDisposition;
+  note: string;
+  sameEntity?: SourcingConfirmedEntity;
+  updatedAt: number;
+  history?: Array<{ at: number; changes: { note?: string; disposition?: SourcingDisposition; sameEntity?: SourcingConfirmedEntity | null } }>;
+}
+export interface SourcingReviewRequest {
+  candidateId: string;
+  read?: boolean;
+  disposition?: SourcingDisposition;
+  note?: string;
+  sameEntity?: Pick<SourcingLibraryRef, "type" | "id"> | null;
+}
+export type SourcingLibraryMatch = SourcingLibraryRef & { summary?: string };
+export type SourcingLibrarySearchResult = SourcingSnapshot & { matches?: SourcingLibraryMatch[] };
+
 export type SourcingContextEvidence = {
   kind: "library";
   entity: SourcingLibraryRef;
@@ -101,6 +121,7 @@ export interface SourcingCandidate {
     receipts?: Array<{ entityType: "project" | "person"; entityId: string; receiptPath: string; manifestPath: string }>;
   };
   nextAction: string;
+  userState?: SourcingUserState;
 }
 
 export interface SourcingSnapshot {

@@ -99,6 +99,8 @@ contextBridge.exposeInMainWorld("workbench", {
   saveWeeklyNewsCheckpoint: (request) => ipcRenderer.invoke("domi:weekly-news-checkpoint", request),
   listSourcing: () => ipcRenderer.invoke("domi:sourcing-list"),
   configureSourcing: (request) => ipcRenderer.invoke("domi:sourcing-configure", request),
+  reviewSourcing: (request) => ipcRenderer.invoke("domi:sourcing-review", request),
+  searchSourcingLibrary: (request) => ipcRenderer.invoke("domi:sourcing-search-library", request),
   beginSourcing: (request) => ipcRenderer.invoke("domi:sourcing-begin", request),
   finishSourcing: (request) => ipcRenderer.invoke("domi:sourcing-finish", request),
   listRadarSources: () => ipcRenderer.invoke("domi:radar-source-list"),

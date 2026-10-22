@@ -42,6 +42,29 @@ function Fixture() {
     onRefresh={() => state.calls.push({ kind: "refresh" })}
     onRun={() => { state.calls.push({ kind: "run" }); setSnapshot(current => ({ ...current, run: { ...current.run, status: "running" } })); }}
     onSaveSettings={value => save("settings", value)} onSaveSources={value => save("sources", value)} onSaveFocuses={value => save("focuses", value)}
+    onReview={async request => {
+      state.calls.push({ kind: "review", value: structuredClone(request) });
+      if (state.failReview) throw new Error("合成处理保存失败，请重试");
+      setSnapshot(current => ({ ...current, candidates: current.candidates.map(candidate => {
+        if (candidate.id !== request.candidateId) return candidate;
+        const userState = { disposition: "none", note: "", ...candidate.userState, updatedAt: Date.now() };
+        if (request.read === true) userState.readAt = Date.now();
+        if (request.read === false) delete userState.readAt;
+        if (request.note !== undefined) userState.note = request.note;
+        if (request.disposition !== undefined) userState.disposition = request.disposition;
+        if (request.sameEntity === null) delete userState.sameEntity;
+        else if (request.sameEntity) userState.sameEntity = { ...request.sameEntity, name: request.sameEntity.id.endsWith("-2") ? "合成另一项目" : request.sameEntity.type === "project" ? "合成已知项目" : "合成已知人物", confirmedAt: Date.now() };
+        return { ...candidate, userState };
+      }) }));
+    }}
+    onSearchLibrary={async (query, type) => {
+      state.calls.push({ kind: "search-library", value: { query, type } });
+      return query.includes("另一") ? [{ type, id: "synthetic-project-2", name: "合成另一项目" }] : [{ type, id: type === "project" ? "synthetic-project" : "synthetic-person", name: type === "project" ? "合成已知项目" : "合成已知人物", summary: "资料库中的真实候选记录" }];
+    }}
+    onFollowUp={async (candidate, text) => {
+      state.calls.push({ kind: "follow-up", value: { candidateId: candidate.id, text } });
+      if (state.failFollowUp) throw new Error("合成任务创建失败，请重试");
+    }}
     onOpenUrl={value => state.calls.push({ kind: "url", value })}
     onOpenRecord={(type, id) => state.calls.push({ kind: "record", value: { type, id } })} />;
 }
@@ -88,10 +111,14 @@ try {
   await page.getByRole("combobox", { name: "发现路径", exact: true }).selectOption("lab");
   assert.equal(await page.locator(".uw-candidate").count(), 1);
   await page.getByRole("combobox", { name: "发现路径", exact: true }).selectOption("all");
+  assert.equal(await page.evaluate(() => window.__underwaterTest.calls.filter(call => call.kind === "review").length), 0, "Rendering and filtering never mark a lead read");
+  assert.equal(await page.locator(".uw-candidate.is-unread").count(), 5);
   // Contact and research context use explicit library identities and grounded evidence.
   await page.getByRole("button", { name: "查看 示例项目·研究助手 的联系路径", exact: true }).click();
   const contextDialog = page.getByRole("dialog", { name: "示例项目·研究助手", exact: true });
   await contextDialog.waitFor();
+  await page.waitForFunction(() => window.__underwaterTest.snapshot.candidates.find(item => item.id === "preview-research-assistant").userState?.readAt);
+  assert.equal(await page.locator(".uw-candidate.is-read").count(), 1, "Opening contact details persists reading status");
   assert.deepEqual(await contextDialog.locator("section > h3").allTextContents().then(headings => headings.slice(0, 3)), ["可以通过谁联系2 条线索", "与已有项目和方向的关联2 项", "为什么发现这条线索"]);
   assert.equal(await contextDialog.getByText("有库内关系依据", { exact: true }).count(), 1);
   assert.equal(await contextDialog.getByText("公开关系待确认", { exact: true }).count(), 1);
@@ -184,7 +211,11 @@ try {
   await page.getByRole("dialog", { name: "PhAI lab" }).waitFor();
   assert.equal(await page.locator(":focus").getAttribute("aria-label"), "关闭线索详情");
   await page.keyboard.press("Shift+Tab");
+  assert.equal(await page.locator(":focus").textContent(), "标记未读");
+  await page.keyboard.press("Shift+Tab");
   assert.equal(await page.locator(":focus").textContent(), "打开项目档案");
+  await page.keyboard.press("Tab");
+  assert.equal(await page.locator(":focus").textContent(), "标记未读");
   await page.keyboard.press("Tab");
   assert.equal(await page.locator(":focus").getAttribute("aria-label"), "关闭线索详情");
   await page.getByRole("button", { name: "吴英成 · 个人主页", exact: false }).click();
@@ -195,6 +226,89 @@ try {
   if (screenshots) await page.screenshot({ path: path.join(screenshots, "underwater-detail.png") });
   await page.keyboard.press("Escape");
   assert.equal(await page.getByRole("dialog").count(), 0);
+  // Reading and decisions persist independently; every detail entry point marks read.
+  for (const suffix of ["详情", "信息来源", "证据与详情", "的联系路径", "的已有项目关联"]) {
+    await page.evaluate(() => { const state = window.__underwaterTest; state.setSnapshot({ ...state.snapshot, candidates: state.snapshot.candidates.map(candidate => candidate.name === "GenuX" ? { ...candidate, userState: undefined } : candidate) }); });
+    const name = `查看 GenuX ${suffix}`;
+    await page.getByRole("button", { name, exact: true }).click();
+    await page.waitForFunction(() => window.__underwaterTest.snapshot.candidates.find(candidate => candidate.name === "GenuX").userState?.readAt);
+    await page.keyboard.press("Escape");
+  }
+  const genuRow = page.locator(".uw-candidate").filter({ has: page.getByRole("button", { name: "查看 GenuX 详情", exact: true }) });
+  assert.equal(await genuRow.getByText("已读", { exact: true }).count(), 1);
+  await page.getByRole("button", { name: "只看未读", exact: true }).click();
+  assert.equal(await genuRow.count(), 0, "Read filter excludes read leads regardless of intake status");
+  await page.getByRole("button", { name: "只看未读", exact: true }).click();
+  await page.getByRole("button", { name: "查看 GenuX 详情", exact: true }).click();
+  const reviewDialog = page.getByRole("dialog", { name: "GenuX", exact: true });
+  await reviewDialog.getByRole("button", { name: "标记未读", exact: true }).click();
+  await reviewDialog.getByRole("button", { name: "标记已读", exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => { window.__underwaterTest.failReview = true; });
+  await page.getByRole("button", { name: "查看 GenuX 详情", exact: true }).click();
+  await reviewDialog.getByRole("alert").getByText("合成处理保存失败，请重试", { exact: true }).waitFor();
+  assert.equal(await genuRow.getByText("未读", { exact: true }).count(), 1, "Failed read save is not shown as persisted read");
+  assert.equal(await page.locator(".uw-candidate").count(), 5, "Read-save failure preserves every existing lead");
+  await page.evaluate(() => { window.__underwaterTest.failReview = false; });
+  await reviewDialog.getByRole("button", { name: "重试保存阅读状态", exact: true }).click();
+  await reviewDialog.getByRole("button", { name: "标记未读", exact: true }).waitFor();
+  const noteField = reviewDialog.getByRole("textbox", { name: "处理意见或备注", exact: true });
+  const draftText = "这个项目和库里的合成已知项目可能是同一个，请核对后关联。";
+  await noteField.fill(draftText);
+  await page.evaluate(() => { const state = window.__underwaterTest; state.setSnapshot({ ...state.snapshot, candidates: state.snapshot.candidates.map(candidate => candidate.name === "GenuX" ? { ...candidate, summary: "新轮次检查更新了摘要", userState: { ...candidate.userState, note: "服务端原有备注" } } : candidate) }); });
+  assert.equal(await noteField.inputValue(), draftText, "Polling cannot overwrite an unsaved note");
+  await page.evaluate(() => { window.__underwaterTest.failReview = true; });
+  await reviewDialog.getByRole("button", { name: "保存备注", exact: true }).click();
+  await reviewDialog.locator(".uw-follow-up").getByRole("alert").waitFor();
+  assert.equal(await noteField.inputValue(), draftText, "Failed save retains the user's input");
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "查看 GenuX 详情", exact: true }).click();
+  assert.equal(await noteField.inputValue(), draftText, "Closing and reopening preserves unsaved notes");
+  await page.evaluate(() => { window.__underwaterTest.failReview = false; });
+  await reviewDialog.getByRole("button", { name: "保存备注", exact: true }).click();
+  await reviewDialog.getByText("备注已保存", { exact: true }).waitFor();
+  await reviewDialog.getByRole("combobox", { name: "跟进状态", exact: true }).selectOption("follow_up");
+  await reviewDialog.getByText("跟进状态已保存", { exact: true }).waitFor();
+  assert.equal(await genuRow.getByText("跟进中", { exact: true }).count(), 1);
+  await page.evaluate(() => { window.__underwaterTest.failFollowUp = true; });
+  await reviewDialog.getByRole("button", { name: "交给 domi 处理", exact: false }).click();
+  await reviewDialog.getByRole("alert").getByText("合成任务创建失败，请重试", { exact: true }).waitFor();
+  assert.equal(await noteField.inputValue(), draftText);
+  await page.evaluate(() => { window.__underwaterTest.failFollowUp = false; });
+  await reviewDialog.getByRole("button", { name: "交给 domi 处理", exact: false }).click();
+  await reviewDialog.getByText("已交给 domi 处理", { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__underwaterTest.calls.filter(call => call.kind === "follow-up").at(-1).value.text), draftText, "Task receives the user's exact instruction");
+  const originalIntake = await page.evaluate(() => window.__underwaterTest.snapshot.candidates.find(candidate => candidate.name === "GenuX").intake);
+  await reviewDialog.getByRole("button", { name: "与库内项目或人物是同一个", exact: false }).click();
+  assert.equal(await reviewDialog.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+  await reviewDialog.getByRole("textbox", { name: "搜索库内档案", exact: true }).fill("合成");
+  await reviewDialog.getByRole("group", { name: "库内匹配档案", exact: true }).getByRole("button", { name: /合成已知项目/ }).click();
+  assert.equal(await page.evaluate(() => window.__underwaterTest.calls.filter(call => call.kind === "review" && call.value.sameEntity).length), 0, "Typing and selecting do not commit identity changes");
+  await reviewDialog.getByRole("button", { name: "确认关联", exact: true }).click();
+  await reviewDialog.getByText("主体关联已保存", { exact: true }).waitFor();
+  assert.match(await reviewDialog.locator(".uw-confirmed-identity").textContent(), /用户确认：与.*合成已知项目.*是同一项目/);
+  assert.deepEqual(await page.evaluate(() => window.__underwaterTest.snapshot.candidates.find(candidate => candidate.name === "GenuX").intake), originalIntake, "User identity confirmation does not invent intake or merge records");
+  await page.evaluate(() => { const state = window.__underwaterTest; state.setSnapshot({ ...state.snapshot, candidates: state.snapshot.candidates.map(candidate => candidate.name === "GenuX" ? { ...candidate, intake: { status: "matched", projectId: "synthetic-earlier-project", reason: "此前自动找到的同名项目" } } : candidate) }); });
+  await reviewDialog.getByRole("heading", { name: "此前自动归档（待复核）", exact: true }).waitFor();
+  await reviewDialog.getByRole("button", { name: "查看此前项目档案", exact: true }).waitFor();
+  assert.equal(await reviewDialog.getByRole("button", { name: "打开项目档案", exact: true }).count(), 0, "Old automatic intake is clearly separated from the user's corrected identity");
+  await reviewDialog.locator(".uw-confirmed-identity").getByRole("button", { name: "合成已知项目", exact: false }).click();
+  assert.deepEqual(await page.evaluate(() => window.__underwaterTest.calls.filter(call => call.kind === "record").at(-1).value), { type: "project", id: "synthetic-project" });
+  await reviewDialog.getByRole("button", { name: "更正主体关联", exact: false }).click();
+  assert.equal(await reviewDialog.locator(".uw-identity-type").textContent(), "项目库", "Company/team/product identity stays within the project library");
+  await reviewDialog.getByRole("textbox", { name: "搜索库内档案", exact: true }).fill("另一");
+  await reviewDialog.getByRole("group", { name: "库内匹配档案", exact: true }).getByRole("button", { name: /合成另一项目/ }).click();
+  await reviewDialog.getByRole("button", { name: "确认关联", exact: true }).click();
+  await page.waitForFunction(() => window.__underwaterTest.snapshot.candidates.find(candidate => candidate.name === "GenuX").userState?.sameEntity?.id === "synthetic-project-2");
+  await reviewDialog.getByRole("button", { name: "撤销", exact: true }).click();
+  await reviewDialog.getByText("已撤销主体关联", { exact: true }).waitFor();
+  assert.equal(await reviewDialog.locator(".uw-confirmed-identity").count(), 0);
+  await reviewDialog.locator(".uw-detail-content").evaluate(element => { element.scrollTop = 0; });
+  if (screenshots) await page.screenshot({ path: path.join(screenshots, "underwater-follow-up.png") });
+  await page.setViewportSize({ width: 390, height: 850 });
+  assert.equal(await reviewDialog.evaluate(element => element.scrollWidth > element.clientWidth + 1), false, "Follow-up controls fit a narrow drawer");
+  await page.setViewportSize({ width: 1187, height: 900 });
+  await page.keyboard.press("Escape");
   await page.getByRole("tab", { name: "发现范围", exact: false }).click();
   if (screenshots) await page.screenshot({ path: path.join(screenshots, "underwater-sources.png") });
   assert.equal(await page.getByRole("button", { name: "添加来源", exact: true }).isVisible(), false, "Source controls start collapsed");
@@ -347,7 +461,7 @@ try {
   await page.evaluate(() => { window.__underwaterTest.setSnapshot(null); window.__underwaterTest.setLoading(true); });
   await page.getByRole("heading", { name: "正在读取水下线索" }).waitFor();
   assert.deepEqual(errors, []);
-  console.log("underwater panel UI: contact routes, research comparisons, historical/partial check states, evidence callbacks, filters, keyboard modal, responsive layout, source CRUD, duplicate protection, save failure, schedule, truthful partial update times, collapsed details, visible-only counts, preserved failure alerts, run/error/empty states passed");
+  console.log("underwater panel UI: read/unread, persistent follow-up notes, save failures, real-task handoff, identity confirmation/correction, historical intake, context evidence, keyboard, responsive layout, source CRUD and truthful update states passed");
   await context.close();
 } finally {
   await browser?.close();

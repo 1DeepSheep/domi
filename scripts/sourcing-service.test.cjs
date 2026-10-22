@@ -59,3 +59,29 @@ test("configure forwards independent focuses and preserves omitted versus explic
   assert.equal(Object.hasOwn(requests[1], "focuses"), false);
   assert.deepEqual(requests[2].focuses, []);
 });
+
+
+test("review forwards only editable fields and leaves identity names/timestamps authoritative", async t => {
+  const requests = [];
+  const f = fixture(t, async (_binary, args) => {
+    assert.equal(args[1], "review");
+    requests.push(JSON.parse(fs.readFileSync(args[3], "utf8")));
+    return { stdout: JSON.stringify({ ok: true, snapshot: snapshot() }) };
+  });
+  await f.service.review({ candidateId: "lead", read: false, note: "", disposition: "follow_up", sameEntity: { type: "project", id: "p", name: "forged", confirmedAt: 1 }, intake: { status: "created" }, userState: { readAt: 1 } });
+  await f.service.review({ candidateId: "lead", sameEntity: null });
+  assert.deepEqual(requests, [
+    { candidateId: "lead", read: false, note: "", disposition: "follow_up", sameEntity: { type: "project", id: "p" } },
+    { candidateId: "lead", sameEntity: null }
+  ]);
+});
+test("library search returns real matches without forwarding arbitrary filters", async t => {
+  const matches = [{ type: "project", id: "p", name: "Project" }];
+  const f = fixture(t, async (_binary, args) => {
+    assert.equal(args[1], "search-library");
+    assert.deepEqual(JSON.parse(fs.readFileSync(args[3], "utf8")), { query: "Project", type: "project" });
+    return { stdout: JSON.stringify({ ok: true, snapshot: snapshot(), matches }) };
+  });
+  const result = await f.service.searchLibrary({ query: "Project", type: "project", limit: 999, backend: "feishu" });
+  assert.deepEqual(result.matches, matches);
+});
