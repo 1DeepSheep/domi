@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import type { SourcingSnapshot, SourcingBeginResult, SourcingSettings, SourcingSource, SourcingFocus } from "./sourcing-types";
+import type { SourcingSnapshot, SourcingReviewRequest, SourcingLibrarySearchResult, SourcingLibraryRef, SourcingBeginResult, SourcingSettings, SourcingSource, SourcingFocus } from "./sourcing-types";
 export {};
 
 declare global {
@@ -132,6 +132,8 @@ declare global {
       listWeeklyNews: (request?: DomiWeeklyNewsRequest) => Promise<DomiWeeklyNewsSnapshot>;
       listSourcing: () => Promise<SourcingSnapshot>;
       configureSourcing: (request: { settings?: Partial<SourcingSettings>; sources?: SourcingSource[]; focuses?: SourcingFocus[] }) => Promise<SourcingSnapshot>;
+      reviewSourcing: (request: SourcingReviewRequest) => Promise<SourcingSnapshot>;
+      searchSourcingLibrary: (request: { query: string; type: SourcingLibraryRef["type"] }) => Promise<SourcingLibrarySearchResult>;
       beginSourcing: (request?: { force?: boolean }) => Promise<SourcingBeginResult>;
       finishSourcing: (request: { runId: string; leaseToken: string; error?: string }) => Promise<SourcingSnapshot>;
       saveWeeklyNewsCheckpoint: (

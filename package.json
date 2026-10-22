@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "7.0.33",
+  "version": "7.0.34",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -59,7 +59,7 @@
     "test:plaud-context": "node --test scripts/plaud-context.test.cjs scripts/plaud-recall-model.test.cjs",
     "test:plaud-context-ui": "node scripts/plaud-context-ui.test.mjs",
     "test:codex-thread-runtime": "node scripts/codex-thread-runtime.test.cjs",
-    "test:sourcing": "node --test scripts/sourcing-service.test.cjs && node --experimental-strip-types --test scripts/sourcing-run.test.mjs scripts/sourcing-status.test.mjs",
+    "test:sourcing": "node --test scripts/sourcing-service.test.cjs && node --experimental-strip-types --test scripts/sourcing-run.test.mjs scripts/sourcing-status.test.mjs scripts/sourcing-follow-up.test.mjs",
     "test:sourcing-ui": "node scripts/sourcing-focus-ui.test.mjs && node scripts/underwater-panel-ui.test.mjs && node scripts/underwater-app-ui.test.mjs"
   },
   "dependencies": {

@@ -21,7 +21,7 @@ import "/src/appearance/index.css";
 const preview = new URLSearchParams(location.search).get("preview") === "underwater";
 const config = window.__underwaterConfig || {};
 const fallback = (await import(preview ? "/src/bridge" : "/src/bridge?underwater-app-fallback")).workbench;
-const state = window.__underwaterAppTest = { calls: [], issues: [], holdRun: Boolean(config.holdRun), failRun: false, result: structuredClone(previewSourcingSnapshot) };
+const state = window.__underwaterAppTest = { calls: [], issues: [], holdRun: Boolean(config.holdRun), pendingRuns: new Map(), failRun: false, result: structuredClone(previewSourcingSnapshot) };
 state.result.run.nextRunAt = Date.now() + (config.nextRunOffset ?? 86400000);
 state.result.settings.enabled = config.enabled ?? true;
 if (config.allFocusesPaused) state.result.focuses = state.result.focuses.map(focus => ({ ...focus, enabled: false }));
@@ -34,15 +34,32 @@ const settings = { ...(await fallback.loadSettings()).settings, onboardingComple
 const mock = { ...fallback,
   loadSettings: async () => ({ ok: true, settings }),
   loadState: async defaults => ({ ok: true, isNew: false, state: defaults }),
-  checkCodex: async () => ({ ok: true, connectionOk: true, pluginSetup: { ok: true, status: "ready", version: "7.0.16" }, models: [{ id: "synthetic-model", name: "Synthetic model", supportedReasoningEfforts: [{ id: "high" }], serviceTiers: [{ id: "priority" }] }] }),
+  checkCodex: async () => ({ ok: true, connectionOk: true, pluginSetup: { ok: true, status: "ready", version: "7.0.16" }, models: [{ id: "gpt-5.6-sol", name: "Synthetic policy model", supportedReasoningEfforts: [{ id: "high" }, { id: "xhigh" }, { id: "max" }, { id: "ultra" }], serviceTiers: [{ id: "priority" }] }] }),
   syncDomi: async () => ({ ok: true }),
   listDomiTasks: async () => ({ ok: true, configured: true, tasks: [], syncedAt: Date.now() }),
   listWeeklyNews: async () => ({ ok: true, items: [], total: 0, radarCheckedThrough: Date.now() }),
-  listSourcing: async () => { state.calls.push({ kind: "list" }); return structuredClone(state.result); },
+  listSourcing: async () => { state.calls.push({ kind: "list" }); const result = structuredClone(state.result); if (state.holdNextList) { state.holdNextList = false; await new Promise(resolve => { state.releaseList = resolve; }); } return result; },
+  reviewSourcing: async request => {
+    state.calls.push({ kind: "review", request: structuredClone(request) });
+    if (state.failReview) throw new Error("合成处理保存失败");
+    state.result.candidates = state.result.candidates.map(candidate => {
+      if (candidate.id !== request.candidateId) return candidate;
+      const userState = { disposition: "none", note: "", ...candidate.userState, updatedAt: Date.now() };
+      if (request.read === true) userState.readAt = Date.now();
+      if (request.read === false) delete userState.readAt;
+      if (request.note !== undefined) userState.note = request.note;
+      if (request.disposition !== undefined) userState.disposition = request.disposition;
+      if (request.sameEntity === null) delete userState.sameEntity;
+      else if (request.sameEntity) userState.sameEntity = { ...request.sameEntity, name: "合成 App 库内项目", confirmedAt: Date.now() };
+      return { ...candidate, userState };
+    });
+    return structuredClone(state.result);
+  },
+  searchSourcingLibrary: async request => { state.calls.push({ kind: "search-library", request: structuredClone(request) }); return { ...structuredClone(state.result), matches: [{ type: request.type, id: "synthetic-library-record", name: "合成 App 库内项目", summary: "真实资料库搜索结果" }] }; },
   configureSourcing: async request => { state.calls.push({ kind: "configure", request }); state.result = { ...state.result, settings: { ...state.result.settings, ...request.settings }, sources: request.sources || state.result.sources, focuses: request.focuses || state.result.focuses }; return structuredClone(state.result); },
   beginSourcing: async request => { state.calls.push({ kind: "begin", request }); state.result.ok = true; state.result.run.status = "running"; state.result.run.error = undefined; return { ...structuredClone(state.result), started: true, runId: "synthetic-run", leaseToken: "synthetic-lease", ledgerPath: "/synthetic/sourcing.json" }; },
   finishSourcing: async request => { state.calls.push({ kind: "finish", request }); state.result.run = { ...state.result.run, status: request.error ? "failed" : "idle", error: request.error, nextRunAt: Date.now() + 86400000 }; return structuredClone(state.result); },
-  runCodex: async request => { state.calls.push({ kind: "run", request }); if (state.holdRun) await new Promise(resolve => { state.releaseRun = resolve; }); if (state.failRun) throw new Error("合成搜索连接失败"); return { ok: true, output: "Synthetic run only" }; },
+  runCodex: async request => { state.calls.push({ kind: "run", request }); if (state.holdRun) await new Promise(resolve => { const release = () => { state.pendingRuns.delete(request.runId); resolve(); }; state.pendingRuns.set(request.runId, release); state.releaseRun = release; }); if (state.failRun) throw new Error("合成搜索连接失败"); return { ok: true, output: "Synthetic run only" }; },
   testCodexConnection: async () => { throw new Error("No real model probe allowed"); },
   reportRendererIssue: issue => state.issues.push(issue)
 };
@@ -80,6 +97,49 @@ try {
     await contextDialog.getByText("公开关系待确认", { exact: true }).waitFor();
     assert.equal(await contextDialog.locator(".uw-research-card").count(), 2, "Full App preserves concrete library comparisons");
     await page.keyboard.press("Escape");
+    if (!preview) {
+      await page.waitForFunction(() => window.__underwaterAppTest.result.candidates.find(candidate => candidate.id === "preview-research-assistant").userState?.readAt);
+      await page.getByRole("button", { name: "刷新搜索结果", exact: true }).click();
+      const reviewedRow = page.locator(".uw-candidate").filter({ has: page.getByRole("button", { name: "查看 示例项目·研究助手 详情", exact: true }) });
+      await reviewedRow.getByText("已读", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "查看 示例项目·研究助手 详情", exact: true }).click();
+      await contextDialog.getByRole("textbox", { name: "处理意见或备注", exact: true }).fill("请下周再联系这个团队");
+      await contextDialog.getByRole("button", { name: "保存备注", exact: true }).click();
+      await contextDialog.getByText("备注已保存", { exact: true }).waitFor();
+      await contextDialog.getByRole("combobox", { name: "跟进状态", exact: true }).selectOption("follow_up");
+      await contextDialog.getByText("跟进状态已保存", { exact: true }).waitFor();
+      await contextDialog.getByRole("button", { name: "与库内项目或人物是同一个", exact: false }).click();
+      await contextDialog.getByRole("textbox", { name: "搜索库内档案", exact: true }).fill("合成 App");
+      await contextDialog.getByRole("group", { name: "库内匹配档案", exact: true }).getByRole("button", { name: /合成 App 库内项目/ }).click();
+      await contextDialog.getByRole("button", { name: "确认关联", exact: true }).click();
+      await contextDialog.getByText("主体关联已保存", { exact: true }).waitFor();
+      const reviewCalls = await page.evaluate(() => window.__underwaterAppTest.calls.filter(call => call.kind === "review").map(call => call.request));
+      assert.deepEqual(reviewCalls, [
+        { candidateId: "preview-research-assistant", read: true },
+        { candidateId: "preview-research-assistant", note: "请下周再联系这个团队" },
+        { candidateId: "preview-research-assistant", disposition: "follow_up" },
+        { candidateId: "preview-research-assistant", sameEntity: { type: "project", id: "synthetic-library-record" } }
+      ], "UI decisions reach the native bridge as narrow review patches");
+      await page.keyboard.press("Escape");
+      await page.evaluate(() => { window.__underwaterAppTest.holdNextList = true; });
+      await page.getByRole("button", { name: "刷新搜索结果", exact: true }).click();
+      await page.waitForFunction(() => Boolean(window.__underwaterAppTest.releaseList));
+      await page.getByRole("button", { name: "查看 示例项目·研究助手 详情", exact: true }).click();
+      const racingNote = contextDialog.getByRole("textbox", { name: "处理意见或备注", exact: true });
+      await racingNote.fill("异步刷新期间保留的新备注");
+      await contextDialog.getByRole("button", { name: "保存备注", exact: true }).click();
+      await contextDialog.getByText("备注已保存", { exact: true }).waitFor();
+      await page.evaluate(() => window.__underwaterAppTest.releaseList());
+      await page.waitForFunction(() => !document.querySelector('[aria-label="刷新搜索结果"]').disabled);
+      assert.equal(await racingNote.inputValue(), "异步刷新期间保留的新备注", "A delayed old list response cannot undo a saved human decision");
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "行业动态", exact: true }).click();
+      await navigation.click();
+      await page.getByRole("button", { name: "查看 示例项目·研究助手 详情", exact: true }).click();
+      assert.equal(await contextDialog.getByRole("textbox", { name: "处理意见或备注", exact: true }).inputValue(), "异步刷新期间保留的新备注");
+      await contextDialog.locator(".uw-confirmed-identity").getByText("用户确认：与", { exact: true }).waitFor();
+      await page.keyboard.press("Escape");
+    }
     const navOrder = await page.locator(".sidebar-nav-item").allTextContents();
     assert.ok(navOrder.findIndex(item => item.includes("水下项目")) < navOrder.findIndex(item => item.includes("行业动态")), "Underwater appears above industry news");
     await page.getByRole("tab", { name: "发现范围", exact: false }).click();
@@ -153,6 +213,59 @@ try {
       assert.equal(await page.evaluate(() => window.__underwaterAppTest.calls.length), 0, "Preview does not list, configure, begin, finish or execute native sourcing");
     }
     assert.deepEqual(await page.evaluate(() => window.__underwaterAppTest.issues), []);
+    assert.deepEqual(errors, []);
+    await context.close();
+  }
+  // Freeform follow-up is a user-authored task, with candidate facts kept in
+  // separate context. It neither starts discovery nor invents an identity match.
+  {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    await context.route("**/*", route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.addInitScript(() => { window.__underwaterConfig = { holdRun: true }; });
+    const page = await context.newPage(); page.setDefaultTimeout(15000);
+    const errors = []; page.on("pageerror", error => errors.push(error.message));
+    await page.goto(origin);
+    await page.getByRole("button", { name: "水下项目", exact: true }).click();
+    await page.getByRole("button", { name: "查看 示例项目·研究助手 详情", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "示例项目·研究助手", exact: true });
+    const instruction = "这个项目可能和库里的研究助手是同一个，请先核对公司主体和产品，再告诉我下一步怎么处理。";
+    await dialog.getByRole("textbox", { name: "处理意见或备注", exact: true }).fill(instruction);
+    await dialog.getByRole("button", { name: "交给 domi 处理", exact: false }).click();
+    await page.waitForFunction(() => window.__underwaterAppTest.calls.some(call => call.kind === "run")).catch(async error => { console.error(await page.locator("body").innerText()); console.error(await page.evaluate(() => window.__underwaterAppTest.calls)); throw error; });
+    const calls = await page.evaluate(() => window.__underwaterAppTest.calls);
+    const request = calls.find(call => call.kind === "run").request;
+    assert.equal(request.workflowId, "domi-analyst");
+    assert.equal(request.requestOrigin, "user");
+    assert.equal(request.requestText, instruction);
+    assert.equal(request.userInstructionText, instruction);
+    assert.deepEqual(request.attachmentPaths, []);
+    assert.equal(request.activeDocumentPath, undefined);
+    assert.match(request.prompt, /preview-research-assistant/);
+    assert.match(request.prompt, /示例项目·研究助手/);
+    assert.match(request.prompt, /example\.com\/research-assistant/);
+    assert.equal(calls.some(call => call.kind === "begin" || call.kind === "finish"), false, "A follow-up never starts the full discovery workflow");
+    assert.equal(calls.some(call => call.kind === "review" && call.request.sameEntity), false, "Freeform text is not an identity confirmation");
+    assert.ok(calls.some(call => call.kind === "review" && call.request.note === instruction), "The instruction is retained as the lead note");
+    // Accepted work may keep running while the user reviews a different lead.
+    // The start guard must protect preflight only, not the whole model run.
+    await page.getByRole("button", { name: "水下项目", exact: true }).click();
+    await page.getByRole("button", { name: "查看 GenuX 详情", exact: true }).click();
+    const secondDialog = page.getByRole("dialog", { name: "GenuX", exact: true });
+    const secondInstruction = "请核对这个团队目前的创业主体，列出公开证据和下一步联系建议。";
+    await secondDialog.getByRole("textbox", { name: "处理意见或备注", exact: true }).fill(secondInstruction);
+    await secondDialog.getByRole("button", { name: "交给 domi 处理", exact: false }).click();
+    await page.waitForFunction(() => window.__underwaterAppTest.calls.filter(call => call.kind === "run").length === 2);
+    const parallelRuns = await page.evaluate(() => window.__underwaterAppTest.calls.filter(call => call.kind === "run").map(call => call.request));
+    assert.notEqual(parallelRuns[0].runId, parallelRuns[1].runId, "Different leads create independently tracked tasks");
+    assert.equal(parallelRuns[1].workflowId, "domi-analyst");
+    assert.equal(parallelRuns[1].requestText, secondInstruction);
+    assert.equal(parallelRuns[1].userInstructionText, secondInstruction);
+    assert.match(parallelRuns[1].prompt, /preview-genux/);
+    assert.deepEqual(parallelRuns[1].attachmentPaths, []);
+    assert.equal(await page.evaluate(() => window.__underwaterAppTest.pendingRuns.size), 2, "Both actual requests are admitted while their results remain pending");
+    assert.equal(await page.getByText("处理任务正在启动，请稍候。", { exact: false }).count(), 0);
+    await page.evaluate(() => { const state = window.__underwaterAppTest; state.holdRun = false; for (const release of [...state.pendingRuns.values()]) release(); });
+    await page.waitForFunction(() => window.__underwaterAppTest.pendingRuns.size === 0);
     assert.deepEqual(errors, []);
     await context.close();
   }
@@ -268,7 +381,7 @@ try {
     assert.deepEqual(errors, [], scenario.name);
     await context.close();
   }
-  console.log("underwater App UI: library context, navigation, saves, collapsed-panel keyboard/layout safety, manual/daily run lifecycle, persisted partial status, and preview isolation passed");
+  console.log("underwater App UI: persisted human decisions, stale-poll isolation, grounded freeform task dispatch, library context, navigation, source saves, keyboard/layout safety, daily runs and preview isolation passed");
 } finally {
   await browser?.close(); await server?.close(); await fs.rm(cache, { recursive: true, force: true });
 }

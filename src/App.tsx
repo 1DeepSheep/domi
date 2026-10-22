@@ -81,6 +81,8 @@ import IndustryOverview from "./IndustryOverview";
 import UnderwaterPanel from "./components/UnderwaterPanel";
 import { useSourcing } from "./use-sourcing";
 import { previewSourcingSnapshot } from "./sourcing-preview";
+import { sourcingFollowUpRequest } from "./sourcing-follow-up";
+import type { SourcingCandidate } from "./sourcing-types";
 import PlaudContextCard, { type PlaudContextDraft } from "./components/PlaudContextCard";
 import { canGeneratePlaudNotes, hasImmediatelyRecoverablePlaudItems, hasRecoverablePlaudItems, plaudAccessForRequest, plaudCompletionFileId, plaudItemPresentation, plaudConnectionSummary, mergePlaudSnapshot, plaudQueueSummary, plaudReadFailureSnapshot, plaudReadRetryDelay, plaudSafeError, plaudSnapshotForScope, plaudSyncFeedback, type PlaudFeedback, type PlaudFeedbackTone } from "./plaud-status";
 import { restorePlaudOnStartup } from "./plaud-startup";
@@ -971,6 +973,7 @@ type Thread = {
   externalType?: "project" | "person";
   externalRecordId?: string;
   hasUnreadCompletion?: boolean;
+  sourcingContext?: string;
   messages: Message[];
   timeline: TimelineItem[];
   lastUsage: CodexUsage | null;
@@ -987,6 +990,7 @@ type SubmitToCodexOptions = {
   activeDocumentPath?: string;
   requestOrigin?: "user" | "programmatic";
   userInstructionText?: string;
+  sourcingContext?: string;
   plaudContextSourceTurnId?: string;
   repositoryIdentitySnapshot?: string;
   background?: boolean;
@@ -1028,6 +1032,7 @@ type QueuedSubmission = {
   activeDocumentPath?: string;
   requestOrigin?: "user" | "programmatic";
   userInstructionText?: string;
+  sourcingContext?: string;
   useDomiPlugin: boolean;
   model: string;
   reasoningEffort: string;
@@ -1119,6 +1124,8 @@ function readQueuedSubmissions(): Record<string, QueuedSubmission[]> {
             || candidate.requestOrigin === "programmatic")
           && (candidate.userInstructionText === undefined
             || typeof candidate.userInstructionText === "string")
+          && (candidate.sourcingContext === undefined
+            || typeof candidate.sourcingContext === "string")
           && typeof candidate.useDomiPlugin === "boolean"
           && typeof candidate.model === "string"
           && typeof candidate.reasoningEffort === "string"
@@ -2890,6 +2897,70 @@ function App() {
     })
   });
 
+  const sourcingFollowUpStartingRef = useRef<symbol | null>(null);
+
+  async function followUpSourcingCandidate(candidate: SourcingCandidate, text: string) {
+    if (sourcingPreviewEnabled || !hasNativeWorkbench) {
+      throw new Error("请在 domi 客户端中提交真实处理任务。");
+    }
+    if (sourcingFollowUpStartingRef.current) throw new Error("处理任务正在启动，请稍候。");
+    const request = sourcingFollowUpRequest(candidate, text);
+    const repositoryIdentitySnapshot = queueRepositoryIdentity(appSettingsRef.current);
+    const startOwner = Symbol("sourcing-follow-up-start");
+    sourcingFollowUpStartingRef.current = startOwner;
+    const releaseStarting = () => {
+      if (sourcingFollowUpStartingRef.current === startOwner) sourcingFollowUpStartingRef.current = null;
+    };
+    let threadId: string | undefined;
+    try {
+      // Persist the user's exact intention even if navigation or launch fails.
+      await sourcing.review({ candidateId: candidate.id, note: request.instruction });
+      if (repositoryIdentitySnapshot !== queueRepositoryIdentity(appSettingsRef.current)) {
+        throw new Error("资料库配置已变化，请返回原资料库后重试。");
+      }
+      threadId = await createThread({ input: request.instruction });
+      if (!threadId) throw new Error("尚未进入处理对话，备注已保留，请重试。");
+      const thread = threadsRef.current.find(item => item.id === threadId);
+      if (!thread) throw new Error("处理对话创建失败，备注已保留，请重试。");
+      // Keep the lead's imported name out of the title fallback used by entity
+      // routing. It remains available to the model as explicitly untrusted data.
+      const followUpThread = { ...thread, title: "水下线索后续处理", manualTitle: true,
+        sourcingContext: request.context };
+      threadsRef.current = threadsRef.current.map(item => item.id === threadId ? followUpThread : item);
+      patchThread(threadId, followUpThread);
+      const result = await submitToCodex(undefined, request.instruction, {
+        thread: followUpThread,
+        attachments: [],
+        activeDocumentPath: undefined,
+        requestOrigin: "user",
+        userInstructionText: request.instruction,
+        sourcingContext: request.context,
+        repositoryIdentitySnapshot,
+        useDomiPlugin: true,
+        model: NEW_THREAD_MODEL,
+        reasoningEffort: NEW_THREAD_REASONING_EFFORT,
+        serviceTier: NEW_THREAD_SERVICE_TIER,
+        // The native run promise resolves after the entire turn. Once this
+        // independent task is accepted, another lead can start its own task.
+        onAccepted: releaseStarting
+      });
+      if (!result?.ok || result.stopped) {
+        throw new Error(result?.error || "处理任务未能启动，备注已保留，请重试。");
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (threadId) {
+        setThreadAttachmentError(threadId, `本次处理未能启动：${message}`);
+        // A host launch failure may already have cleared the submitted draft.
+        updateComposerDraft(threadId, draft => draft.input.trim()
+          ? draft : { ...draft, input: request.instruction });
+      }
+      throw new Error(message);
+    } finally {
+      releaseStarting();
+    }
+  }
+
   async function openSourcingRecord(entityType: "project" | "person", recordId: string) {
     if (sourcingPreviewEnabled) return;
     const result = await workbench.previewDomiDatabaseRecord({ entityType, recordId });
@@ -4272,6 +4343,7 @@ function App() {
         userInstructionText: queued.requestOrigin === "user"
           ? queued.userInstructionText || ""
           : "",
+        sourcingContext: queued.sourcingContext,
         model: queued.model,
         reasoningEffort: queued.reasoningEffort,
         serviceTier: queued.serviceTier,
@@ -9196,6 +9268,7 @@ function App() {
         activeDocumentPath: options.activeDocumentPath,
         requestOrigin,
         userInstructionText,
+        sourcingContext: options.sourcingContext,
         useDomiPlugin,
         model: runModelPolicy.model,
         reasoningEffort: runModelPolicy.reasoningEffort,
@@ -9342,6 +9415,7 @@ function App() {
       messageText,
       [
         domiContextForThread(effectiveDomiSnapshot, targetThread),
+        options.sourcingContext || sourceThread.sourcingContext,
         conversationContinuationNotice,
         executionNotice
       ].filter(Boolean).join("\n\n"),
@@ -14472,6 +14546,7 @@ function App() {
                       initialTab={sourcingPreviewEnabled && new URLSearchParams(window.location.search).get("view") === "scope" ? "scope" : "leads"}
                       preview={sourcingPreviewEnabled} onRefresh={() => void sourcing.refresh()} onRun={() => void sourcing.run()}
                       onSaveSettings={sourcing.saveSettings} onSaveSources={sourcing.saveSources} onSaveFocuses={sourcing.saveFocuses}
+                      onReview={sourcing.review} onSearchLibrary={sourcing.searchLibrary} onFollowUp={followUpSourcingCandidate}
                       onOpenRecord={openSourcingRecord} onOpenUrl={url => void workbench.openResource(url)} />
                 : workspaceView === "news"
                   ? renderNewsWorkspace()

@@ -437,6 +437,8 @@ const browserFallback: Window["workbench"] = {
   }),
   listSourcing: async () => unavailableSourcing(),
   configureSourcing: async () => unavailableSourcing(),
+  reviewSourcing: async () => unavailableSourcing(),
+  searchSourcingLibrary: async () => ({ ...unavailableSourcing(), matches: [] }),
   beginSourcing: async () => ({ ...unavailableSourcing(), started: false }),
   finishSourcing: async () => unavailableSourcing(),
   listWeeklyNews: async () => ({
