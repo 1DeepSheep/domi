@@ -124,16 +124,32 @@ try {
       assert.deepEqual(first[2].request, { runId: "synthetic-run", leaseToken: "synthetic-lease" });
       await page.evaluate(() => { window.__underwaterAppTest.failRun = true; });
       await page.getByRole("button", { name: "立即搜索", exact: true }).click();
-      await page.getByRole("alert").getByText("合成搜索连接失败 已保留上次成功结果。").waitFor();
+      await page.getByRole("alert").getByText("合成搜索连接失败 已保存的结果仍保留。").waitFor();
       const finishes = await page.evaluate(() => window.__underwaterAppTest.calls.filter(call => call.kind === "finish"));
       assert.equal(finishes.length, 2);
       assert.equal(finishes[1].request.error, "合成搜索连接失败", "Failed execution releases and persists the run error");
       assert.equal(await page.getByRole("button", { name: "立即搜索", exact: true }).isEnabled(), true);
       await page.getByRole("tab", { name: "项目线索", exact: true }).click();
       assert.equal(await page.locator(".uw-candidate").count(), 5, "Failed run preserves last good candidates");
+      // Loading a persisted partial snapshot through the real hook clears the
+      // prior failure and renders saved progress without inventing full success.
+      await page.evaluate(() => {
+        const state = window.__underwaterAppTest;
+        state.result.run = { ...state.result.run, status: "partial", lastSuccessAt: undefined,
+          error: "合成部分来源和关联未完成", coverage: { checked: 4, failed: 2, pending: 0 },
+          focusCoverage: { checked: 0, failed: 0, pending: 1 } };
+      });
+      await page.getByRole("button", { name: "刷新搜索结果", exact: true }).click();
+      const partialToggle = page.getByRole("button", { name: "部分来源与关系待核", exact: true });
+      await partialToggle.waitFor();
+      assert.equal(await partialToggle.getAttribute("aria-expanded"), "false");
+      assert.equal(await page.getByRole("alert").count(), 0, "The hook does not propagate partial coverage as a failure");
+      assert.match(await page.locator(".uw-update-copy").textContent(), /本轮结果已更新/);
+      assert.equal(await page.locator(".uw-candidate").count(), 5);
+      assert.equal(await page.evaluate(() => window.__underwaterAppTest.calls.filter(call => call.kind === "run").length), 2, "Refresh only reads persisted results");
     } else {
       await page.getByRole("button", { name: "立即搜索", exact: true }).click();
-      await page.getByRole("alert").getByText("这是界面预览，未执行真实搜索或入库。 已保留上次成功结果。").waitFor();
+      await page.getByRole("alert").getByText("这是界面预览，未执行真实搜索或入库。 已保存的结果仍保留。").waitFor();
       assert.equal(await page.evaluate(() => window.__underwaterAppTest.calls.length), 0, "Preview does not list, configure, begin, finish or execute native sourcing");
     }
     assert.deepEqual(await page.evaluate(() => window.__underwaterAppTest.issues), []);
@@ -252,7 +268,7 @@ try {
     assert.deepEqual(errors, [], scenario.name);
     await context.close();
   }
-  console.log("underwater App UI: library context, navigation, saves, collapsed-panel keyboard/layout safety, manual/daily run lifecycle, and preview isolation passed");
+  console.log("underwater App UI: library context, navigation, saves, collapsed-panel keyboard/layout safety, manual/daily run lifecycle, persisted partial status, and preview isolation passed");
 } finally {
   await browser?.close(); await server?.close(); await fs.rm(cache, { recursive: true, force: true });
 }
