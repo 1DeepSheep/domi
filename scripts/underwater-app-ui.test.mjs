@@ -21,7 +21,7 @@ import "/src/appearance/index.css";
 const preview = new URLSearchParams(location.search).get("preview") === "underwater";
 const config = window.__underwaterConfig || {};
 const fallback = (await import(preview ? "/src/bridge" : "/src/bridge?underwater-app-fallback")).workbench;
-const state = window.__underwaterAppTest = { calls: [], issues: [], holdRun: Boolean(config.holdRun), failRun: false, result: structuredClone(previewSourcingSnapshot) };
+const state = window.__underwaterAppTest = { calls: [], issues: [], holdRun: Boolean(config.holdRun), pendingRuns: new Map(), failRun: false, result: structuredClone(previewSourcingSnapshot) };
 state.result.run.nextRunAt = Date.now() + (config.nextRunOffset ?? 86400000);
 state.result.settings.enabled = config.enabled ?? true;
 if (config.allFocusesPaused) state.result.focuses = state.result.focuses.map(focus => ({ ...focus, enabled: false }));
@@ -59,7 +59,7 @@ const mock = { ...fallback,
   configureSourcing: async request => { state.calls.push({ kind: "configure", request }); state.result = { ...state.result, settings: { ...state.result.settings, ...request.settings }, sources: request.sources || state.result.sources, focuses: request.focuses || state.result.focuses }; return structuredClone(state.result); },
   beginSourcing: async request => { state.calls.push({ kind: "begin", request }); state.result.ok = true; state.result.run.status = "running"; state.result.run.error = undefined; return { ...structuredClone(state.result), started: true, runId: "synthetic-run", leaseToken: "synthetic-lease", ledgerPath: "/synthetic/sourcing.json" }; },
   finishSourcing: async request => { state.calls.push({ kind: "finish", request }); state.result.run = { ...state.result.run, status: request.error ? "failed" : "idle", error: request.error, nextRunAt: Date.now() + 86400000 }; return structuredClone(state.result); },
-  runCodex: async request => { state.calls.push({ kind: "run", request }); if (state.holdRun) await new Promise(resolve => { state.releaseRun = resolve; }); if (state.failRun) throw new Error("合成搜索连接失败"); return { ok: true, output: "Synthetic run only" }; },
+  runCodex: async request => { state.calls.push({ kind: "run", request }); if (state.holdRun) await new Promise(resolve => { const release = () => { state.pendingRuns.delete(request.runId); resolve(); }; state.pendingRuns.set(request.runId, release); state.releaseRun = release; }); if (state.failRun) throw new Error("合成搜索连接失败"); return { ok: true, output: "Synthetic run only" }; },
   testCodexConnection: async () => { throw new Error("No real model probe allowed"); },
   reportRendererIssue: issue => state.issues.push(issue)
 };
@@ -221,6 +221,7 @@ try {
   {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     await context.route("**/*", route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.addInitScript(() => { window.__underwaterConfig = { holdRun: true }; });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
     const errors = []; page.on("pageerror", error => errors.push(error.message));
     await page.goto(origin);
@@ -245,6 +246,26 @@ try {
     assert.equal(calls.some(call => call.kind === "begin" || call.kind === "finish"), false, "A follow-up never starts the full discovery workflow");
     assert.equal(calls.some(call => call.kind === "review" && call.request.sameEntity), false, "Freeform text is not an identity confirmation");
     assert.ok(calls.some(call => call.kind === "review" && call.request.note === instruction), "The instruction is retained as the lead note");
+    // Accepted work may keep running while the user reviews a different lead.
+    // The start guard must protect preflight only, not the whole model run.
+    await page.getByRole("button", { name: "水下项目", exact: true }).click();
+    await page.getByRole("button", { name: "查看 GenuX 详情", exact: true }).click();
+    const secondDialog = page.getByRole("dialog", { name: "GenuX", exact: true });
+    const secondInstruction = "请核对这个团队目前的创业主体，列出公开证据和下一步联系建议。";
+    await secondDialog.getByRole("textbox", { name: "处理意见或备注", exact: true }).fill(secondInstruction);
+    await secondDialog.getByRole("button", { name: "交给 domi 处理", exact: false }).click();
+    await page.waitForFunction(() => window.__underwaterAppTest.calls.filter(call => call.kind === "run").length === 2);
+    const parallelRuns = await page.evaluate(() => window.__underwaterAppTest.calls.filter(call => call.kind === "run").map(call => call.request));
+    assert.notEqual(parallelRuns[0].runId, parallelRuns[1].runId, "Different leads create independently tracked tasks");
+    assert.equal(parallelRuns[1].workflowId, "domi-analyst");
+    assert.equal(parallelRuns[1].requestText, secondInstruction);
+    assert.equal(parallelRuns[1].userInstructionText, secondInstruction);
+    assert.match(parallelRuns[1].prompt, /preview-genux/);
+    assert.deepEqual(parallelRuns[1].attachmentPaths, []);
+    assert.equal(await page.evaluate(() => window.__underwaterAppTest.pendingRuns.size), 2, "Both actual requests are admitted while their results remain pending");
+    assert.equal(await page.getByText("处理任务正在启动，请稍候。", { exact: false }).count(), 0);
+    await page.evaluate(() => { const state = window.__underwaterAppTest; state.holdRun = false; for (const release of [...state.pendingRuns.values()]) release(); });
+    await page.waitForFunction(() => window.__underwaterAppTest.pendingRuns.size === 0);
     assert.deepEqual(errors, []);
     await context.close();
   }

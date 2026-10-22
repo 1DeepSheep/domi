@@ -2897,7 +2897,7 @@ function App() {
     })
   });
 
-  const sourcingFollowUpStartingRef = useRef(false);
+  const sourcingFollowUpStartingRef = useRef<symbol | null>(null);
 
   async function followUpSourcingCandidate(candidate: SourcingCandidate, text: string) {
     if (sourcingPreviewEnabled || !hasNativeWorkbench) {
@@ -2906,7 +2906,11 @@ function App() {
     if (sourcingFollowUpStartingRef.current) throw new Error("处理任务正在启动，请稍候。");
     const request = sourcingFollowUpRequest(candidate, text);
     const repositoryIdentitySnapshot = queueRepositoryIdentity(appSettingsRef.current);
-    sourcingFollowUpStartingRef.current = true;
+    const startOwner = Symbol("sourcing-follow-up-start");
+    sourcingFollowUpStartingRef.current = startOwner;
+    const releaseStarting = () => {
+      if (sourcingFollowUpStartingRef.current === startOwner) sourcingFollowUpStartingRef.current = null;
+    };
     let threadId: string | undefined;
     try {
       // Persist the user's exact intention even if navigation or launch fails.
@@ -2935,7 +2939,10 @@ function App() {
         useDomiPlugin: true,
         model: NEW_THREAD_MODEL,
         reasoningEffort: NEW_THREAD_REASONING_EFFORT,
-        serviceTier: NEW_THREAD_SERVICE_TIER
+        serviceTier: NEW_THREAD_SERVICE_TIER,
+        // The native run promise resolves after the entire turn. Once this
+        // independent task is accepted, another lead can start its own task.
+        onAccepted: releaseStarting
       });
       if (!result?.ok || result.stopped) {
         throw new Error(result?.error || "处理任务未能启动，备注已保留，请重试。");
@@ -2950,7 +2957,7 @@ function App() {
       }
       throw new Error(message);
     } finally {
-      sourcingFollowUpStartingRef.current = false;
+      releaseStarting();
     }
   }
 
