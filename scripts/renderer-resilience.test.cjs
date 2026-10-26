@@ -641,7 +641,7 @@ assert.match(
 );
 assert.match(
   main,
-  /async function resolveCanonicalEntityWorkspace[\s\S]*?resolveEntityWorkspaceWithRecovery[\s\S]*?serviceCoordinator\.run\([\s\S]*?"domi:sync"[\s\S]*?getDomiIntegration\(\)\.sync\(\)[\s\S]*?retries: 0/,
+  /async function resolveCanonicalEntityWorkspace[\s\S]*?resolveEntityWorkspaceWithRecovery[\s\S]*?serviceCoordinator\.run\([\s\S]*?"domi:reindex"[\s\S]*?getDomiIntegration\(\)\.sync\(\{ reindex: true \}\)[\s\S]*?retries: 0/,
   "A missing entity directory may trigger one coalesced index rebuild with no hidden retry loop."
 );
 assert.match(
@@ -2199,12 +2199,12 @@ for (const field of [
 }
 assert.match(
   app,
-  /const dataConnectionChanged = requestChangesDataConnection\(request\)[\s\S]*?submissionStartingThreadIdsRef\.current\.size > 0[\s\S]*?queueStartingThreadIdsRef\.current\.size > 0[\s\S]*?runContextRef\.current\.size > 0[\s\S]*?settlingThreadIdsRef\.current\.size > 0[\s\S]*?请等待任务完成后再修改资料连接[\s\S]*?workbench\.saveSettings\(request\)/,
+  /const dataConnectionChanged = requestChangesDataConnection\(request, previousSettings\)[\s\S]*?submissionStartingThreadIdsRef\.current\.size > 0[\s\S]*?queueStartingThreadIdsRef\.current\.size > 0[\s\S]*?runContextRef\.current\.size > 0[\s\S]*?settlingThreadIdsRef\.current\.size > 0[\s\S]*?请等待任务完成后再修改资料连接[\s\S]*?workbench\.saveSettings\(request\)/,
   "Data-connection changes must fail closed before persistence while a submission or archive is active."
 );
 assert.match(
   app,
-  /if \(dataConnectionChanged && result\.settings\.onboardingComplete\) \{[\s\S]*?domiSnapshotRef\.current = null;[\s\S]*?setDomiSnapshot\(null\);[\s\S]*?refreshAfterDataConnectionSave/,
+  /if \(\(repositoryChanged \|\| completingOnboarding\) && result\.settings\.onboardingComplete\) \{[\s\S]*?if \(repositoryChanged\) \{[\s\S]*?domiSnapshotRef\.current = null;[\s\S]*?setDomiSnapshot\(null\);[\s\S]*?refreshAfterDataConnectionSave/,
   "Switching repositories must synchronously discard the old snapshot before refreshing the new one."
 );
 assert.match(

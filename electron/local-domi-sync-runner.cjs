@@ -4,6 +4,7 @@ const { runRepositoryWorker } = require("./repository-worker.cjs");
 
 const DEFAULT_WORKER_PATH = path.join(__dirname, "local-domi-sync-worker.cjs");
 const DEFAULT_SYNC_TIMEOUT_MS = 3 * 60 * 1000;
+const DEFAULT_SNAPSHOT_TIMEOUT_MS = 15 * 1000;
 const activeSyncs = new Map();
 
 function localSyncSource(source = {}) {
@@ -28,12 +29,15 @@ function runLocalDomiSync(source, options = {}) {
   const workerPath = path.resolve(options.workerPath || DEFAULT_WORKER_PATH);
   const workerData = {
     source: localSyncSource(source),
+    reindex: options.reindex === true,
     // Only tests pass a delay. Keeping it inside the worker makes the event-loop
     // regression deterministic without changing production synchronization.
     testDelayMs: Math.min(Math.max(Number(options.testDelayMs) || 0, 0), 5_000)
   };
-  const timeoutMs = Math.max(100, Number(options.timeoutMs) || DEFAULT_SYNC_TIMEOUT_MS);
-  const key = JSON.stringify(workerData.source);
+  const timeoutMs = Math.max(100, Number(options.timeoutMs)
+    || (workerData.reindex ? DEFAULT_SYNC_TIMEOUT_MS : DEFAULT_SNAPSHOT_TIMEOUT_MS));
+  // A scanner blocked in cloud IO must never occupy the ordinary DB-read slot.
+  const key = JSON.stringify({ source: workerData.source, reindex: workerData.reindex });
   const active = activeSyncs.get(key);
   if (active) return active.result;
   let run;
@@ -42,7 +46,9 @@ function runLocalDomiSync(source, options = {}) {
       workerPath, workerData, WorkerClass, timeoutMs,
       timeoutError: () => {
         const failure = new Error(
-          `本地资料库扫描超过 ${Math.ceil(timeoutMs / 1000)} 秒，已停止本轮刷新并保留上次成功数据。`
+          workerData.reindex
+            ? `本地资料库扫描超过 ${Math.ceil(timeoutMs / 1000)} 秒，已停止本轮刷新并保留上次成功数据。`
+            : "本地资料库读取暂未完成，已保留上次成功数据。"
         );
         failure.code = "DOMI_LOCAL_SYNC_TIMEOUT";
         return failure;
@@ -66,6 +72,7 @@ function runLocalDomiSync(source, options = {}) {
 
 module.exports = {
   DEFAULT_SYNC_TIMEOUT_MS,
+  DEFAULT_SNAPSHOT_TIMEOUT_MS,
   localSyncSource,
   runLocalDomiSync
 };

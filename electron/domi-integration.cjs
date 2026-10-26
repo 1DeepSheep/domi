@@ -1638,11 +1638,11 @@ class DomiIntegration {
     }
   }
 
-  async syncLocalRepository(source) {
-    const key = `${path.resolve(source.localDatabasePath)}\n${path.resolve(source.localLibraryDir)}`;
+  async syncLocalRepository(source, { reindex = false } = {}) {
+    const key = `${path.resolve(source.localDatabasePath)}\n${path.resolve(source.localLibraryDir)}\n${reindex ? "reindex" : "snapshot"}`;
     const active = this.localSyncPromises.get(key);
     if (active) return active;
-    const pending = Promise.resolve().then(() => this.localSyncRunner(source));
+    const pending = Promise.resolve().then(() => this.localSyncRunner(source, { reindex }));
     this.localSyncPromises.set(key, pending);
     try {
       return await pending;
@@ -5243,16 +5243,26 @@ class DomiIntegration {
     return result;
   }
 
-  async sync() {
+  async sync({ reindex = false } = {}) {
     const plugin = this.findPlugin();
     const projectSource = this.readProjectConfig();
     const health = await this.status(plugin);
     if (projectSource.backend === "local") {
-      const local = await this.syncLocalRepository(projectSource);
+      const previous = this.stateStore.loadCache(CACHE_KEY)?.value;
+      const local = await this.syncLocalRepository(projectSource, { reindex: reindex === true });
+      const current = this.stateStore.loadCache(CACHE_KEY)?.value;
+      // A read may hold a database view from before a concurrent scan or edit.
+      // Return the published result as well as retaining it in the cache.
+      if (!reindex && current?.backend === "local"
+        && current.sources?.projects?.localDatabasePath === projectSource.localDatabasePath
+        && current.sources?.projects?.localLibraryDir === projectSource.localLibraryDir
+        && Number(current.syncedAt) > (Number(previous?.syncedAt) || 0)) {
+        return { ok: true, snapshot: current, updatedAt: current.syncedAt };
+      }
       const snapshot = {
         version: 1,
         backend: "local",
-        syncedAt: Date.now(),
+        syncedAt: Math.max(Date.now(), (Number(current?.syncedAt) || 0) + 1),
         health,
         sources: {
           projects: {

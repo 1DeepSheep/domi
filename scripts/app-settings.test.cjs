@@ -450,6 +450,14 @@ test("local repository mode completes onboarding without any Feishu identifiers"
     assert.equal(diskConfig.storageBackend, "local");
     assert.equal(diskConfig.localRepositoryDir, workspaceRoot);
     assert.equal(diskConfig.localDatabasePath, path.join(root, "domi-repository.sqlite3"));
+    const { syncLocalRepository } = require("../electron/local-domi-sync-worker.cjs");
+    const firstRead = syncLocalRepository({
+      localDatabasePath: saved.settings.localDatabasePath,
+      localLibraryDir: saved.settings.localRepositoryDir
+    });
+    assert.equal(firstRead.repositoryHealth.ok, true);
+    assert.equal(firstRead.workspaceIndex.snapshotOnly, true);
+    assert.deepEqual(firstRead.projects, []);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

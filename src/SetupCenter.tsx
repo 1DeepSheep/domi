@@ -65,6 +65,9 @@ type SetupCenterProps = {
   onLogin: () => Promise<ChatGPTLoginResult>;
   onRefresh: (verifiedStatus?: CodexCheckResult) => Promise<void>;
   onReadOnlyRefresh?: () => Promise<void>;
+  repositorySyncing?: boolean;
+  repositoryError?: string;
+  onReindexLocalFiles?: () => Promise<{ ok: boolean; error?: string }>;
 };
 
 function domiWorkspacePath(selectedDirectory: string) {
@@ -180,7 +183,10 @@ export default function SetupCenter({
   onSave,
   onLogin,
   onRefresh,
-  onReadOnlyRefresh
+  onReadOnlyRefresh,
+  repositorySyncing = false,
+  repositoryError = "",
+  onReindexLocalFiles
 }: SetupCenterProps) {
   const { confirm, confirmDialog } = useAppConfirm();
   const [tab, setTab] = useState<SetupTab>(required ? "connection" : initialTab);
@@ -189,6 +195,7 @@ export default function SetupCenter({
   draftRef.current = draft;
   const previousSettingsRef = useRef(settings);
   const [saving, setSaving] = useState(false);
+  const [repositoryScanNotice, setRepositoryScanNotice] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginWaiting, setLoginWaiting] = useState(false);
   const [loginAttempted, setLoginAttempted] = useState(false);
@@ -1897,7 +1904,27 @@ export default function SetupCenter({
                     <code>{draft.localDatabasePath || "保存设置后自动创建"}</code>
                     <small>数据库保存在 Application Support，不放入同步盘，Markdown 和附件仍可选择 iCloud、OneDrive 或普通文件夹。</small>
                   </div>}
+                  {!required && settings.storageBackend === "local" && onReindexLocalFiles && (
+                    <div className="local-database-maintenance">
+                      <strong>补充本地文件</strong>
+                      <small>在 Finder 中新增或移动文件后，可重新扫描并更新资料索引。云盘文件较多时可能需要几分钟。</small>
+                      <button type="button" disabled={repositorySyncing || saving || hasUnsavedChanges}
+                        onClick={async () => {
+                          setRepositoryScanNotice("");
+                          const result = await onReindexLocalFiles();
+                          if (result.ok) setRepositoryScanNotice("本地文件扫描完成，资料索引已更新。");
+                        }}>
+                        {repositorySyncing ? <LoaderCircle className="spinning" size={14} /> : <RefreshCw size={14} />}
+                        {repositorySyncing ? "正在刷新资料库" : "重新扫描本地文件"}
+                      </button>
+                      {hasUnsavedChanges && <small>请先保存设置，再扫描已保存的资料库位置。</small>}
+                      {!repositoryError && repositoryScanNotice && <div className="setup-feedback success repository-scan-feedback" role="status">{repositoryScanNotice}</div>}
+                    </div>
+                  )}
                 </div>
+              {!required && repositoryError && <div className="setup-feedback error repository-scan-feedback" role="status">
+                <strong>资料库刷新未完成</strong><span>{repositoryError}</span>
+              </div>}
               {!required && <section className="task-calendar-settings">
                 <div className="task-calendar-settings-heading">
                   <CalendarDays size={20} />
