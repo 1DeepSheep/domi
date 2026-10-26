@@ -1058,9 +1058,10 @@ const DATA_CONNECTION_SETTING_KEYS = [
   "localDatabasePath"
 ] as const;
 
-function requestChangesDataConnection(request: AppSettingsSaveRequest) {
+function requestChangesDataConnection(request: AppSettingsSaveRequest, current: AppSettings | null) {
   return DATA_CONNECTION_SETTING_KEYS.some((key) =>
     Object.prototype.hasOwnProperty.call(request, key)
+      && String(request[key] ?? "") !== String(current?.[key] ?? "")
   );
 }
 
@@ -1933,6 +1934,9 @@ function App() {
   const [domiSnapshot, setDomiSnapshot] = useState<DomiSnapshot | null>(null);
   const [domiSyncing, setDomiSyncing] = useState(false);
   const [domiError, setDomiError] = useState("");
+  const [domiReindexing, setDomiReindexing] = useState(false);
+  const [domiReindexError, setDomiReindexError] = useState("");
+  const dataConnectionRefreshRevisionRef = useRef(0);
   const [domiQuery, setDomiQuery] = useState("");
   const [domiSearchError, setDomiSearchError] = useState("");
   const [domiSearchActiveKey, setDomiSearchActiveKey] = useState("");
@@ -4745,18 +4749,37 @@ function App() {
     else setContextPanelWidth(update);
   }
 
-  async function refreshDomi() {
-    if (domiSyncing) return;
-    setDomiSyncing(true);
-    setDomiError("");
+  async function refreshDomi(request: { reindex?: boolean } = {}) {
+    const reindex = Boolean(request.reindex);
+    const repositoryIdentity = queueRepositoryIdentity(appSettingsRef.current);
+    const isCurrent = () => repositoryIdentity === queueRepositoryIdentity(appSettingsRef.current);
+    if (reindex ? domiReindexing : domiSyncing) return { ok: false, error: "资料库正在刷新，请稍后重试。" };
+    const setBusy = reindex ? setDomiReindexing : setDomiSyncing;
+    const setError = reindex ? setDomiReindexError : setDomiError;
+    setBusy(true);
+    setError("");
     try {
-      const result = await workbench.syncDomi();
-      if (result.snapshot) setDomiSnapshot(result.snapshot);
-      if (!result.ok) setDomiError(result.error || "domi 同步失败。 ");
+      const result = await workbench.syncDomi(request);
+      if (!isCurrent()) return { ok: false, error: "资料库设置已变更，旧刷新已忽略。" };
+      if (result.snapshot) {
+        const incoming = result.snapshot;
+        setDomiSnapshot(current => {
+          if (!isCurrent()) return current;
+          const sameSource = current?.backend === incoming.backend
+            && current?.sources.projects.localDatabasePath === incoming.sources.projects.localDatabasePath
+            && current?.sources.projects.localLibraryDir === incoming.sources.projects.localLibraryDir;
+          return sameSource && current && current.syncedAt > incoming.syncedAt ? current : incoming;
+        });
+      }
+      if (!result.ok) setError(result.error || "domi 同步失败。 ");
+      else if (reindex) setDomiError("");
+      return result;
     } catch (error) {
-      setDomiError(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      if (isCurrent()) setError(message);
+      return { ok: false, error: message };
     } finally {
-      setDomiSyncing(false);
+      if (isCurrent()) setBusy(false);
     }
   }
 
@@ -7059,8 +7082,9 @@ function App() {
     // Login and connection checks save these fields before touching the
     // managed session, including when the browser value itself is unchanged.
     if (["plaudConnectionMode", "plaudBrowser"].some(key => Object.prototype.hasOwnProperty.call(request, key))) cancelPlaudSyncIntent();
-    const completingOnboarding = request.onboardingComplete === true && !appSettingsRef.current?.onboardingComplete;
-    const dataConnectionChanged = requestChangesDataConnection(request) || completingOnboarding;
+    const previousSettings = appSettingsRef.current;
+    const completingOnboarding = request.onboardingComplete === true && !previousSettings?.onboardingComplete;
+    const dataConnectionChanged = requestChangesDataConnection(request, previousSettings) || completingOnboarding;
     if (
       dataConnectionChanged
       && (
@@ -7092,6 +7116,7 @@ function App() {
     }
     if (settingsRevision !== settingsSaveRevisionRef.current) return result;
     if (result.ok && result.settings) {
+      const repositoryChanged = queueRepositoryIdentity(previousSettings) !== queueRepositoryIdentity(result.settings);
       appSettingsRef.current = result.settings;
       setAppSettings(result.settings);
       const statusAccepted = codexReadinessController.acceptSaved(readinessRevision, result.codex);
@@ -7102,7 +7127,7 @@ function App() {
         "storageBackend",
         "localLibraryDir",
         "localRepositoryDir"
-      ].some((key) => Object.prototype.hasOwnProperty.call(request, key));
+      ].some((key) => String(previousSettings?.[key as keyof AppSettings] ?? "") !== String(result.settings?.[key as keyof AppSettings] ?? ""));
       if (documentLibraryLocationChanged) {
         documentLibraryRequestRef.current += 1;
         setDocumentLibrary(null);
@@ -7111,12 +7136,13 @@ function App() {
         setDocumentLibraryExpandedPaths(new Set());
         if (result.settings.onboardingComplete) void refreshDocumentLibrary();
       }
-      if (dataConnectionChanged && result.settings.onboardingComplete) {
-        // A snapshot is scoped to the repository that produced it. Clear both
-        // the state and synchronous ref before starting the new sync so a send
-        // in the same event loop cannot combine new settings with old records.
-        domiSnapshotRef.current = null;
-        setDomiSnapshot(null);
+      if ((repositoryChanged || completingOnboarding) && result.settings.onboardingComplete) {
+        // Preserve usable records when finishing setup for the same library.
+        // A changed source must never display or send the previous source's records.
+        if (repositoryChanged) {
+          domiSnapshotRef.current = null;
+          setDomiSnapshot(null);
+        }
         void refreshAfterDataConnectionSave(result.settings);
       }
     } else codexReadinessController.failSave(readinessRevision);
@@ -7124,22 +7150,52 @@ function App() {
   }
 
   async function refreshAfterDataConnectionSave(savedSettings: AppSettings) {
+    const revision = ++dataConnectionRefreshRevisionRef.current;
+    const repositoryIdentity = queueRepositoryIdentity(savedSettings);
+    const isCurrent = () => revision === dataConnectionRefreshRevisionRef.current
+      && repositoryIdentity === queueRepositoryIdentity(appSettingsRef.current);
+    const reindex = savedSettings.storageBackend === "local";
+    const adoptSnapshot = (incoming?: DomiSnapshot) => {
+      if (!incoming || !isCurrent()) return;
+      setDomiSnapshot(current => {
+        if (!isCurrent()) return current;
+        const snapshot = current && current.syncedAt > incoming.syncedAt ? current : incoming;
+        domiSnapshotRef.current = snapshot;
+        return snapshot;
+      });
+    };
     setDomiSyncing(true);
     setDomiError("");
+    setDomiReindexError("");
+    setDomiReindexing(reindex);
     try {
+      // Show the selected library's existing index immediately. The explicit
+      // first setup/path change below imports files in the background; ordinary
+      // startup and unchanged settings saves never start a filesystem scan.
       const synced = await workbench.syncDomi();
-      if (synced.snapshot) {
-        domiSnapshotRef.current = synced.snapshot;
-        setDomiSnapshot(synced.snapshot);
-      }
-      if (!synced.ok) setDomiError(synced.error || "资料库设置已保存，但首次同步失败。");
-      if (savedSettings.storageBackend === "feishu") {
-        await refreshDomiTaskBoard({ fresh: true });
-      }
+      if (!isCurrent()) return;
+      adoptSnapshot(synced.snapshot);
+      if (!synced.ok) setDomiError(synced.error || "资料库设置已保存，但资料读取失败。");
     } catch (syncError) {
-      setDomiError(syncError instanceof Error ? syncError.message : String(syncError));
+      if (isCurrent()) setDomiError(syncError instanceof Error ? syncError.message : String(syncError));
     } finally {
-      setDomiSyncing(false);
+      if (isCurrent()) setDomiSyncing(false);
+    }
+    if (!isCurrent()) return;
+    if (!reindex) {
+      await refreshDomiTaskBoard({ fresh: true });
+      return;
+    }
+    try {
+      const indexed = await workbench.syncDomi({ reindex: true });
+      if (!isCurrent()) return;
+      adoptSnapshot(indexed.snapshot);
+      if (indexed.ok) setDomiError("");
+      else setDomiReindexError(indexed.error || "资料库设置已保存，但本地文件尚未扫描完成。请在资料设置中重新扫描。");
+    } catch (scanError) {
+      if (isCurrent()) setDomiReindexError(scanError instanceof Error ? scanError.message : String(scanError));
+    } finally {
+      if (isCurrent()) setDomiReindexing(false);
     }
   }
 
@@ -14765,25 +14821,24 @@ function App() {
               </button>
             </div>
 
+            {(domiError || domiReindexError || domiReindexing) && (
+              <div className="repository-refresh-notice" role="status" aria-label="资料库刷新状态">
+                <span><Database size={14} />{domiReindexing
+                  ? "正在扫描本地文件，完成后更新资料索引"
+                  : `${domiReindexError ? "本地文件扫描未完成" : "资料库刷新未完成"}${domiSnapshot ? "，已保留现有数据" : ""}`}</span>
+                <button type="button" onClick={() => {
+                  setSettingsInitialTab("data");
+                  setSettingsOpen(true);
+                }}>查看资料设置</button>
+              </div>
+            )}
+
             <section className={`panel-section ${openSections.domi ? "open" : ""}`}>
               <button className="panel-title" type="button" onClick={() => toggleSection("domi")}>
                 <span><Mic size={17} />录音交流</span>
                 {openSections.domi ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
               </button>
               <div className="panel-content">
-                {domiError && (
-                  <div className="domi-inline-error actionable" role="status">
-                    <AlertCircle size={14} />
-                    <span>{domiError}</span>
-                    <button
-                      type="button"
-                      onClick={() => void refreshDomi()}
-                      disabled={domiSyncing}
-                    >
-                      {domiSyncing ? "重试中" : "重试"}
-                    </button>
-                  </div>
-                )}
                 {plaudEnabled ? (
                   <>
                     {plaudError && !plaudSyncIntent && (
@@ -15018,7 +15073,7 @@ function App() {
                   </div>
                   <div>
                     <span>项目与人脉</span>
-                    <strong>{domiSnapshot?.health.lark.ok
+                    <strong>{domiReindexing ? "正在扫描本地文件" : (domiError || domiReindexError) ? domiSnapshot ? "显示已有资料" : "暂未读取" : domiSnapshot?.health.lark.ok
                       ? domiSnapshot.backend === "local" ? "本地已同步" : "已同步"
                       : "未连接"}</strong>
                   </div>
@@ -15143,6 +15198,9 @@ function App() {
             settingsDirtyRef.current = dirty;
           }}
           onSave={saveAppSettings}
+          repositorySyncing={domiReindexing}
+          repositoryError={domiReindexError || domiError}
+          onReindexLocalFiles={() => refreshDomi({ reindex: true })}
           onLogin={startChatGPTLogin}
           onRefresh={refreshCodex}
           onReadOnlyRefresh={async () => { await codexReadinessController.refresh(undefined, { readOnly: true, force: true }); }}

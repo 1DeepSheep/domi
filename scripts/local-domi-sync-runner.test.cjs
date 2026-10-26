@@ -9,6 +9,8 @@ const { Worker } = require("node:worker_threads");
 const { DomiIntegration } = require("../electron/domi-integration.cjs");
 const { runLocalDomiSync } = require("../electron/local-domi-sync-runner.cjs");
 const { industryWorkerLock } = require("../electron/repository-worker.cjs");
+const { LocalDomiRepository } = require("../electron/local-domi-repository.cjs");
+const { DatabaseSync } = require("node:sqlite");
 
 function localHealth() {
   return {
@@ -36,7 +38,7 @@ test("a deliberately slow local reindex leaves the main event loop responsive", 
     ticks += 1;
   }, 10);
   const startedAt = performance.now();
-  const first = await runLocalDomiSync(source, { testDelayMs: 300 });
+  const first = await runLocalDomiSync(source, { reindex: true, testDelayMs: 300 });
   const elapsedMs = performance.now() - startedAt;
   clearInterval(interval);
 
@@ -63,7 +65,7 @@ subdomains: ["Agent"]
 # 增量项目
 `);
 
-  const second = await runLocalDomiSync(source);
+  const second = await runLocalDomiSync(source, { reindex: true });
   assert.equal(second.workspaceIndex.unchanged, false);
   assert.ok(second.projects.some((project) => project.recordId === "prj_worker_fresh"));
 });
@@ -132,6 +134,7 @@ test("a stuck local scan is terminated at the deadline instead of hanging the ap
       localDatabasePath: "/tmp/domi-stuck-sync.sqlite3",
       localLibraryDir: "/tmp/domi-stuck-library"
     }, {
+      reindex: true,
       WorkerClass: StuckWorker,
       timeoutMs: 40
     }),
@@ -175,14 +178,14 @@ test("terminating the real scanner inside overview generation releases the paren
   `);
   let worker;
   class ObservedWorker extends Worker { constructor(...args) { super(...args); worker = this; } }
-  const pending = runLocalDomiSync(data.source, { workerPath: bootstrap, WorkerClass: ObservedWorker, timeoutMs: 600 });
+  const pending = runLocalDomiSync(data.source, { reindex: true, workerPath: bootstrap, WorkerClass: ObservedWorker, timeoutMs: 600 });
   const failed = assert.rejects(pending, error => error.code === "DOMI_LOCAL_SYNC_TIMEOUT");
   await until(() => fs.existsSync(path.join(data.root, "received-token")));
   assert.equal(fs.readFileSync(data.lockPath, "utf8"), fs.readFileSync(path.join(data.root, "received-token"), "utf8"),
     "the actual generator must use the parent's token, not create a worker-local token");
   await failed;
   await until(() => worker.threadId === -1 && !fs.existsSync(data.lockPath));
-  const recovered = await runLocalDomiSync(data.source);
+  const recovered = await runLocalDomiSync(data.source, { reindex: true });
   assert.equal(recovered.repositoryHealth.ok, true);
 });
 
@@ -205,7 +208,7 @@ test("normal completion, errors and unexpected exit clean only the scanner's own
           }
           terminate() { return Promise.resolve(1); }
         }
-        const request = runLocalDomiSync(data.source, { WorkerClass: CompletingWorker });
+        const request = runLocalDomiSync(data.source, { reindex: true, WorkerClass: CompletingWorker });
         if (mode === "success") assert.deepEqual(await request, { projects: ["preserved"] });
         else await assert.rejects(request, /scan failed|worker failed|意外退出/);
         if (foreign) {
@@ -229,10 +232,10 @@ test("a timeout keeps the lock and scanner slot until termination is confirmed",
     }
     terminate() { return new Promise(resolve => { finishTermination = resolve; }); }
   }
-  const request = runLocalDomiSync(data.source, { WorkerClass: DelayedTermination, timeoutMs: 100 });
+  const request = runLocalDomiSync(data.source, { reindex: true, WorkerClass: DelayedTermination, timeoutMs: 100 });
   await assert.rejects(request, error => error.code === "DOMI_LOCAL_SYNC_TIMEOUT");
   assert.equal(fs.existsSync(data.lockPath), true, "a still-live worker must keep its lock");
-  assert.equal(runLocalDomiSync(data.source, { WorkerClass: DelayedTermination }), request);
+  assert.equal(runLocalDomiSync(data.source, { reindex: true, WorkerClass: DelayedTermination }), request);
   assert.equal(calls, 1, "retry must not start a second scanner before the first exits");
   const other = JSON.stringify({ pid: process.pid, token: "replacement-worker" });
   fs.writeFileSync(data.lockPath, other);
@@ -240,4 +243,108 @@ test("a timeout keeps the lock and scanner slot until termination is confirmed",
   worker.emit("exit", 1);
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(fs.readFileSync(data.lockPath, "utf8"), other, "late cleanup must not delete a replacement lock");
+});
+
+function seedSnapshot(t) {
+  const data = lockFixture(t);
+  const repository = new LocalDomiRepository({
+    databasePath: data.source.localDatabasePath,
+    libraryDir: data.source.localLibraryDir
+  });
+  repository.database.prepare(`
+    INSERT INTO projects (id, name, normalized_name, created_at, updated_at)
+    VALUES ('prj_snapshot', '已索引项目', '已索引项目', 1, 1)
+  `).run();
+  repository.database.prepare(`
+    INSERT INTO repository_meta (key, value, updated_at) VALUES ('workspace_index', ?, 123)
+  `).run(JSON.stringify({ projects: { needsNameReview: 3 }, people: {} }));
+  // A normal list read must not execute constructor migrations either.
+  repository.database.prepare("DELETE FROM repository_meta WHERE key = 'readable_project_homepage_v2'").run();
+  repository.close();
+  return data;
+}
+
+test("ordinary refresh reads SQLite without accessing or recreating the cloud library", async t => {
+  const data = seedSnapshot(t);
+  fs.rmSync(data.source.localLibraryDir, { recursive: true });
+  const accessMarker = path.join(data.root, "unexpected-library-access");
+  const bootstrap = path.join(data.root, "read-only-snapshot.cjs");
+  fs.writeFileSync(bootstrap, `
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const library = ${JSON.stringify(data.source.localLibraryDir)};
+    const originalWrite = fs.writeFileSync;
+    for (const method of ['readFileSync', 'readdirSync', 'mkdirSync', 'statSync', 'lstatSync', 'existsSync', 'writeFileSync']) {
+      const original = fs[method];
+      fs[method] = function (file, ...args) {
+        if (typeof file === 'string' && (file === library || file.startsWith(library + path.sep))) {
+          originalWrite.call(this, ${JSON.stringify(accessMarker)}, method);
+          throw new Error('Cloud provider IO is unavailable');
+        }
+        return original.call(this, file, ...args);
+      };
+    }
+    require(${JSON.stringify(path.resolve(__dirname, "../electron/local-domi-sync-worker.cjs"))});
+  `);
+  const result = await runLocalDomiSync(data.source, { workerPath: bootstrap });
+  assert.equal(result.projects[0].recordId, "prj_snapshot");
+  assert.equal(result.workspaceIndex.snapshotOnly, true);
+  assert.equal(result.workspaceIndex.projects.needsNameReview, 3);
+  assert.equal(result.workspaceIndex.indexedAt, 123);
+  assert.equal(fs.existsSync(accessMarker), false, "even a swallowed filesystem exception would trigger this marker");
+  assert.equal(fs.existsSync(data.source.localLibraryDir), false);
+  const database = new DatabaseSync(data.source.localDatabasePath, { readOnly: true });
+  try {
+    assert.equal(database.prepare("SELECT 1 FROM repository_meta WHERE key = 'readable_project_homepage_v2'").get(), undefined);
+  } finally { database.close(); }
+});
+
+test("a database-only refresh observes newly committed records without a rescan", async t => {
+  const data = seedSnapshot(t);
+  assert.equal((await runLocalDomiSync(data.source)).projects.length, 1);
+  const database = new DatabaseSync(data.source.localDatabasePath);
+  try {
+    database.prepare(`INSERT INTO projects (id, name, normalized_name, created_at, updated_at)
+      VALUES ('prj_incremental', '新增项目', '新增项目', 2, 2)`).run();
+  } finally { database.close(); }
+  const second = await runLocalDomiSync(data.source);
+  assert.deepEqual(second.projects.map(project => project.recordId), ["prj_incremental", "prj_snapshot"]);
+});
+
+test("an unresponsive cloud scanner cannot block a fresh SQLite snapshot", async t => {
+  const data = seedSnapshot(t);
+  let releaseScanner;
+  class BlockedScanner extends EventEmitter {
+    constructor() { super(); releaseScanner = () => this.emit("message", { ok: true, value: { complete: true } }); }
+    terminate() { return Promise.resolve(0); }
+  }
+  const scan = runLocalDomiSync(data.source, { reindex: true, WorkerClass: BlockedScanner, timeoutMs: 5000 });
+  t.after(() => releaseScanner());
+  const snapshot = await runLocalDomiSync(data.source, { timeoutMs: 2000 });
+  assert.equal(snapshot.projects[0].recordId, "prj_snapshot");
+  releaseScanner();
+  assert.deepEqual(await scan, { complete: true });
+});
+
+test("missing or uninitialized databases fail explicitly and never become empty successful snapshots", async t => {
+  const data = lockFixture(t);
+  await assert.rejects(runLocalDomiSync(data.source), error =>
+    error.code === "DOMI_LOCAL_REPOSITORY_NOT_READY" && /重新扫描本地文件/.test(error.message));
+  assert.equal(fs.existsSync(data.source.localDatabasePath), false);
+  assert.equal(fs.existsSync(data.source.localLibraryDir), false);
+  const empty = new DatabaseSync(data.source.localDatabasePath);
+  empty.close();
+  await assert.rejects(runLocalDomiSync(data.source), error => error.code === "DOMI_LOCAL_REPOSITORY_NOT_READY");
+  const recovered = await runLocalDomiSync(data.source, { reindex: true });
+  assert.equal(recovered.repositoryHealth.ok, true);
+  assert.equal((await runLocalDomiSync(data.source)).repositoryHealth.ok, true);
+});
+
+test("snapshot timeouts use a read-specific message rather than claiming a full scan", async () => {
+  class StuckReader extends EventEmitter { terminate() { return Promise.resolve(0); } }
+  await assert.rejects(runLocalDomiSync({
+    localDatabasePath: "/tmp/domi-read-timeout.sqlite3",
+    localLibraryDir: "/tmp/domi-read-timeout-library"
+  }, { WorkerClass: StuckReader, timeoutMs: 100 }), error =>
+    error.code === "DOMI_LOCAL_SYNC_TIMEOUT" && /读取暂未完成/.test(error.message) && !/扫描|180/.test(error.message));
 });

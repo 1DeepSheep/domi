@@ -21,7 +21,7 @@ import "/src/styles.css";
 import "/src/appearance/index.css";
 import "@fontsource-variable/instrument-sans/wght.css";
 import "@fontsource-variable/newsreader/standard.css";
-const state = window.__plaudStatusTest = { calls: [], plans: { cache: [], list: [], sync: [], resume: [] }, pending: {}, issues: [], settings: null };
+const state = window.__plaudStatusTest = { calls: [], plans: { cache: [], list: [], sync: [], resume: [], domi: [] }, pending: {}, issues: [], settings: null };
 state.readerListeners = [];
 const startup = window.__plaudStartupConfig || {};
 if (startup.online === false) Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
@@ -35,6 +35,7 @@ state.snapshot = startup.snapshot || { ok: true, syncedAt: Date.now(), items: []
 // the list after this response without a manual refresh or generate request.
 state.plans.resume.push(startup.resume || { result: { ok: true, status: "complete", resumePendingCount: 0 } });
 if (startup.list) state.plans.list.push(startup.list);
+if (startup.domi) state.plans.domi.push(startup.domi);
 state.plans.cache.push(startup.cache || { result: { ok: false, cached: false, cacheVerified: false, items: [], remoteStatus: "not_loaded" } });
 const invoke = async (kind, payload) => {
   state.calls.push({ kind, payload });
@@ -48,12 +49,16 @@ workbench.loadSettings = async () => {
   return { ok: true, settings: structuredClone(state.settings), updatedAt: Date.now() };
 };
 if (startup.allowRun) workbench.checkCodex = async () => ({
-  ok: true, connectionOk: true, workspacePath: "/synthetic", path: "/synthetic/codex",
+  ok: true, connectionOk: true, authMode: "chatgpt", workspacePath: "/synthetic", path: "/synthetic/codex",
   pluginSetup: { ok: true, status: "ready", version: "7.0.9" },
   models: startup.models || [{ id: "gpt-5.6-sol", name: "Synthetic model", supportedReasoningEfforts: [{ id: "max" }], serviceTiers: [{ id: "priority" }] }]
 });
+if (startup.allowSetup) workbench.testCodexConnection = async request => {
+  state.calls.push({ kind: "connection-test", payload: request });
+  return { ok: true, requestId: request.requestId, codex: await workbench.checkCodex() };
+};
 if (startup.holdCodex) workbench.checkCodex = () => new Promise(resolve => { state.pending.codex = resolve; });
-if (startup.allowRun) workbench.syncDomi = async () => ({ ok: true });
+if (startup.allowRun) workbench.syncDomi = request => invoke("domi", request);
 workbench.saveSettings = async request => {
   state.calls.push({ kind: "settings", payload: request });
   Object.assign(state.settings, structuredClone(request));
@@ -378,6 +383,113 @@ try {
   });
   const readFailure = { ok: false, stale: true, items: [], remoteStatus: "network_error", retryable: true,
     errorCode: "PLAUD_NETWORK_TIMEOUT", errorStage: "init", error: "PLAUD_NETWORK_TIMEOUT: synthetic read timeout" };
+  const localScanTimeout = "本地资料库扫描超过 180 秒，已停止本轮刷新并保留上次成功数据。";
+  const librarySnapshot = (total, syncedAt = 1, root = "/synthetic/OneDrive/domi工作区") => ({
+    version: 1, backend: "local", syncedAt, projects: Array.from({ length: total }, (_, i) => ({
+      recordId: `synthetic-project-${i}`, name: `匿名项目 ${i}`, domain: "AI", subdomains: [],
+      status: "待交流", rating: "", createdAt: null, lastFollowup: null, link: ""
+    })), people: [],
+    sources: { projects: { name: "Synthetic projects", total, localLibraryDir: root, localDatabasePath: "/synthetic/library.db" },
+      people: { name: "Synthetic people", total: 0 } },
+    health: { plugin: { ok: true, version: "7.0.9", displayName: "domi", root: "/synthetic/plugin" },
+      lark: { ok: true, userName: "", appName: "" }, plaud: { ok: true, queueCount: 0, queueStages: {} } }
+  });
+  await startupScenario({ allowRun: true, allowSetup: true,
+    settings: { storageBackend: "local", onboardingComplete: false, localRepositoryDir: "/synthetic/OneDrive/domi工作区" },
+    domi: { result: { ok: true, snapshot: librarySnapshot(0) } }, snapshot: snapshot([startupReady]) }, async ({ page, count, wait, release }) => {
+    await wait("domi", 1);
+    const settings = page.getByRole("dialog", { name: "domi 设置", exact: true });
+    const primary = settings.locator("footer").getByRole("button", { name: "开始使用", exact: true });
+    await primary.waitFor();
+    assert.equal(await count("domi"), 1, "Opening first-run setup must not scan an existing folder");
+    await page.evaluate(empty => window.__plaudStatusTest.plans.domi.push({ result: { ok: true, snapshot: empty } }, { hold: true }), librarySnapshot(0, 2));
+    await primary.click();
+    await wait("domi", 3);
+    await settings.waitFor({ state: "hidden" });
+    const requests = await page.evaluate(() => window.__plaudStatusTest.calls.filter(call => call.kind === "domi").map(call => call.payload));
+    assert.equal(Boolean(requests[0]?.reindex), false);
+    assert.equal(Boolean(requests[1]?.reindex), false, "First setup shows the selected library's current index first");
+    assert.deepEqual(requests[2], { reindex: true }, "Completing first setup explicitly imports an existing workspace into the new database");
+    await page.getByRole("status", { name: "资料库刷新状态", exact: true }).getByText("正在扫描本地文件，完成后更新资料索引", { exact: true }).waitFor();
+    assert.equal(await page.getByText("本地已同步", { exact: true }).count(), 0, "An empty new index is not presented as a finished import");
+    assert.equal(await page.getByRole("button", { name: "同步 domi 项目与人脉", exact: true }).isDisabled(), false);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+    await release("domi", { ok: true, snapshot: librarySnapshot(1, 3) });
+    await page.getByText("本地已同步", { exact: true }).waitFor();
+    assert.match(await page.locator(".right-panel-header").innerText(), /1 项目 \/ 0 人脉/);
+
+    await page.getByTitle("打开 Codex 设置", { exact: true }).click();
+    await settings.getByRole("button", { name: "资料连接", exact: true }).click();
+    await settings.getByRole("button", { name: "保存资料连接", exact: true }).click();
+    await wait("settings", 2);
+    assert.equal(await count("domi"), 3, "Saving unchanged data settings must not scan again");
+
+    const changedRoot = "/synthetic/OneDrive/another-workspace";
+    await settings.locator(".local-library-setting input").fill(changedRoot);
+    await page.evaluate(cached => window.__plaudStatusTest.plans.domi.push({ result: { ok: true, snapshot: cached } }, { hold: true }), librarySnapshot(2, 4, changedRoot));
+    await settings.getByRole("button", { name: "保存资料连接", exact: true }).click();
+    await wait("domi", 5);
+    await settings.getByTitle("关闭设置", { exact: true }).click();
+    assert.match(await page.locator(".right-panel-header").innerText(), /2 项目 \/ 0 人脉/,
+      "A selected library's cached records stay usable while its explicit import runs");
+    await release("domi", { ok: false, error: localScanTimeout });
+    await page.getByRole("button", { name: "查看资料设置", exact: true }).click();
+    assert.match(await settings.locator(".repository-scan-feedback").innerText(), /180 秒/);
+    await page.evaluate(indexed => window.__plaudStatusTest.plans.domi.push({ result: { ok: true, snapshot: indexed } }), librarySnapshot(3, 5, changedRoot));
+    await settings.getByRole("button", { name: "重新扫描本地文件", exact: true }).click();
+    await wait("domi", 6);
+    await settings.getByText("本地文件扫描完成，资料索引已更新。", { exact: true }).waitFor();
+    assert.match(await page.locator(".right-panel-header").innerText(), /3 项目 \/ 0 人脉/);
+  });
+  await startupScenario({ allowRun: true, settings: { storageBackend: "local" },
+    domi: { error: localScanTimeout }, snapshot: snapshot([startupReady]) }, async ({ page, count, wait, release }) => {
+    await wait("domi", 1);
+    await page.getByText("合成录音 startup-ready", { exact: true }).waitFor();
+    const recordings = page.locator(".panel-section").filter({ has: page.getByRole("button", { name: "录音交流", exact: true }) });
+    assert.doesNotMatch(await recordings.innerText(), /本地资料库扫描|资料库刷新未完成/,
+      "Repository errors must not masquerade as recording failures");
+    assert.equal(await recordings.locator(".plaud-connection-status").count(), 0);
+    await page.getByRole("status", { name: "资料库刷新状态", exact: true }).waitFor();
+    await page.getByRole("button", { name: "查看资料设置", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "domi 设置", exact: true });
+    assert.match(await settings.locator(".repository-scan-feedback").innerText(), /本地资料库扫描超过 180 秒/);
+    const rescan = settings.getByRole("button", { name: "重新扫描本地文件", exact: true });
+    const rootInput = settings.locator(".local-library-setting input");
+    const originalRoot = await rootInput.inputValue();
+    await rootInput.fill("/synthetic/unsaved-library");
+    assert.equal(await rescan.isDisabled(), true, "Rescan must not scan an unsaved directory selection");
+    await rootInput.fill(originalRoot);
+    await page.evaluate(() => window.__plaudStatusTest.plans.domi.push({ hold: true }));
+    await rescan.click();
+    await wait("domi", 2);
+    assert.equal(await settings.getByRole("button", { name: "正在刷新资料库", exact: true }).isDisabled(), true);
+    const requests = await page.evaluate(() => window.__plaudStatusTest.calls.filter(call => call.kind === "domi").map(call => call.payload));
+    assert.equal(Boolean(requests[0]?.reindex), false, "Startup only reads the indexed library");
+    assert.deepEqual(requests[1], { reindex: true }, "Only the explicit maintenance action scans local files");
+    await settings.getByTitle("关闭设置", { exact: true }).click();
+    const libraryRefresh = page.getByRole("button", { name: "同步 domi 项目与人脉", exact: true });
+    assert.equal(await libraryRefresh.isDisabled(), false, "A long manual scan does not block normal indexed reads");
+    await libraryRefresh.click();
+    await wait("domi", 3);
+    assert.equal(await page.evaluate(() => Boolean(window.__plaudStatusTest.calls.filter(call => call.kind === "domi")[2]?.payload?.reindex)), false);
+    await page.getByTitle("打开 Codex 设置", { exact: true }).click();
+    await settings.getByRole("button", { name: "资料连接", exact: true }).click();
+    await release("domi", { ok: false, error: localScanTimeout });
+    await rescan.waitFor();
+    assert.match(await settings.locator(".repository-scan-feedback").innerText(), /180 秒/);
+    await settings.getByTitle("关闭设置", { exact: true }).click();
+    assert.equal(await page.getByText("合成录音 startup-ready", { exact: true }).count(), 1,
+      "A failed maintenance scan keeps the existing recording list");
+    await page.evaluate(() => window.__plaudStatusTest.plans.list.push({ result: {
+      ok: false, stale: true, retryable: false, remoteStatus: "auth_required", items: [],
+      errorCode: "PLAUD_AUTH_REQUIRED", error: "PLAUD_AUTH_REQUIRED: synthetic expired session"
+    } }));
+    await recordings.getByRole("button", { name: "刷新 PLAUD 最近录音", exact: true }).click();
+    await recordings.getByText("PLAUD 登录已失效", { exact: true }).waitFor();
+    assert.equal(await recordings.getByRole("button", { name: "重新登录", exact: true }).count(), 1,
+      "Actual PLAUD failures remain visible and actionable");
+    assert.equal(await count("domi"), 3, "Refreshing recordings must not start a library scan");
+  });
   await startupScenario({ holdCodex: true, cache: { result: trustedCache }, resume: { hold: true },
     list: { result: readFailure }, snapshot: readFailure }, async ({ page, count, wait, release }) => {
     await page.getByText("合成录音 saved-recording", { exact: true }).waitFor();

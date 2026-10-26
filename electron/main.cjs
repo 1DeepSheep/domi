@@ -666,8 +666,8 @@ async function resolveCanonicalEntityWorkspace(request, { repairMissing = false 
     reindex: mayRepair
       ? async () => {
           const synced = await serviceCoordinator.run(
-            "domi:sync",
-            () => getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().sync()),
+            "domi:reindex",
+            () => getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().sync({ reindex: true })),
             {
               force: true,
               allowStale: false,
@@ -5207,12 +5207,13 @@ ipcMain.handle("domi:plaud-delete", async (_event, request) => {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
-ipcMain.handle("domi:sync", async () => {
+ipcMain.handle("domi:sync", async (_event, request = {}) => {
+  const reindex = request?.reindex === true;
   try {
     const result = await serviceCoordinator.run(
-      "domi:sync",
-      () => getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().sync()),
-      { force: true, allowStale: false }
+      reindex ? "domi:reindex" : "domi:sync",
+      () => getDomiPluginActivationGate().withStableClient(() => getDomiIntegration().sync({ reindex })),
+      { force: true, allowStale: false, retries: 0 }
     );
     serviceCoordinator.invalidate("domi:status");
     serviceCoordinator.invalidate("domi:entity-materials:");

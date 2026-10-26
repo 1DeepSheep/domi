@@ -1267,9 +1267,22 @@ function newsRow(row) {
 }
 
 class LocalDomiRepository {
-  constructor({ databasePath, libraryDir }) {
+  constructor({ databasePath, libraryDir, readOnly = false }) {
     this.databasePath = path.resolve(resolveHomePath(databasePath));
     this.libraryDir = path.resolve(resolveHomePath(libraryDir));
+    // Normal list refreshes must not hydrate cloud folders or run migrations.
+    // Missing/uninitialized databases are reported to the caller, not silently
+    // replaced with a new empty repository.
+    if (readOnly) {
+      this.database = new DatabaseSync(this.databasePath, { readOnly: true });
+      try {
+        this.database.exec("PRAGMA busy_timeout = 5000");
+      } catch (error) {
+        this.database.close();
+        throw error;
+      }
+      return;
+    }
     fs.mkdirSync(path.dirname(this.databasePath), { recursive: true, mode: 0o700 });
     ensureDocumentLibraryStructure(this.libraryDir);
     this.database = new DatabaseSync(this.databasePath);

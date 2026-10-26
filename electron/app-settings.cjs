@@ -450,6 +450,14 @@ class AppSettingsService {
       try {
         ensureDocumentLibraryStructure(location.rootPath);
         require("./codex-onboarding.cjs").verifyWorkspace(location.rootPath);
+        // Initialize the database during explicit setup, not on every list
+        // refresh. Routine refreshes can then stay read-only and avoid cloud IO.
+        const { LocalDomiRepository } = require("./local-domi-repository.cjs");
+        const repository = new LocalDomiRepository({
+          databasePath: settings.localDatabasePath,
+          libraryDir: location.rootPath
+        });
+        repository.close();
       } catch {
         throw new Error("无法在当前文件夹保存资料。请允许 domi 访问该文件夹，或选择其他保存位置；已有资料未改动。");
       }

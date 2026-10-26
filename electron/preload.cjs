@@ -86,7 +86,7 @@ contextBridge.exposeInMainWorld("workbench", {
   startFeishuSetupAuth: () => ipcRenderer.invoke("domi:feishu-setup-start-auth"),
   completeFeishuSetupAuth: (request) => ipcRenderer.invoke("domi:feishu-setup-complete-auth", request),
   provisionFeishuSetup: () => ipcRenderer.invoke("domi:feishu-setup-provision"),
-  syncDomi: () => ipcRenderer.invoke("domi:sync"),
+  syncDomi: (request = {}) => ipcRenderer.invoke("domi:sync", request),
   refreshIndustryOverviews: (request) => ipcRenderer.invoke("domi:industry-overviews", request),
   listDomiDatabase: (request) => ipcRenderer.invoke("domi:database-list", request),
   updateDomiDatabaseRecord: (request) => ipcRenderer.invoke("domi:database-update", request),

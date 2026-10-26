@@ -5929,6 +5929,43 @@ body.panel-resizing .main-grid {
   line-height: 1.5;
 }
 
+.repository-refresh-notice {
+  display: grid;
+  gap: 6px;
+  margin: 0 16px 12px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+}
+
+.repository-refresh-notice > span,
+.local-database-maintenance > button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.repository-refresh-notice > button {
+  justify-self: start;
+  color: inherit;
+  text-decoration: underline;
+}
+
+.local-database-maintenance {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.local-database-maintenance > small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.local-database-maintenance > button {
+  justify-self: start;
+}
+
 .domi-inline-error.actionable {
   display: grid;
   grid-template-columns: 15px minmax(0, 1fr) auto;
