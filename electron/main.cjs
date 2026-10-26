@@ -31,6 +31,8 @@ const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DesktopNotificationService } = require("./desktop-notifications.cjs");
 const { DomiIntegration } = require("./domi-integration.cjs");
 const { SourcingService } = require("./sourcing-service.cjs");
+const { TodoDailyScheduler } = require("./todo-daily-scheduler.cjs");
+const { TodoRunWatchdog, isTodoSyncRun } = require("./todo-run-watchdog.cjs");
 const { PlaudRecallService } = require("./plaud-recall-model.cjs");
 const plaudRecallService = new PlaudRecallService();
 const { resolveLarkCliForChild } = require("./lark-runtime.cjs");
@@ -142,6 +144,11 @@ const activeRuns = new Map();
 const startingCodexRunIds = new Set();
 const cancelledCodexRunIds = new Set();
 const startingCodexThreadIds = new Set();
+const todoRunWatchdog = new TodoRunWatchdog({
+  isRunning: runId => activeRuns.has(runId) || startingCodexRunIds.has(runId),
+  stop: runId => stopCodex(runId),
+  onDeadline: runId => appendRuntimeLog("todo-run-deadline", { runId })
+});
 const liveCodexThreads = new Map();
 const codexThreadTurnIds = new Map();
 const codexThreadSandboxPolicies = new Map();
@@ -231,6 +238,7 @@ let stateStore = null;
 let desktopNotifications = null;
 let domiIntegration = null;
 let sourcingService = null;
+let todoDailyScheduler = null;
 let domiPluginManager = null;
 let domiPluginActivationGate = null;
 let appSettings = null;
@@ -330,6 +338,43 @@ function getDomiIntegration() {
 function getSourcingService() {
   if (!sourcingService) sourcingService = new SourcingService({ integration: getDomiIntegration() });
   return sourcingService;
+}
+
+function getTodoDailyScheduler() {
+  if (!todoDailyScheduler) todoDailyScheduler = new TodoDailyScheduler({
+    filePath: path.join(app.getPath("userData"), "todo-daily-schedule.json")
+  });
+  return todoDailyScheduler;
+}
+
+function todoDailyRepositoryIdentity() {
+  const settings = getAppSettings().load().settings;
+  const local = settings.storageBackend === "local";
+  const source = local
+    ? ["local", settings.localRepositoryDir, settings.localDatabasePath, settings.localLibraryDir]
+    : ["feishu", settings.projectBaseToken, settings.projectTableId, settings.peopleBaseToken,
+      settings.peopleTableId, settings.radarBaseToken, settings.radarTableId,
+      settings.wikiSpaceId, settings.taskDocumentUrl, settings.localLibraryDir];
+  if (!settings.onboardingComplete || (local
+    ? !settings.localRepositoryDir || !settings.localDatabasePath
+    : !settings.projectBaseToken || !settings.projectTableId || !settings.peopleBaseToken || !settings.peopleTableId)) {
+    throw new Error("连接资料库后，每天会自动更新待办。");
+  }
+  // Return an opaque scope so a completion can still target the original
+  // library after settings change, without sending private source identifiers.
+  return crypto.createHash("sha256").update(JSON.stringify(source.map(value => String(value || "").trim()))).digest("hex");
+}
+
+function todoDailyRuntimeStatus(repositoryIdentity) {
+  const status = getTodoDailyScheduler().status({ repositoryIdentity });
+  const survivingTodoRun = [...activeRuns.values()].some(run => !run.finished
+    && (String(run.runId || "").startsWith("todo-sync-") || run.workflowId === "task"));
+  const startingTodoRun = [...startingCodexRunIds].some(id => String(id).startsWith("todo-sync-"));
+  // A renderer reload loses its local timer, but cannot start another writer
+  // while an earlier model job remains alive in the main process.
+  return { ...status, repositoryIdentity, ...(survivingTodoRun || startingTodoRun
+    ? { state: "running", due: false, running: true, nextRunAt: Math.max(status.nextRunAt, Date.now() + 60_000) }
+    : {}) };
 }
 
 function getDesktopNotifications() {
@@ -2291,13 +2336,15 @@ function armRunIdleTimeout(run) {
       void reconcileCodexTurnStart(run);
       return;
     }
-    if (run.plaudWorkflowReserved) {
+    if (run.plaudWorkflowReserved || run.todoSyncWatchdogProtected) {
       // A failed/accepted interrupt RPC does not prove the remote CLI stopped.
       // Keep ownership until a terminal notification/read confirms completion.
       const retainUntilConfirmed = () => {
         if (run.finished || activeRuns.get(run.runId) !== run) return;
         publishCodexEvent(run.sender, run.runId, { type: "reconnecting", threadId: run.threadId,
-          turnId: run.turnId, summary: "正在确认录音任务是否已停止；确认前保留 PLAUD 会话，避免重复占用" });
+          turnId: run.turnId, summary: run.todoSyncWatchdogProtected
+            ? "正在确认待办更新是否已停止；确认前不会重复更新"
+            : "正在确认录音任务是否已停止；确认前保留 PLAUD 会话，避免重复占用" });
         armRunIdleTimeout(run);
       };
       void stopCodex(run.runId).then(retainUntilConfirmed, retainUntilConfirmed);
@@ -2387,6 +2434,7 @@ function finishRun(run, type, details = {}) {
     return;
   }
   run.finished = true;
+  todoRunWatchdog.clear(run.runId);
   clearTimeout(run.idleTimer);
   clearTimeout(run.reconcileTimer);
   for (const request of run.pendingUserInputs.values()) {
@@ -3978,6 +4026,7 @@ async function runCodex(sender, payload) {
   }
 
   startingCodexRunIds.add(runId);
+  todoRunWatchdog.arm(runId, payload);
   if (requestedThreadId) startingCodexThreadIds.add(requestedThreadId);
   let plaudWorkflowReserved = false;
   try {
@@ -4093,6 +4142,7 @@ async function runCodex(sender, payload) {
         externalType: payload?.externalType || "",
         externalRecordId: payload?.externalRecordId || "",
         workflowId: payload?.workflowId || "",
+        todoSyncWatchdogProtected: isTodoSyncRun(runId, payload),
         plaudWorkflowReserved,
         useDomiPlugin: payload?.useDomiPlugin === true,
         slidesDeliveryPolicy: normalizedSlidesDeliveryPolicy(payload?.slidesDeliveryPolicy),
@@ -4191,6 +4241,7 @@ async function runCodex(sender, payload) {
     }
     startingCodexRunIds.delete(runId);
     schedulePendingSkillHubCodexReload();
+    if (!activeRuns.has(runId)) todoRunWatchdog.clear(runId);
     cancelledCodexRunIds.delete(runId);
     if (requestedThreadId) startingCodexThreadIds.delete(requestedThreadId);
   }
@@ -4235,11 +4286,13 @@ async function stopCodex(runId) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       const unfinished = activeRuns.get(runId);
-      if (unfinished?.plaudWorkflowReserved) {
+      if (unfinished?.plaudWorkflowReserved || unfinished?.todoSyncWatchdogProtected) {
         const snapshot = await getCodexClient().request("thread/read", { threadId: unfinished.threadId, includeTurns: true });
         const turn = snapshot?.thread?.turns?.find(item => item.id === unfinished.turnId);
         if (!turn || !["completed", "failed", "stopped"].includes(classifyCodexTurnStatus(turn.status))) {
-          return { ok: false, error: "停止请求已发送，正在确认原录音任务的状态；确认结束前会保留 PLAUD 会话。" };
+          return { ok: false, error: unfinished.todoSyncWatchdogProtected
+            ? "停止请求已发送，正在确认待办更新状态；确认结束前不会重复更新。"
+            : "停止请求已发送，正在确认原录音任务的状态；确认结束前会保留 PLAUD 会话。" };
         }
       }
       if (unfinished) finishRun(unfinished, "stopped");
@@ -4993,6 +5046,36 @@ ipcMain.handle("domi:podcast-process", async (_event, request) => {
     return result;
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:todo-daily-status", () => {
+  try {
+    return todoDailyRuntimeStatus(todoDailyRepositoryIdentity());
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:todo-sync-claim", (_event, request) => {
+  try {
+    const repositoryIdentity = todoDailyRepositoryIdentity();
+    const status = todoDailyRuntimeStatus(repositoryIdentity);
+    if (activeRuns.size > 0 || startingCodexRunIds.size > 0 || pendingRunPostProcessing.size > 0) {
+      return { ...status, claimed: false, token: null, reason: "busy" };
+    }
+    return { ...getTodoDailyScheduler().claim({ repositoryIdentity, trigger: request?.trigger }), repositoryIdentity };
+  } catch (error) {
+    return { ok: false, claimed: false, token: null, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("domi:todo-sync-finish", (_event, request) => {
+  try {
+    const repositoryIdentity = String(request?.repositoryIdentity || "");
+    if (!/^[a-f0-9]{64}$/.test(repositoryIdentity)) throw new Error("无法确认待办更新所属资料库。");
+    return { ...getTodoDailyScheduler().finish({
+      repositoryIdentity, token: request?.token, success: request?.success
+    }), repositoryIdentity };
+  } catch (error) {
+    return { ok: false, accepted: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
 ipcMain.handle("domi:task-list", async (_event, request) => {

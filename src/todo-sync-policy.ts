@@ -1,6 +1,6 @@
 import type { DomiSnapshot, DomiTaskBoardSnapshot, DomiTask, DomiWeeklyNewsSnapshot } from "./env.d.ts";
 
-export const TODO_RULE_VERSION = "domi-todo-local-merge-v2";
+export const TODO_RULE_VERSION = "domi-todo-daily-priorities-v3";
 const DAY = 86_400_000;
 const SHA256 = /^[a-f0-9]{64}$/i;
 

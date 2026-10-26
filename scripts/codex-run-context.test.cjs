@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const { TodoRunWatchdog, isTodoSyncRun } = require("../electron/todo-run-watchdog.cjs");
 const {
   bindCodexRunToTurn,
   codexClientIdleForSkillReload,
@@ -81,6 +82,7 @@ function mainRunHarness(overrides = {}) {
     armRunIdleTimeout() {}, appendRuntimeLog() {}, boundedRuntimeText: String,
     schedulePendingSkillHubCodexReload() {}, resetCodexClient() {},
     codexClientIdleForSkillReload, codexRunExecutionMode, threadPersistenceOptions, bindCodexRunToTurn,
+    isTodoSyncRun,
     normalizeCodexRoutingParams, requestCodexTurn, resolveCodexActiveRun,
     classifyCodexTurnStatus: require("../electron/codex-turn-status.cjs").classifyCodexTurnStatus,
     publishCodexEvent: (_sender, _runId, event) => events.push(event),
@@ -91,6 +93,10 @@ function mainRunHarness(overrides = {}) {
     },
     ...overrides
   };
+  context.todoRunWatchdog ||= new TodoRunWatchdog({
+    isRunning: id => context.activeRuns.has(id) || context.startingCodexRunIds.has(id),
+    stop: id => context.stopCodex(id)
+  });
   context.findActiveRun = params => resolveCodexActiveRun(context.activeRuns.values(), params).run;
   context.getCodexClient ||= () => ({
     start: async () => {}, capabilities: () => ({ experimentalApi: true }),
@@ -111,6 +117,34 @@ function mainRunHarness(overrides = {}) {
   }
   return { context, calls, events };
 }
+
+test("todo main watchdog spans preflight and model execution and clears only on terminal completion", async () => {
+  const prepared = deferred();
+  const { context } = mainRunHarness({ ensureCodexRuntimeReady: () => prepared.promise });
+  const id = "todo-sync-main-lifecycle";
+  const completion = context.runCodex({}, { runId: id, prompt: "synthetic todo", workflowId: "task", background: true, ephemeral: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.startingCodexRunIds.has(id), true);
+  assert.equal(context.todoRunWatchdog.entries.has(id), true);
+  prepared.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  const run = context.activeRuns.get(id);
+  assert.equal(context.startingCodexRunIds.has(id), false);
+  assert.equal(context.todoRunWatchdog.entries.has(id), true);
+  assert.equal(run.todoSyncWatchdogProtected, true);
+  context.finishRun(run, "completed");
+  assert.equal((await completion).ok, true);
+  assert.equal(context.todoRunWatchdog.entries.has(id), false);
+});
+
+test("failed todo preflight clears its main watchdog without affecting another task", async () => {
+  const { context } = mainRunHarness({ ensureCodexRuntimeReady: async () => { throw new Error("synthetic preflight failure"); } });
+  const id = "todo-sync-preflight-failure";
+  const result = await context.runCodex({}, { runId: id, prompt: "synthetic todo", workflowId: "task", background: true, ephemeral: true });
+  assert.equal(result.ok, false);
+  assert.equal(context.todoRunWatchdog.entries.has(id), false);
+  assert.equal(context.startingCodexRunIds.has(id), false);
+});
 
 test("every real run supplies the domi output contract without changing user input or starting extra turns", async () => {
   for (const lifecycle of ["new", "resumed", "live"]) {

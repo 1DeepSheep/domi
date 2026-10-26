@@ -507,6 +507,15 @@ const browserFallback: Window["workbench"] = {
     tasks: [],
     error: "浏览器预览模式不能读取 1.待办事项。"
   }),
+  todoDailyStatus: async () => ({
+    ok: false, error: "请在 domi 客户端中自动更新待办。"
+  }),
+  claimTodoSync: async () => ({
+    ok: false, claimed: false, token: null, error: "请在 domi 客户端中更新待办。"
+  }),
+  finishTodoSync: async () => ({
+    ok: false, accepted: false, error: "请在 domi 客户端中验证待办更新。"
+  }),
   updateDomiTask: async () => ({
     ok: false,
     error: "浏览器预览模式不能更新 1.待办事项。"
