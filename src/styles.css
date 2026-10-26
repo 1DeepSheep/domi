@@ -11783,3 +11783,19 @@ body.panel-resizing .main-grid {
 .plaud-context-scope p { color: var(--muted); margin: 6px 0 12px; }
 .plaud-context-scope button { border: 1px solid var(--line-strong); color: var(--text); border-radius: 6px; background: var(--surface); font: inherit; padding: 7px 11px; cursor: pointer; }
 .plaud-context-scope button:disabled { opacity: .55; cursor: default; }
+
+/* Priorities and all four task groups share one accessible vertical scroller. */
+.managed-task-board .task-board-scroll { overflow-y: auto; padding-top: 16px; }
+.managed-task-board .managed-task-grid {
+  height: auto;
+  grid-template-rows: auto;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.managed-task-board .task-column-list { max-height: 480px; }
+@container (min-width: 920px) {
+  .managed-task-board .managed-task-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@container (max-width: 580px) {
+  .managed-task-board .managed-task-grid { grid-template-columns: minmax(0, 1fr); }
+}

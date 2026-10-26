@@ -149,6 +149,9 @@ declare global {
       processPodcastEpisode: (request: PodcastProcessRequest) => Promise<PodcastProcessResult>;
       updatePodcastProgress: (request: PodcastProgressRequest) => Promise<PodcastProgressResult>;
       listDomiTasks: (request?: DomiTaskBoardRequest) => Promise<DomiTaskBoardSnapshot>;
+      todoDailyStatus: () => Promise<TodoDailyStatus>;
+      claimTodoSync: (request: { trigger: "daily" | "manual" }) => Promise<TodoDailyClaimResult>;
+      finishTodoSync: (request: { repositoryIdentity: string; token: string; success: boolean }) => Promise<TodoDailyFinishResult>;
       updateDomiTask: (request: DomiTaskUpdateRequest) => Promise<DomiTaskUpdateResult>;
       loginPlaud: (request: DomiPlaudConnectionRequest) => Promise<DomiPlaudConnectionResult>;
       checkPlaudConnection: (
@@ -1200,6 +1203,29 @@ export type DomiWeeklyNewsSnapshot = {
 };
 
 export type DomiTaskStatus = "open" | "in_progress" | "done" | "ignored";
+export type TodoDailyStatus = {
+  ok: boolean;
+  repositoryIdentity?: string;
+  state?: "scheduled" | "due" | "running" | "completed" | "retrying" | "exhausted";
+  due?: boolean;
+  localDay?: string;
+  scheduledAt?: number;
+  nextRunAt?: number;
+  lastSuccessAt?: number | null;
+  lastAttemptAt?: number | null;
+  attempts?: number;
+  running?: boolean;
+  runningForRepository?: boolean;
+  leaseExpiresAt?: number | null;
+  error?: string;
+};
+export type TodoDailyClaimResult = TodoDailyStatus & {
+  claimed: boolean;
+  token: string | null;
+  reason?: string | null;
+};
+export type TodoDailyFinishResult = TodoDailyStatus & { accepted: boolean };
+
 export type DomiTaskPriority = "P1" | "P2" | "P3";
 export type DomiTaskCategory =
   | "key-milestone"

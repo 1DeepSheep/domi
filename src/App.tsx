@@ -79,6 +79,7 @@ import {
 import { hasNativeWorkbench, workbench } from "./bridge";
 import IndustryOverview from "./IndustryOverview";
 import UnderwaterPanel from "./components/UnderwaterPanel";
+import TodoPriorities from "./components/TodoPriorities";
 import { useSourcing } from "./use-sourcing";
 import { previewSourcingSnapshot } from "./sourcing-preview";
 import { sourcingFollowUpRequest } from "./sourcing-follow-up";
@@ -157,6 +158,8 @@ import {
   DomiSnapshot,
   DomiTask,
   DomiTaskBoardSnapshot,
+  TodoDailyStatus,
+  TodoDailyClaimResult,
   DomiWeeklyNewsSnapshot,
   DocumentLibraryNode,
   DocumentLibrarySearchMatch,
@@ -2015,6 +2018,11 @@ function App() {
   );
   const [domiTaskSyncElapsed, setDomiTaskSyncElapsed] = useState(0);
   const [domiTaskSyncQueued, setDomiTaskSyncQueued] = useState(false);
+  const [todoDailyStatus, setTodoDailyStatus] = useState<TodoDailyStatus | null>(null);
+  const [todoNow, setTodoNow] = useState(Date.now);
+  const todoSyncInFlightRef = useRef(false);
+  const todoDailyCheckRef = useRef<() => Promise<void>>(async () => {});
+  const todoDailyCheckingRef = useRef(false);
   const [documentLibrary, setDocumentLibrary] = useState<DocumentLibrarySnapshot | null>(null);
   const [documentLibraryLoading, setDocumentLibraryLoading] = useState(false);
   const [documentLibraryError, setDocumentLibraryError] = useState("");
@@ -3840,21 +3848,50 @@ function App() {
     return () => window.clearInterval(timer);
   }, [domiTaskSyncState.startedAt, domiTaskSyncState.completedAt]);
 
+  // Check local scheduling state only; native claims persist across reloads.
+  // A late open or wake catches up without creating a second writer.
+  todoDailyCheckRef.current = async () => {
+    setTodoNow(Date.now());
+    if (!hasNativeWorkbench || !storageReady || !codexRecoveryReady
+      || !appSettingsRef.current?.onboardingComplete || !domiTaskBoard?.configured
+      || todoDailyCheckingRef.current || todoSyncInFlightRef.current) return;
+    todoDailyCheckingRef.current = true;
+    const identity = queueRepositoryIdentity(appSettingsRef.current);
+    try {
+      const status = await workbench.todoDailyStatus();
+      if (identity !== queueRepositoryIdentity(appSettingsRef.current)) return;
+      setTodoDailyStatus(status);
+      if (status.ok && (status.due || domiTaskSyncQueued) && !executingSuggestionId && !domiTaskMutationId
+        && !settingsSavePromiseRef.current && !hasPendingTodoForegroundWork()
+        && codexTaskReady(codexReadinessController.snapshot.status, true)) {
+        await syncManagedTasks({ trigger: domiTaskSyncQueued ? "manual" : "daily" });
+      }
+    } catch {
+      // A failed status read never replaces the board or starts a blind run.
+      setTodoDailyStatus({ ok: false });
+    } finally {
+      todoDailyCheckingRef.current = false;
+    }
+  };
+
   useEffect(() => {
-    if (
-      !domiTaskSyncQueued
-      || runningTaskThreads.length > 0
-      || executingSuggestionId
-      || !domiTaskBoard?.configured
-    ) return;
-    setDomiTaskSyncQueued(false);
-    void syncManagedTasks({ bypassQueue: true });
-  }, [
-    domiTaskSyncQueued,
-    runningTaskThreads.length,
-    executingSuggestionId,
-    domiTaskBoard?.configured
-  ]);
+    const check = () => { void todoDailyCheckRef.current(); };
+    const timer = window.setInterval(check, 60_000);
+    window.addEventListener("focus", check);
+    window.addEventListener("online", check);
+    document.addEventListener("visibilitychange", check);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", check);
+      window.removeEventListener("online", check);
+      document.removeEventListener("visibilitychange", check);
+    };
+  }, []);
+
+  useEffect(() => {
+    void todoDailyCheckRef.current();
+  }, [storageReady, codexRecoveryReady, appSettings, domiTaskBoard?.configured,
+    codexStatus, executingSuggestionId, domiTaskMutationId, runningTaskThreads.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5522,8 +5559,10 @@ function App() {
     if (!options.silent) setDomiTaskLoading(true);
     setDomiTaskError("");
     try {
+      const scope = queueRepositoryIdentity(appSettingsRef.current);
       const result = await workbench.listDomiTasks({ fresh: options.fresh === true });
-      setDomiTaskBoard(result);
+      if (scope !== queueRepositoryIdentity(appSettingsRef.current)) return null;
+      setDomiTaskBoard(current => result.ok || result.stale || !current ? result : current);
       if (!result.ok && !result.stale && result.configured) {
         setDomiTaskError(result.error || `无法读取 ${todoDocumentLabel}。`);
       }
@@ -7088,7 +7127,8 @@ function App() {
     if (
       dataConnectionChanged
       && (
-        submissionStartingThreadIdsRef.current.size > 0
+        todoSyncInFlightRef.current
+        || submissionStartingThreadIdsRef.current.size > 0
         || queueStartingThreadIdsRef.current.size > 0
         || runContextRef.current.size > 0
         || settlingThreadIdsRef.current.size > 0
@@ -7379,6 +7419,7 @@ function App() {
   }
 
   async function updateManagedTask(taskId: string, status: DomiTask["status"]) {
+    if (todoSyncInFlightRef.current) return;
     setDomiTaskMutationId(taskId);
     setDomiTaskError("");
     try {
@@ -7398,6 +7439,7 @@ function App() {
   }
 
   async function executeManagedTask(task: DomiTask) {
+    if (todoSyncInFlightRef.current) return;
     if (domiTaskMutationId || executingSuggestionId) return;
     const marked = await updateManagedTask(task.id, "in_progress");
     if (!marked) return;
@@ -7429,19 +7471,24 @@ function App() {
     }
   }
 
-  async function syncManagedTasks(options: { bypassQueue?: boolean } = {}) {
-    if (executingSuggestionId) return;
-    const foregroundRunCount = Object.keys(activeRunsByThread).length;
-    if (!options.bypassQueue && foregroundRunCount > 0) {
-      setDomiTaskSyncQueued(true);
-      setDomiTaskError("");
-      setDomiTaskSyncState({
-        phase: "waiting",
-        label: `等待 ${foregroundRunCount} 个前台任务完成后自动同步`,
-        startedAt: null,
-        completedAt: null,
-        candidateCount: 0
-      });
+  function hasPendingTodoForegroundWork() {
+    return submissionStartingThreadIdsRef.current.size > 0
+      || queueStartingThreadIdsRef.current.size > 0
+      || runContextRef.current.size > 0
+      || settlingThreadIdsRef.current.size > 0
+      || Object.values(activeRunsByThreadRef.current).some(Boolean);
+  }
+
+  async function syncManagedTasks(options: { trigger?: "daily" | "manual" } = {}) {
+    const automatic = options.trigger === "daily";
+    if (executingSuggestionId || domiTaskMutationId || todoSyncInFlightRef.current) return;
+    if (settingsSavePromiseRef.current || hasPendingTodoForegroundWork()) {
+      if (!automatic) {
+        setDomiTaskSyncQueued(true);
+        setDomiTaskError("");
+        setDomiTaskSyncState({ phase: "waiting", label: "当前任务完成后更新待办",
+          startedAt: null, completedAt: null, candidateCount: 0 });
+      }
       return;
     }
     const todoWorkflow = workflows.find((workflow) => workflow.id === "task");
@@ -7449,14 +7496,35 @@ function App() {
       setDomiTaskError("未找到 domi 待办事项工作流。");
       return;
     }
-    const requestText = todoWorkflow.defaultPrompt || `更新 ${todoDocumentLabel}。`;
+    todoSyncInFlightRef.current = true;
+    const repositoryIdentity = queueRepositoryIdentity(appSettingsRef.current);
+    let claim: TodoDailyClaimResult;
+    try {
+      claim = await workbench.claimTodoSync({ trigger: automatic ? "daily" : "manual" });
+      if (repositoryIdentity === queueRepositoryIdentity(appSettingsRef.current)) setTodoDailyStatus(claim);
+      if (!claim.ok) throw new Error(claim.error || "暂时无法开始待办更新，请稍后重试。");
+      if (!claim.claimed || !claim.token || !claim.repositoryIdentity) {
+        if (!automatic && (claim.reason === "busy" || claim.reason === "running")) {
+          setDomiTaskSyncQueued(true);
+          setDomiTaskSyncState({ phase: "waiting", label: "当前任务完成后更新待办",
+            startedAt: null, completedAt: null, candidateCount: 0 });
+        }
+        todoSyncInFlightRef.current = false;
+        return;
+      }
+    } catch (error) {
+      todoSyncInFlightRef.current = false;
+      if (!automatic) setDomiTaskError(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const requestText = (todoWorkflow.defaultPrompt || `更新 ${todoDocumentLabel}。`)
+      + "\n按今天的真实截止时间、明确承诺、已核实的新进展和跟进必要性，更新当前最值得采取的行动。保留正在推进、已完成及忽略状态；没有新的依据不要虚构紧迫性。只维护待办，不自动发消息、约会或执行研究任务。";
     const runId = createId("todo-sync");
     let timeoutHandle: number | undefined;
     let ledgerPollHandle: number | undefined;
     let postWriteGraceHandle: number | undefined;
     let ledgerPollingActive = true;
     const startedAt = Date.now();
-    const repositoryIdentity = queueRepositoryIdentity(appSettingsRef.current);
     const localBackend = appSettingsRef.current?.storageBackend === "local";
     let candidateCount = 0;
     let outcome = "failed";
@@ -7475,6 +7543,9 @@ function App() {
     setDomiTaskError("");
     updateSyncPhase("refreshing", "正在刷新项目与人脉资料");
     try {
+      if (repositoryIdentity !== queueRepositoryIdentity(appSettingsRef.current)) {
+        throw new Error("资料库已切换，将在新资料库准备好后更新待办。");
+      }
       const synced = await workbench.syncDomi();
       const currentSnapshot = synced.snapshot || domiSnapshot;
       const [baselineBoard, newsRevision] = await Promise.all([
@@ -7482,10 +7553,13 @@ function App() {
         workbench.listWeeklyNews({ days: 7, limit: 1 })
           .catch(() => ({ ok: false } as DomiWeeklyNewsSnapshot))
       ]);
+      if (repositoryIdentity !== queueRepositoryIdentity(appSettingsRef.current)) {
+        throw new Error("资料库已切换，本轮待办更新已停止。");
+      }
       if (baselineBoard.ok) setDomiTaskBoard(baselineBoard);
       if (synced.snapshot) setDomiSnapshot(synced.snapshot);
-      if (!synced.ok && !currentSnapshot) {
-        throw new Error(synced.error || "资料库刷新失败，暂时无法生成待办事项。");
+      if (!synced.ok || synced.stale || !currentSnapshot || !baselineBoard.ok || baselineBoard.stale) {
+        throw new Error(synced.error || baselineBoard.error || "最新资料暂时无法读取，已保留现有待办。");
       }
       candidateCount = recentTodoCandidateCount(currentSnapshot);
       const inputFingerprint = currentSnapshot
@@ -7548,7 +7622,7 @@ function App() {
           model: runModelPolicy.model,
           reasoningEffort: runModelPolicy.reasoningEffort,
           serviceTier: runModelPolicy.serviceTier,
-          workspacePath: activeThread.workspacePath
+          workspacePath: appSettingsRef.current?.localRepositoryDir || codexStatus?.workspacePath
         });
       const isFreshLedger = (snapshot: DomiTaskBoardSnapshot | null) => {
         return Boolean(localBackend && snapshot
@@ -7661,13 +7735,37 @@ function App() {
       if (!boardRefreshedAfterFailure) {
         await refreshDomiTaskBoard({ silent: true, fresh: true });
       }
-      setDomiTaskError(error instanceof Error ? error.message : String(error));
-      updateSyncPhase("failed", "本轮同步未完整完成，当前看板保留最近一次有效内容");
+      if (!automatic) setDomiTaskError(error instanceof Error ? error.message : String(error));
+      else setDomiTaskError("");
+      updateSyncPhase("failed", automatic
+        ? "自动更新暂未完成，已保留现有待办"
+        : "本轮更新未完成，已保留现有待办");
     } finally {
       ledgerPollingActive = false;
       if (timeoutHandle !== undefined) window.clearTimeout(timeoutHandle);
       if (ledgerPollHandle !== undefined) window.clearTimeout(ledgerPollHandle);
       if (postWriteGraceHandle !== undefined) window.clearTimeout(postWriteGraceHandle);
+      try {
+        const request = { repositoryIdentity: claim.repositoryIdentity!, token: claim.token!,
+          success: outcome === "completed" || outcome === "skipped" };
+        let finished = await workbench.finishTodoSync(request).catch(() => ({ ok: false, accepted: false }));
+        for (const delay of [250, 750]) {
+          if (finished.ok) break;
+          await new Promise(resolve => window.setTimeout(resolve, delay));
+          finished = await workbench.finishTodoSync(request).catch(() => ({ ok: false, accepted: false }));
+        }
+        if (repositoryIdentity === queueRepositoryIdentity(appSettingsRef.current)) {
+          setTodoDailyStatus(finished);
+          if (request.success && (!finished.ok || !finished.accepted)) {
+            updateSyncPhase("completed", "待办已更新，自动更新记录尚未确认");
+          }
+        }
+      } catch {
+        // The persisted lease prevents a reload from duplicating this run.
+        setTodoDailyStatus({ ok: false });
+      }
+      todoSyncInFlightRef.current = false;
+      setTodoNow(Date.now());
       setExecutingSuggestionId(null);
       workbench.reportRendererIssue({
         kind: "workflow-metric",
@@ -11490,6 +11588,17 @@ function App() {
 
   function renderTaskBoard() {
     const suggestionCount = managedTasksByCategory.active.length;
+    const dailyCaption = todoDailyStatus?.ok === false
+      ? "自动更新时间暂未确认，当前显示已保存的待办"
+      : todoDailyStatus?.state === "running"
+      ? "正在更新今天的重点，已有待办可继续查看"
+      : todoDailyStatus?.state === "retrying"
+        ? "本次自动更新未完成，稍后会再试；当前显示最近一次结果"
+        : todoDailyStatus?.state === "exhausted"
+          ? "今天自动更新暂未完成，可手动更新；已有待办已保留"
+          : todoDailyStatus?.lastSuccessAt
+            ? `最近更新 ${new Date(todoDailyStatus.lastSuccessAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} · 按当前截止时间排序`
+            : "先按已有待办排序，自动更新完成后补充最新进展";
     const columns: Array<{
       id: string;
       title: string;
@@ -11536,7 +11645,7 @@ function App() {
               <h1 id="task-board-title">待办事项</h1>
               <p>
                 {domiTaskBoard?.configured
-                  ? `${suggestionCount} 个待办事项 · 与 ${todoDocumentLabel} 同步`
+                  ? `${suggestionCount} 个待办事项 · 每天 09:00 自动更新，未打开时下次启动补更`
                   : "完成资料库连接后显示行动看板"}
               </p>
             </div>
@@ -11576,7 +11685,7 @@ function App() {
               onClick={() => void syncManagedTasks()}
               disabled={Boolean(executingSuggestionId || domiTaskSyncQueued)
                 || !domiTaskBoard?.configured}
-              title={`运行 Todo Skill，更新 ${todoDocumentLabel} 后刷新看板`}
+              title={`立即更新 ${todoDocumentLabel}，重新判断当前优先事项`}
             >
               <RefreshCw
                 className={executingSuggestionId === "managed-refresh"
@@ -11588,7 +11697,7 @@ function App() {
                 ? "同步中"
                 : domiTaskSyncQueued
                   ? "等待中"
-                  : "同步"}
+                  : "立即更新"}
             </button>
           </div>
         </div>
@@ -11614,6 +11723,14 @@ function App() {
           </div>
         ) : (
           <div className="task-board-scroll">
+            <TodoPriorities
+              tasks={managedTasksByCategory.active}
+              now={todoNow}
+              subtitle={dailyCaption}
+              onExecute={task => void executeManagedTask(task)}
+              busy={Boolean(domiTaskMutationId || executingSuggestionId)}
+              busyTaskId={executingSuggestionId?.startsWith("managed:") ? executingSuggestionId.slice(8) : domiTaskMutationId}
+            />
             <div className="task-board-grid managed-task-grid">
               {columns.map((column) => (
                 <section className={`task-column managed-${column.id}`} aria-labelledby={`managed-task-${column.id}`} key={column.id}>

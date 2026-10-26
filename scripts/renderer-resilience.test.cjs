@@ -1308,7 +1308,7 @@ assert.match(
 );
 assert.match(
   app,
-  /domiTaskSyncQueued[\s\S]*?runningTaskThreads\.length > 0[\s\S]*?syncManagedTasks\(\{ bypassQueue: true \}\)/,
+  /status\.due \|\| domiTaskSyncQueued[\s\S]*?!hasPendingTodoForegroundWork\(\)[\s\S]*?syncManagedTasks\(/,
   "Todo-board sync must wait for foreground Codex runs to finish instead of competing for model capacity."
 );
 assert.match(
@@ -1344,7 +1344,7 @@ assert.match(
 );
 assert.match(
   managedTaskBoardSource,
-  /onClick=\{\(\) => void syncManagedTasks\(\)\}[\s\S]*?\? "同步中"[\s\S]*?\? "等待中"[\s\S]*?: "同步"/,
+  /onClick=\{\(\) => void syncManagedTasks\(\)\}[\s\S]*?\? "同步中"[\s\S]*?\? "等待中"[\s\S]*?: "立即更新"/,
   "The managed task board must expose sync as the single generation entry point."
 );
 assert.doesNotMatch(
