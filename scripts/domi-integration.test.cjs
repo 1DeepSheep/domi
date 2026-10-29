@@ -3797,6 +3797,9 @@ test("local repository mode syncs projects, people and news without Feishu", asy
     upsertNews: (items) => {
       news.splice(0, news.length, ...items);
     },
+    replaceNewsRange: (items) => {
+      news.splice(0, news.length, ...items);
+    },
     listNews: ({ rangeStart, rangeEnd, limit }) => news
       .filter((item) => item.publishedAt >= rangeStart && item.publishedAt < rangeEnd)
       .slice(0, limit)
@@ -3832,6 +3835,65 @@ test("local repository mode syncs projects, people and news without Feishu", asy
   const newsResult = await integration.weeklyNews({ days: 7, page: 0 });
   assert.equal(newsResult.backend, "local");
   assert.deepEqual(newsResult.items.map((item) => item.recordId), ["evt_demo"]);
+});
+
+test("local weekly news reconciles a complete range and cannot revive corrected dates from old pages", async (t) => {
+  const { WorkbenchStateStore } = require("../electron/state-store.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-news-date-cache-"));
+  const databasePath = path.join(root, "repository.sqlite3");
+  const libraryDir = path.join(root, "library");
+  const repository = new LocalDomiRepository({ databasePath, libraryDir });
+  const options = { databasePath: path.join(root, "state.sqlite3"), projectsDir: path.join(root, "projects") };
+  let stateStore = new WorkbenchStateStore(options);
+  t.after(() => { stateStore.close(); repository.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const now = Date.now(), day = 86_400_000;
+  const insert = repository.database.prepare("INSERT INTO news_events (event_id,title,published_at,created_at,updated_at) VALUES (?,?,?,1,1)");
+  // The last valid item lies beyond the 500-card display limit.
+  for (let index = 0; index < 501; index++) insert.run(`news-${index}`, `示例动态${index}`, now - 60_000 - index);
+  insert.run("corrected-year", "示例历史动态", now - 365 * day);
+  const wrongDate = { recordId: "corrected-year", title: "示例历史动态", publishedAt: now - 1000 };
+  const deleted = { recordId: "removed", title: "已移除动态", publishedAt: now - 2000 };
+  const outside = { recordId: "other-period", title: "其他日期动态", publishedAt: now - 20 * day };
+  stateStore.upsertNews([wrongDate, deleted, outside]);
+  const recentSnapshot = { items: [wrongDate, deleted], rangeStart: now - 7 * day, rangeEnd: now };
+  stateStore.saveCache("weekly-news-v1:7:0", recentSnapshot);
+  stateStore.saveCache("weekly-news-v1:30:0", { ...recentSnapshot, rangeStart: now - 30 * day });
+  // Even a legacy malformed page outside this range must not revive the same ID.
+  stateStore.saveCache("weekly-news-v1:7:3", { items: [wrongDate], rangeStart: now - 28 * day, rangeEnd: now - 21 * day });
+  stateStore.saveCache("weekly-news-v1:7:2", { items: [outside], rangeStart: now - 21 * day, rangeEnd: now - 14 * day });
+  stateStore.saveCache("weekly-news-radar-checkpoint-v1", { version: 2, domains: { AI: now - 1000 } });
+  const industryKey = `industry-overview-v1:${require("node:crypto").createHash("sha256")
+    .update(JSON.stringify([databasePath, libraryDir])).digest("hex")}`;
+  stateStore.saveCache(industryKey, { version: "test", result: { ok: true, entries: [], news: [wrongDate, outside] } });
+  const configProvider = () => ({ storageBackend: "local", localRepositoryDir: libraryDir, localDatabasePath: databasePath });
+  const integration = new DomiIntegration({ stateStore, configProvider, plaudOutputDir: path.join(root, "plaud") });
+  const fresh = await integration.weeklyNews({ days: 7 });
+  assert.equal(fresh.ok, true);
+  assert.equal(fresh.items.length, 500);
+  const cached = stateStore.listNews({ rangeStart: now - 7 * day, rangeEnd: now + day, limit: 1000 });
+  assert.equal(cached.length, 501, "the authoritative cache read must not use the 500-card display limit");
+  assert.ok(cached.some(item => item.recordId === "news-500"));
+  assert.ok(!cached.some(item => item.recordId === "corrected-year" || item.recordId === "removed"));
+  assert.equal(stateStore.loadCache("weekly-news-v1:30:0"), null);
+  assert.equal(stateStore.loadCache("weekly-news-v1:7:3"), null);
+  assert.ok(stateStore.loadCache("weekly-news-v1:7:2"));
+  assert.ok(stateStore.loadCache("weekly-news-radar-checkpoint-v1"));
+  assert.ok(stateStore.listNews({ limit: 1000 }).some(item => item.recordId === "other-period"));
+  const boardNews = stateStore.loadCache(industryKey).value.result.news;
+  assert.ok(!boardNews.some(item => item.recordId === "corrected-year"));
+  assert.ok(boardNews.some(item => item.recordId === "other-period"));
+
+  stateStore.close();
+  stateStore = new WorkbenchStateStore(options);
+  const reopened = new DomiIntegration({ stateStore, configProvider, plaudOutputDir: path.join(root, "plaud") });
+  const cacheOnly = await reopened.weeklyNews({ days: 30, cacheOnly: true });
+  assert.ok(!cacheOnly.items.some(item => item.recordId === "corrected-year" || item.recordId === "removed"));
+  reopened.withLocalRepository = () => { throw new Error("synthetic repository unavailable"); };
+  const offline = await reopened.weeklyNews({ days: 7 });
+  assert.equal(offline.stale, true);
+  assert.ok(!offline.items.some(item => item.recordId === "corrected-year" || item.recordId === "removed"));
+  assert.equal(stateStore.listNews({ rangeStart: now - 7 * day, rangeEnd: now + day, limit: 1000 }).length, 501,
+    "a failed authoritative read must retain the last successful complete range");
 });
 
 test("local materials use the exact entity directory and database edits avoid a full sync", async (t) => {

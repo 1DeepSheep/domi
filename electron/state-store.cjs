@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 
@@ -550,6 +551,64 @@ class WorkbenchStateStore {
       .all(Number(rangeStart) || 0, Number(rangeEnd) || Number.MAX_SAFE_INTEGER, Math.max(1, Number(limit) || 100))
       .map((row) => parseJson(row.value))
       .filter(Boolean);
+  }
+
+  replaceNewsRange(items, { rangeStart, rangeEnd, cachePrefix, industryCacheKey }) {
+    if (!Number.isFinite(rangeStart) || !Number.isFinite(rangeEnd) || rangeStart >= rangeEnd
+      || !Array.isArray(items) || items.some((item) => !item?.recordId
+        || !Number.isFinite(item.publishedAt)
+        || item.publishedAt < rangeStart || item.publishedAt >= rangeEnd)) {
+      throw new Error("完整行业动态缓存范围无效。");
+    }
+    // Only call after an untruncated authoritative read. A date correction can
+    // move a record out of this range, so upserts alone leave a stale copy behind.
+    const updatedAt = Date.now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = this.database.prepare(
+        "SELECT record_id FROM news_items WHERE published_at >= ? AND published_at < ?"
+      ).all(rangeStart, rangeEnd);
+      const affectedIds = new Set([...previous.map((row) => row.record_id), ...items.map((item) => item.recordId)]);
+      this.database.prepare("DELETE FROM news_items WHERE published_at >= ? AND published_at < ?")
+        .run(rangeStart, rangeEnd);
+      for (const item of items) {
+        this.upsertNewsStatement.run(String(item.recordId), item.publishedAt, JSON.stringify(item), updatedAt);
+      }
+      if (cachePrefix) {
+        for (const row of this.listCacheStatement.all(`${String(cachePrefix)}:%`)) {
+          const snapshot = parseJson(this.readCacheStatement.get(row.key)?.value);
+          const overlaps = snapshot?.rangeStart < rangeEnd && snapshot?.rangeEnd > rangeStart;
+          const containsAffected = Array.isArray(snapshot?.items)
+            && snapshot.items.some((item) => affectedIds.has(item?.recordId));
+          if (overlaps || containsAffected) this.deleteCacheStatement.run(row.key);
+        }
+      }
+      if (industryCacheKey) {
+        const cached = this.readCacheStatement.get(String(industryCacheKey));
+        const snapshot = parseJson(cached?.value);
+        if (Array.isArray(snapshot?.result?.news)) {
+          const newsById = new Map(snapshot.result.news.filter((item) => !affectedIds.has(item.recordId)
+            && !(item.publishedAt >= rangeStart && item.publishedAt < rangeEnd))
+            .map((item) => [item.recordId, item]));
+          for (const item of items) newsById.set(item.recordId, item);
+          const news = [...newsById.values()].sort((a, b) => b.publishedAt - a.publishedAt
+            || (b.importance || 0) - (a.importance || 0)
+            || String(a.recordId).localeCompare(String(b.recordId))).slice(0, 2000);
+          if (JSON.stringify(news) !== JSON.stringify(snapshot.result.news)) {
+            const corrected = { ...snapshot, result: { ...snapshot.result, news },
+              newsFingerprint: crypto.createHash("sha256").update(JSON.stringify(news)).digest("hex"),
+              newsRevision: (Number(snapshot.newsRevision) || 0) + 1 };
+            this.writeCacheStatement.run(String(industryCacheKey), JSON.stringify(corrected),
+              Math.max(updatedAt, Number(cached.updated_at || 0) + 1));
+          }
+        }
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return { count: items.length, updatedAt };
   }
 
   loadCache(key) {

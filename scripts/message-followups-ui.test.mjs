@@ -164,6 +164,27 @@ try {
   assert.equal(await actions.count(), 1, "The completed independent marker becomes a suggestion");
   await actions.click();
   assert.equal(await page.getByRole("textbox", { name: "草稿" }).inputValue(), prompt);
+
+  // Exercise the production renderer and click routing, including the exact
+  // historical failure shape: an angle destination whose closing > is missing.
+  const documentPath = "/synthetic/documents/Documents/domi/work/" + "a".repeat(150) + "/中文 交流(新)-纪要.md";
+  for (const content of [`[结构化纪要](<${documentPath}>)：已完成。`, `[结构化纪要](<${documentPath})：已完成。`]) {
+    await render({ content });
+    const link = message.getByRole("link", { name: "结构化纪要", exact: true });
+    assert.equal(await link.count(), 1);
+    assert.equal(await message.innerText(), "结构化纪要：已完成。");
+    await link.click();
+    assert.equal(decodeURIComponent(await page.evaluate(() => window.__followupTest.documents.at(-1))), documentPath);
+  }
+  const pdfPath = "/synthetic/documents/Documents/原始 材料(1).pdf";
+  await render({ content: `[原始材料](<${pdfPath})` });
+  await message.getByRole("link", { name: "原始材料", exact: true }).click();
+  assert.equal(decodeURIComponent(await page.evaluate(() => window.__followupTest.documents.at(-1))), pdfPath);
+  const beforeUnsafe = await page.evaluate(() => [window.__followupTest.documents.length, window.__followupTest.opens.length]);
+  await render({ content: "[不安全](javascript:payload.md)" });
+  await message.getByRole("link", { name: "不安全", exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => [window.__followupTest.documents.length, window.__followupTest.opens.length]), beforeUnsafe);
+
   assert.deepEqual(dialogs, []);
   assert.deepEqual(errors, []);
   assert.deepEqual(await page.evaluate(() => ({ sends: window.__followupTest.sends, modelRuns: window.__followupTest.modelRuns })), { sends: 0, modelRuns: 0 });

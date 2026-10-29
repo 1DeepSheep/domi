@@ -129,6 +129,13 @@ test("news changes refresh the cards without regenerating industry documents or 
   assert.equal(reopened.cached, true);
   assert.equal(reopened.news.length, 1);
   assert.equal(data.count(), 1);
+  const correctedPublication = Date.parse("2025-10-23T08:00:00Z");
+  data.repository.database.prepare("UPDATE news_events SET published_at=? WHERE event_id='news-1'").run(correctedPublication);
+  assert.equal(cache.read(data.source).news[0].publishedAt, correctedPublication);
+  const correctedReopen = new IndustryOverviewCache({ stateStore, refresh: data.refresh }).read(data.source);
+  assert.equal(correctedReopen.news[0].publishedAt, correctedPublication,
+    "an old board snapshot must not restore the previous publication year after restart");
+  assert.equal(data.count(), 1, "correcting a news date must not regenerate unrelated industry documents");
 });
 
 test("library changes and failed reads never substitute another library's cached content", async t => {
@@ -290,6 +297,63 @@ test("application upgrades display the existing snapshot while rebuilding the ch
   assert.equal(snapshot.projectCount, 1);
   assert.equal((await service.read(data.source)).cached, false, "Stale version is only for initial display, never treated as fresh");
   assert.equal((await service.read(data.source)).cached, true);
+});
+
+test("production cached-only reads and in-flight workers retain reconciled news dates", async t => {
+  const { WorkbenchStateStore } = require("../electron/state-store.cjs");
+  const { EventEmitter } = require("node:events");
+  const data = fixture(t);
+  data.cache.read(data.source);
+  const [key, serialized] = [...data.stored.entries()][0];
+  const wrong = { recordId: "wrong-year", publishedAt: 1500, title: "示例旧闻" };
+  const history = { recordId: "history", publishedAt: 500, title: "其他历史动态" };
+  const oldSnapshot = { ...JSON.parse(serialized), result: { ...JSON.parse(serialized).result, news: [wrong, history] } };
+  const stateStore = new WorkbenchStateStore({ databasePath: path.join(data.root, "app-state.sqlite3"), projectsDir: path.join(data.root, "app-projects") });
+  const workers = [];
+  class ControlledWorker extends EventEmitter {
+    constructor() { super(); workers.push(this); }
+    async terminate() { return 0; }
+  }
+  const service = new IndustryOverviewService({ stateStore, WorkerClass: ControlledWorker });
+  t.after(async () => { await service.close(); stateStore.close(); });
+  stateStore.upsertNews([wrong]);
+  stateStore.saveCache(key, oldSnapshot);
+  stateStore.saveCache("industry-overview-v1:another-library", oldSnapshot);
+  assert.equal((await service.read(data.source, { cachedOnly: true })).news[0].recordId, "wrong-year");
+  const pending = service.read(data.source);
+  await new Promise(resolve => setImmediate(resolve));
+  const options = { rangeStart: 1000, rangeEnd: 2000, cachePrefix: "weekly-news-v1", industryCacheKey: key };
+  stateStore.replaceNewsRange([], options);
+  const corrected = stateStore.loadCache(key).value;
+  assert.deepEqual(corrected.result.news, [history], "keep unrelated history even when it is absent from the news cache");
+  assert.deepEqual(corrected.result.entries, oldSnapshot.result.entries);
+  assert.deepEqual(stateStore.loadCache("industry-overview-v1:another-library").value, oldSnapshot);
+  stateStore.replaceNewsRange([], options);
+  assert.equal(stateStore.loadCache(key).value.newsRevision, corrected.newsRevision,
+    "unchanged refreshes must not invalidate an in-flight worker");
+  assert.deepEqual((await service.read(data.source, { cachedOnly: true })).news, [history], "ignore the previously populated service memory");
+  workers[0].emit("message", { ok: true, result: oldSnapshot.result, cache: oldSnapshot });
+  assert.deepEqual((await pending).news, [history], "a worker started before reconciliation must not restore the old year");
+  assert.deepEqual(stateStore.loadCache(key).value.result.news, [history]);
+  const reopened = new IndustryOverviewService({ stateStore, WorkerClass: ControlledWorker });
+  t.after(() => reopened.close());
+  assert.deepEqual((await reopened.read(data.source, { cachedOnly: true })).news, [history]);
+
+  const fresh = { recordId: "new-current", publishedAt: 1800, title: "示例新增动态" };
+  const next = service.read(data.source);
+  await new Promise(resolve => setImmediate(resolve));
+  const freshSnapshot = { ...stateStore.loadCache(key).value,
+    result: { ...oldSnapshot.result, news: [fresh, history] } };
+  workers[1].emit("message", { ok: true, result: freshSnapshot.result, cache: freshSnapshot });
+  assert.deepEqual((await next).news, [fresh, history], "the next authoritative refresh can add newer events normally");
+  const failed = service.read(data.source);
+  await new Promise(resolve => setImmediate(resolve));
+  workers[2].emit("message", { ok: false, error: "synthetic source unavailable" });
+  await assert.rejects(failed, /synthetic source unavailable/);
+  assert.deepEqual((await service.read(data.source, { cachedOnly: true })).news, [fresh, history]);
+  stateStore.deleteCacheStatement.run(key);
+  assert.deepEqual(await service.read(data.source, { cachedOnly: true }), { ok: true, entries: [], cached: false },
+    "a deleted persisted cache must not be replaced with the older in-memory copy");
 });
 
 test("worker requests deduplicate, serialize force escalation, and capture library paths before queuing", async t => {

@@ -12,6 +12,7 @@ import {
   remarkCodexFileCitations
 } from "./message-citations";
 import { remarkCodexFollowups, type MessageFollowup } from "./message-followups";
+import { remarkRepairLocalDocumentLinks } from "./message-document-links";
 
 type MessageContentMessage = {
   role: "user" | "assistant" | "system";
@@ -64,7 +65,7 @@ const MessageContent = memo(function MessageContent({
   return (
     <div className="message-text message-markdown" onCopy={copyMessageSelection}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, [remarkCodexFollowups, followups], [remarkCodexFileCitations, attachmentNameContext], remarkMessageFormatting, remarkHumanizeMessageStates]}
+        remarkPlugins={[remarkGfm, remarkRepairLocalDocumentLinks, [remarkCodexFollowups, followups], [remarkCodexFileCitations, attachmentNameContext], remarkMessageFormatting, remarkHumanizeMessageStates]}
         urlTransform={(url, key, node) => {
           if (key === "href" && codexFileCitationPath(url)) return url;
           if (

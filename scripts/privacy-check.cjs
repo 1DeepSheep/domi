@@ -217,16 +217,20 @@ function scanSource() {
 }
 
 function scanHistory() {
+  const inspectedContents = new Set();
   const commits = execFileSync("git", ["-C", root, "rev-list", "--all"], { encoding: "utf8" })
     .split(/\r?\n/)
     .filter(Boolean);
   for (const commit of commits) {
     const files = execFileSync(
       "git",
-      ["-C", root, "ls-tree", "-r", "--name-only", "-z", commit],
+      ["-C", root, "ls-tree", "-r", "-z", commit],
       { encoding: "utf8" }
     ).split("\0").filter(Boolean);
-    for (const relativePath of files) {
+    for (const entry of files) {
+      const separator = entry.indexOf("\t");
+      const relativePath = entry.slice(separator + 1);
+      const objectId = entry.slice(0, separator).split(" ")[2];
       if (relativePath.split(/[\\/]/).includes("plaud-browser")) {
         fail("Git 历史包含 PLAUD 浏览器 Profile", `${commit.slice(0, 12)}:${relativePath}`);
         continue;
@@ -238,6 +242,10 @@ function scanHistory() {
         fail("Git 历史包含运行数据或敏感文件", historyPath);
         continue;
       }
+      // Keep every historical path check. Content policy also depends on the
+      // full path (checker and lockfile exemptions), not only on blob bytes.
+      const contentKey = `${relativePath}\0${objectId}`;
+      if (inspectedContents.has(contentKey)) continue;
       let blob;
       try {
         blob = execFileSync(
@@ -255,6 +263,7 @@ function scanHistory() {
         root,
         { identityOnly: isPrivacyChecker(relativePath) }
       );
+      inspectedContents.add(contentKey);
     }
   }
 }

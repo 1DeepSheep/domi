@@ -153,7 +153,12 @@ class IndustryOverviewService {
 
   previous(key, { allowStale = false } = {}) {
     let value = this.entries.get(key);
-    if (!value) { try { value = this.stateStore?.loadCache?.(key)?.value; } catch {} }
+    // A news reconciliation may repair the persisted snapshot while this service
+    // is alive. Never let its older in-memory copy undo that correction.
+    if (typeof this.stateStore?.loadCache === "function") {
+      try { value = this.stateStore.loadCache(key)?.value; } catch { value = null; }
+      if (!value) this.entries.delete(key);
+    }
     if ((!allowStale && value?.version !== CACHE_VERSION) || !usable(value?.result) || !Array.isArray(value?.result?.entries)) return null;
     this.entries.set(key, value);
     return value;
@@ -209,21 +214,32 @@ class IndustryOverviewService {
   }
 
   run(source, key, force) {
+    const previous = this.previous(key);
     const run = runRepositoryWorker({
       workerPath: this.workerPath, WorkerClass: this.WorkerClass,
-      workerData: { source, previous: this.previous(key), force },
+      workerData: { source, previous, force },
       resourceLimits: { maxOldGenerationSizeMb: 256 }, timeoutMs: this.timeoutMs,
       timeoutError: () => new Error("行业看板后台刷新超时，已保留上次成功结果。"),
       exitError: code => new Error(`行业看板后台服务意外退出（${code}）。`)
     });
     const result = run.result.then(message => {
       if (!message?.ok) throw new Error(message?.error || "行业看板后台刷新失败。");
-      const value = message.cache;
+      let value = message.cache;
+      let result = message.result;
+      const latest = this.previous(key, { allowStale: true });
+      // An older worker may finish after the date was corrected. Keep the
+      // reconciled news for this response; the next worker can refresh it again.
+      if (latest?.newsRevision && latest.newsRevision !== previous?.newsRevision) {
+        const news = latest.result.news;
+        result = { ...result, news };
+        if (value?.result) value = { ...value, result: { ...value.result, news }, newsFingerprint: hash(news) };
+      }
+      if (value && latest?.newsRevision) value = { ...value, newsRevision: latest.newsRevision };
       if (value?.version === CACHE_VERSION && usable(value?.result)) {
         this.entries.set(key, value);
         try { this.stateStore?.saveCache?.(key, value); } catch {}
       }
-      return message.result;
+      return result;
     });
     return { result, completion: run.completion, cancel: run.cancel, get abortError() { return run.abortError; } };
   }
