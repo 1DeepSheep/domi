@@ -2169,6 +2169,7 @@ class LocalDomiRepository {
   }
 
   listNews({ rangeStart, rangeEnd, limit = 500 }) {
+    // null requests the complete authoritative range for cache reconciliation.
     return this.database.prepare(`
       SELECT event_id, title, domains_json, subdomains_json, types_json,
         published_at, summary, investment_meaning, url, source, companies,
@@ -2178,7 +2179,7 @@ class LocalDomiRepository {
       WHERE published_at >= ? AND published_at < ? AND worth_following = 1
       ORDER BY published_at DESC, importance DESC, event_id
       LIMIT ?
-    `).all(rangeStart, rangeEnd, limit).map(newsRow);
+    `).all(rangeStart, rangeEnd, limit === null ? -1 : limit).map(newsRow);
   }
 
   listAllNews(limit = 2_000) {

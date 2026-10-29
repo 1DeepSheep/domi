@@ -8,6 +8,28 @@ const { WorkbenchStateStore } = require("../electron/state-store.cjs");
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+test("complete news range replacement removes stale rows atomically and preserves unrelated history", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-news-range-"));
+  const store = new WorkbenchStateStore({ databasePath: path.join(root, "state.sqlite3"), projectsDir: path.join(root, "projects") });
+  t.after(() => { store.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  store.upsertNews([{ recordId: "stale", publishedAt: 1500 }, { recordId: "history", publishedAt: 500 }]);
+  store.saveCache("weekly-news-v1:7:0", { rangeStart: 1000, rangeEnd: 2000, items: [{ recordId: "stale", publishedAt: 1500 }] });
+  const options = { rangeStart: 1000, rangeEnd: 2000, cachePrefix: "weekly-news-v1" };
+  assert.throws(() => store.replaceNewsRange([{ recordId: "invalid", publishedAt: 3000 }], options), /范围无效/);
+  const exec = store.database.exec.bind(store.database);
+  store.database.exec = sql => {
+    if (sql === "COMMIT") throw new Error("synthetic commit failure");
+    return exec(sql);
+  };
+  assert.throws(() => store.replaceNewsRange([], options), /synthetic commit failure/);
+  store.database.exec = exec;
+  assert.deepEqual(store.listNews({ limit: 10 }).map(item => item.recordId), ["stale", "history"]);
+  assert.ok(store.loadCache("weekly-news-v1:7:0"));
+  store.replaceNewsRange([], options);
+  assert.deepEqual(store.listNews({ limit: 10 }).map(item => item.recordId), ["history"]);
+  assert.equal(store.loadCache("weekly-news-v1:7:0"), null);
+});
+
 for (const method of ["save", "savePatch"]) {
   test(`${method} retries all changes after a failed COMMIT without a reload`, () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "domi-state-rollback-"));

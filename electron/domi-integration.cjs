@@ -4024,12 +4024,20 @@ class DomiIntegration {
     try {
       source = this.readRadarConfig();
       if (source.backend === "local") {
-        const items = this.withLocalRepository(source, (repository) => repository.listNews({
+        const authoritativeItems = this.withLocalRepository(source, (repository) => repository.listNews({
           rangeStart: rangeStart.getTime(),
           rangeEnd: rangeEnd.getTime(),
-          limit: 500
+          limit: null
         }));
-        this.stateStore.upsertNews(items);
+        this.stateStore.replaceNewsRange(authoritativeItems, {
+          rangeStart: rangeStart.getTime(),
+          rangeEnd: rangeEnd.getTime(),
+          cachePrefix: WEEKLY_NEWS_CACHE_KEY,
+          industryCacheKey: `industry-overview-v1:${crypto.createHash("sha256")
+            .update(JSON.stringify([path.resolve(source.localDatabasePath), path.resolve(source.localLibraryDir)]))
+            .digest("hex")}`
+        });
+        const items = authoritativeItems.slice(0, 500);
         const olderItems = this.withLocalRepository(source, (repository) => repository.listNews({
           rangeStart: 0,
           rangeEnd: rangeStart.getTime(),

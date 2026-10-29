@@ -799,8 +799,12 @@ try {
     await settings.getByRole("button", { name: "录音转写", exact: true }).click();
     await settings.getByRole("radio").filter({ hasText: "暂时不用" }).click();
     await settings.getByRole("button", { name: "保存 PLAUD 设置", exact: true }).click();
+    await page.getByText("PLAUD 未启用", { exact: true }).waitFor();
+    // Normal retries may run while the settings dialog is being operated.
+    // Once disabling has taken effect, no remaining retry may read the list.
+    const readsBeforeDisabledWait = await count("list");
     await page.clock.fastForward(180_001);
-    assert.equal(await count("list"), 1, "Disabling PLAUD must cancel an already scheduled list retry");
+    assert.equal(await count("list"), readsBeforeDisabledWait, "Disabling PLAUD must cancel an already scheduled list retry");
   });
 
   const preflightFailure = (patch = {}) => ({ ok: false, status: "failed", preflight: true, submissionStarted: false,

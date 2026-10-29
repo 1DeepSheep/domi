@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { remarkRepairLocalDocumentLinks } from "../src/message-document-links.ts";
+import { isLocalMarkdownResource, isLocalPdfResource } from "../src/document-resources.ts";
 import {
   codexFileCitationHref,
   codexFileCitationPath,
@@ -7,6 +10,68 @@ import {
   remarkCodexFileCitations,
   splitCodexFileCitations
 } from "../src/message-citations.ts";
+
+function repaired(source) {
+  const tree = fromMarkdown(source);
+  remarkRepairLocalDocumentLinks()(tree, { value: source });
+  return tree;
+}
+
+function collectNodes(tree, type) {
+  return [...(tree.type === type ? [tree] : []), ...(tree.children || []).flatMap(child => collectNodes(child, type))];
+}
+
+test("repairs historical local document links missing their angle closer without exposing paths", () => {
+  const transcript = "/synthetic/documents/Documents/domi/work/context/" + "a".repeat(150) + "/10-28 中文 回顾(第一版)-transcript.md";
+  const notes = "/synthetic/documents/Documents/纪要/20261028-行业交流-纪要.md";
+  const source = `已完成。\n\n- [完整文字稿](<${transcript})：直接复用。\n- [结构化纪要](<${notes})：正文摘要。`;
+  const tree = repaired(source);
+  const links = collectNodes(tree, "link");
+  assert.deepEqual(links.map(node => node.url), [transcript, notes]);
+  assert.deepEqual(links.map(node => node.children[0].value), ["完整文字稿", "结构化纪要"]);
+  assert.equal(collectNodes(tree, "text").map(node => node.value).join(""), "已完成。完整文字稿：直接复用。结构化纪要：正文摘要。");
+});
+
+test("standard angle destinations and balanced filename parentheses keep exact targets", () => {
+  for (const destination of ["/synthetic/documents/中文 文件(新).md", "/synthetic/documents/版本((新)).pdf", "/synthetic/documents/报价%20标记.md", "file:///synthetic/documents/中文%20文件.md", "~/Documents/交流纪要.markdown"]) {
+    const standard = repaired(`[纪要](<${destination}>)`);
+    const historical = repaired(`[纪要](<${destination})`);
+    assert.equal(collectNodes(standard, "link")[0].url, destination);
+    assert.equal(collectNodes(historical, "link")[0].url, destination);
+  }
+  const tree = repaired("[纪要](</synthetic/documents/纪要.md:12)：保留定位 [资料](</synthetic/documents/BP.pdf)：后文");
+  assert.deepEqual(collectNodes(tree, "link").map(node => node.url), ["/synthetic/documents/纪要.md:12", "/synthetic/documents/BP.pdf"]);
+});
+
+test("recovery never promotes unsafe schemes, code, escaped examples, images or incomplete destinations", () => {
+  const malformed = "[纪要](</synthetic/documents/note.md)";
+  for (const source of [
+    "[不安全](<javascript:alert(1).md)", "[不安全](<data:text/html,test.md)", "[远端](<https://example.com/note.md)",
+    "[远端文件](<file://example.com/note.md)", "[远端文件](<//example.com/note.md)",
+    "[未完成](</synthetic/documents/note.md", "[未完成](</synthetic/documents/note.md>" ,
+    "[跨行](</synthetic/documents/\nnote.md)", "[命令](</synthetic/documents/tool.sh)",
+    "[歧义](</synthetic/documents/unbalanced(draft.md)", "[歧义](</synthetic/documents/note.md)/not-the-end.md",
+    "[注入](</synthetic/documents/note.md\" onclick=\"alert(1))",
+    `\`${malformed}\``, `\`\`\`md\n${malformed}\n\`\`\``, `\\${malformed}`, `!${malformed}`,
+    "[实体编码](</synthetic/documents/a&amp;b.md)"
+  ]) assert.equal(collectNodes(repaired(source), "link").length, 0, source);
+  const linked = repaired(`[${malformed}](https://example.com)`);
+  assert.equal(collectNodes(linked, "link").length, 1, "Do not make a link inside an existing link");
+});
+
+test("local document recognition never bypasses URL safety based on a file extension", () => {
+  for (const resource of [
+    "javascript:alert(1).md", "data:text/html,note.md", "vbscript:payload.pdf", "https://example.com/note.md",
+    "<https://example.com/note.md>", "%6Aavascript:payload.md", "file://example.com/note.pdf", "//example.com/note.md", "\u0000/synthetic/documents/note.md"
+  ]) {
+    assert.equal(isLocalMarkdownResource(resource), false, resource);
+    assert.equal(isLocalPdfResource(resource), false, resource);
+  }
+  for (const resource of ["/synthetic/documents/中文 文件(新).md", "notes/交流.md", "file:///synthetic/documents/纪要.md", "file://localhost/synthetic/documents/纪要.md", "</synthetic/documents/纪要.md>"]) {
+    assert.equal(isLocalMarkdownResource(resource), true, resource);
+  }
+  assert.equal(isLocalPdfResource("/synthetic/documents/原始 材料(1).pdf"), true);
+});
 
 test("turns a local PDF citation into a short material label", () => {
   const citation = parseCodexFileCitation(

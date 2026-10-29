@@ -213,6 +213,7 @@ import {
   normalizeRadarDomains
 } from "./radar-domains";
 import { parseRadarResult, radarRejectionSummary } from "./radar-result";
+import { newsDateLabel } from "./news-date";
 import {
   pendingPlaudContinuation,
   plaudContinuationPrompt
@@ -1393,10 +1394,6 @@ const todayLabel = () =>
     day: "numeric",
     weekday: "short"
   }).format(new Date());
-
-const newsDateLabel = (timestamp?: number | null) => timestamp
-  ? new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(timestamp)
-  : "时间待补充";
 
 const newsRangeLabel = (start?: number, end?: number) => start && end
   ? `${newsDateLabel(start)} - ${newsDateLabel(end)}`

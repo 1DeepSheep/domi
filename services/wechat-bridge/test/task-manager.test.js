@@ -787,7 +787,17 @@ test("a targeted pending-delivery flush never sends a different task result", as
 
 test("long tasks send at most the configured milestone notices", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "domi-wechat-progress-budget-"));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.UTC(2026, 0, 1) });
+  let finishStream;
+  let markStreamStarted;
+  let jobFinished;
+  const continueStream = new Promise((resolve) => { finishStream = resolve; });
+  const streamStarted = new Promise((resolve) => { markStreamStarted = resolve; });
+  t.after(async () => {
+    finishStream();
+    await jobFinished;
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
   const sent = [];
   const manager = new TaskManager({
     codex: {
@@ -797,7 +807,8 @@ test("long tasks send at most the configured milestone notices", async (t) => {
             async function* events() {
               yield { type: "thread.started", thread_id: "thread-progress" };
               yield { type: "item.started", item: { type: "web_search" } };
-              await new Promise((resolve) => setTimeout(resolve, 45));
+              markStreamStarted();
+              await continueStream;
               yield { type: "item.completed", item: { type: "agent_message", text: "完成" } };
             }
             return { events: events() };
@@ -814,10 +825,33 @@ test("long tasks send at most the configured milestone notices", async (t) => {
     progressNotificationDelaysMs: [0, 15],
     progressPollIntervalMs: 5,
   });
+  const runJob = manager.runJob.bind(manager);
+  t.mock.method(manager, "runJob", (...args) => {
+    jobFinished = runJob(...args);
+    return jobFinished;
+  });
   const task = manager.createTask("owner", "长任务");
   manager.enqueue(task, { text: "开始", codexInput: "开始" });
-  await waitFor(() => task.status === "completed");
+  await streamStarted;
 
+  // Drive the clock while the model stream is explicitly held open. Slow CI
+  // scheduling must not let task completion race the second milestone.
+  t.mock.timers.tick(5);
+  assert.equal(sent.length, 1);
+  t.mock.timers.tick(9);
+  assert.equal(sent.length, 1, "The second milestone is not sent before its delay");
+  t.mock.timers.tick(1);
+  assert.equal(sent.length, 2);
+  t.mock.timers.tick(100);
+  assert.equal(task.status, "running");
+  assert.equal(sent.length, 2, "More polls do not exceed the configured budget");
+
+  finishStream();
+  await jobFinished;
+  assert.equal(task.status, "completed");
+  assert.equal(manager.activeControllers.has(task.id), false);
+  t.mock.timers.tick(100);
+  assert.equal(sent.length, 2, "Completed tasks do not send later milestone notices");
   assert.equal(sent.length, 2);
   assert.equal(sent.every((text) => text.includes("仍在处理")), true);
 });
