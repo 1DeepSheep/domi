@@ -9657,7 +9657,18 @@ function App() {
       }
     }
 
-    if (result.ok && result.output && !hasNativeWorkbench) {
+    if (result.stopped) {
+      // Preparation can be cancelled before a Codex process/turn exists, so
+      // the native bridge returns a terminal result without emitting an event.
+      // Use the same idempotent cleanup as streamed stop events (including
+      // pausing queued work and releasing this thread's run lock).
+      handleCodexEvent({
+        type: "stopped",
+        runId,
+        output: result.output,
+        eventCount: result.eventCount
+      });
+    } else if (result.ok && result.output && !hasNativeWorkbench) {
       const runCompletedAt = Date.now();
       patchMessage(assistantId, {
         content: result.output,
@@ -10266,8 +10277,8 @@ function App() {
     }
     addTimeline(activeThread.id, {
       runId: activeRunId,
-      title: "用户已停止",
-      detail: "Codex 进程已收到终止信号",
+      title: "已请求停止",
+      detail: "正在结束任务；准备阶段的任务不会提交给 Codex。",
       kind: "event",
       status: "stopped"
     });

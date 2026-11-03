@@ -1274,6 +1274,7 @@ async function verifyMainAutomaticActivationWiring() {
     request: async method => response(method), close: () => { events.push("old-close"); } };
   const activeRuns = new Map([["existing-task", {}]]);
   const context = {
+    clearTimeout, codexIdleReleaseTimer: null,
     process: { env: {} }, app: { isPackaged: true }, DomiPluginActivationGate,
     domiPluginActivationGate: null, domiIntegration: null, updateRestartPreparing: false,
     applicationQuitFlushStarted: false, activeRuns, startingCodexRunIds: new Set(),

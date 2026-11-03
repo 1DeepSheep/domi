@@ -440,3 +440,36 @@ test("closing during network preparation prevents a late process from spawning",
   assert.equal(client.child, null);
   assert.equal(client.startPromise, null);
 });
+
+test('close reaps detached MCP descendants even after the server exits, without touching unrelated processes', async () => {
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'domi-owned-tree-'));
+  const binary = path.join(root, 'fake-codex');
+  const pidFile = path.join(root, 'child.pid');
+  const stubborn = "process.on('SIGTERM',()=>{});setInterval(()=>{},1000);";
+  const unrelated = spawn(process.execPath, ['-e', stubborn], { stdio: 'ignore' });
+  writeFakeCodex(binary, `#!/usr/bin/env node
+const {spawn}=require('node:child_process');
+const fs=require('node:fs');
+const tool=spawn(process.execPath,['-e',${JSON.stringify(stubborn)}],{detached:true,stdio:'ignore'});tool.unref();
+fs.writeFileSync(${JSON.stringify(pidFile)},String(tool.pid));
+const readline=require('node:readline');
+readline.createInterface({input:process.stdin}).on('line',line=>{
+const m=JSON.parse(line);if(m.id)process.stdout.write(JSON.stringify({id:m.id,result:{}})+'\\n');
+}).on('close',()=>process.exit(0));
+`);
+  const server=new CodexAppServer({cwd:root,version:'test',runtimeProvider:()=>({codexPath:binary})});
+  let pid;
+  try {
+    await server.start();pid=Number(fs.readFileSync(pidFile,'utf8'));
+    await server.close();
+    await new Promise(resolve=>setTimeout(resolve,150));
+    assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+    assert.doesNotThrow(()=>process.kill(unrelated.pid,0));
+  } finally {
+    await server.close();
+    if(pid)try{process.kill(pid,'SIGKILL');}catch{}
+    unrelated.kill('SIGKILL');
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
