@@ -80,7 +80,8 @@ function mainRunHarness(overrides = {}) {
     repositoryRuntimeContext: () => "", larkRuntimeContext: async () => "", feishuDocumentWriteContext: async () => "",
     createRunUsageTracker: () => ({}), directoryIdentity: () => ({}), normalizedSlidesDeliveryPolicy: () => null,
     armRunIdleTimeout() {}, appendRuntimeLog() {}, boundedRuntimeText: String,
-    schedulePendingSkillHubCodexReload() {}, resetCodexClient() {},
+    schedulePendingSkillHubCodexReload() {}, resetCodexClient() {}, scheduleIdleCodexRelease() {},
+    codexThreadReclaimer: { release: async () => false, wait: async () => {} },
     codexClientIdleForSkillReload, codexRunExecutionMode, threadPersistenceOptions, bindCodexRunToTurn,
     isTodoSyncRun,
     normalizeCodexRoutingParams, requestCodexTurn, resolveCodexActiveRun,
@@ -286,7 +287,6 @@ test("a rejected elevated turn cannot widen the cached effective policy", async 
   context.codexThreadTurnIds.set("original", new Set());
   context.rememberCodexThreadSandbox("original", { sandbox: { type: "workspaceWrite", networkAccess: false,
     writableRoots: ["/synthetic/shared"] } }, "/synthetic/intake");
-  const before = context.codexThreadSandboxPolicies.get("original");
   const client = context.getCodexClient();
   context.getCodexClient = () => ({ ...client, request: async method => {
     assert.equal(method, "turn/start");
@@ -294,11 +294,11 @@ test("a rejected elevated turn cannot widen the cached effective policy", async 
   } });
   const result = await context.runCodex({}, { runId: "rejected-policy", threadId: "original", prompt: "synthetic" });
   assert.equal(result.ok, false);
-  assert.equal(context.codexThreadSandboxPolicies.get("original"), before);
+  assert.equal(context.codexThreadSandboxPolicies.has("original"), false, "Terminal release invalidates policy until resume reads it again");
   const next = context.codexTurnSandboxPolicy("workspace-write", "/synthetic/entity", "original");
   assert.equal(next.type, "workspaceWrite");
   assert.equal(next.networkAccess, false);
-  assert.deepEqual(Array.from(next.writableRoots), ["/synthetic/entity", "/synthetic/shared"]);
+  assert.deepEqual(Array.from(next.writableRoots), ["/synthetic/entity"]);
 });
 
 test("cold resume pages every turn header without hydrating items", async () => {
@@ -389,7 +389,7 @@ test("empty intermediate turn pages fail closed instead of silently accepting an
   assert.equal(calls, 1);
 });
 
-test("ephemeral completion removes its effective policy while persistent threads retain it", async () => {
+test("terminal completion drops warm policies for both ephemeral and persistent threads", async () => {
   for (const ephemeral of [true, false]) {
     const { context } = mainRunHarness();
     const running = context.runCodex({}, { runId: "cleanup-policy", prompt: "synthetic", ephemeral });
@@ -398,7 +398,8 @@ test("ephemeral completion removes its effective policy while persistent threads
     context.rememberCodexThreadSandbox(run.threadId, { sandbox: { type: "workspaceWrite", networkAccess: true } }, run.workspacePath);
     context.finishRun(run, "completed");
     await running;
-    assert.equal(context.codexThreadSandboxPolicies.has(run.threadId), !ephemeral);
+    assert.equal(context.codexThreadSandboxPolicies.has(run.threadId), false);
+    assert.equal(context.liveCodexThreads.has(run.threadId), false);
   }
 });
 

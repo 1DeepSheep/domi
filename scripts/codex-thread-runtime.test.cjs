@@ -10,6 +10,7 @@ const path = require('node:path');
 const { once } = require('node:events');
 const { performance } = require('node:perf_hooks');
 const { CodexAppServer } = require('../electron/codex-app-server.cjs');
+const { CodexThreadReclaimer } = require('../electron/codex-thread-reclaimer.cjs');
 
 const binaries = process.argv.slice(2);
 if (!binaries.length) {
@@ -85,7 +86,7 @@ async function run(binaryPath) {
     if (!client) return;
     const child = client.child;
     const exited = child && child.exitCode === null ? once(child, 'exit') : Promise.resolve();
-    client.close();
+    await client.close();
     await within(exited, 5_000, 'App server shutdown');
   }
   async function timed(label, fn) {
@@ -159,6 +160,24 @@ async function run(binaryPath) {
     // was asserted from resume.cwd and the actual provider request above.
     assert.ok(coldContext.includes(archived));
     assert.equal(fs.existsSync(path.join(home, 'auth.json')), false);
+    const reclaimer = new CodexThreadReclaimer();
+    for (let i = 0; i < 8; i++) {
+      assert.equal(await reclaimer.release(client, threadId), true);
+      // Current Codex retains unsubscribed sessions for up to 30 minutes.
+      // Domi closes its backend when idle to bound that retention.
+      await stopClient();
+      client = createClient();
+      await client.start();
+      const resumed = await client.request('thread/resume', { threadId, excludeTurns: true });
+      assert.equal(resumed.thread.id, threadId);
+      const retained = await client.request('thread/turns/list', { threadId, limit: 10, itemsView: 'full' });
+      for (const marker of ['SYNTHETIC_ORIGINAL_USER_MESSAGE', 'SYNTHETIC_REPLY_3']) {
+        assert.ok(JSON.stringify(retained).includes(marker), 'Unsubscribe must retain original conversation');
+      }
+    }
+    await turn(threadId, 'FOLLOWUP_AFTER_RESOURCE_RELEASE');
+    assert.ok(JSON.stringify(requests.at(-1).input).includes('SYNTHETIC_REPLY_3'));
+    assert.equal(requests.length, 4, 'Unsubscribe/resume must not run a model');
     console.log(JSON.stringify({ ok: true, cliVersion: started.thread.cliVersion, modelRequests: requests.length, remoteModelRequests: 0, historyTurns: history.data.length, measures }));
   } catch (error) {
     console.error(logs.join('').slice(-5000));

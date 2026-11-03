@@ -12,6 +12,11 @@ const os = require("node:os");
 const path = require("node:path");
 const { fileURLToPath, pathToFileURL } = require("node:url");
 const { promisify } = require("node:util");
+const { CodexThreadReclaimer } = require("./codex-thread-reclaimer.cjs");
+const codexThreadReclaimer = new CodexThreadReclaimer({
+  onError: error => appendRuntimeLog("codex-thread-release-deferred", { code: error?.code || "release-failed" })
+});
+let codexIdleReleaseTimer = null;
 const {
   CodexAppServer,
   codexEnvironment,
@@ -1860,11 +1865,14 @@ async function attemptSafeUpdateInstall() {
         service.markInstallFailure(error || "无法启动更新安装器。");
       };
 
+      // Await backend/tool cleanup while Electron is still alive. will-quit
+      // cannot wait for asynchronous descendant cleanup before process exit.
+      await codexClient?.close();
       // The renderer is flushed and every critical queue is idle. Mark this as
       // a dedicated update quit before the installer runs so before-quit never
       // opens the ordinary task-interruption confirmation. Resource shutdown is
       // delayed until Electron actually emits will-quit; a launcher failure
-      // therefore leaves the current app fully operational and retryable.
+      // can reopen the idle Codex backend on the next request.
       applicationQuitFlushStarted = true;
       applicationQuitFlushComplete = true;
       updateNativeQuitAccepted = false;
@@ -2442,6 +2450,12 @@ function finishRun(run, type, details = {}) {
   }
   run.pendingUserInputs.clear();
   activeRuns.delete(run.runId);
+  // Unsubscribe only after delivery checks/continuations have reached a terminal
+  // state. Invalidate the warm-thread shortcut before exposing completion.
+  liveCodexThreads.delete(run.threadId);
+  codexThreadTurnIds.delete(run.threadId);
+  codexThreadSandboxPolicies.delete(run.threadId);
+  void codexThreadReclaimer.release(codexClient, run.threadId);
   if (run.plaudWorkflowReserved) {
     run.plaudWorkflowReserved = false;
     getDomiIntegration().releasePlaudWorkflow(run.runId);
@@ -2506,6 +2520,7 @@ function finishRun(run, type, details = {}) {
   run.resolve(result);
   queueRunPostProcessing(run, type, finishedAt);
   schedulePendingSkillHubCodexReload();
+  scheduleIdleCodexRelease();
 }
 
 async function completeRunThroughSlidesDeliveryGate(run) {
@@ -2811,6 +2826,7 @@ function getCodexClient() {
         }
       },
       onExit: ({ error, intentional }) => {
+        if (codexClient !== client) return;
         liveCodexThreads.clear();
         codexThreadTurnIds.clear();
         codexThreadSandboxPolicies.clear();
@@ -2825,6 +2841,8 @@ function getCodexClient() {
 }
 
 function resetCodexClient() {
+  clearTimeout(codexIdleReleaseTimer);
+  codexIdleReleaseTimer = null;
   // Preserve queued upgrades across skill/network reloads. The activation
   // gate rejects an obsolete runtime before resuming its deferred request.
   codexNetworkReloadPending = false;
@@ -2836,6 +2854,25 @@ function resetCodexClient() {
   codexThreadSandboxPolicies.clear();
   resolvedCodexUserInputs.clear();
   serviceCoordinator.invalidate("codex:check");
+}
+
+function scheduleIdleCodexRelease() {
+  clearTimeout(codexIdleReleaseTimer);
+  const client = codexClient;
+  if (!client || activeRuns.size || startingCodexRunIds.size) return;
+  codexIdleReleaseTimer = setTimeout(() => {
+    codexIdleReleaseTimer = null;
+    if (codexClient !== client || activeRuns.size || startingCodexRunIds.size) return;
+    if (client.pending.size || pendingRunPostProcessing.size || codexThreadReclaimer.pending.size) {
+      scheduleIdleCodexRelease();
+      return;
+    }
+    // Also retire subagent/tool sessions owned by this backend. Persisted
+    // conversations are resumed by ID on demand, never archived or deleted.
+    resetCodexClient();
+    appendRuntimeLog("codex-idle-resources-released");
+  }, 30_000);
+  codexIdleReleaseTimer.unref();
 }
 
 function schedulePendingSkillHubCodexReload() {
@@ -3221,6 +3258,8 @@ async function verifyCodexThreadIdle(client, threadId, deadlineAt) {
 }
 
 async function resolveThread(client, payload, workspacePath, sandbox) {
+  // A fast follow-up must not race a terminal turn's unsubscribe request.
+  if (payload.threadId) await codexThreadReclaimer.wait(payload.threadId);
   const model = payload.model && payload.model !== "default" ? payload.model : undefined;
   const effort = payload.reasoningEffort && payload.reasoningEffort !== "default"
     ? payload.reasoningEffort
@@ -4241,6 +4280,7 @@ async function runCodex(sender, payload) {
     }
     startingCodexRunIds.delete(runId);
     schedulePendingSkillHubCodexReload();
+    scheduleIdleCodexRelease();
     if (!activeRuns.has(runId)) todoRunWatchdog.clear(runId);
     cancelledCodexRunIds.delete(runId);
     if (requestedThreadId) startingCodexThreadIds.delete(requestedThreadId);
@@ -4593,7 +4633,7 @@ app.on("before-quit", (event) => {
     await domiIntegration?.closeIndustryOverviews();
     await documentSearchService?.close();
     updateService?.stop();
-    codexClient?.close();
+    await codexClient?.close();
     if (remaining === 0) stateStore?.close();
     applicationQuitFlushComplete = true;
     app.quit();

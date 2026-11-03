@@ -278,7 +278,7 @@ test("a pending network reload waits for active and starting tasks and rechecks 
   const activeRuns = new Map([["fixture", {}]]), startingCodexRunIds = new Set(), scheduled = [];
   let closes = 0, invalidations = 0;
   const context = mainFunctions(["schedulePendingSkillHubCodexReload", "resetCodexClient"], {
-    activeRuns, startingCodexRunIds, codexClientIdleForSkillReload,
+    activeRuns, startingCodexRunIds, codexClientIdleForSkillReload, clearTimeout, codexIdleReleaseTimer: null,
     setImmediate: callback => scheduled.push(callback),
     serviceCoordinator: { invalidate: () => { invalidations++; } },
     liveCodexThreads: new Map(), codexThreadTurnIds: new Map(),

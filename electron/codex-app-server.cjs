@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
+const { captureOwnedTree, signalOwnedTree } = require("./owned-process-tree.cjs");
 const {
   codexClientCapabilities,
   isExperimentalApiInitializationError
@@ -102,6 +103,7 @@ class CodexAppServer {
     this.onExit = onExit;
     this.requestTimeoutMs = requestTimeoutMs;
     this.child = null;
+    this.closing = new Map();
     this.lifecycleGeneration = 0;
     this.initialized = false;
     this.startPromise = null;
@@ -202,7 +204,7 @@ class CodexAppServer {
   }
 
   async #startProcess() {
-    if (this.child) this.close();
+    if (this.child) await this.close();
     const generation = this.lifecycleGeneration;
     const runtime = await this.runtimeProvider?.() || {};
     if (generation !== this.lifecycleGeneration) throw new Error("Codex 连接准备已取消。");
@@ -309,21 +311,31 @@ class CodexAppServer {
     }
     this.pending.clear();
     const child = this.child;
+    if (this.closing.has(child)) return this.closing.get(child);
     if (child && child.exitCode === null) {
+      const owned = captureOwnedTree(child.pid);
       child.stdin.end();
-      const terminateTimer = setTimeout(() => {
-        if (child.exitCode === null) {
-          child.kill("SIGTERM");
-        }
-      }, 500);
-      const killTimer = setTimeout(() => {
-        if (child.exitCode === null) {
-          child.kill("SIGKILL");
-        }
-      }, 1500);
-      terminateTimer.unref();
-      killTimer.unref();
+      const closing = new Promise((resolve) => {
+        setTimeout(() => {
+          // MCP tools create their own process groups; killing only the parent
+          // or its process group leaves those tools orphaned.
+          try { signalOwnedTree(owned, "SIGTERM"); } catch { /* best effort */ }
+          if (child.exitCode === null) {
+            child.kill("SIGTERM");
+          }
+        }, 500);
+        setTimeout(() => {
+          try { signalOwnedTree(owned, "SIGKILL"); } catch { /* best effort */ }
+          if (child.exitCode === null) {
+            child.kill("SIGKILL");
+          }
+          resolve();
+        }, 1500);
+      }).finally(() => this.closing.delete(child));
+      this.closing.set(child, closing);
+      return closing;
     }
+    return Promise.allSettled([...this.closing.values()]);
   }
 
   #sendRequest(method, params, timeoutMs = this.requestTimeoutMs) {
