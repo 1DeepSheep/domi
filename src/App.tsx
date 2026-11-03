@@ -180,6 +180,7 @@ import {
   resolveDomiModelPolicy
 } from "./model-policy";
 import { sidebarUpdateEntry } from "./update-entry";
+import { searchSidebarEntities } from "./sidebar-entity-search";
 import { newSkillHubCandidatesForReview } from "./skill-hub-review";
 import {
   documentLibraryExpansionPath,
@@ -3293,37 +3294,9 @@ function App() {
   );
 
   const deferredDatabaseQuery = useDeferredValue(databaseQuery);
-  const domiSearchResults = useMemo(() => {
-    const query = domiQuery.trim().toLocaleLowerCase("zh-CN");
-    if (!query || !domiSnapshot) return { projects: [], people: [] };
-    const projects = domiSnapshot.projects
-      .filter((project) =>
-        [
-          project.name,
-          project.legalName || "",
-          ...(project.aliases || []),
-          project.domain,
-          project.status,
-          project.notes || "",
-          ...project.subdomains,
-          ...(project.cities || []),
-          ...(project.investors || [])
-        ]
-          .join(" ")
-          .toLocaleLowerCase("zh-CN")
-          .includes(query)
-      )
-      .slice(0, 5);
-    const people = domiSnapshot.people
-      .filter((person) =>
-        [person.name, person.organization, person.status, ...person.types, ...person.cities]
-          .join(" ")
-          .toLocaleLowerCase("zh-CN")
-          .includes(query)
-      )
-      .slice(0, 5);
-    return { projects, people };
-  }, [domiQuery, domiSnapshot]);
+  const domiSearchResults = useMemo(() => searchSidebarEntities(
+    domiSnapshot?.projects || [], domiSnapshot?.people || [], domiQuery
+  ), [domiQuery, domiSnapshot]);
   const domiSearchOptions = useMemo<DomiSearchOption[]>(() => [
     ...domiSearchResults.projects.map((record) => ({
       key: `project:${record.recordId}`,
