@@ -14110,7 +14110,7 @@ function App() {
                   role="group"
                   aria-labelledby="domi-project-results-label"
                 >
-                  <span id="domi-project-results-label">项目</span>
+                  <span id="domi-project-results-label">项目 · {domiSearchResults.projects.length}</span>
                   {domiSearchResults.projects.map((project, index) => {
                     const optionKey = `project:${project.recordId}`;
                     return (
@@ -14141,7 +14141,7 @@ function App() {
                   role="group"
                   aria-labelledby="domi-people-results-label"
                 >
-                  <span id="domi-people-results-label">人脉</span>
+                  <span id="domi-people-results-label">人脉 · {domiSearchResults.people.length}</span>
                   {domiSearchResults.people.map((person, index) => {
                     const optionIndex = domiSearchResults.projects.length + index;
                     const optionKey = `person:${person.recordId}`;
