@@ -18,20 +18,18 @@ function matchRank(query: string, name: string, identities: string[], metadata: 
   return Infinity;
 }
 
-function rankedMatches<T>(items: readonly T[], rank: (item: T) => number, limit: number) {
-  // Limit only after relevance ranking. Keep snapshot order for equal matches.
+function rankedMatches<T>(items: readonly T[], rank: (item: T) => number) {
+  // Keep snapshot order for equally relevant matches.
   return items.map((item, index) => ({ item, index, rank: rank(item) }))
     .filter(result => Number.isFinite(result.rank))
     .sort((left, right) => left.rank - right.rank || left.index - right.index)
-    .slice(0, limit)
     .map(result => result.item);
 }
 
 export function searchSidebarEntities(
   projects: readonly DomiProject[],
   people: readonly DomiPerson[],
-  input: string,
-  limit = 5
+  input: string
 ) {
   const query = normalize(input);
   if (!query) return { projects: [], people: [] };
@@ -42,12 +40,12 @@ export function searchSidebarEntities(
       [project.legalName || "", ...(project.aliases || [])],
       [project.domain, project.status, ...project.subdomains, ...(project.cities || []), ...(project.investors || [])],
       project.notes
-    ), limit),
+    )),
     people: rankedMatches(people, person => matchRank(
       query,
       person.name,
       [],
       [person.organization, person.status, ...person.types, ...person.cities]
-    ), limit)
+    ))
   };
 }
