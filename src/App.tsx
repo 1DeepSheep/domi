@@ -1161,6 +1161,7 @@ function readPausedQueuedSubmissionIds() {
 }
 
 type RunContext = {
+  submissionOwnerThreadId?: string;
   connectionGeneration?: number;
   threadId: string;
   assistantMessageId: string;
@@ -2241,6 +2242,7 @@ function App() {
   const creatingThreadRef = useRef(false);
   const attachmentImportCountRef = useRef(0);
   const submissionStartingThreadIdsRef = useRef(new Set<string>());
+  const submissionGenerationsRef = useRef(new Map<string, number>());
   const codexRecoveryStartedRef = useRef(false);
   const queueStartingThreadIdsRef = useRef(new Set<string>());
   const settlingThreadIdsRef = useRef(new Set<string>());
@@ -8803,6 +8805,7 @@ function App() {
         });
       }
       const releaseRun = () => {
+        markThreadSubmissionStart(context.submissionOwnerThreadId || context.threadId, context.queuedSubmission ? "queue" : "foreground", false);
         settlingThreadIdsRef.current.delete(context.threadId);
         runContextRef.current.delete(payload.runId);
         setActiveRunsByThread((current) => {
@@ -9175,6 +9178,8 @@ function App() {
   ) {
     const sourceThread = options.thread || activeThread;
     const submissionSource = options.queuedSubmission ? "queue" : "foreground";
+    const submissionGeneration = (submissionGenerationsRef.current.get(sourceThread.id) || 0) + 1;
+    submissionGenerationsRef.current.set(sourceThread.id, submissionGeneration);
     // Own the entire preflight lifecycle here so UI sends, queue-pump sends
     // and programmatic sends all participate in the same deletion guard.
     markThreadSubmissionStart(sourceThread.id, submissionSource, true);
@@ -9228,7 +9233,9 @@ function App() {
         repositoryIdentitySnapshot: submittedRepositoryIdentity
       });
     } finally {
-      markThreadSubmissionStart(sourceThread.id, submissionSource, false);
+      if (submissionGenerationsRef.current.get(sourceThread.id) === submissionGeneration) {
+        markThreadSubmissionStart(sourceThread.id, submissionSource, false);
+      }
     }
   }
 
@@ -9501,6 +9508,7 @@ function App() {
     }
     patchThread(targetThread.id, { timeline: [], lastUsage: null });
     runContextRef.current.set(runId, {
+      submissionOwnerThreadId: sourceThread.id,
       connectionGeneration: codexReadinessController.generation,
       threadId: targetThread.id,
       assistantMessageId: assistantId,
@@ -10237,10 +10245,23 @@ function App() {
     if (!activeRunId) {
       return;
     }
-    const stopResult = await workbench.stopCodex(activeRunId);
+    const runId = activeRunId;
+    const threadId = activeThread.id;
+    const stopResult = await workbench.stopCodex(runId);
+    if (stopResult.ok && stopResult.inactive) {
+      const context = runContextRef.current.get(runId);
+      if (context && context.threadId === threadId) {
+        const prior = threadsRef.current.find(thread => thread.id === threadId)?.messages
+          .find(message => message.id === context.assistantMessageId)?.content;
+        handleCodexEvent(stopResult.terminalEvent?.runId === runId ? stopResult.terminalEvent : {
+          type: "stopped", runId, output: prior || "任务已停止。"
+        });
+      }
+      return;
+    }
     if (!stopResult.ok) {
-      addTimeline(activeThread.id, {
-        runId: activeRunId,
+      addTimeline(threadId, {
+        runId,
         title: "正在确认停止请求",
         detail: stopResult.error || "运行状态尚未确认，确认后会自动停止。",
         kind: "event",
@@ -10248,8 +10269,8 @@ function App() {
       });
       return;
     }
-    addTimeline(activeThread.id, {
-      runId: activeRunId,
+    addTimeline(threadId, {
+      runId,
       title: "已请求停止",
       detail: "正在结束任务；准备阶段的任务不会提交给 Codex。",
       kind: "event",

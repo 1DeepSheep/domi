@@ -140,6 +140,7 @@ export interface SourcingSnapshot {
     lastAttemptAt?: number;
     lastSuccessAt?: number;
     nextRunAt?: number;
+    retryBlocked?: boolean;
     error?: string;
     coverage?: { checked: number; failed: number; pending: number };
     focusCoverage?: { checked: number; failed: number; pending: number };
@@ -148,6 +149,7 @@ export interface SourcingSnapshot {
 }
 
 export type SourcingBeginResult = SourcingSnapshot & {
+  contextPath?: string;
   started: boolean;
   runId?: string;
   leaseToken?: string;

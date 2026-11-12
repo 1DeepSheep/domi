@@ -63,7 +63,7 @@ function mainRunHarness(overrides = {}) {
   };
   const context = {
     path, process, setTimeout, clearTimeout,
-    activeRuns: new Map(), startingCodexRunIds: new Set(), cancelledCodexRunIds: new Set(),
+    activeRuns: new Map(), terminalRunEvents: new Map(), startingCodexRunIds: new Set(), cancelledCodexRunIds: new Set(),
     startingCodexThreadIds: new Set(), liveCodexThreads: new Map(), codexThreadTurnIds: new Map(), codexThreadSandboxPolicies: new Map(),
     updateRestartPreparing: false, skillHubCodexReloadPending: false, demoWorkspace: "/synthetic/workspace",
     ensureDemoWorkspace() {}, getAppSettings: () => ({ load: () => ({ settings: { storageBackend: "local" } }) }),
@@ -955,4 +955,24 @@ test("stable clients use compatibility input without a failed first request", as
   assert.equal(calls.length, 1);
   assert.equal(Object.hasOwn(calls[0].params, "additionalContext"), false);
   assert.equal(compatibilityEvents[0].reason, "stable-client");
+});
+
+test("stop reconciles a lost terminal event and absent runs without an endless confirmation state", async () => {
+  const { context } = mainRunHarness();
+  const id = "synthetic-missed-terminal";
+  const completion = context.runCodex({}, { runId: id, prompt: "synthetic" });
+  await new Promise(resolve => setImmediate(resolve));
+  const run = context.activeRuns.get(id);
+  run.output = "Completed synthetic result";
+  context.finishRun(run, "completed");
+  await completion;
+  const stop = await context.stopCodex(id);
+  assert.equal(stop.ok, true);
+  assert.equal(stop.inactive, true);
+  assert.equal(stop.terminalEvent.type, "completed");
+  assert.equal(stop.terminalEvent.output, "Completed synthetic result");
+  const absent = await context.stopCodex("synthetic-absent");
+  assert.equal(absent.ok, true);
+  assert.equal(absent.inactive, true);
+  assert.equal(absent.terminalEvent, undefined);
 });

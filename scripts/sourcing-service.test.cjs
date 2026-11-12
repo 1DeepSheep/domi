@@ -26,6 +26,8 @@ test("adapter uses installed script/current config and removes private request f
   const result = await f.service.begin({ force: true });
   assert.equal(result.started, true); assert.equal(result.leaseToken, "token"); assert.equal(result.run.status, "running");
   assert.equal(fs.existsSync(inputPath), false);
+  assert.ok(fs.existsSync(result.contextPath));
+  t.after(() => fs.rmSync(path.dirname(result.contextPath), { recursive: true, force: true }));
 });
 test("missing persisted receipt becomes failed state instead of false success", async t => {
   const calls = [];
@@ -84,4 +86,31 @@ test("library search returns real matches without forwarding arbitrary filters",
   });
   const result = await f.service.searchLibrary({ query: "Project", type: "project", limit: 999, backend: "feishu" });
   assert.deepEqual(result.matches, matches);
+});
+
+test("discovery context pages preserve all sources and separate accumulated history", t => {
+  const { prepareSourcingContext, PAGE_CHARS } = require("../electron/sourcing-context.cjs");
+  const sources = Array.from({ length: 1800 }, (_, i) => ({ id: `src-${i}`, name: `Source ${i}`,
+    url: `https://example.test/${i}`, type: "other", enabled: true, detail: "历史检查😀".repeat(300) }));
+  sources.push({ id: "disabled", url: "https://example.test/off", enabled: false });
+  const lease = snapshot({ runId: "r", ledgerPath: "/synthetic/ledger.json", sources });
+  const before = JSON.stringify(lease);
+  const context = prepareSourcingContext(lease);
+  t.after(() => fs.rmSync(context.directory, { recursive: true, force: true }));
+  const manifest = JSON.parse(fs.readFileSync(context.path, "utf8"));
+  function readSection(name) {
+    let value = "";
+    for (let i = 1; i <= manifest.sections[name].pages; i++) {
+      const page = fs.readFileSync(path.join(context.directory, `${name}-${i}.json.part`), "utf8");
+      assert.ok(page.length <= PAGE_CHARS);
+      value += page;
+    }
+    return JSON.parse(value);
+  }
+  assert.equal(readSection("sources").length, 1800);
+  assert.equal(readSection("sources").at(-1).id, "src-1799");
+  assert.equal(readSection("sources")[0].detail, undefined);
+  assert.deepEqual(readSection("source_history").map(s => s.detail), sources.slice(0, 1800).map(s => s.detail));
+  assert.deepEqual(readSection("excluded_source_urls"), ["https://example.test/off"]);
+  assert.equal(JSON.stringify(lease), before);
 });
