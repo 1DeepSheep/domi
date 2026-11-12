@@ -27,7 +27,7 @@ declare global {
       downloadUpdate: () => Promise<UpdateStatus>;
       installUpdate: () => Promise<UpdateInstallResult>;
       runCodex: (payload: CodexRunRequest) => Promise<CodexRunResult>;
-      stopCodex: (runId: string) => Promise<{ ok: boolean; error?: string }>;
+      stopCodex: (runId: string) => Promise<{ ok: boolean; error?: string; inactive?: boolean; terminalEvent?: CodexEventPayload }>;
       recoverCodexThread: (
         threadId: string,
         request?: CodexThreadRecoveryRequest

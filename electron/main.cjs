@@ -146,6 +146,8 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 const activeRuns = new Map();
+// Reconcile a missed terminal event when the user presses Stop after completion.
+const terminalRunEvents = new Map();
 const startingCodexRunIds = new Set();
 const cancelledCodexRunIds = new Set();
 const startingCodexThreadIds = new Set();
@@ -2507,8 +2509,9 @@ function finishRun(run, type, details = {}) {
     reasoningOutputTokens: usage?.reasoning_output_tokens || 0
   });
 
-  publishCodexEvent(run.sender, run.runId, {
+  const terminalEvent = {
     type,
+    runId: run.runId,
     threadId: run.threadId,
     turnId: run.turnId,
     output: run.privateOutput ? "" : run.output,
@@ -2516,7 +2519,13 @@ function finishRun(run, type, details = {}) {
     outputPath: "",
     eventCount: run.eventCount,
     usage
-  });
+  };
+  terminalRunEvents.set(run.runId, terminalEvent);
+  while (terminalRunEvents.size > 32
+    || [...terminalRunEvents.values()].reduce((total, event) => total + (event.output?.length || 0), 0) > 2_000_000) {
+    terminalRunEvents.delete(terminalRunEvents.keys().next().value);
+  }
+  publishCodexEvent(run.sender, run.runId, terminalEvent);
   run.resolve(result);
   queueRunPostProcessing(run, type, finishedAt);
   schedulePendingSkillHubCodexReload();
@@ -4295,7 +4304,7 @@ async function stopCodex(runId) {
       getDomiIntegration().releasePlaudWorkflow(runId);
       return { ok: true };
     }
-    return { ok: false, error: "没有找到正在执行的任务。" };
+    return { ok: true, inactive: true, terminalEvent: terminalRunEvents.get(runId) };
   }
 
   run.stopRequested = true;

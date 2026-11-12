@@ -146,6 +146,7 @@ export function useSourcing(options: {
     const tick = () => {
       const current = snapshotRef.current;
       if (!current?.configured || !current.settings.enabled || runningRef.current) return;
+      if (current.run.retryBlocked) return;
       if ((current.focusConfigured || current.focuses?.length) && !current.focuses?.some(focus => focus.enabled)) return;
       // begin() is the authority for calendar day, retry backoff and active leases.
       if (current.run.nextRunAt && current.run.nextRunAt > Date.now()) return;

@@ -64,5 +64,8 @@ export function sourcingUpdateStatus(snapshot: SourcingSnapshot | null): Sourcin
 
 /** Partial coverage is rendered as progress, not as a transport/run failure. */
 export function sourcingSnapshotError(snapshot: SourcingSnapshot | null): string {
-  return snapshot?.error || (snapshot?.run.status === "failed" ? snapshot.run.error || "" : "");
+  const error = snapshot?.error || (snapshot?.run.status === "failed" ? snapshot.run.error || "" : "");
+  return /maximum length|安全输入长度/i.test(error)
+    ? "上轮发现资料超过输入上限。更新 domi 后点击“立即搜索”可重新开始，已保存结果仍保留。"
+    : error;
 }

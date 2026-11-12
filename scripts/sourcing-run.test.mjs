@@ -126,3 +126,14 @@ test("every discovery requires evidence-backed contact routes and research compa
   assert.ok(text.includes("即使关闭自动入库仍要完成这两项分析"));
   assert.ok(text.includes("checkedAt 由后台生成"));
 });
+
+test("file-backed discovery input remains bounded as historical sources grow", () => {
+  const sources = Array.from({ length: 2000 }, (_, i) => ({ id: String(i), name: "Synthetic", enabled: true,
+    type: "other", url: `https://example.test/${i}`, detail: "Old history".repeat(300) }));
+  const text = sourcingRequestText({ ...lease, sources, contextPath: "/synthetic/manifest.json" });
+  assert.ok(text.length < 10000);
+  assert.ok(text.includes('context_manifest="/synthetic/manifest.json"'));
+  assert.ok(!text.includes("Old history"));
+  assert.ok(text.includes("必须覆盖所有来源页"));
+  assert.throws(() => sourcingRequestText({ ...lease, sources }), /安全输入长度/);
+});

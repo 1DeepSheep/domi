@@ -6,6 +6,7 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const execute = promisify(execFile);
+const { prepareSourcingContext } = require("./sourcing-context.cjs");
 
 function emptySnapshot(error) {
   return { ok: false, configured: false, error: error.message || String(error), candidates: [], sources: [], focuses: [], focusConfigured: false, excludedSourceUrls: [],
@@ -22,6 +23,7 @@ class SourcingService {
   constructor({ integration, executeCommand = execute } = {}) {
     this.integration = integration;
     this.executeCommand = executeCommand;
+    this.contexts = new Map();
   }
   async command(command, request = {}) {
     let temporaryDirectory;
@@ -61,8 +63,28 @@ class SourcingService {
         ? { type: request.sameEntity.type, id: request.sameEntity.id } : undefined });
   }
   searchLibrary(request = {}) { return this.command("search-library", { query: request.query, type: request.type }); }
-  begin(request = {}) { return this.command("begin", { force: request.force === true }); }
+  async begin(request = {}) {
+    const lease = await this.command("begin", { force: request.force === true });
+    if (!lease.ok || !lease.started) return lease;
+    try {
+      const context = prepareSourcingContext(lease);
+      this.contexts.set(lease.runId, context.directory);
+      return { ...lease, contextPath: context.path };
+    } catch (error) {
+      const failed = await this.command("fail", { runId: lease.runId, leaseToken: lease.leaseToken,
+        error: `准备发现资料失败：${error.message}` });
+      return { ...failed, started: false };
+    }
+  }
   async finish(request = {}) {
+    try { return await this.finishRun(request); }
+    finally {
+      const directory = this.contexts.get(request.runId);
+      if (directory) fs.rmSync(directory, { recursive: true, force: true });
+      this.contexts.delete(request.runId);
+    }
+  }
+  async finishRun(request = {}) {
     const payload = { runId: request.runId, leaseToken: request.leaseToken, ...(request.error ? { error: String(request.error) } : {}) };
     if (payload.error) return this.command("fail", payload);
     const result = await this.command("complete", payload);

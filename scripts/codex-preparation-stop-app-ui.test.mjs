@@ -17,7 +17,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import "/src/styles.css";
 const fallback = (await import("/src/bridge?stop-fixture")).workbench;
-const state = window.__stopTest = { runs: [], issues: [], listener: null, finish: null };
+const state = window.__stopTest = { runs: [], issues: [], listener: null, finish: null, stopMode: "normal" };
 const settings = { ...(await fallback.loadSettings()).settings, onboardingComplete: true,
  codexPath: "/synthetic/codex", plaudConnectionMode: "disabled", localRepositoryDir: "/synthetic/library", radarFollowedDomains: [] };
 const ready = { ...(await fallback.checkCodex()), ok: true, connectionOk: true,
@@ -33,7 +33,11 @@ window.workbench = { ...fallback,
  checkCodex: async () => ready,
  onCodexEvent: listener => {state.listener=listener;return ()=>{};},
  runCodex: request => {state.runs.push(request);return new Promise(resolve=>{state.finish=()=>resolve({ok:true,stopped:true,runId:request.runId,output:""});});},
- stopCodex: async () => {state.finish();return {ok:true};},
+ stopCodex: async () => {
+ if (state.stopMode === "inactive") return {ok:true,inactive:true};
+ if (state.stopMode === "completed") return {ok:true,inactive:true,terminalEvent:{type:"completed",runId:state.runs.at(-1).runId,output:"合成任务已完成。"}};
+ state.finish();return {ok:true};
+},
  listWeeklyNews: async () => ({ok:true,items:[],total:0,radarCheckedThrough:Date.now()}),
  listDomiTasks: async () => ({ok:true,configured:true,tasks:[],syncedAt:Date.now()}),
  reportRendererIssue: issue => state.issues.push(issue)
@@ -73,12 +77,13 @@ try {
   const composer = page.getByRole("textbox", { name: "输入投资任务", exact: true });
   await composer.waitFor();
   const stop = page.getByRole("button", {name:"停止当前 Codex 运行",exact:true});
-  for (const eventFirst of [false, true]) {
+  for (const mode of ["normal", "eventFirst", "inactive", "completed"]) {
+    await page.evaluate(mode => {window.__stopTest.stopMode=mode;}, mode);
     await composer.fill("执行合成测试任务");
     await page.getByRole("button", {name:"发送给 Codex",exact:true}).click();
     await page.waitForFunction(() => !!window.__stopTest.finish);
     await stop.waitFor();
-    if (eventFirst) {
+    if (mode === "eventFirst") {
       await page.evaluate(() => {
         const s=window.__stopTest;
         s.listener({type:"stopped",runId:s.runs.at(-1).runId,output:""});
@@ -89,10 +94,11 @@ try {
     }
     await stop.waitFor({state:"detached"});
     await page.waitForFunction(() => document.querySelectorAll(".message.assistant.running").length === 0);
-    assert.match(await page.locator(".message.assistant.done").last().innerText(), /任务已停止/);
+    if (mode === "completed") assert.match(await page.locator(".message.assistant.done").last().innerText(), /合成任务已完成/);
+    else if (mode !== "inactive") assert.match(await page.locator(".message.assistant.done").last().innerText(), /任务已停止/);
     await page.evaluate(() => {window.__stopTest.finish=null;});
   }
-  assert.equal(await page.evaluate(() => window.__stopTest.runs.length), 2, "Stopping releases the run lock for the next explicit submission");
+  assert.equal(await page.evaluate(() => window.__stopTest.runs.length), 4, "Stopping releases the run lock for the next explicit submission");
   assert.deepEqual(await page.evaluate(() => window.__stopTest.issues), []);
   assert.deepEqual(errors, []);
   console.log("Stop cancellation UI passed: preparation result without event, event/result deduplication, released run lock, no stuck spinner.");
