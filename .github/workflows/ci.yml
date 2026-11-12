@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   validate:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,6 +77,9 @@ jobs:
 
       - name: Verify Codex readiness and queued task recovery
         run: npm run test:codex-readiness-ui
+
+      - name: Verify task cancellation and terminal-state recovery
+        run: npm run test:codex-stop-ui
 
       - name: Verify attachment names, historical links and document previews
         run: npm run test:attachment-names-ui
