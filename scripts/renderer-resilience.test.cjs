@@ -902,7 +902,7 @@ assert.match(
 );
 assert.match(
   main,
-  /const codexPathChanged =[\s\S]*?codexRuntimeReadinessPromise = null;[\s\S]*?const codex = await runCodexCheck\(\);[\s\S]*?appliedSettings\.codexPath !== codex\.path[\s\S]*?save\(\{ codexPath: codex\.path \}\)[\s\S]*?getAppSettings\(\)\.load\(\)/,
+  /const codexPathChanged =[\s\S]*?runtimeSourcesKey = "";[\s\S]*?const codex = await runCodexCheck\(\);[\s\S]*?appliedSettings\.codexPath !== codex\.path[\s\S]*?save\(\{ codexPath: codex\.path \}\)[\s\S]*?getAppSettings\(\)\.load\(\)/,
   "Applying a first-run custom path must re-resolve the runtime and return its canonical tested realpath."
 );
 assert.match(
@@ -1194,7 +1194,7 @@ assert.match(
 );
 assert.match(
   main,
-  /CODEX_VERSION_CHECK_TIMEOUT_MS[\s\S]*?CODEX_HEALTH_REQUEST_TIMEOUT_MS[\s\S]*?execFileAsync\(binary, \["--version"\][\s\S]*?timeout: codexCheckTimeout\(deadlineAt, CODEX_VERSION_CHECK_TIMEOUT_MS\)[\s\S]*?healthTimeoutMs = codexCheckTimeout\(deadlineAt, CODEX_HEALTH_REQUEST_TIMEOUT_MS\)[\s\S]*?client\.request\("model\/list"[\s\S]*?timeoutMs: healthTimeoutMs[\s\S]*?codex-check-performance/,
+  /CODEX_VERSION_CHECK_TIMEOUT_MS[\s\S]*?CODEX_HEALTH_REQUEST_TIMEOUT_MS[\s\S]*?execFileAsync\(binary, \["--version"\][\s\S]*?timeout: codexCheckTimeout\(deadlineAt, CODEX_VERSION_CHECK_TIMEOUT_MS\)[\s\S]*?healthTimeoutMs = codexCheckTimeout\(deadlineAt, CODEX_HEALTH_REQUEST_TIMEOUT_MS\)[\s\S]*?visibleModels\(client, healthTimeoutMs\)[\s\S]*?timeoutMs: healthTimeoutMs[\s\S]*?codex-check-performance/,
   "Codex version and App Server readiness probes must stay bounded and emit stage timings."
 );
 assert.match(

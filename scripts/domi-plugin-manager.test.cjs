@@ -225,6 +225,7 @@ async function verifyActivationGate() {
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const implementation = main.match(/async function runCodexCheck\([\s\S]*?\n\}\n/)[0];
   const context = {
+    visibleModels: require("../electron/codex-discovery.cjs").visibleModels,
     process: { env: {} }, app: { isPackaged: true },
     codexCheckRuntimeKey: () => "test-runtime", codexCheckGeneration: 0,
     codexClient: null, codexNetworkDiagnostic: { ok: true, status: "direct" },
@@ -522,6 +523,7 @@ async function verifyReadinessDiagnostics() {
     onActivated: () => assert.fail("diagnostic tests must not activate plugins")
   });
   const context = {
+    visibleModels: require("../electron/codex-discovery.cjs").visibleModels,
     process: { env: {} }, app: { isPackaged: true },
     crypto: require("node:crypto"), codexCheckGeneration: 0, codexClient: client,
     codexNetworkDiagnostic: { ok: true, status: "direct" },
@@ -1219,6 +1221,7 @@ async function verifyHealthProbeDuringDeferredUpgrade() {
         : method === "model/list" ? { data: [] } : { config: {} };
     } };
   const context = {
+    visibleModels: require("../electron/codex-discovery.cjs").visibleModels,
     process: { env: {} }, app: { isPackaged: true },
     codexCheckRuntimeKey: () => "test-runtime", codexCheckGeneration: 0,
     // Match networkFingerprint so this test isolates plugin activation.
@@ -1274,6 +1277,7 @@ async function verifyMainAutomaticActivationWiring() {
     request: async method => response(method), close: () => { events.push("old-close"); } };
   const activeRuns = new Map([["existing-task", {}]]);
   const context = {
+    visibleModels: require("../electron/codex-discovery.cjs").visibleModels,
     clearTimeout, codexIdleReleaseTimer: null,
     process: { env: {} }, app: { isPackaged: true }, DomiPluginActivationGate,
     domiPluginActivationGate: null, domiIntegration: null, updateRestartPreparing: false,

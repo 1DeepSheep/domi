@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("workbench", {
+  refreshCodexCatalog: (onDemand) => ipcRenderer.invoke("codex:model-catalog", onDemand),
   checkCodex: (options) => ipcRenderer.invoke("codex:check", options),
   onDomiPluginState: (callback) => {
     const handler = (_event, state) => callback(state);

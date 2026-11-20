@@ -2884,7 +2884,7 @@ function App() {
     } = {}
   ) {
     const semanticRequestText = String(options.requestText || "").trim();
-    return resolveDomiModelPolicy({
+    const selection = resolveDomiModelPolicy({
       workflowId,
       runKind: options.runKind,
       useDomiPlugin: options.useDomiPlugin,
@@ -2897,6 +2897,16 @@ function App() {
       userReasoningEffort: options.reasoningEffort ?? reasoningEffort,
       userServiceTier: options.serviceTier ?? serviceTier
     });
+    if (selection.policyClass === "inherit" && codexStatus?.authMode === "chatgpt" && codexStatus.models.length) {
+      const available = (id: string) => codexStatus.models.some(item => item.id === id);
+      if (selection.model !== "default" && !available(selection.model)) {
+        throw new Error(`当前 Codex 模型列表中已没有 ${selection.model}，请在输入框右下角重新选择模型。`);
+      }
+      if (selection.model === "default" && codexStatus.configuredModel && !available(codexStatus.configuredModel)) {
+        return { ...selection, model: (codexStatus.models.find(item => item.isDefault) || codexStatus.models[0]).id };
+      }
+    }
+    return selection;
   }
 
   const sourcing = useSourcing({
@@ -3424,13 +3434,23 @@ function App() {
       : "hidden";
   }, [hasConversation, input]);
 
+  function refreshAvailableModels(onDemand: boolean) {
+    if (!hasNativeWorkbench || !workbench.refreshCodexCatalog) return;
+    void codexReadinessController.refreshCatalog(() => workbench.refreshCodexCatalog!(onDemand));
+  }
+
   useEffect(() => {
+    const refresh = () => { if (!document.hidden) refreshAvailableModels(false); };
+    window.addEventListener("focus", refresh);
+    const timer = window.setInterval(refresh, 60_000);
     codexReadinessController.activate();
     // Deferred upgrades finish independently after repository/PLAUD readers
     // release their leases. Verify the actual registry before enabling tasks.
     const unsubscribe = workbench.onDomiPluginState?.(() => codexReadinessController.observePluginState());
     return () => {
       unsubscribe?.();
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
       codexReadinessController.dispose();
     };
   }, []);
@@ -13907,7 +13927,10 @@ function App() {
                 <button
                   className="model-picker-trigger"
                   type="button"
-                  onClick={() => setModelMenuOpen((open) => !open)}
+                  onClick={() => {
+                    if (!modelMenuOpen) refreshAvailableModels(true);
+                    setModelMenuOpen(!modelMenuOpen);
+                  }}
                   aria-label="选择模型、推理强度和速度"
                   aria-expanded={modelMenuOpen}
                   disabled={!codexConnected}

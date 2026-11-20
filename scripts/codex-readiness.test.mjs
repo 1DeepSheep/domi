@@ -299,3 +299,20 @@ test("an unrelated settings save cannot cancel the outstanding plugin verificati
     assert.equal(codexTaskReady(h.controller.snapshot.status, true), true);
   }
 });
+
+test("model refresh retains the working list on failure and ignores results from an old connection", async () => {
+  const { controller } = harness();
+  await controller.refresh(ready);
+  const updated = { ...ready, models: [{ id: "new" }], version: "new runtime" };
+  await controller.refreshCatalog(async () => updated);
+  assert.deepEqual(controller.snapshot.status.models, updated.models);
+  await controller.refreshCatalog(async () => { throw Error("temporary failure"); });
+  assert.deepEqual(controller.snapshot.status.models, updated.models);
+  const pending = deferred();
+  const refresh = controller.refreshCatalog(() => pending.promise);
+  const revision = controller.beginSave(true);
+  controller.acceptSaved(revision, ready);
+  pending.resolve(updated);
+  await refresh;
+  assert.deepEqual(controller.snapshot.status.models, ready.models);
+});

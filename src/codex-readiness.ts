@@ -179,6 +179,23 @@ export class CodexReadinessController {
     }
   }
 
+  private catalogPending = false;
+  async refreshCatalog(load: () => Promise<CodexCheckResult | null>) {
+    if (this.disposed || this.catalogPending || this.savePending || this.snapshot.checking
+      || !codexConnectionReady(this.snapshot.status)) return;
+    const revision = this.revision;
+    this.catalogPending = true;
+    try {
+      const status = await load();
+      if (status?.connectionOk && this.isCurrent(revision) && this.snapshot.status) {
+        this.update({ status: { ...this.snapshot.status, models: status.models, path: status.path,
+          version: status.version, configuredModel: status.configuredModel,
+          configuredReasoningEffort: status.configuredReasoningEffort, configuredServiceTier: status.configuredServiceTier } });
+      }
+    } catch { /* Keep the last usable list during an offline or interrupted refresh. */ }
+    finally { this.catalogPending = false; }
+  }
+
   observeRuntimeEvent(configurationGeneration: number) {
     if (this.explicitProbeRevision !== null && !this.savePending
       && configurationGeneration === this.configurationGeneration) {
