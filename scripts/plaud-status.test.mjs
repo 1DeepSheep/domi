@@ -257,71 +257,51 @@ function startupFixture(patch = {}) {
   return { calls, operations };
 }
 
-test("startup reads the recent list after a genuinely empty local resume", async () => {
+test("startup renders the remote list before recovering pending transcripts", async () => {
   const { calls, operations } = startupFixture();
   await restorePlaudOnStartup(operations);
-  assert.deepEqual(calls, ["resume", "list"]);
+  assert.deepEqual(calls, ["list", "resume"]);
 });
 
-test("startup reuses a recovery snapshot including offline/auth results without extra remote reads", async () => {
-  for (const snapshot of [
-    { ok: true, items: [item({ transcriptPath: "/synthetic/ready.md" })] },
-    { ok: false, remoteStatus: "auth_required" },
-    { ok: false, remoteStatus: "network_error" }
-  ]) {
-    const { calls, operations } = startupFixture({ resume: async () => ({ ok: snapshot.ok, snapshot }) });
+test("unavailable or stale remote data never starts an automatic recovery", async () => {
+  for (const snapshot of [null, { ok: false }, { ok: true, stale: true }, { ok: true, paused: true }]) {
+    const { calls, operations } = startupFixture({ list: async () => snapshot });
     await restorePlaudOnStartup(operations);
     assert.deepEqual(calls, []);
   }
 });
 
-test("startup joins manual reads and syncs without another generation or list", async () => {
-  for (const kind of ["pendingList", "pendingSync"]) {
-    const active = deferred();
-    const { calls, operations } = startupFixture({ [kind]: () => active.promise });
-    const restore = restorePlaudOnStartup(operations);
-    assert.deepEqual(calls, []);
-    const snapshot = { ok: true, items: [item()] };
-    active.resolve(kind === "pendingList" ? snapshot : { ok: true, snapshot });
-    await restore;
-    assert.deepEqual(calls, []);
-  }
-});
-
-test("startup continues after a busy empty recovery or title mutation releases its lock", async () => {
-  for (const kind of ["pendingSync", "pendingMutation"]) {
-    const active = deferred();
-    let busy = true;
-    const { calls, operations } = startupFixture({ [kind]: () => busy ? active.promise : null });
-    const restore = restorePlaudOnStartup(operations);
-    assert.deepEqual(calls, []);
-    busy = false;
-    active.resolve(kind === "pendingSync" ? { ok: true, resumePendingCount: 0 } : undefined);
-    await restore;
-    assert.deepEqual(calls, kind === "pendingSync" ? ["list"] : ["resume", "list"]);
-  }
-});
-
-test("disabled, cancelled and superseded startup scopes never launch a later read", async () => {
-  const disabled = startupFixture({ isCurrent: () => false });
-  await restorePlaudOnStartup(disabled.operations);
-  assert.deepEqual(disabled.calls, []);
-  for (const kind of ["resume", "pendingList", "pendingSync", "pendingMutation"]) {
-    const active = deferred();
-    let current = true;
-    const { calls, operations } = startupFixture({ isCurrent: () => current, [kind]: () => active.promise });
-    const restore = restorePlaudOnStartup(operations);
-    current = false;
-    active.resolve(kind === "pendingList" || kind === "pendingMutation" ? null : { ok: true });
-    await restore;
-    assert.deepEqual(calls, []);
-  }
-});
-
-test("a failed startup probe is followed by at most one list attempt", async () => {
-  const { calls, operations } = startupFixture({ resume: async () => null,
-    list: async () => { calls.push("list"); return null; } });
+test("startup joins a live sync and reuses its snapshot", async () => {
+  const { calls, operations } = startupFixture({ pendingSync: () => Promise.resolve({ snapshot: { ok: true } }) });
   await restorePlaudOnStartup(operations);
+  assert.deepEqual(calls, []);
+});
+
+test("startup shares an in-flight list and the download it starts", async () => {
+  const active = deferred();
+  let download = null;
+  const { calls, operations } = startupFixture({ pendingList: () => active.promise, pendingSync: () => download });
+  const restore = restorePlaudOnStartup(operations);
+  download = Promise.resolve({ ok: true });
+  active.resolve({ ok: true });
+  await restore;
+  assert.deepEqual(calls, []);
+});
+
+test("startup waits for a mutation and stops if the account changes during a read", async () => {
+  const mutation = deferred(), list = deferred();
+  let busy = true, current = true;
+  const { calls, operations } = startupFixture({ isCurrent: () => current,
+    pendingMutation: () => busy ? mutation.promise : null, list: () => { calls.push("list"); return list.promise; } });
+  const restore = restorePlaudOnStartup(operations);
+  assert.deepEqual(calls, []);
+  busy = false;
+  mutation.resolve();
+  await Promise.resolve();
+  assert.deepEqual(calls, ["list"]);
+  current = false;
+  list.resolve({ ok: true });
+  await restore;
   assert.deepEqual(calls, ["list"]);
 });
 

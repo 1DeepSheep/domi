@@ -3660,7 +3660,11 @@ function App() {
         pendingSync: () => plaudSyncPromiseRef.current,
         pendingMutation: () => plaudMutationPromiseRef.current,
         resume: () => syncPlaudQueue({ resumeOnly: true }),
-        list: () => refreshPlaudQueue({ fresh: true, automatic: true })
+        list: async () => {
+          const list = await refreshPlaudQueue({ fresh: true, automatic: true });
+          if (isCurrent()) setPlaudInitializing(false);
+          return list;
+        }
       });
     }).catch((error) => {
       if (isCurrent()) setPlaudError(plaudSafeError(error));
@@ -3763,10 +3767,8 @@ function App() {
   }, []);
 
   const plaudNeedsRecovery = plaudEnabled && plaudNetworkOnline
-    && !plaudReaderBusy && !plaudSnapshot?.paused && !plaudSyncIntent
-    && (plaudResumePendingCount === null ? hasRecoverablePlaudItems(plaudSnapshot) : plaudResumePendingCount > 0)
-    && !["auth_required", "access_denied", "runtime_unavailable"]
-      .includes(plaudSnapshot?.remoteStatus || "");
+    && !plaudReaderBusy && plaudSnapshot?.remoteStatus === "connected" && !plaudSnapshot.stale && !plaudSnapshot.paused && !plaudSyncIntent
+    && (plaudResumePendingCount === null ? hasRecoverablePlaudItems(plaudSnapshot) : plaudResumePendingCount > 0);
   const plaudResumeRetryAt = Number.isFinite(plaudSnapshot?.retryAt) ? plaudSnapshot!.retryAt! : 0;
   const plaudResumeRetryAfterMs = Number.isFinite(plaudSnapshot?.retryAfterMs) ? plaudSnapshot!.retryAfterMs! : 0;
   useEffect(() => {
@@ -6406,7 +6408,7 @@ function App() {
     const owner = {};
     plaudListOwnerRef.current = owner;
     setPlaudLoading(true);
-    setPlaudError("");
+    if (!automatic) setPlaudError("");
     if (!automatic) setPlaudNotice("");
     let refreshedSnapshot: DomiPlaudSnapshot | null = null;
     const request = (async (): Promise<DomiPlaudSnapshot | null> => {
@@ -6565,7 +6567,7 @@ function App() {
     plaudSyncOwnerRef.current = owner;
     setPlaudSyncing(true);
     setPlaudResuming(resumeOnly);
-    setPlaudError("");
+    if (!resumeOnly) setPlaudError("");
     setPlaudNotice("");
     const request = (async (): Promise<DomiPlaudSyncResult | null> => {
       try {
@@ -6586,7 +6588,10 @@ function App() {
           const snapshot = plaudSnapshotForScope(result.snapshot, !plaudNeedsFreshListRef.current);
           setPlaudSnapshot(current => mergePlaudSnapshot(current, snapshot));
           if (!snapshot.ok || snapshot.stale) setPlaudError(plaudSafeError(snapshot.error || snapshot.warning));
-          if (snapshot.ok && !snapshot.stale) plaudNeedsFreshListRef.current = false;
+          if (snapshot.ok && !snapshot.stale) {
+            plaudNeedsFreshListRef.current = false;
+            setPlaudError("");
+          }
         }
         setPlaudResumePendingCount(typeof result.resumePendingCount === "number" ? Math.max(0, result.resumePendingCount) : null);
         if (resumeOnly && result.snapshot && (!result.snapshot.ok || result.snapshot.stale)) {
@@ -15017,13 +15022,11 @@ function App() {
                       <strong>最近录音</strong>
                       <span>
                         <small>
-                          {plaudLoading
-                            ? "正在读取"
-                            : plaudInitializing || plaudResuming
-                              ? "正在检查"
-                            : plaudSnapshot?.syncedAt
-                              ? `${plaudSnapshot.stale || plaudReaderBusy ? "上次成功 " : ""}${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(plaudSnapshot.syncedAt)}`
-                              : "尚未读取"}
+                          {plaudSnapshot?.syncedAt
+                            ? `${plaudSnapshot.stale || plaudReaderBusy ? "上次成功 " : ""}${new Intl.DateTimeFormat("zh-CN", {
+                              month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"
+                            }).format(plaudSnapshot.syncedAt)}`
+                            : plaudLoading || plaudInitializing ? "正在读取" : "尚未读取"}
                         </small>
                         <button
                           type="button"
@@ -15187,7 +15190,7 @@ function App() {
                       disabled={plaudReaderBusy || plaudInitializing || plaudSyncing || plaudLoading || plaudLoadingMore || Boolean(renamingPlaudId) || Boolean(deletingPlaudId)}
                     >
                       <RefreshCw className={plaudInitializing || plaudSyncing || plaudLoading || plaudLoadingMore ? "spinning" : ""} size={14} />
-                      {plaudReaderBusy ? "任务完成后自动更新录音" : plaudSyncing ? plaudResuming ? "正在检查并补下载文字稿" : "正在同步并生成文字稿"
+                      {plaudReaderBusy ? "任务完成后自动更新录音" : plaudSyncing ? plaudResuming ? "正在核对待处理文字稿" : "正在同步并生成文字稿"
                         : plaudLoading || plaudLoadingMore ? "正在读取最近录音"
                           : plaudInitializing ? "正在检查最近录音" : "同步 PLAUD 并生成文字稿"}
                     </button>

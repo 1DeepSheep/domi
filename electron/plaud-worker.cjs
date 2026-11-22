@@ -211,7 +211,7 @@ async function listWithClient(client, requestedLimit, requestedOffset, options =
     ? Math.max(100, visibleLimit + 1)
     : visibleLimit + 1;
   const files = await client.listFiles({ limit: fetchLimit, skip: offset, ...(Number.isFinite(options.deadlineAt) ? { deadlineAt: options.deadlineAt } : {}) });
-  // Preserve the server's edit_time ordering. Re-sorting the first 100-item
+  // Preserve the server's ordering across pages. Re-sorting the first 100-item
   // pending-count window before slicing made items from server page two leak
   // into page one, which then produced duplicates on the next request.
   const normalized = files
