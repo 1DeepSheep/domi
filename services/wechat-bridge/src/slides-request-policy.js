@@ -11,12 +11,20 @@ const PAGE_CONTEXT = /(?:这|那|此|上|前|后|第[\d一二两三四五六七�
 const PRESERVE = /(?:保持|保留|沿用|继续使用|不要改|不改)\s*(?:原有的?|原来的?|原|现有的?|当前的?)?\s*(?:模板|版式|母版|主题)|(?:preserve|keep|retain)\s+(?:the\s+)?(?:existing|original|current)\s+(?:template|theme|master|layout)/i;
 const EDITABLE = /(?:\bpptx\b|\.pptx\b|可编辑(?:的)?\s*(?:ppt|powerpoint|幻灯片|演示文稿)|(?:ppt|powerpoint)\s*(?:源文件|原文件)|(?:源文件|原文件)\s*(?:ppt|powerpoint)|editable\s+powerpoint)/i;
 const NO_PPTX = /(?:不要|不用|无需|不需要|别|不交付|不生成|不输出|不制作|不要再)\s*(?:(?:用|使用|生成|输出|交付|制作|创建)\s*)?(?:可编辑(?:的)?\s*)?(?:pptx|powerpoint(?:\s*源文件)?)|(?:no|without|do not|don't)\s+(?:(?:create|generate|deliver|export|use)\s+)?(?:pptx|editable\s+powerpoint)|只(?:要|交付|生成|输出|给我)\s*(?:html|pdf)/i;
-const NO_DECK = /(?:不要|不用|无需|不需要|别|先不)\s*(?:再\s*)?(?:生成|制作|创建|输出|做|画)\s*(?!(?:pptx|可编辑)\b)(?:任何)?(?:slides?\b|ppt\b|deck\b|幻灯片|演示文稿|汇报)|(?:do not|don't)\s+(?:create|generate|make)\s+(?:a\s+)?(?:deck|slides|presentation)/i;
+const NO_DECK = /(?:不要|不用|无需|不需要|别|先不|不是\s*(?:要|想|让|叫|要求)(?:让|叫)?\s*你?)\s*(?:再\s*)?(?:生成|制作|创建|输出|做|画)\s*(?!(?:pptx|可编辑)\b)(?:任何)?(?:slides?\b|ppt\b|deck\b|幻灯片|演示文稿|汇报)|(?:do not|don't)\s+(?:create|generate|make)\s+(?:a\s+)?(?:deck|slides|presentation)/i;
 const META = /(?:创建|新建|开发|修改|优化|设计).{0,35}(?:\bskill\b|技能|插件|路由|生成器)|(?:create|build|edit|design).{0,35}\b(?:skill|plugin|generator)\b/i;
 const ADVICE = /^(?:请问|想问|我想知道|帮我看看)?\s*(?:为什么|为何|怎么|如何|是不是|是否|what\b|why\b|how\b)/i;
 const FILE_OPERATION = /(?:打开|发给|发送|下载|查看|解释|介绍|说明|审阅|检查).{0,30}(?:slides?\b|pptx?\b|deck\b|幻灯片|演示文稿)|(?:slides?\b|pptx?\b|deck\b|幻灯片|演示文稿).{0,30}(?:发给|发送|下载|打开|是什么|做什么|怎么用)/i;
 const SHORT_REVISION = /^(?:(?:请|帮我|麻烦你?)\s*)?(?:按(?:上面|之前|刚才|上述)(?:的)?要求\s*)?(?:修改|更新|修正|调整|改一下|改一版|优化|完善)(?:一下)?(?:吧)?[。！!\s]*$/;
 const NEW_DECK = /(?:新任务|另一个任务|换个问题)|(?:生成|制作|创建|做)\s*(?:一份|一个)?\s*(?:新的|全新|另一份|另一个).{0,30}(?:pptx?|slides?|deck|幻灯片|演示文稿)/i;
+
+// Identify a deck requested as an output when other documents are also mentioned.
+const NOTES = /(?:生成|写|整理|归档|更新|修改|完成|输出|核对|做|提取|补充到|加入|用于|用来)[^，,。；;！!\n]{0,24}(?:纪要|会议记录|文字稿)|(?:纪要|会议记录|文字稿)[^，,。；;！!\n]{0,10}(?:整理|入库|归档)|(?:write|prepare|summarize|update)\s+(?:the\s+)?(?:meeting\s+)?(?:minutes|notes)/i;
+const DECK_TARGET = /(?:制[作成]|生成|输出|导出|创建|做成?|画|修改|改成|转(?:换)?成|交付|提供|需要|要一份|整理成|create|make|generate|edit|deliver|export)\s*(?:(?:一份|一个|一套|\d+\s*页的?|新的|可编辑的?|汇报用的|a|an|the|new|editable)\s*)*(?:pptx?\b|powerpoint|slides?\b|presentation|deck\b|幻灯片|演示文稿|路演材料|汇报)|(?:纪要|会议记录|minutes)\s*(?:[和及与、]|以及|and)\s*(?:一份\s*)?(?:pptx?\b|slides?\b|演示文稿|幻灯片)/i;
+
+// Remove a presentation only when the wording identifies it as an input. Keep
+// the rest of the clause: "参考 PPT，另做一份 PPT" still has an output request.
+const SOURCE_DECK = /(?:参考|参照|阅读|读取|读一下|读|查看|分析|根据|基于|结合|从)\s*(?:(?:这个|这份|该|已有的?|我?上传的?|附件中?的?|公司|原始|现有的?)\s*)*(?:[^\s，,。；;！？、]{1,50}\.pptx?\b|pptx?\b|powerpoint\b|slides?\b|deck\b|演示文稿|幻灯片)|(?:pptx?\b|powerpoint\b|slides?\b|deck\b|演示文稿|幻灯片)\s*(?:仅供|只供|(?:是|仅|只)?\s*(?:作为|用作|用于))\s*(?:公司|背景|补充)?\s*(?:参考|材料|核对)/gi;
 
 function contextualRevisionIntent(text, previous) {
   if (!previous || NEW_DECK.test(text)) return false;
@@ -37,13 +45,13 @@ export function isContextualSlidesRevision(text, previousDeliveryPolicy = "") {
 }
 
 export function resolveSlidesDeliveryPolicy({ text = "", hasPowerPointAttachment = false, previousDeliveryPolicy = "", selectedSlides = false, awaitingSlidesInput = false } = {}) {
-  const request = String(text).trim();
+  const request = String(text).replace(/^\s*(?:补充材料|参考材料|附件清单|附件|attachments?)\s*[：:].*$/gim, "").trim();
   const previous = SLIDES_DELIVERY_POLICIES.has(previousDeliveryPolicy) ? previousDeliveryPolicy : "";
   if (!request) return selectedSlides ? "html_pdf" : "";
   if (META.test(request) || NO_DECK.test(request)) return "";
 
   // Historical verbs in a question/file request are not current instructions.
-  const currentText = request.replace(/(?:之前|此前|上次|先前|已经|刚才).{0,12}?(?:生成|制作|创建|输出|做)的?/gi, "");
+  const currentText = request.replace(SOURCE_DECK, "参考材料").replace(/(?:之前|此前|上次|先前|已经|刚才).{0,12}?(?:生成|制作|创建|输出|做)的?/gi, "");
   const clauses = currentText.split(/[，,。；;！!\n]+/).map((item) => item.trim()).filter(Boolean);
   const hasCurrentAction = (clause) => {
     if (ADVICE.test(clause)) return false;
@@ -54,6 +62,7 @@ export function resolveSlidesDeliveryPolicy({ text = "", hasPowerPointAttachment
     return AUTHOR.test(clause) || (CHANGE.test(clause) && PAGE_CONTEXT.test(clause));
   };
   const explicitAction = clauses.some(hasCurrentAction);
+  if (!selectedSlides && NOTES.test(currentText) && !clauses.some(clause => hasCurrentAction(clause) && DECK_TARGET.test(clause))) return "";
   const advice = ADVICE.test(currentText)
     || /(?:怎么|如何|应该怎样|怎样才能).{0,16}(?:制作|做|生成|创建|输出|修复|使用|打开)/.test(currentText)
     || /(?:是什么|做什么|怎么用)[？?]?\s*$/.test(currentText);
@@ -80,15 +89,15 @@ export function resolveSlidesDeliveryPolicy({ text = "", hasPowerPointAttachment
   const contextualEdit = contextualRevisionIntent(currentText, previous) || inputContinuation;
   const hasSlide = SLIDE.test(currentText);
   const deliveryAsk = /(?:给我|要一份|需要一份|来一份|provide|deliver).{0,20}(?:slides?|pptx?|powerpoint|deck|幻灯片|演示文稿)/i.test(currentText);
+  const editingAttachedDeck = hasPowerPointAttachment && (CHANGE.test(currentText) || /重新排版|重排/.test(currentText))
+    && PAGE_CONTEXT.test(currentText) && !/(?:根据|基于|参考).{0,50}(?:BP|材料|附件|pptx)/i.test(currentText);
   const authoring = explicitAction || deliveryAsk || contextualEdit;
   if (!authoring && !selectedSlides) return "";
-  if (!hasSlide && !hasPowerPointAttachment && !contextualEdit && !selectedSlides) return "";
+  if (!hasSlide && !editingAttachedDeck && !contextualEdit && !selectedSlides) return "";
   // Preserve formatting on a contextual revision, but not on a new deck.
   const inherit = contextualEdit;
   const rejectPreserve = /(?:不要|不再|无需|不必|别|不)\s*保留|恢复默认(?:模板|主题)|改用.{0,12}(?:默认|Morgan Stanley|投行)/i.test(currentText);
   const preserve = !rejectPreserve && (PRESERVE.test(currentText) || (inherit && previous.endsWith("_preserve_template")));
-  const editingAttachedDeck = hasPowerPointAttachment && (CHANGE.test(currentText) || /重新排版|重排/.test(currentText))
-    && PAGE_CONTEXT.test(currentText) && !/(?:根据|基于|参考).{0,50}(?:BP|材料|附件|pptx)/i.test(currentText);
   const outputIntent = currentText.replace(/(?:根据|基于|参考|阅读|分析).{0,60}?\.pptx\b/gi, "");
   const pptx = !NO_PPTX.test(currentText) && (
     EDITABLE.test(outputIntent) || editingAttachedDeck || (inherit && previous.startsWith("explicit_pptx"))

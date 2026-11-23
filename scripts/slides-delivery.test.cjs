@@ -514,7 +514,7 @@ test("desktop lifecycle wires the policy through submission, restart recovery, a
   const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
   const preload = fs.readFileSync(path.join(__dirname, "..", "electron", "preload.cjs"), "utf8");
 
-  assert.match(app, /slidesDeliveryPolicy:\s*latestAssistant\.slidesDeliveryPolicy/);
+  assert.match(app, /slidesDeliveryPolicy:\s*slidesPolicyFromHistory\(thread\.messages, latestAssistant\)/);
   assert.match(app, /slidesDeliveryPolicy\s*}\s*:\s*{}\)/);
   assert.match(main, /completeRunThroughSlidesDeliveryGate\(run\)/);
   assert.match(main, /slidesDeliveryCorrectionAttempts[^\n]*>=\s*1/);
@@ -556,6 +556,6 @@ test("actual desktop gate ends missing-input turns without consuming repair or b
   assert.equal(results.at(-1).type, "failed");
   assert.equal(results.at(-1).output, "");
   assert.equal(validations, 1);
-  await context.completeRunThroughSlidesDeliveryGate({ output: "普通任务答复" });
+  await context.completeRunThroughSlidesDeliveryGate({ useDomiPlugin: true, workflowId: "domi-router", output: "[参考材料](/archive/BP.pptx)" });
   assert.equal(results.at(-1).type, "completed");
 });

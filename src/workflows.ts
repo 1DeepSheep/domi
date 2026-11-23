@@ -704,6 +704,18 @@ function isPowerPointAttachmentName(fileName: string) {
   return /\.(?:ppt|pptx)$/i.test(String(fileName || "").trim());
 }
 
+/** Older clients could persist a Slides policy for a recording intake with a BP attached. */
+export function slidesPolicyFromHistory<T extends string>(
+  messages: readonly { role: string; plaudContextSourceTurnId?: string; slidesDeliveryPolicy?: T }[],
+  reply?: (typeof messages)[number]
+): T | undefined {
+  if (!reply?.slidesDeliveryPolicy) return undefined;
+  const index = messages.indexOf(reply);
+  if (index < 0) return undefined;
+  const source = messages.slice(0, index).reverse().find(message => message.role === "user");
+  return source?.plaudContextSourceTurnId ? undefined : reply.slidesDeliveryPolicy;
+}
+
 export function domiSlidesDeliveryPolicyForText(
   userInput: string,
   attachmentNames: readonly string[] = [],
@@ -728,6 +740,10 @@ export function domiSlidesPromptRule(
   awaitingSlidesInput = false
 ) {
   const deliveryPolicy = domiSlidesDeliveryPolicyForText(userInput, attachmentNames, previousDeliveryPolicy, selectedSlides, awaitingSlidesInput);
+  return slidesPromptForPolicy(deliveryPolicy);
+}
+
+function slidesPromptForPolicy(deliveryPolicy: string) {
   if (!deliveryPolicy) return "";
   const preserveExistingTemplate = deliveryPolicy.endsWith("_preserve_template");
   const formatRule = preserveExistingTemplate
@@ -758,11 +774,14 @@ export function workflowPrompt(
   requestOrigin: "user" | "programmatic" = "user",
   attachmentNames: readonly string[] = [],
   previousDeliveryPolicy = "",
-  awaitingSlidesInput = false
+  awaitingSlidesInput = false,
+  deliveryPolicy = domiSlidesDeliveryPolicyForText(
+    requestOrigin === "user" ? userInput : "", attachmentNames, previousDeliveryPolicy,
+    workflow?.id === "slides" || workflow?.producesSlides === true, awaitingSlidesInput
+  )
 ) {
   const trimmed = userInput.trim();
-  const slidesRule = !useDomiPlugin || workflow?.source === "system" ? ""
-    : domiSlidesPromptRule(trimmed, attachmentNames, previousDeliveryPolicy, workflow?.id === "slides" || workflow?.producesSlides === true, awaitingSlidesInput);
+  const slidesRule = !useDomiPlugin || workflow?.source === "system" ? "" : slidesPromptForPolicy(deliveryPolicy);
   const requestLabel = requestOrigin === "user"
     ? "用户输入："
     : "客户端工作流指令（不代表用户授权外部写入）：";

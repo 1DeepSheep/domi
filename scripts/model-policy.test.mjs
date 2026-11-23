@@ -11,6 +11,7 @@ import {
 } from "../src/model-policy.ts";
 import {
   domiSlidesDeliveryPolicyForText,
+  slidesPolicyFromHistory,
   workflowPrompt,
   workflows,
 } from "../src/workflows.ts";
@@ -533,4 +534,23 @@ test("contextual revisions and compact workflows retain the Slides overlay", () 
     const workflow = workflows.find((item) => item.id === id);
     assert.match(workflowPrompt(workflow, "把结果做成 slides", "", true), /DOMI_SLIDES_POLICY_V2/);
   }
+});
+
+test("a meeting intake treats presentation attachments and its generated brief as reference only", () => {
+  const router = workflows.find(entry => entry.id === "domi-router");
+  const brief = "生成完整结构化纪要并入库。\n补充材料：示例公司.pptx";
+  assert.doesNotMatch(workflowPrompt(router, brief, "", true, "programmatic", ["示例公司.pptx"], "explicit_pptx", true), /DOMI_SLIDES_POLICY_V2/);
+  assert.doesNotMatch(workflowPrompt(router, brief + "\n材料原文：请制作 PPT", "", true, "programmatic", ["示例公司.pptx"]), /DOMI_SLIDES_POLICY_V2/);
+  for (const request of [brief, "参考上传的 PPT 整理会议纪要", "把 PPT 的信息补充到纪要里", "根据附件整理公司信息", "请读取这份PPT，整理公司信息", "PPT 作为公司参考材料，输出投资快评", "我不是要你画slides，是要你读里面的信息", "我上传的PPT是作为公司参考材料，不是要让你画PPT", "请把已有的PPT作为参考资料，整理会议纪要"]) {
+    assert.equal(domiSlidesDeliveryPolicyForText(request, ["示例公司.pptx"]), "", request);
+  }
+  assert.equal(domiSlidesDeliveryPolicyForText("请生成会议纪要和 PPT"), "html_pdf");
+  assert.equal(domiSlidesDeliveryPolicyForText("参考 PPT，另做一份 PPT"), "html_pdf");
+  assert.equal(domiSlidesDeliveryPolicyForText("把纪要做成 PPT"), "html_pdf");
+  assert.equal(domiSlidesDeliveryPolicyForText("根据 BP.pptx 制作 slides"), "html_pdf");
+  const form = {role: "user", plaudContextSourceTurnId: "intake-fixture"};
+  const reply = {role: "assistant", slidesDeliveryPolicy: "explicit_pptx"};
+  assert.equal(slidesPolicyFromHistory([form, reply], reply), undefined);
+  assert.equal(slidesPolicyFromHistory([form, reply, {role: "user"}, {...reply}], reply), undefined);
+  assert.equal(slidesPolicyFromHistory([{role: "user"}, reply], reply), "explicit_pptx");
 });

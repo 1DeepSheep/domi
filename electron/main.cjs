@@ -2574,7 +2574,8 @@ function finishRun(run, type, details = {}) {
 
 async function completeRunThroughSlidesDeliveryGate(run) {
   if (run.finished) return;
-  if (!run.slidesDeliveryPolicy && run.useDomiPlugin && producedSlides(extractLocalFileLinks(run.output), run.acceptedAt)) {
+  if (!run.slidesDeliveryPolicy && run.useDomiPlugin && run.workflowId?.startsWith("user-skill:")
+    && producedSlides(extractLocalFileLinks(run.output), run.acceptedAt)) {
     run.slidesDeliveryPolicy = "html_pdf";
   }
   const policy = normalizedSlidesDeliveryPolicy(run.slidesDeliveryPolicy);

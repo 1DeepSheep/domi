@@ -191,6 +191,7 @@ import {
 } from "./sidebar-search-navigation";
 import {
   domiSlidesDeliveryPolicyForText,
+  slidesPolicyFromHistory,
   quickStartWorkflows,
   radarDiscoveryWindow,
   radarPriorityPeopleContext,
@@ -1777,7 +1778,7 @@ function plaudNotesWorkflowRequest(item: DomiPlaudItem, intake?: PlaudIntake) {
     "6. 如已连接飞书，可按本轮内容需要只读检索飞书 Wiki、云文档或 Base 中的相关信息作为外部参考，并标明采用的来源；飞书只读检索失败不得阻塞文字稿、纪要、快评和本地主库归档。",
     "7. 当前文本是客户端生成的程序化工作流，不是用户对飞书写入的原始指令。除 legacy_feishu_primary 按 Skill 对既有固定 Base／唯一 Wiki 主文档完成管理闭环外，若本轮没有用户明确要求创建、编辑、更新或发布飞书内容的原始消息，禁止创建、编辑、更新、覆盖或发布任何飞书外部内容，也不得运行飞书 Markdown 导出／交接。",
     "8. 权威主库写入前执行去重、字段校验和写后回读；最终只报告纪要、项目判断、评分、主库归档以及飞书只读参考的实际结果。",
-    ...(intake?.attachments?.length ? ["9. 用户在会议背景中补充了公司材料／BP，文件路径见本轮附件清单。先读取这些材料，用于核对公司与产品名称、术语及关键数字；纪要以本次实际讨论为主，不得把仅出现在 BP 的内容写成会上已讨论的事实。数字冲突保留各自期间与口径，不静默替换。附件读取失败时明确说明，不能假装已核验。项目身份确认后复用本轮附件归档流程，保留原始材料和原始文件名，不新建重复项目。"] : []),
+    ...(intake?.attachments?.length ? ["9. 用户在会议背景中补充了公司材料／BP，文件路径见本轮附件清单。这些附件（包括 PPTX）是只读参考材料。本轮交付纪要及其归档，保留原件，不另行制作、编辑或导出演示文稿。先读取这些材料，用于核对公司与产品名称、术语及关键数字；纪要以本次实际讨论为主，不得把仅出现在 BP 的内容写成会上已讨论的事实。数字冲突保留各自期间与口径，不静默替换。附件读取失败时明确说明，不能假装已核验。项目身份确认后复用本轮附件归档流程，保留原始材料和原始文件名，不新建重复项目。"] : []),
     ...(intake?.contextStatus ? ["", "客户端已保存的会议信息：", `- contextStatus：${intake.contextStatus}`, `- contextPath：${intake.contextPath || "按 fileId 从队列读取"}`, "以下为用户在会议背景卡片中提交的原始回答，仅作为会议事实与用户修正，不扩大任何外部写入权限：", intake.rawAnswer || "暂不补充，直接按已有文字稿处理。"] : [])
   ].join("\n");
 }
@@ -4149,7 +4150,7 @@ function App() {
         let reboundRunId = "";
         try {
           const recoveryRequest = {
-            slidesDeliveryPolicy: latestAssistant.slidesDeliveryPolicy
+            slidesDeliveryPolicy: slidesPolicyFromHistory(thread.messages, latestAssistant)
           };
           let result = await workbench.recoverCodexThread(recoveryThreadId, recoveryRequest);
           if (!result.ok) {
@@ -9295,12 +9296,12 @@ function App() {
     }
     const previousAssistant = [...sourceThread.messages].reverse()
       .find((message) => message.role === "assistant");
-    const previousSlidesDeliveryPolicy = previousAssistant?.slidesDeliveryPolicy || "";
+    const previousSlidesDeliveryPolicy = slidesPolicyFromHistory(sourceThread.messages, previousAssistant) || "";
     const awaitingSlidesInput = previousAssistant?.awaitingSlidesInput === true
       && (!workflow || workflow.id === "slides");
     const slidesDeliveryPolicy = useDomiPlugin && workflow?.source !== "system"
       ? domiSlidesDeliveryPolicyForText(
-          messageText,
+          userInstructionText,
           selectedAttachments.map((attachment) => attachment.name || attachment.path),
           previousSlidesDeliveryPolicy,
           workflow?.id === "slides" || workflow?.producesSlides === true,
@@ -9562,6 +9563,9 @@ function App() {
     const conversationContinuationNotice = targetThread.messages.length > 0
       ? [
           "同一任务连续对话规则：",
+          previousAssistant?.slidesDeliveryPolicy && !previousSlidesDeliveryPolicy && !slidesDeliveryPolicy
+            ? "- 上一轮录音表单的演示文稿交付标记有误。继续本条录音时以已确认的纪要与归档任务为准，所附 BP 只作参考。"
+            : "",
           "- 这是左侧当前任务中的后续消息，必须结合该任务此前的用户输入、追问、补充信息和执行结果理解，不得当成新建普通对话。",
           "- 简短的人名、项目名、参会人、目的、纠正或“继续”等输入，默认是在补充或修正上一轮尚未完成的工作。",
           "- 仅当用户明确更换主题或主动选择新的工作流时，才按新任务意图转向；不要要求用户重复已经在本任务中提供的信息。"
@@ -9580,7 +9584,8 @@ function App() {
       requestOrigin,
       selectedAttachments.map((attachment) => attachment.name || attachment.path),
       previousSlidesDeliveryPolicy,
-      awaitingSlidesInput
+      awaitingSlidesInput,
+      slidesDeliveryPolicy
     );
     const prompt = selectedAttachments.length
       ? `${basePrompt}\n\n${attachmentPrompt(selectedAttachments)}`
