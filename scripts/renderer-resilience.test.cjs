@@ -2235,19 +2235,12 @@ assert.match(
   /message\?\.content === LEGACY_NEW_THREAD_GREETING[\s\S]*?\.map\(\(message\) => recoverInterrupted/,
   "Loading an existing task must remove the legacy greeting without touching real answers."
 );
-assert.match(
-  app,
-  /lastCachedInputTokens = Math\.min[\s\S]*?lastUncachedInputTokens[\s\S]*?lastInputTokens - lastCachedInputTokens/,
-  "Token usage must clamp the cached subset before deriving newly processed input."
-);
-assert.match(
-  app,
-  /本轮可观测用量[\s\S]*?新增输入[\s\S]*?缓存读取[\s\S]*?缓存写入[\s\S]*?输出[\s\S]*?推理/,
-  "The usage panel must identify observed run usage and expose cache reads, cache writes, output, and reasoning."
-);
+assert.doesNotMatch(main, /type: "usage"/, "Token samples should be aggregated in the host without intermediate renderer events.");
+assert.doesNotMatch(app, /timeline-section|本轮可观测用量/, "The work panel must omit raw Codex telemetry.");
+assert.match(app, /payload\.usage \? \{ lastUsage: payload\.usage \}/, "Terminal usage remains available for diagnostics.");
 assert.match(
   main,
-  /method === "rawResponse\/completed"[\s\S]*?observeRawResponseUsage[\s\S]*?publishRunUsage/,
+  /method === "rawResponse\/completed"[\s\S]*?observeRawResponseUsage\(run\.tokenUsageTracker, params\.usage\)/,
   "Desktop token usage must accumulate exact raw-response completion usage instead of showing only the last model call."
 );
 assert.match(

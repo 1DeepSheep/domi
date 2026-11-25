@@ -174,6 +174,8 @@ try {
     assert.equal((await calls("save")).length, 1, "A launch retry reuses saved context");
     const run = (await calls("run"))[0].payload;
     assert.match(run.prompt, /contextStatus=provided/);
+    assert.doesNotMatch(run.prompt, /上下文优化不得降低|期望产物：/);
+    assert.match(run.prompt, /DOMI_ENTITY_RESULT_V1/);
     assert.match(run.prompt, /示例负责人\n投资团队/);
     assert.match(run.prompt, /全文阅读、信息覆盖、数字与实体核验/);
     assert.doesNotMatch(run.prompt, /先采用 domi 插件的 domi-router，并完整读取 PLAUD 投资录音工作流及各阶段 Skill/);

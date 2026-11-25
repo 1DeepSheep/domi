@@ -778,13 +778,24 @@ export function workflowPrompt(
   deliveryPolicy = domiSlidesDeliveryPolicyForText(
     requestOrigin === "user" ? userInput : "", attachmentNames, previousDeliveryPolicy,
     workflow?.id === "slides" || workflow?.producesSlides === true, awaitingSlidesInput
-  )
+  ),
+  confirmedRecording = false
 ) {
   const trimmed = userInput.trim();
   const slidesRule = !useDomiPlugin || workflow?.source === "system" ? "" : slidesPromptForPolicy(deliveryPolicy);
   const requestLabel = requestOrigin === "user"
     ? "用户输入："
     : "客户端工作流指令（不代表用户授权外部写入）：";
+  // The intake form already supplies the recording task and its saved inputs.
+  // Keep the host bindings and machine receipt without wrapping it in a second task.
+  if (confirmedRecording && useDomiPlugin && workflow?.id === "domi-router"
+    && requestOrigin === "programmatic" && !slidesRule) {
+    return [
+      "采用 $domi:domi-router 的 PLAUD 投资录音流程，从指定阶段继续。",
+      '若本轮写入项目或人物并按 record_id 回读成功，在末尾附 <!-- DOMI_ENTITY_RESULT_V1 {"entityType":"project或person","recordId":"实际record_id","name":"规范名称"} -->。',
+      domiContext, requestLabel, trimmed
+    ].filter(Boolean).join("\n");
+  }
   if (workflow?.source === "system") {
     return [
       "你正在 domi 的 Skill Hub 中使用 Codex 原生 Skill 创建流程。",
@@ -837,9 +848,7 @@ export function workflowPrompt(
       "确实没有匹配 Skill 时，再以投资分析师身份直接回答；不得为了形式完整而加载与本轮无关的 Skill 或 references。",
       "请用中文直接完成任务。优先使用已有 Watching List、People、Wiki、本地资料库和下面的 domi 绑定上下文，避免重复研究；不得编造项目、人脉、融资、财务或会议事实；外部写入必须遵循对应 Skill 的确认、去重和字段校验规则。",
       "若请求对应资料库中的具体项目，先按项目名查重并绑定稳定项目目录；项目材料和产物统一进入该项目的纪要／研究／原始材料／导出目录，不得写入当前任务工作区的 outputs 后再搬运。查询优先使用 SQLite 与当前实体目录，不递归扫描整个工作区。",
-      "如果运行上下文提供本机项目前次研究快照，先复用其中的研究摘录和来源线索；网址只作为线索，时效事实、关键判断、证据缺口和冲突信息仍须用当前材料或最新一手来源核验。需要联网时，把互不依赖的查询合并为并行多查询调用，不要逐项串行等待。",
-      "标准或深度研究若至少包含两个相互独立的事实簇，且当前 Codex 支持子任务并行，应按任务内容一次性派发最多 3 个互斥的只读子任务（例如产品与技术、团队与融资、市场与竞品）；子任务不得写数据库或文件、不得向用户提问、不得继续派生子任务。快速研究或单点核验只使用并行多查询，不强制创建子任务。所有正式写入、关键回读和最终判断由当前主任务串行完成，并合并证据、去除转载重复、标记来源冲突。",
-      "主回答和用户要求的正式文档完成必要保存与关键回读后立即返回；不要为了生成重复副本、刷新全库索引、整理内部回执或其他非关键收尾延迟答复，客户端会在后台维护通用运行归档和研究缓存。",
+      "需要研究时复用已有快照，并行核验时效事实、关键判断与冲突。按任务需要使用只读子任务；正式写入和关键回读由主任务完成。完成必要交付后直接回答。",
       '如果本轮成功新增或更新一个项目或人物记录并按 record_id 回读验证，在最终回复末尾输出一次隐藏机器回执：<!-- DOMI_ENTITY_RESULT_V1 {"entityType":"project或person","recordId":"实际record_id","name":"规范名称"} -->；没有实际写入时不得输出。',
       domiContext ? `\ndomi 绑定上下文：\n${domiContext}` : "",
       "",
@@ -902,7 +911,7 @@ export function workflowPrompt(
   }
   return [
     "你正在 domi 投资工作台中运行，底层是本地 Codex。",
-    `必须采用 domi 插件中的 Skill：${workflow.skill}。进入执行阶段前完整读取该 Skill 及其要求的 references，不要用通用模板或同名非 domi Skill 替代。`,
+    `必须采用 domi 插件中的 Skill：${workflow.skill}。按当前阶段读取该 Skill 所需的 references，同一任务复用已读规则。`,
     slidesRule,
     "",
     `工作流：${workflow.title}`,

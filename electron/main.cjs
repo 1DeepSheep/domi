@@ -2362,18 +2362,6 @@ function describeItem(item) {
   }
 }
 
-function publishRunUsage(run, complete = false) {
-  const usage = runUsageSnapshot(run.tokenUsageTracker, complete);
-  if (usage.usage_samples === 0) return null;
-  publishCodexEvent(run.sender, run.runId, {
-    type: "usage",
-    threadId: run.threadId,
-    turnId: run.turnId,
-    usage
-  });
-  return usage;
-}
-
 function armRunIdleTimeout(run) {
   clearTimeout(run.idleTimer);
   if (run.pendingUserInputs?.size > 0) {
@@ -2768,15 +2756,13 @@ function handleCodexNotification(method, params) {
 
   if (method === "thread/tokenUsage/updated") {
     markConnectionRecovered();
-    const observed = observeThreadTokenUsage(run.tokenUsageTracker, params.tokenUsage);
-    if (observed) publishRunUsage(run, false);
+    observeThreadTokenUsage(run.tokenUsageTracker, params.tokenUsage);
     return;
   }
 
   if (method === "rawResponse/completed") {
     markConnectionRecovered();
-    const observed = observeRawResponseUsage(run.tokenUsageTracker, params.usage);
-    if (observed) publishRunUsage(run, false);
+    observeRawResponseUsage(run.tokenUsageTracker, params.usage);
     return;
   }
 
@@ -3807,11 +3793,14 @@ function explicitFeishuWriteIntent(payload) {
 }
 
 function needsLarkAccess(payload) {
-  const requestText = String(payload?.requestText || "");
   const backend = getAppSettings().load().settings.storageBackend;
-  // Read/reference access and write authorization are separate. A generated
-  // workflow may request a read-only Feishu lookup, but only original user
-  // text can authorize a remote write.
+  const requestText = String(payload?.requestText || "");
+  // The local intake template mentions optional Feishu references on every run.
+  // Explicit links still benefit from preflight; the plugin can look up other references on demand.
+  if (backend === "local" && payload?.requestOrigin === "programmatic"
+    && payload?.workflowId === "domi-router" && payload?.plaudAccess?.kind === "recording") {
+    return /https?:\/\/(?:[\w-]+\.)*(?:feishu\.cn|larksuite\.com)(?:[/:?#]|$)/i.test(requestText);
+  }
   if (feishuReferenceRequestPattern.test(requestText)) return true;
   if (backend === "local") return false;
   if (payload?.workflowId === "schedule") return larkRequestPattern.test(requestText);
