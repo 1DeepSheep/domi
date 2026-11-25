@@ -490,14 +490,12 @@ try {
       "Actual PLAUD failures remain visible and actionable");
     assert.equal(await count("domi"), 3, "Refreshing recordings must not start a library scan");
   });
-  await startupScenario({ holdCodex: true, cache: { result: trustedCache }, resume: { hold: true },
-    list: { result: readFailure }, snapshot: readFailure }, async ({ page, count, wait, release }) => {
+  await startupScenario({ holdCodex: true, cache: { result: trustedCache }, list: { hold: true }, snapshot: readFailure }, async ({ page, count, wait, release }) => {
     await page.getByText("合成录音 saved-recording", { exact: true }).waitFor();
-    await wait("resume", 1);
-    assert.equal(await count("cache"), 1, "StrictMode reads the local cache once before background recovery");
-    assert.equal(await count("list"), 0, "Cached rows appear while remote recovery and Codex readiness remain held");
-    await release("resume", { ok: true, resumePendingCount: 0 });
     await wait("list", 1);
+    assert.equal(await count("cache"), 1, "StrictMode reads the local cache once");
+    assert.equal(await count("resume"), 0, "Cached rows are usable while the remote list and Codex readiness are held");
+    await release("list", readFailure);
     await page.getByText("已保留录音，正在后台重连", { exact: true }).waitFor();
     assert.equal(await page.locator(".domi-inline-error").count(), 0);
     assert.equal(await page.getByText("合成录音 saved-recording", { exact: true }).count(), 1);
@@ -517,15 +515,15 @@ try {
     assert.equal(await page.getByText("合成录音 saved-recording", { exact: true }).count(), 0,
       "A confirmed fresh empty response replaces older cached recordings");
   });
-  await startupScenario({ cache: { result: trustedCache }, resume: { result: { ok: false, snapshot: {
+  await startupScenario({ cache: { result: trustedCache }, list: { result: {
     ...readFailure, retryable: false, remoteStatus: "auth_required", errorCode: "PLAUD_AUTH_REQUIRED", error: "PLAUD_AUTH_REQUIRED: expired"
-  } } } }, async ({ page, count }) => {
+  } } }, async ({ page, count }) => {
     await page.getByText("合成录音 saved-recording", { exact: true }).waitFor();
     await page.getByText("PLAUD 登录已失效", { exact: true }).waitFor();
     assert.equal(await page.getByRole("button", { name: "重新登录", exact: true }).count(), 1);
     assert.equal(await page.locator(".domi-inline-error").count(), 0);
     await page.clock.fastForward(120000);
-    assert.equal(await count("list"), 0, "A confirmed expired login must not trigger automatic remote requests");
+    assert.equal(await count("list"), 1, "A confirmed expired login must not trigger automatic remote requests");
   });
   await startupScenario({ cache: { result: trustedCache }, allowLogin: true, list: { hold: true } }, async ({ page, count, wait, release }) => {
     await page.getByText("合成录音 saved-recording", { exact: true }).waitFor();
@@ -597,7 +595,7 @@ try {
   await startupScenario({ resume: { result: readyResult } }, async ({ page, count }) => {
     await page.getByText("合成录音 a", { exact: true }).waitFor();
     assert.equal(await count("resume"), 1);
-    assert.equal(await count("list"), 0, "Existing recovery already returns the recent snapshot");
+    assert.equal(await count("list"), 1, "Startup reads the current list before resuming existing transcripts");
   });
   const supersededSnapshot = snapshot([item("superseded")], { superseded: true, paused: true,
     stale: true, retryable: true, remoteStatus: "verification_pending" });
@@ -644,24 +642,21 @@ try {
     await settings.getByRole("button", { name: "保存 PLAUD 设置", exact: true }).click();
     await release("resume", { ok: true, resumePendingCount: 0 });
     await page.getByText("PLAUD 未启用", { exact: true }).waitFor();
-    assert.equal(await count("list"), 0, "Disabling PLAUD while startup is pending cancels its follow-up read");
+    assert.equal(await count("list"), 1, "Disabling PLAUD prevents a second read after pending recovery");
   });
   await startupScenario({ list: { hold: true } }, async ({ page, count, wait, release }) => {
     await wait("list", 1);
-    await page.evaluate(() => { window.__plaudStatusTest.plans.resume.push({ hold: true }); });
     await page.getByTitle("打开 Codex 设置", { exact: true }).click();
     const settings = page.getByRole("dialog", { name: "domi 设置", exact: true });
     await settings.getByRole("button", { name: "录音转写", exact: true }).click();
     await settings.getByRole("radio").filter({ hasText: "Tabbit" }).click();
     await settings.getByRole("button", { name: "重新检测", exact: true }).click();
     await settings.getByTitle("关闭设置", { exact: true }).click();
-    assert.equal(await count("resume"), 1, "New-browser startup must not join the old backend list operation");
-    await release("list", snapshot([item("old-browser")]));
-    await wait("resume", 2);
+    assert.equal(await count("resume"), 0, "A pending old-browser list cannot start transcript recovery");
     const oldCache = snapshot([item("old-browser")]);
     await page.evaluate(result => { window.__plaudStatusTest.plans.list.push({ result }); },
       { ...oldCache, ok: false, stale: true, remoteStatus: "network_error", error: "Failed to fetch", lastSuccessfulSnapshot: oldCache });
-    await release("resume", { ok: true, resumePendingCount: 0 });
+    await release("list", oldCache);
     await wait("list", 2);
     await page.getByRole("button", { name: "同步 PLAUD 并生成文字稿", exact: true }).waitFor();
     assert.equal(await page.getByText("合成录音 old-browser", { exact: true }).count(), 0, "Neither the old response nor its global cache may populate the new scope");
@@ -700,7 +695,7 @@ try {
     assert.equal(await page.getByText("任务正在使用 PLAUD，完成后会自动更新最近录音。", { exact: true }).count(), 0,
       "A delayed paused response cannot override the newer available event");
     assert.equal(await page.locator(".domi-inline-error").count(), 0);
-    assert.equal(await count("resume"), 1);
+    assert.equal(await count("resume"), 0, "The superseded startup list must not launch transcript recovery");
   });
   const transient = snapshot([], { ok: false, retryable: true, remoteStatus: "network_error", error: "Failed to fetch" });
   const setOnline = (page, value) => page.evaluate(value => {
@@ -1056,7 +1051,11 @@ try {
       const valid = completion.ok && completion.fileId === "startup-ready";
       assert.equal(issues.some(issue => /DOMI_ENTITY_RESULT_V1|本地工作流结果未通过核验/.test(issue.message)), !valid,
         "Only a verifier-approved exact recording may finish without an entity receipt");
-      if (valid && completion.outcome === "waiting-input") await page.getByText("等待补充会议背景", { exact: true }).waitFor();
+      if (valid && completion.outcome === "waiting-input") {
+        assert.equal(await page.evaluate(() => window.__plaudStatusTest.calls.find(call => call.kind === "notification").payload.title),
+          "domi 任务等待你的补充");
+      }
+      assert.equal(await page.getByRole("button", { name: "Codex 运行", exact: true }).count(), 0);
       assert.equal(await page.locator(".domi-inline-error").count(), 0, "Notes finalization errors must not be rendered as a PLAUD connection failure");
     });
   }

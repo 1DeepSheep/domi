@@ -3742,9 +3742,12 @@ function App() {
     plaudScopeVersionRef.current += 1;
   }, []);
 
-  const plaudNeedsRecovery = plaudEnabled && plaudNetworkOnline
-    && !plaudReaderBusy && plaudSnapshot?.remoteStatus === "connected" && !plaudSnapshot.stale && !plaudSnapshot.paused && !plaudSyncIntent
-    && (plaudResumePendingCount === null ? hasRecoverablePlaudItems(plaudSnapshot) : plaudResumePendingCount > 0);
+  const hasPendingPlaudTranscripts = plaudResumePendingCount === null
+    ? hasRecoverablePlaudItems(plaudSnapshot) : plaudResumePendingCount > 0;
+  const plaudRecoveryAllowed = (plaudSnapshot?.remoteStatus === "connected" && !plaudSnapshot.stale)
+    || (plaudSnapshot?.remoteStatus === "rate_limited" && (plaudResumePendingCount ?? 0) > 0);
+  const plaudNeedsRecovery = plaudEnabled && plaudNetworkOnline && !plaudReaderBusy
+    && !plaudSnapshot?.paused && !plaudSyncIntent && plaudRecoveryAllowed && hasPendingPlaudTranscripts;
   const plaudResumeRetryAt = Number.isFinite(plaudSnapshot?.retryAt) ? plaudSnapshot!.retryAt! : 0;
   const plaudResumeRetryAfterMs = Number.isFinite(plaudSnapshot?.retryAfterMs) ? plaudSnapshot!.retryAfterMs! : 0;
   useEffect(() => {
