@@ -902,7 +902,7 @@ assert.match(
 );
 assert.match(
   main,
-  /const codexPathChanged =[\s\S]*?codexRuntimeReadinessPromise = null;[\s\S]*?const codex = await runCodexCheck\(\);[\s\S]*?appliedSettings\.codexPath !== codex\.path[\s\S]*?save\(\{ codexPath: codex\.path \}\)[\s\S]*?getAppSettings\(\)\.load\(\)/,
+  /const codexPathChanged =[\s\S]*?runtimeSourcesKey = "";[\s\S]*?const codex = await runCodexCheck\(\);[\s\S]*?appliedSettings\.codexPath !== codex\.path[\s\S]*?save\(\{ codexPath: codex\.path \}\)[\s\S]*?getAppSettings\(\)\.load\(\)/,
   "Applying a first-run custom path must re-resolve the runtime and return its canonical tested realpath."
 );
 assert.match(
@@ -1194,7 +1194,7 @@ assert.match(
 );
 assert.match(
   main,
-  /CODEX_VERSION_CHECK_TIMEOUT_MS[\s\S]*?CODEX_HEALTH_REQUEST_TIMEOUT_MS[\s\S]*?execFileAsync\(binary, \["--version"\][\s\S]*?timeout: codexCheckTimeout\(deadlineAt, CODEX_VERSION_CHECK_TIMEOUT_MS\)[\s\S]*?healthTimeoutMs = codexCheckTimeout\(deadlineAt, CODEX_HEALTH_REQUEST_TIMEOUT_MS\)[\s\S]*?client\.request\("model\/list"[\s\S]*?timeoutMs: healthTimeoutMs[\s\S]*?codex-check-performance/,
+  /CODEX_VERSION_CHECK_TIMEOUT_MS[\s\S]*?CODEX_HEALTH_REQUEST_TIMEOUT_MS[\s\S]*?execFileAsync\(binary, \["--version"\][\s\S]*?timeout: codexCheckTimeout\(deadlineAt, CODEX_VERSION_CHECK_TIMEOUT_MS\)[\s\S]*?healthTimeoutMs = codexCheckTimeout\(deadlineAt, CODEX_HEALTH_REQUEST_TIMEOUT_MS\)[\s\S]*?visibleModels\(client, healthTimeoutMs\)[\s\S]*?timeoutMs: healthTimeoutMs[\s\S]*?codex-check-performance/,
   "Codex version and App Server readiness probes must stay bounded and emit stage timings."
 );
 assert.match(
@@ -2235,19 +2235,12 @@ assert.match(
   /message\?\.content === LEGACY_NEW_THREAD_GREETING[\s\S]*?\.map\(\(message\) => recoverInterrupted/,
   "Loading an existing task must remove the legacy greeting without touching real answers."
 );
-assert.match(
-  app,
-  /lastCachedInputTokens = Math\.min[\s\S]*?lastUncachedInputTokens[\s\S]*?lastInputTokens - lastCachedInputTokens/,
-  "Token usage must clamp the cached subset before deriving newly processed input."
-);
-assert.match(
-  app,
-  /本轮可观测用量[\s\S]*?新增输入[\s\S]*?缓存读取[\s\S]*?缓存写入[\s\S]*?输出[\s\S]*?推理/,
-  "The usage panel must identify observed run usage and expose cache reads, cache writes, output, and reasoning."
-);
+assert.doesNotMatch(main, /type: "usage"/, "Token samples should be aggregated in the host without intermediate renderer events.");
+assert.doesNotMatch(app, /timeline-section|本轮可观测用量/, "The work panel must omit raw Codex telemetry.");
+assert.match(app, /payload\.usage \? \{ lastUsage: payload\.usage \}/, "Terminal usage remains available for diagnostics.");
 assert.match(
   main,
-  /method === "rawResponse\/completed"[\s\S]*?observeRawResponseUsage[\s\S]*?publishRunUsage/,
+  /method === "rawResponse\/completed"[\s\S]*?observeRawResponseUsage\(run\.tokenUsageTracker, params\.usage\)/,
   "Desktop token usage must accumulate exact raw-response completion usage instead of showing only the last model call."
 );
 assert.match(

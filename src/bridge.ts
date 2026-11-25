@@ -203,6 +203,7 @@ const browserFallback: Window["workbench"] = {
     status: await browserFallback.getUpdateStatus(),
     error: "浏览器预览模式不能安装更新。"
   }),
+  refreshCodexCatalog: async () => null,
   checkCodex: async (_options) => ({
     ok: false,
     connectionOk: false,

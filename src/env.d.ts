@@ -5,6 +5,7 @@ export {};
 declare global {
   interface Window {
     workbench: {
+      refreshCodexCatalog?: (onDemand: boolean) => Promise<CodexCheckResult | null>;
       checkCodex: (request?: { readOnly?: boolean; force?: boolean }) => Promise<CodexCheckResult>;
       loadSettings: () => Promise<AppSettingsResult>;
       saveSettings: (request: AppSettingsSaveRequest) => Promise<AppSettingsSaveResult>;

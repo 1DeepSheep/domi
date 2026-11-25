@@ -31,6 +31,7 @@ const {
   CodexConnectionTestController,
   normalizeConnectionTestRequestId
 } = require("./codex-connection-test.cjs");
+const { desktopInstalls, isDesktopRuntimePath, newestRuntime, stamp, visibleModels } = require("./codex-discovery.cjs");
 const { CodexRuntimeManager } = require("./codex-runtime.cjs");
 const { WorkbenchStateStore } = require("./state-store.cjs");
 const { DesktopNotificationService } = require("./desktop-notifications.cjs");
@@ -241,6 +242,9 @@ const appIconPath = path.join(rootDir, "public", "domi-dock-icon.png");
 let codexClient = null;
 let codexCheckGeneration = 0;
 let codexRuntimeReadinessPromise = null;
+let activeCodexRuntime = null;
+let runtimeSourcesKey = "";
+let lastCatalogKey = "";
 let stateStore = null;
 let desktopNotifications = null;
 let domiIntegration = null;
@@ -618,38 +622,74 @@ function getCodexRuntimeManager() {
   return codexRuntimeManager;
 }
 
-function ensureCodexRuntimeReady() {
+function codexSources() {
+  const manager = getCodexRuntimeManager();
+  const candidates = app.isPackaged ? desktopInstalls() : [];
+  const managedBinary = path.join(manager.currentLink(), "bin", "codex");
+  const configured = getAppSettings().load().settings.codexPath;
+  const custom = configured && !configured.startsWith(manager.packageRoot() + path.sep)
+    && !isDesktopRuntimePath(configured) ? configured : "";
+  return {
+    manager, candidates, custom,
+    key: JSON.stringify([custom, stamp(custom), stamp(managedBinary), stamp(manager.statePath()),
+      ...candidates.map(candidate => [candidate.binary, candidate.identity])])
+  };
+}
+
+function canSwitchCodexRuntime(startingRunId) {
+  const onlyOwnStart = startingCodexRunIds.size === 1 && startingCodexRunIds.has(startingRunId);
+  return !applicationQuitFlushStarted && !updateRestartPreparing
+    && activeRuns.size === 0 && (!startingCodexRunIds.size || onlyOwnStart)
+    && !pendingRunPostProcessing.size && !codexThreadReclaimer.pending.size
+    && !codexClient?.pending.size && !domiPluginActivationGate?.pending && !domiPluginActivationGate?.readers;
+}
+
+function ensureCodexRuntimeReady(startingRunId) {
   if (codexRuntimeReadinessPromise) return codexRuntimeReadinessPromise;
+  const sources = codexSources();
+  if (activeCodexRuntime && (runtimeSourcesKey === sources.key || !canSwitchCodexRuntime(startingRunId))) {
+    return Promise.resolve(activeCodexRuntime);
+  }
   codexRuntimeReadinessPromise = (async () => {
-    const configuredPath = getAppSettings().load().settings.codexPath;
     let result;
-    if (app.isPackaged) {
-      result = await getCodexBootstrap().install();
-      if (!result.ok) {
-        throw new Error(result.error || "无法修复 Codex Runtime。");
-      }
+    if (!app.isPackaged || sources.custom) {
+      const configured = sources.custom || getAppSettings().load().settings.codexPath;
+      result = await getCodexBootstrap().status(configured);
     } else {
-      result = {
-        ok: true,
-        path: resolveCodexBinary(configuredPath),
-        source: "development"
-      };
+      result = await getCodexBootstrap().install();
+      const state = sources.manager.readState();
+      if (!state.rolledBackAt || state.currentTarget !== result.currentTarget) {
+        result = await newestRuntime(result, sources.candidates);
+      }
     }
-    const canonicalPath = resolveCodexBinary(result.path || configuredPath);
-    if (canonicalPath !== configuredPath) {
-      getAppSettings().save({ codexPath: canonicalPath });
-      if (codexClient) resetCodexClient();
-    }
-    appendRuntimeLog("codex-runtime-ready", {
-      source: String(result.source || (result.managed ? "managed" : "external")),
-      repaired: result.installedNow === true
-    });
-    return { ...result, path: canonicalPath };
-  })().catch((error) => {
-    codexRuntimeReadinessPromise = null;
-    throw error;
-  });
+    if (!result.ok) throw new Error(result.error || "无法准备 Codex Runtime。");
+    if (activeCodexRuntime && !canSwitchCodexRuntime(startingRunId)) return activeCodexRuntime;
+    const canonicalPath = resolveCodexBinary(result.path);
+    const identity = result.identity || stamp(canonicalPath);
+    const replaced = activeCodexRuntime && (activeCodexRuntime.path !== canonicalPath || activeCodexRuntime.identity !== identity);
+    const configuredPath = getAppSettings().load().settings.codexPath;
+    if (canonicalPath !== configuredPath) getAppSettings().save({ codexPath: canonicalPath });
+    if (codexClient && (replaced || configuredPath !== canonicalPath)) resetCodexClient();
+    activeCodexRuntime = { ...result, path: canonicalPath, identity };
+    runtimeSourcesKey = sources.key;
+    appendRuntimeLog("codex-runtime-ready", { source: result.source || "configured", version: result.version });
+    return activeCodexRuntime;
+  })().finally(() => { codexRuntimeReadinessPromise = null; });
   return codexRuntimeReadinessPromise;
+}
+
+// Passive checks do only local file stats until the installed CLI or model cache changes.
+async function refreshCodexCatalog(onDemand) {
+  if (applicationQuitFlushStarted || updateRestartPreparing) return null;
+  const fingerprint = () => JSON.stringify([codexSources().key, codexCheckRuntimeKey(),
+    stamp(path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "models_cache.json"))]);
+  if (!onDemand && fingerprint() === lastCatalogKey) return null;
+  if (!canSwitchCodexRuntime()) return null;
+  const readOnly = runtimeSourcesKey === codexSources().key && Boolean(codexClient?.initialized && codexClient.child && !codexClient.child.killed && !codexClient.intentionalClose);
+  const result = await runCodexCheckCached({ force: true, readOnly });
+  if (!result.connectionOk || runtimeSourcesKey !== codexSources().key) return null;
+  lastCatalogKey = fingerprint();
+  return result;
 }
 
 async function resolveCodexInstallerProxyEnvironment() {
@@ -2322,18 +2362,6 @@ function describeItem(item) {
   }
 }
 
-function publishRunUsage(run, complete = false) {
-  const usage = runUsageSnapshot(run.tokenUsageTracker, complete);
-  if (usage.usage_samples === 0) return null;
-  publishCodexEvent(run.sender, run.runId, {
-    type: "usage",
-    threadId: run.threadId,
-    turnId: run.turnId,
-    usage
-  });
-  return usage;
-}
-
 function armRunIdleTimeout(run) {
   clearTimeout(run.idleTimer);
   if (run.pendingUserInputs?.size > 0) {
@@ -2534,7 +2562,8 @@ function finishRun(run, type, details = {}) {
 
 async function completeRunThroughSlidesDeliveryGate(run) {
   if (run.finished) return;
-  if (!run.slidesDeliveryPolicy && run.useDomiPlugin && producedSlides(extractLocalFileLinks(run.output), run.acceptedAt)) {
+  if (!run.slidesDeliveryPolicy && run.useDomiPlugin && run.workflowId?.startsWith("user-skill:")
+    && producedSlides(extractLocalFileLinks(run.output), run.acceptedAt)) {
     run.slidesDeliveryPolicy = "html_pdf";
   }
   const policy = normalizedSlidesDeliveryPolicy(run.slidesDeliveryPolicy);
@@ -2727,15 +2756,13 @@ function handleCodexNotification(method, params) {
 
   if (method === "thread/tokenUsage/updated") {
     markConnectionRecovered();
-    const observed = observeThreadTokenUsage(run.tokenUsageTracker, params.tokenUsage);
-    if (observed) publishRunUsage(run, false);
+    observeThreadTokenUsage(run.tokenUsageTracker, params.tokenUsage);
     return;
   }
 
   if (method === "rawResponse/completed") {
     markConnectionRecovered();
-    const observed = observeRawResponseUsage(run.tokenUsageTracker, params.usage);
-    if (observed) publishRunUsage(run, false);
+    observeRawResponseUsage(run.tokenUsageTracker, params.usage);
     return;
   }
 
@@ -3040,11 +3067,7 @@ async function runCodexCheck({ signal, deadlineAt = Number.POSITIVE_INFINITY, re
               timeoutMs: healthTimeoutMs
             })
           : Promise.resolve({ account: null, requiresOpenaiAuth: false }),
-        client.request("model/list", {
-          cursor: null,
-          limit: 50,
-          includeHidden: false
-        }, { timeoutMs: healthTimeoutMs }),
+        visibleModels(client, healthTimeoutMs),
         client.request("config/read", { includeLayers: false }, {
           timeoutMs: healthTimeoutMs
         })
@@ -3449,10 +3472,8 @@ async function saveRuntimeSettings(request) {
         : "";
     if (!codexConnectionChanged) return { ok: true, ...result, warning };
     if (codexPathChanged) {
-      // The readiness promise is intentionally cached during normal startup,
-      // but a user-selected runtime path is a new input and must be resolved
-      // again before the connection result can be trusted.
-      codexRuntimeReadinessPromise = null;
+      // Revalidate the chosen executable before reporting the saved connection.
+      runtimeSourcesKey = "";
     }
     resetCodexClient();
     const codex = await runCodexCheck();
@@ -3487,7 +3508,9 @@ async function installCodexCli() {
 }
 
 async function codexRuntimeStatus() {
-  return getCodexBootstrap().runtimeStatus();
+  const status = await getCodexBootstrap().runtimeStatus();
+  return activeCodexRuntime?.source === "desktop"
+    ? { ...status, path: activeCodexRuntime.path, version: activeCodexRuntime.version, managed: false } : status;
 }
 
 async function updateCodexRuntime() {
@@ -3770,11 +3793,14 @@ function explicitFeishuWriteIntent(payload) {
 }
 
 function needsLarkAccess(payload) {
-  const requestText = String(payload?.requestText || "");
   const backend = getAppSettings().load().settings.storageBackend;
-  // Read/reference access and write authorization are separate. A generated
-  // workflow may request a read-only Feishu lookup, but only original user
-  // text can authorize a remote write.
+  const requestText = String(payload?.requestText || "");
+  // The local intake template mentions optional Feishu references on every run.
+  // Explicit links still benefit from preflight; the plugin can look up other references on demand.
+  if (backend === "local" && payload?.requestOrigin === "programmatic"
+    && payload?.workflowId === "domi-router" && payload?.plaudAccess?.kind === "recording") {
+    return /https?:\/\/(?:[\w-]+\.)*(?:feishu\.cn|larksuite\.com)(?:[/:?#]|$)/i.test(requestText);
+  }
   if (feishuReferenceRequestPattern.test(requestText)) return true;
   if (backend === "local") return false;
   if (payload?.workflowId === "schedule") return larkRequestPattern.test(requestText);
@@ -4092,7 +4118,7 @@ async function runCodex(sender, payload) {
     const genericWorkspace = requestedWorkspace && !isEntityWorkspace(requestedWorkspace)
       ? requestedWorkspace : null;
     workspacePath = localEntityRequest ? canonicalEntityWorkspace : genericWorkspace || demoWorkspace;
-    await ensureCodexRuntimeReady();
+    await ensureCodexRuntimeReady(runId);
     assertCodexRunNotCancelled(runId);
     const larkRequired = needsLarkAccess(payload);
     const execution = await confirmExternalDomiRun(sender, payload);
@@ -4683,6 +4709,7 @@ ipcMain.handle("app:notify", (_event, request = {}) => getDesktopNotifications()
 ipcMain.handle("app:consume-pending-notification", () => getDesktopNotifications().consumePendingNotification());
 ipcMain.handle("app:set-unread-task-count", (_event, count) => getDesktopNotifications().setUnreadTaskCount(count));
 
+ipcMain.handle("codex:model-catalog", (_event, onDemand) => refreshCodexCatalog(onDemand === true));
 ipcMain.handle("codex:check", (_event, request) => runCodexCheckCached(request));
 ipcMain.handle("codex:run", (event, payload) => runCodex(event.sender, payload));
 ipcMain.handle("codex:stop", (_event, runId) => stopCodex(runId));

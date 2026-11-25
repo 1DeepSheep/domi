@@ -5796,8 +5796,7 @@ body.panel-resizing .main-grid {
 }
 
 .company-list,
-.people-list,
-.timeline-list {
+.people-list {
   display: flex;
   flex-direction: column;
   padding: 0 1px 10px;
@@ -5836,8 +5835,7 @@ body.panel-resizing .main-grid {
 }
 
 .company-row:first-child,
-.person-row:first-child,
-.timeline-item:first-child {
+.person-row:first-child {
   border-top: 0;
 }
 
@@ -6466,59 +6464,6 @@ body.panel-resizing .main-grid {
   font-family: var(--font-cn);
   font-size: var(--text-caption);
   text-align: right;
-}
-
-.usage-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  padding: 0 1px 7px;
-}
-
-.usage-row span {
-  display: inline-flex;
-  height: 21px;
-  align-items: center;
-  border-radius: 11px;
-  color: #5c7164;
-  background: #edf2ee;
-  padding: 0 7px;
-  font-size: var(--text-caption);
-  font-weight: 600;
-}
-
-.timeline-item {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  align-items: start;
-  gap: 7px;
-  border-top: 1px solid rgba(232, 232, 228, 0.8);
-  padding: 8px 0;
-}
-
-.timeline-item svg {
-  margin-top: 1px;
-  color: var(--green);
-}
-
-.timeline-item strong {
-  display: block;
-  color: #41413d;
-  font-family: var(--font-cn);
-  font-size: var(--text-secondary);
-  font-weight: 600;
-}
-
-.timeline-item span {
-  display: -webkit-box;
-  overflow: hidden;
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: var(--text-caption);
-  line-height: 1.5;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow-wrap: anywhere;
 }
 
 .empty-state {

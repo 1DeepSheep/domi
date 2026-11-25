@@ -1,7 +1,7 @@
 {
   "name": "domi",
   "productName": "domi",
-  "version": "7.0.41",
+  "version": "7.0.43",
   "author": "domi",
   "license": "Apache-2.0",
   "private": true,
@@ -64,7 +64,7 @@
     "test:sourcing-ui": "node scripts/sourcing-focus-ui.test.mjs && node scripts/underwater-panel-ui.test.mjs && node scripts/underwater-app-ui.test.mjs",
     "test:todo": "node --test scripts/todo-daily-scheduler.test.cjs scripts/todo-daily-ipc.test.cjs scripts/todo-run-watchdog.test.cjs && node --experimental-strip-types scripts/todo-priorities.test.mjs && node --experimental-strip-types scripts/todo-milestone-context.test.mjs",
     "test:todo-ui": "node scripts/todo-priorities-ui.test.mjs && node scripts/todo-daily-app-ui.test.mjs",
-    "test:codex-resources": "node --test scripts/codex-thread-reclaimer.test.cjs scripts/codex-app-server.test.cjs",
+    "test:codex-resources": "node --test scripts/codex-discovery.test.cjs scripts/codex-thread-reclaimer.test.cjs scripts/codex-app-server.test.cjs",
     "test:sidebar-search": "node --experimental-strip-types scripts/sidebar-entity-search.test.mjs && node --experimental-strip-types scripts/sidebar-search-navigation.test.mjs"
   },
   "dependencies": {
@@ -101,6 +101,7 @@
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "semver": "6.3.1",
     "smol-toml": "1.9.0"
   },
   "devDependencies": {

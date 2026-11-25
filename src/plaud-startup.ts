@@ -9,39 +9,24 @@ type StartupOperations = {
   list: () => Promise<DomiPlaudSnapshot | null>;
 };
 
-/** Restore the list after a local-only empty resume, without submitting work. */
+/** Show the current remote list before starting potentially slow transcript recovery. */
 export async function restorePlaudOnStartup(operations: StartupOperations) {
-  let resumed = false;
-  // Wait for existing bounded operations, rather than polling or discarding a
-  // startup read when a manual operation owns the shared browser session.
   for (let handoff = 0; handoff < 8 && operations.isCurrent(); handoff += 1) {
-    const pendingList = operations.pendingList();
-    if (pendingList) {
-      const snapshot = await pendingList;
-      if (operations.isCurrent() && snapshot) return;
-      continue;
-    }
     const pendingSync = operations.pendingSync();
     if (pendingSync) {
       const result = await pendingSync;
-      if (!operations.isCurrent()) return;
       if (result?.snapshot) return;
-      resumed = true;
       continue;
     }
-    const pendingMutation = operations.pendingMutation();
-    if (pendingMutation) {
-      await pendingMutation;
+    const mutation = operations.pendingMutation();
+    if (mutation) {
+      await mutation;
       continue;
     }
-    if (!resumed) {
-      const result = await operations.resume();
-      if (!operations.isCurrent()) return;
-      if (result?.snapshot) return;
-      resumed = true;
-    } else {
-      await operations.list();
-      return;
-    }
+    const snapshot = await (operations.pendingList() || operations.list());
+    if (!operations.isCurrent() || !snapshot?.ok || snapshot.stale || snapshot.paused || snapshot.superseded) return;
+    // The list handler can already have started recovery for a ready transcript.
+    await (operations.pendingSync() || operations.resume());
+    return;
   }
 }
